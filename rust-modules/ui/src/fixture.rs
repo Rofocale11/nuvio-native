@@ -12,6 +12,7 @@
 use std::borrow::Cow;
 use std::ffi::CStr;
 
+use super::a11y::{A11y, A11yPath, Role, Seg};
 use super::dispatch::{CxParts, Dispatcher, NoTap, Rig, Split};
 use super::frame::{Budget, RenderReport};
 use plx_machine::machine::{
@@ -95,8 +96,26 @@ impl LogicalState for FixtureArg {
 pub enum FixtureFx {
     StoreAdd(u32),
     Net(Addr),
+    /// Explicit yielded request; ordinary Net remains synchronous for existing fixtures.
+    ExternalNet(Addr),
     Poster(PosterKey),
 }
+
+impl plx_machine::machine::AppEffect for FixtureFx {
+    type Inline = Self;
+    type ExternalFx = Self;
+    fn route(self) -> plx_machine::machine::EffectDisposition<Self, Self> {
+        match self {
+            effect @ Self::ExternalNet(_) => plx_machine::machine::EffectDisposition::External(effect),
+            effect @ (Self::StoreAdd(_) | Self::Net(_) | Self::Poster(_)) =>
+                plx_machine::machine::EffectDisposition::Inline(effect),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "extension_screen_tests.rs"]
+mod extension_screen_tests;
 
 /// The app's messages.
 pub enum FixtureMsg {
@@ -180,6 +199,13 @@ pub struct FixtureRow {
     /// What the row's elements are for the press: `Page(5xx)` rows are `Bare`, `Page(6xx)`
     /// rows `Control`, everything else `Card`.
     pub kind: ElemKind,
+    /// The first element whose data has not landed (an unloaded paged slot, for the by-id
+    /// `Unloaded` refusal). `usize::MAX` is a row every element of which has landed.
+    pub unloaded_from: usize,
+    /// The row's FOCUSED element is not loaded (a screen whose press on its focused element lands
+    /// elsewhere while its picture lags, as Home's does across the hero/grid door). It reads the
+    /// context's focus, so a resolution handed a stale focus does not see it.
+    pub unloaded_while_focused: bool,
 }
 
 impl Focusable<FixtureHost> for FixtureRow {
@@ -236,6 +262,36 @@ impl Focusable<FixtureHost> for FixtureRow {
         FocusKey {
             entry: self.entry,
             elem: col.min(self.len.saturating_sub(1) as u32),
+        }
+    }
+    /// `row.<i>`: the row's role follows what its elements are for the press. The subject is
+    /// `rk<i>` (a catalog key's stand-in) and the label is a word, never a title.
+    fn a11y(&self, key: &u32, cx: &Cx<'_, FixtureHost>) -> Option<A11y<'_>> {
+        let i = *key as usize;
+        let held = self.unloaded_while_focused
+            && cx.focus.current.is_some_and(|focus| focus.entry == self.entry && focus.elem == *key);
+        (i < self.len).then(|| {
+            let role = match self.kind {
+                ElemKind::Card => Role::Card,
+                ElemKind::Bare => Role::Row,
+                _ => Role::Button,
+            };
+            A11y::new(A11yPath::new().name("row").index(i), role)
+                .with_label("row item")
+                .with_subject(format!("rk{i}"))
+                .with_loaded(i < self.unloaded_from && !held)
+        })
+    }
+    fn a11y_elems(&self, g: GroupId, _cx: &Cx<'_, FixtureHost>, out: &mut Vec<u32>) {
+        if g == self.group {
+            out.extend(0..self.len as u32);
+        }
+    }
+    fn a11y_find(&self, path: &A11yPath, _cx: &Cx<'_, FixtureHost>) -> Option<u32> {
+        let mut segs = path.segs();
+        match (segs.next(), segs.next(), segs.next()) {
+            (Some(Seg::Name("row")), Some(Seg::Index(i)), None) if i < self.len => Some(i as u32),
+            _ => None,
         }
     }
 }
@@ -330,9 +386,36 @@ pub struct FixtureScreen {
     /// `DrawFrame::lifted` as the page pass last handed it to this page's visible or captured draw
     /// (the element the opener lift owns); `None` when none was. Render bookkeeping, not state.
     pub lifted: Option<FocusKey<u32>>,
+    /// The [`draw_order`] tick of the latest opener LIFT ([`Screen::redraw_focused`], the
+    /// dispatcher's one lift pass) and how many there have been. Render bookkeeping, like
+    /// [`Self::draw_at`]; `Cell`s because the lift draws through `&self`.
+    pub redrawn_at: std::cell::Cell<usize>,
+    pub redraws: std::cell::Cell<u32>,
+    /// The element this page says is departing (`Screen::opener_departing`): a removed card it
+    /// still draws as it goes.
+    pub departing: Option<u32>,
+    /// How far this page answers that it has tucked the top chrome away (`Screen::chrome_tuck`);
+    /// 0 for every page until a test sets it.
+    pub tuck: f32,
 }
 
 crate::focusable_via_composed!(FixtureScreen, FixtureHost);
+
+#[cfg(test)]
+impl FixtureScreen {
+    /// The row's element count, as a store landing would set it (a row longer than the canvas).
+    pub(crate) fn set_row_len(&mut self, len: usize) {
+        self.row.len = len;
+    }
+    /// The row's first element whose data has not landed (an unloaded paged slot).
+    pub(crate) fn set_unloaded_from(&mut self, from: usize) {
+        self.row.unloaded_from = from;
+    }
+    /// The row's focused element is not loaded while it holds focus.
+    pub(crate) fn set_unloaded_while_focused(&mut self, held: bool) {
+        self.row.unloaded_while_focused = held;
+    }
+}
 
 impl Composed<FixtureHost> for FixtureScreen {
     fn layout(&self, _cx: &Cx<'_, FixtureHost>) -> Vec<(PartId, Rect)> {
@@ -363,6 +446,7 @@ impl Machine<FixtureHost> for FixtureScreen {
                 super::screen::By::Pointer => "by_pointer",
                 super::screen::By::Restore => "by_restore",
                 super::screen::By::Reconcile => "by_reconcile",
+                super::screen::By::Script => "by_script",
             });
         }
         // Page 801 observes the context of each delivered input, without consuming directions.
@@ -372,6 +456,15 @@ impl Machine<FixtureHost> for FixtureScreen {
                 plx_machine::machine::InputOwner::Entry(_) => "entry_owner",
             });
             if cx.focus.current.is_some() { self.state.events.push("has_focus"); }
+        }
+        // Page 660 (a `Control` row) says what the press machine reads in each Tick it is delivered:
+        // a press standing on the focused element, or none (`a_tick_in_the_frame_a_press_armed_...`).
+        if self.arg == FixtureArg::Page(660) && matches!(ev, ScreenEvent::Tick(_)) {
+            self.state.events.push(if cx.press.live && cx.press.owner.is_some() && cx.press.owner == cx.focus.current {
+                "tick_press_on_focus"
+            } else {
+                "tick_press_idle"
+            });
         }
         // Page 800 makes stale interactive delivery observable at BOTH exits: the logical
         // handler and an adapter/store write. The dispatcher must reject it before step.
@@ -415,10 +508,12 @@ impl Machine<FixtureHost> for FixtureScreen {
             ScreenEvent::Input(_) => Handled::No,
             ScreenEvent::Mount => {
                 // a request emitted from mount is addressable: the id arrived first
-                fx.push(Fx::App(FixtureFx::Net(Addr {
-                    to: fx.from(),
-                    req: RequestId(1),
-                })));
+                let address = Addr { to: fx.from(), req: RequestId(1) };
+                // Page 974 explicitly exercises a yielded POST-mount request. Ordinary pages
+                // keep their synchronous Net effect; no rig may override its routing authority.
+                fx.push(Fx::App(if self.arg == FixtureArg::Page(974) {
+                    FixtureFx::ExternalNet(address)
+                } else { FixtureFx::Net(address) }));
                 fx.push(Fx::Log(LogLine(format!("fixture: mounted {:?}", self.arg))));
                 Handled::Yes
             }
@@ -462,7 +557,15 @@ impl Machine<FixtureHost> for FixtureScreen {
 }
 
 impl Screen<FixtureHost> for FixtureScreen {
+    fn opener_departing(&self, key: FocusKey<u32>) -> bool {
+        self.departing == Some(key.elem)
+    }
+    fn redraw_focused(&self, _f: &mut DrawFrame<'_, '_, FixtureHost>, _focus: Option<FocusKey<u32>>) {
+        self.redrawn_at.set(draw_order());
+        self.redraws.set(self.redraws.get() + 1);
+    }
     fn as_any(&self) -> Option<&dyn std::any::Any> { Some(self) }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> { Some(self) }
     fn covered_surfaces_ready(&self) -> bool {
         // Page 901 models a remounted owner awaiting an identity-matched store notice.
         self.arg != FixtureArg::Page(901) || self.state.items_seen > 0
@@ -477,6 +580,9 @@ impl Screen<FixtureHost> for FixtureScreen {
     }
     fn strip_reachable(&self) -> bool {
         self.arg != FixtureArg::Snapped
+    }
+    fn chrome_tuck(&self) -> f32 {
+        self.tuck
     }
     fn focus_source(&self) -> super::screen::FocusSource {
         if self.arg == FixtureArg::Legacy {
@@ -511,6 +617,9 @@ impl Screen<FixtureHost> for FixtureScreen {
             self.lifted = f.lifted;
         }
         composed_draw(self, f);
+        if self.arg == FixtureArg::Page(975) {
+            f.report_presentation(FixtureMsg::Store(StoreOrd(0), 1));
+        }
         if matches!(self.arg, FixtureArg::Page(_)) {
             // a page that always shows a placeholder, for the held-image debt test
             crate::placeholder::note(f.painter, crate::placeholder::Reason::DetailSpinner, "fixture");
@@ -555,10 +664,16 @@ pub struct FixtureModal {
     pub last_navigation: super::screen::NavPresentation,
     /// The peak alpha this surface asks its host page to dim to (`Screen::scrim`). 0 = none.
     pub scrim_alpha: f32,
-    /// When set the dim is over the video plane and inherits this envelope (`Scrim::over_video`).
-    pub scrim_corners: Option<[[f32; 3]; 4]>,
+    /// When set the dim is over the video plane (`Scrim::over_video`).
+    pub scrim_over_video: bool,
     /// Optional lifted element callback for exercising the dispatcher's borrowed frame context.
-    pub scrim_lift: Option<super::screen::ScrimLift>,
+    /// The bar member this surface hangs from ([`Screen::bar_opener`]), and the rect the dispatcher
+    /// last handed it ([`Screen::opener_rect`]).
+    pub bar_opener: Option<u32>,
+    pub opener_seen: Vec<super::Rect>,
+    /// How much of its opener this surface leaves ([`Screen::opener_alpha`]): a morphing menu's
+    /// `opener_alpha`, 1.0 (whole) by default.
+    pub opener_alpha: f32,
     /// The [`draw_order`] tick at which the container ASKED for that dim, and the one at which
     /// this surface's own `draw` ran. The two together are how a host test observes that the
     /// scrim landed inside the PAGE PASS rather than with the panel — see
@@ -573,6 +688,17 @@ pub struct FixtureModal {
     /// What this surface names as its opener (`Screen::opener`): the host page and the element
     /// whose card the opener lift owns. `None` like every surface that opens from nothing.
     pub opener: Option<(plx_machine::machine::EntryId, Option<FocusKey<u32>>)>,
+    /// The `dt_us` of every `Tick` this surface was delivered, in order.
+    pub tick_dts: Vec<u32>,
+    /// One entry per [`Screen::draw_held`] call: whether the painter it was handed was LIVE (not
+    /// the text recorder a held surface's `draw` is walked through).
+    pub held_faces: Vec<bool>,
+    /// One entry per [`Screen::draw_warm`] call: whether the painter it was handed records.
+    pub warm_walks: Vec<bool>,
+    /// The morphing [`Popover`](crate::popover::Popover) a glass menu owns, when
+    /// [`modal_owns_popover`] is on: opened on `Mount`, dismissed on `Closing` and stepped on every
+    /// `Tick`, exactly the three things the library and account menus do with theirs.
+    pub popover: Option<crate::popover::Popover>,
 }
 
 thread_local! {
@@ -582,6 +708,28 @@ thread_local! {
 /// Make every [`FixtureModal`] drawn on this thread paint one line of text ("modal surface text").
 pub fn modal_draws_text(on: bool) {
     MODAL_TEXT.with(|t| t.set(on));
+}
+
+thread_local! {
+    static MODAL_POPOVER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make every [`FixtureModal`] mounted on this thread own a morphing popover the way the glass
+/// menus do (`FixtureModal::popover`): the host-snapshot cost of a menu's own `Closing` handling
+/// is observable only with one standing there.
+pub fn modal_owns_popover(on: bool) {
+    MODAL_POPOVER.with(|p| p.set(on));
+}
+
+thread_local! {
+    static MODAL_WARMS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make every [`FixtureModal`] on this thread hold one string back ("held back text"): it answers
+/// [`Screen::warms_text`] and walks that string in [`Screen::draw_warm`], as a Settings push does for
+/// the page it is about to show.
+pub fn modal_warms_text(on: bool) {
+    MODAL_WARMS.with(|t| t.set(on));
 }
 
 /// A monotonic tick the fixture screens stamp their draw-order observations with.
@@ -607,12 +755,18 @@ impl FixtureModal {
             last_draw_alpha: 0.0,
             last_navigation: Default::default(),
             scrim_alpha: 0.0,
-            scrim_corners: None,
-            scrim_lift: None,
+            scrim_over_video: false,
+            bar_opener: None,
+            opener_seen: Vec::new(),
+            opener_alpha: 1.0,
             scrim_at: std::cell::Cell::new(0),
             draw_at: 0,
             render: RenderReport::NONE,
             opener: None,
+            tick_dts: Vec::new(),
+            held_faces: Vec::new(),
+            warm_walks: Vec::new(),
+            popover: None,
         }
     }
 
@@ -636,9 +790,12 @@ impl FixtureModal {
                                     prepared: 0,
                                     drawn: 0,
                                     kind: ElemKind::Card,
+                                    unloaded_from: usize::MAX,
+                                    unloaded_while_focused: false,
                                 },
                                 draw_at: 0,
                                 recorded_draws: 0, recorded_at: 0, speculative_draws: 0, lifted: None,
+                                redrawn_at: Default::default(), redraws: Default::default(), departing: None, tuck: 0.0,
                             }),
                             inflight: Vec::new(),
                             staged: false,
@@ -704,6 +861,15 @@ impl Focusable<FixtureHost> for FixtureModal {
             elem: 0,
         }
     }
+    /// The surface's one control: `close`.
+    fn a11y(&self, key: &u32, _cx: &Cx<'_, FixtureHost>) -> Option<A11y<'_>> {
+        (*key == 0).then(|| A11y::new(A11yPath::new().name("close"), Role::Button))
+    }
+    fn a11y_elems(&self, g: GroupId, _cx: &Cx<'_, FixtureHost>, out: &mut Vec<u32>) {
+        if g == GroupId(9) {
+            out.push(0);
+        }
+    }
 }
 
 impl Machine<FixtureHost> for FixtureModal {
@@ -720,7 +886,18 @@ impl Machine<FixtureHost> for FixtureModal {
                 self.inner
                     .request(NavOp::Root(FixtureArg::Page(100)), ReturnState::default());
                 self.run_inner();
+                if MODAL_POPOVER.with(|p| p.get()) {
+                    let mut pop = crate::popover::Popover::new().morphing();
+                    pop.open();
+                    self.popover = Some(pop);
+                }
                 Handled::Yes
+            }
+            ScreenEvent::Closing => {
+                if let Some(pop) = self.popover.as_mut() {
+                    pop.dismiss();
+                }
+                Handled::No
             }
             ScreenEvent::Input(InputEvent {
                 kind: InputKind::Key { key: Key::Ok, .. },
@@ -755,6 +932,14 @@ impl Machine<FixtureHost> for FixtureModal {
                 }
             }
             ScreenEvent::Tick(t) => {
+                self.tick_dts.push(t.dt_us);
+                if let Some(pop) = self.popover.as_mut() {
+                    pop.update(t.dt());
+                }
+                // a surface waiting for its text asks for the next frame, as a push's pre-roll does
+                if MODAL_WARMS.with(|w| w.get()) {
+                    fx.note(plx_machine::present::PresentEvent::Motion);
+                }
                 // the surface's own foreground spring: reports motion while it settles
                 if self.pop < 1.0 {
                     self.pop = (self.pop + 0.25).min(1.0);
@@ -798,22 +983,47 @@ impl Screen<FixtureHost> for FixtureModal {
     fn opener(&self) -> Option<(plx_machine::machine::EntryId, Option<FocusKey<u32>>)> {
         self.opener
     }
+    fn bar_opener(&self) -> Option<u32> {
+        self.bar_opener
+    }
+    fn opener_alpha(&self) -> f32 {
+        // a surface that owns a popover answers its morph's (a menu's opener is consumed by it); one
+        // without keeps the alpha a test states
+        self.popover.as_ref().map_or(self.opener_alpha, |p| p.opener_alpha())
+    }
+    fn handed_back(&self) -> bool {
+        self.popover.as_ref().is_some_and(|p| p.handed_back())
+    }
+    fn opener_rect(&mut self, drawn: super::Rect) {
+        self.opener_seen.push(drawn);
+        // the menus' own `opener_rect`: the morph starts and ends on the opener's live drawn rect
+        if let Some(pop) = self.popover.as_mut() {
+            pop.track_opener(drawn);
+        }
+    }
+    fn draw_held(&mut self, f: &mut DrawFrame<'_, '_, FixtureHost>) {
+        self.held_faces.push(!f.painter.records());
+    }
+    fn warms_text(&self) -> bool {
+        MODAL_WARMS.with(|t| t.get())
+    }
+    fn draw_warm(&mut self, f: &mut DrawFrame<'_, '_, FixtureHost>) {
+        self.warm_walks.push(f.painter.records());
+        f.painter.text(c"held back text".as_ptr(), 640.0, 300.0, 24, [1.0; 4], 0, 0);
+    }
     fn scrim(&self) -> super::screen::Scrim {
         self.scrim_at.set(draw_order());
-        if let Some(c) = self.scrim_corners {
-            return super::screen::Scrim::over_video(self.scrim_alpha, Some(c));
+        if self.scrim_over_video {
+            return super::screen::Scrim::over_video(self.scrim_alpha);
         }
-        match self.scrim_lift {
-            Some(lift) => super::screen::Scrim::lifting(self.scrim_alpha, lift),
-            None => super::screen::Scrim::dim(self.scrim_alpha),
-        }
+        super::screen::Scrim::dim(self.scrim_alpha)
     }
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, FixtureHost>) {
         self.draw_at = draw_order();
         self.last_draw_alpha = f.page_alpha;
         self.last_navigation = super::screen::NavPresentation {
             page_alpha: f.page_alpha, chrome_alpha: f.chrome_alpha,
-            view_tab: f.view_tab, blur_amount: f.blur_amount,
+            view_tab: f.view_tab, blur_amount: f.blur_amount, chrome_lift: 0.0,
         };
         let p = f.painter;
         // One string, so a test can see whether this surface's text reached the glyph cache or
@@ -920,9 +1130,12 @@ impl Mounter<FixtureHost> for FixtureMounter {
                 prepared: 0,
                 drawn: 0,
                 kind,
+                unloaded_from: usize::MAX,
+                unloaded_while_focused: false,
             },
             draw_at: 0,
             recorded_draws: 0, recorded_at: 0, speculative_draws: 0, lifted: None,
+            redrawn_at: Default::default(), redraws: Default::default(), departing: None, tuck: 0.0,
         })
     }
 }
@@ -987,25 +1200,16 @@ impl Screen<FixtureHost> for VideoPlaneScreen {
     fn render(&self) -> RenderStrategy {
         RenderStrategy::VideoPlane
     }
-    fn underlay_corners(&self, _cx: &Cx<'_, FixtureHost>) -> Option<[[f32; 3]; 4]> {
-        VIDEO_PLANE_CORNERS.with(|c| c.get())
-    }
-}
-
-thread_local! {
-    /// What [`VideoPlaneScreen::underlay_corners`] answers: a test's stand-in for the playing
-    /// item's envelope (`None`: no envelope to preload).
-    static VIDEO_PLANE_CORNERS: std::cell::Cell<Option<[[f32; 3]; 4]>> = const { std::cell::Cell::new(None) };
-}
-
-pub fn set_video_plane_corners(c: Option<[[f32; 3]; 4]>) {
-    VIDEO_PLANE_CORNERS.with(|v| v.set(c));
 }
 
 pub struct FixtureRig {
     pub page_alpha: f32,
     pub chrome_alpha: f32,
     pub chrome_draws: usize,
+    /// Make [`Rig::draw_chrome`] declare ONE live glass at the bar's REST rect, at the nav's
+    /// `chrome_alpha` and whatever its `chrome_lift` says: the shared bar's track, as a tucked
+    /// page with the lift forced to 0 would leave it.
+    pub chrome_glass: bool,
     pub view_tab: Option<u32>,
     pub blur_amount: f32,
     pub navigation_reads: std::cell::Cell<usize>,
@@ -1019,11 +1223,16 @@ pub struct FixtureRig {
     pub ls2_pumps: u32,
     pub opaque_route_calls: Vec<bool>,
     pub clears: u32,
-    scrim_name: std::ffi::CString,
-    scrim_initial: std::ffi::CString,
-    scrim_labels: Vec<String>,
-    scrim_expand: f32,
-    scrim_chrome: bool,
+    /// Every bar member the lift pass was asked to redraw (`Rig::lift_bar_member`), with the
+    /// presentation it was asked under.
+    pub bar_lifts: Vec<(u32, super::screen::NavPresentation)>,
+    /// What each of those asks would stand on, decided as the real lift decides it at paint time
+    /// (`widgets::lift_ground`, over the stack's field and the host snapshot): the chip's lift
+    /// paints on every ask, so an ask is a chip painted once.
+    pub bar_lift_grounds: Vec<super::widgets::LiftGround>,
+    /// The bar member the opener lift owned on each chrome pass (`Rig::draw_chrome`'s `lifted`):
+    /// the one the chrome pass left out.
+    pub chrome_lifted: Vec<Option<u32>>,
     us: u64,
 }
 
@@ -1033,6 +1242,7 @@ impl FixtureRig {
             page_alpha: 1.0,
             chrome_alpha: 1.0,
             chrome_draws: 0,
+            chrome_glass: false,
             view_tab: None,
             blur_amount: 0.0,
             navigation_reads: std::cell::Cell::new(0),
@@ -1046,49 +1256,54 @@ impl FixtureRig {
             ls2_pumps: 0,
             opaque_route_calls: Vec::new(),
             clears: 0,
-            scrim_name: std::ffi::CString::default(),
-            scrim_initial: std::ffi::CString::default(),
-            scrim_labels: Vec::new(),
-            scrim_expand: 0.0,
-            scrim_chrome: false,
+            bar_lifts: Vec::new(),
+            bar_lift_grounds: Vec::new(),
+            chrome_lifted: Vec::new(),
             us: 0,
         }
-    }
-
-    pub fn seed_scrim_chrome_for_test(&mut self, name: &str, initial: &str, labels: &[&str], expand: f32) {
-        self.scrim_name = std::ffi::CString::new(name).unwrap();
-        self.scrim_initial = std::ffi::CString::new(initial).unwrap();
-        self.scrim_labels = labels.iter().map(|s| (*s).to_owned()).collect();
-        self.scrim_expand = expand;
-        self.scrim_chrome = true;
     }
 }
 
 impl Rig<FixtureHost> for FixtureRig {
-    fn page_alpha(&self) -> f32 { self.page_alpha }
-    fn navigation_presentation(&self) -> super::screen::NavPresentation {
+    fn navigation_presentation(&self, _nav: &super::containers::Navigation<FixtureHost>) -> super::screen::NavPresentation {
         self.navigation_reads.set(self.navigation_reads.get() + 1);
         super::screen::NavPresentation {
             page_alpha: self.page_alpha, chrome_alpha: self.chrome_alpha,
-            view_tab: self.view_tab, blur_amount: self.blur_amount,
+            view_tab: self.view_tab, blur_amount: self.blur_amount, chrome_lift: 0.0,
         }
     }
     fn draw_chrome(&mut self, _arg: &FixtureArg, _parts: &CxParts<u32>,
-        _nav: super::screen::NavPresentation, _glass: Option<&mut super::frame::glass::GlassPlan>) {
+        nav: super::screen::NavPresentation, _glass: Option<&mut super::frame::glass::GlassPlan>,
+        lifted: Option<u32>) {
         self.chrome_draws += 1;
+        self.chrome_lifted.push(lifted);
+        if self.chrome_glass {
+            let track = super::Rect::new(
+                600.0,
+                super::widgets::TOP_BAR_Y - super::widgets::TAB_TRACK_PAD,
+                720.0,
+                super::widgets::TAB_PILL_H + 2.0 * super::widgets::TAB_TRACK_PAD,
+            );
+            let _declared = super::widgets::Glass::DYNAMIC_BACKDROP.backdrop(
+                super::Painter::root().alpha(nav.chrome_alpha),
+                track,
+                0.0,
+                track.h * 0.5,
+                [1.0; 4],
+                plx_gfx::gfx::GlassRim::Standing,
+                plx_gfx::gfx::GlassFace::NONE,
+                super::theme::Material::UltraThin,
+            );
+        }
     }
-    fn scrim_chrome_read(&self) -> Option<super::widgets::ChromeRead<'_>> {
-        self.scrim_chrome.then(|| super::widgets::ChromeRead {
-            profile: super::widgets::ProfileChipRead {
-                src: 0,
-                thumb: "",
-                initial: &self.scrim_initial,
-                name: &self.scrim_name,
-                name_w: 0.0,
-            },
-            labels: super::widgets::TabLabels { generation: 1, labels: &self.scrim_labels },
-            chip_expand: self.scrim_expand,
-        })
+    /// A bar member the fixture draws at a fixed resting rect, through the page's tuck.
+    fn bar_member_rect(&self, _elem: u32, presented: super::screen::NavPresentation) -> Option<super::Rect> {
+        Some(presented.chrome_rect(super::Rect::new(76.0, 40.0, 60.0, 60.0)))
+    }
+    fn lift_bar_member(&mut self, elem: u32, presented: super::screen::NavPresentation,
+        _material: Option<plx_gfx::gfx::GlassFace>, ground: &super::underlay::UnderlayField) {
+        self.bar_lifts.push((elem, presented));
+        self.bar_lift_grounds.push(super::widgets::lift_ground(ground, crate::popover::host::page_tex()));
     }
     fn split(&mut self) -> Split<'_, FixtureHost> {
         Split {
@@ -1194,7 +1409,7 @@ impl super::adapters::Adapters<FixtureHost> for FixtureRig {
                     Delivery::Machine(FixtureMsg::Store(StoreOrd(0), v)),
                 ));
             }
-            FixtureFx::Net(addr) => self.net_requests.push(addr),
+            FixtureFx::Net(addr) | FixtureFx::ExternalNet(addr) => self.net_requests.push(addr),
             FixtureFx::Poster(key) => self.cache.accept(PosterReady {
                 key,
                 result: Ok(Decoded {
@@ -1210,6 +1425,23 @@ impl super::adapters::Adapters<FixtureHost> for FixtureRig {
 // ---------------------------------------------------------------------------------------------
 // the smoke test — the spike's proof that the contracts compose
 // ---------------------------------------------------------------------------------------------
+
+/// A tiny deterministic generator (splitmix64) for the random key walks the card screens' tests
+/// drive against random landing delays.
+pub struct Walk(pub u64);
+
+impl Walk {
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    pub fn below(&mut self, n: u64) -> u64 { self.next() % n }
+}
 
 pub fn tick(ms: u32) -> Tick {
     Tick { ms, dt_us: 16_000 }
@@ -1229,6 +1461,32 @@ pub fn key(k: Key, at: Tick) -> InputEvent<u32> {
     }
 }
 
+/// [`key`]'s release: the same key, `Edge::Up`.
+pub fn key_up(k: Key, at: Tick) -> InputEvent<u32> {
+    let mut event = key(k, at);
+    if let InputKind::Key { edge, .. } = &mut event.kind {
+        *edge = plx_machine::machine::Edge::Up;
+    }
+    event
+}
+
+/// Headless runner with explicit admission and a virtual swap after drawing.
+pub fn frame_and_swap(
+    d: &mut Dispatcher<FixtureHost>, rig: &mut FixtureRig, at: Tick,
+    inputs: Vec<InputEvent<u32>>, results: Vec<(Addr, FixtureMsg)>,
+    tap: &mut dyn super::dispatch::Tap<FixtureHost>,
+) -> super::dispatch::FrameReport {
+    let mut report = d.frame_with(rig, at, inputs, results, tap, false);
+    if report.presented {
+        d.present.take(at.ms);
+        d.prepare(rig);
+        let drawn = d.draw(rig, true);
+        report.drawn = drawn.drawn;
+        d.present.acknowledge(at.ms);
+    }
+    report
+}
+
 #[test]
 fn the_spike_composes_boot_a_key_a_landing_and_a_poster_over_four_frames() {
     let _g = plx_base::testlock::serial();
@@ -1237,7 +1495,7 @@ fn the_spike_composes_boot_a_key_a_landing_and_a_poster_over_four_frames() {
 
     // frame 1: boot — Root(Home) parked, committed, mounted, entered; presented (first frame)
     d.request(MachineId::Nav, NavOp::Root(FixtureArg::Home));
-    let r1 = d.frame(&mut rig, tick(0), vec![], vec![], &mut NoTap);
+    let r1 = frame_and_swap(&mut d, &mut rig, tick(0), vec![], vec![], &mut NoTap);
     assert!(r1.presented);
     assert_eq!(r1.mounted.len(), 1, "Home mounted at NAV COMMIT");
     assert_eq!(rig.ls2_pumps, 1);
@@ -1253,7 +1511,7 @@ fn the_spike_composes_boot_a_key_a_landing_and_a_poster_over_four_frames() {
         to: MachineId::Instance(home),
         req: RequestId(1),
     };
-    let r2 = d.frame(
+    let r2 = frame_and_swap(&mut d,
         &mut rig,
         tick(16),
         vec![],
@@ -1278,7 +1536,7 @@ fn the_spike_composes_boot_a_key_a_landing_and_a_poster_over_four_frames() {
         FixtureMsg::Store(StoreOrd(0), 1),
     );
     d.track_inflight(home, RequestId(0));
-    let r3 = d.frame(&mut rig, tick(32), vec![key(Key::Ok, tick(32))], vec![notice], &mut NoTap);
+    let r3 = frame_and_swap(&mut d, &mut rig, tick(32), vec![key(Key::Ok, tick(32))], vec![notice], &mut NoTap);
     assert_eq!(r3.mounted.len(), 1, "the page mounted in the same frame as the key");
     assert!(r3.presented, "the key invalidated");
     assert_eq!(d.nav.tabs.stack.depth(), 2);
@@ -1301,14 +1559,14 @@ fn the_spike_composes_boot_a_key_a_landing_and_a_poster_over_four_frames() {
         }),
     });
     d.budget.note_queued(rig.cache.has_pending());
-    let r4 = d.frame(&mut rig, tick(48), vec![], vec![], &mut NoTap);
+    let r4 = frame_and_swap(&mut d, &mut rig, tick(48), vec![], vec![], &mut NoTap);
     assert!(r4.presented, "queued prepare work forces a present");
     assert!(rig.cache.resolve(PosterKey(9)).is_some(), "uploaded in prepare");
     assert!(!rig.cache.has_pending());
     d.budget.note_queued(false);
 
     // frame 5: BACK pops the page: WillLeave → Unmount → Uncover → Enter(Restored) on Home
-    let r5 = d.frame(&mut rig, tick(64), vec![key(Key::Back, tick(64))], vec![], &mut NoTap);
+    let r5 = frame_and_swap(&mut d, &mut rig, tick(64), vec![key(Key::Back, tick(64))], vec![], &mut NoTap);
     assert_eq!(r5.unmounted.len(), 1);
     d.prune(&r5.unmounted);
     assert_eq!(d.nav.tabs.stack.depth(), 1);
@@ -1353,6 +1611,8 @@ impl Tap<FixtureHost> for RecTap {
         let input = match &ev.kind {
             InputKind::Key { key, .. } => json!({"kind": "key", "key": key_name(*key), "ms": ev.at.ms}),
             InputKind::SystemKeyboard(up) => json!({"kind": "keyboard", "up": up, "ms": ev.at.ms}),
+            InputKind::ById { id, press, expect } => json!({"kind": "by_id", "id": &**id,
+                "press": press.map(|tap| json!([tap.sym, tap.wcode])), "expect": expect.as_deref(), "ms": ev.at.ms}),
             InputKind::Text(edit) => {
                 let (op, text) = match edit {
                     TextEdit::Commit(text) => ("commit", text.as_ref()),
@@ -1386,6 +1646,7 @@ impl Tap<FixtureHost> for RecTap {
             Fx::Timer { .. } => "timer",
             Fx::CancelTimer(_) => "cancel_timer",
             Fx::Press(_) => "press",
+            Fx::HoldHint(_) => "hold_hint",
             Fx::Remember { .. } => "remember",
             Fx::Log(_) => "log",
             Fx::App(_) => "app",
@@ -1396,8 +1657,8 @@ impl Tap<FixtureHost> for RecTap {
         let why = why.map(|p| format!("{p:?}"));
         self.w.present(f, bit, why.as_deref());
     }
-    fn state(&mut self, f: u64, hash: u64) {
-        self.w.state(f, hash);
+    fn state(&mut self, f: u64, hash: &mut dyn FnMut() -> u64) {
+        self.w.state(f, hash());
     }
     fn focus(&mut self, f: u64, focus: Option<(u32, u32, Option<u32>)>) {
         self.w.focus(f, focus);
@@ -1415,6 +1676,20 @@ impl Codec<FixtureHost> for FixtureCodec {
         let at = tick(v["ms"].as_u64()?.try_into().ok()?);
         let kind = match v["kind"].as_str()? {
             "keyboard" => Some(InputKind::SystemKeyboard(v["up"].as_bool()?)),
+            "by_id" => Some(InputKind::ById {
+                id: v["id"].as_str()?.into(),
+                press: match &v["press"] {
+                    Value::Null => None,
+                    pair => Some(plx_machine::machine::OkTap {
+                        sym: pair[0].as_u64()?.try_into().ok()?,
+                        wcode: pair[1].as_u64()?.try_into().ok()?,
+                    }),
+                },
+                expect: match &v["expect"] {
+                    Value::Null => None,
+                    subject => Some(subject.as_str()?.into()),
+                },
+            }),
             "text" => Some(InputKind::Text(match v["op"].as_str()? {
                 "commit" => TextEdit::Commit(v["text"].as_str()?.into()),
                 "backspace" => TextEdit::Backspace, "clear" => TextEdit::Clear,
@@ -1460,7 +1735,7 @@ impl Codec<FixtureHost> for FixtureCodec {
 /// The scenario every recorder test drives: boot, an HTTP landing, a store notice + OK, BACK.
 fn drive(d: &mut Dispatcher<FixtureHost>, rig: &mut FixtureRig, tap: &mut dyn Tap<FixtureHost>) {
     d.request(MachineId::Nav, NavOp::Root(FixtureArg::Home));
-    d.frame(rig, tick(0), vec![], vec![], tap);
+    frame_and_swap(d, rig, tick(0), vec![], vec![], tap);
     let home = d.nav.top_page().and_then(|e| e.inst.as_ref()).unwrap().id;
     d.track_inflight(home, RequestId(1));
     d.track_inflight(home, RequestId(0));
@@ -1468,26 +1743,59 @@ fn drive(d: &mut Dispatcher<FixtureHost>, rig: &mut FixtureRig, tap: &mut dyn Ta
         to: MachineId::Instance(home),
         req: RequestId(req),
     };
-    d.frame(
+    frame_and_swap(d,
         rig,
         tick(16),
         vec![],
         vec![(addr(1), FixtureMsg::Http { status: 200, blob: vec![] })],
         tap,
     );
-    d.frame(
+    frame_and_swap(d,
         rig,
         tick(32),
         vec![key(Key::Ok, tick(32))],
         vec![(addr(0), FixtureMsg::Store(StoreOrd(0), 1))],
         tap,
     );
-    d.frame(rig, tick(48), vec![], vec![], tap);
-    let r = d.frame(rig, tick(64), vec![key(Key::Back, tick(64))], vec![], tap);
+    frame_and_swap(d, rig, tick(48), vec![], vec![], tap);
+    let r = frame_and_swap(d, rig, tick(64), vec![key(Key::Back, tick(64))], vec![], tap);
     d.prune(&r.unmounted);
 }
 
 fn record() -> Recording {
+    record_with(drive)
+}
+
+/// The scenario with accessibility-id inputs: boot, a `focus:` of the Home row's third element, then
+/// in one batch a `focus:` of its first and a `press:` of an id that names nothing (a refusal is part
+/// of the stream too), then a `press:` of its second, which opens a page, and BACK.
+fn drive_by_id(d: &mut Dispatcher<FixtureHost>, rig: &mut FixtureRig, tap: &mut dyn Tap<FixtureHost>) {
+    use plx_machine::machine::{OkTap, Source};
+    let by_id = |id: &str, press: bool, at: Tick| InputEvent {
+        at,
+        source: Source::Script,
+        kind: InputKind::ById {
+            id: id.into(),
+            press: press.then_some(OkTap { sym: 0x0d, wcode: 0 }),
+            expect: None,
+        },
+    };
+    d.request(MachineId::Nav, NavOp::Root(FixtureArg::Home));
+    frame_and_swap(d, rig, tick(0), vec![], vec![], tap);
+    // the same two requests `drive` and `replay_mode` register on Home after the first frame
+    let home = d.nav.top_page().and_then(|e| e.inst.as_ref()).unwrap().id;
+    d.track_inflight(home, RequestId(1));
+    d.track_inflight(home, RequestId(0));
+    frame_and_swap(d, rig, tick(16), vec![by_id("home.row.2", false, tick(16))], vec![], tap);
+    frame_and_swap(d, rig, tick(32),
+        vec![by_id("home.row.0", false, tick(32)), by_id("home.row.9", true, tick(32))], vec![], tap);
+    frame_and_swap(d, rig, tick(48), vec![by_id("home.row.1", true, tick(48))], vec![], tap);
+    frame_and_swap(d, rig, tick(64), vec![], vec![], tap);
+    let r = frame_and_swap(d, rig, tick(80), vec![key(Key::Back, tick(80))], vec![], tap);
+    d.prune(&r.unmounted);
+}
+
+fn record_with(scenario: fn(&mut Dispatcher<FixtureHost>, &mut FixtureRig, &mut dyn Tap<FixtureHost>)) -> Recording {
     let sink = MemSink::default();
     let segs = sink.segments.clone();
     let header = Header::new(fixture_state_fp(), &FixtureInit { seed: 1 });
@@ -1495,7 +1803,7 @@ fn record() -> Recording {
     let mut tap = RecTap { w };
     let mut d: Dispatcher<FixtureHost> = Dispatcher::new();
     let mut rig = FixtureRig::new();
-    drive(&mut d, &mut rig, &mut tap);
+    scenario(&mut d, &mut rig, &mut tap);
     tap.w.finish().unwrap();
     let manifest = serde_json::to_string(&json!({
         "schema": super::rec::SCHEMA, "state_fp": fixture_state_fp(),
@@ -1545,6 +1853,52 @@ fn replay_mode(rec: &Recording, codec: &dyn Codec<FixtureHost>, mode: super::rep
     r.present_diffs.splice(0..0, r0.present_diffs);
     r.focus_diffs.splice(0..0, r0.focus_diffs);
     r
+}
+
+/// **A by-id input records and replays to the same state hash in both modes.** It is recorded once,
+/// at its tap in the ingest pre-pass; the `FocusMoved` and the OK edges it expands to are never
+/// recorded as inputs, and replay re-expands them from the replayed by-id input.
+#[test]
+fn a_by_id_input_records_and_replays_to_the_same_state_hash_in_both_modes() {
+    let rec = record_with(drive_by_id);
+    assert!(rec.state_stream().len() >= 4, "every event frame carries an st record");
+    let recorded: Vec<_> = rec.frames.iter().flat_map(|f| f.inputs.iter()).filter(|v| v["kind"] == "by_id").collect();
+    assert_eq!(recorded.len(), 4, "one input per by-id token, and none for the keys it expanded to");
+    assert!(recorded.iter().any(|v| v["press"].is_array() && v["expect"].is_null()), "{recorded:?}");
+    for mode in [super::replay::Mode::Targets, super::replay::Mode::Resolve] {
+        let report = replay_mode(&rec, &FixtureCodec, mode);
+        assert!(report.is_clean(), "{:?}: {:?}", mode, report.safe_lines());
+        assert_eq!(report.graded as usize, rec.state_stream().len());
+    }
+}
+
+/// **The fixture's own focusables answer the accessibility-id contract** (every element projects, ids
+/// are unique, `a11y_find` inverts `a11y`, `a11y_elems` matches the group's length), including an
+/// unloaded slot.
+#[test]
+fn the_fixture_focusables_conform_to_the_accessibility_id_contract() {
+    use plx_machine::machine::{EntryId, FocusRead, InputOwner, PressRead};
+    let (view, measure) = (FixtureView::default(), FixtureMeasure);
+    let cx: Cx<'_, FixtureHost> = Cx {
+        views: FixtureViews { store: &view },
+        tick: Tick::default(),
+        measure: &measure,
+        press: PressRead::default(),
+        focus: FocusRead::default(),
+        owner: InputOwner::Entry(EntryId(1)),
+        modal: Default::default(),
+        page_image: Default::default(),
+        hold_hint: Default::default(),
+    };
+    for (kind, role) in [(ElemKind::Card, Role::Card), (ElemKind::Bare, Role::Row), (ElemKind::Control, Role::Button)] {
+        let row = FixtureRow { len: 5, group: GroupId(1), entry: EntryId(1), prepared: 0, drawn: 0, kind, unloaded_from: 3, unloaded_while_focused: false };
+        super::a11y::conformance(&row, &cx);
+        let third = row.a11y(&2, &cx).unwrap();
+        assert_eq!(third.role, role);
+        assert_eq!(third.path.to_string(), "row.2");
+        assert!(third.loaded && !row.a11y(&3, &cx).unwrap().loaded, "the slots from `unloaded_from` have not landed");
+    }
+    super::a11y::conformance(&FixtureModal::new(EntryId(2)), &cx);
 }
 
 #[test]
@@ -1729,14 +2083,18 @@ fn the_present_bit_is_recorded_and_replayed() {
 fn the_fixture_bundles_state_shape_is_pinned() {
     // Re-pin only with a named reason: a shape change invalidates every fixture of this bundle.
     // The fixture bundle now versions the input machine and queued whole-input payloads too.
-    assert_eq!(fixture_state_fp(), 0x23c4_4e83_a90a_8644);
+    // Owned HoldHintRead and gesture/key/page-instance LiftReceipt join Input Canon (V12).
+    // This pins the current producer only; no historical recording is rewritten or admitted.
+    // The queued whole-input census gained `Pan` (a queued input it had left out) and the by-id
+    // input `ById{id,press,expect}` (accessibility ids, plan a11y-ids D3).
+    assert_eq!(fixture_state_fp(), 0x2147_c8eb_9623_ae70);
 }
 
 pub fn booted() -> (Dispatcher<FixtureHost>, FixtureRig, plx_machine::machine::InstanceId) {
     let mut d: Dispatcher<FixtureHost> = Dispatcher::new();
     let mut rig = FixtureRig::new();
     d.request(MachineId::Nav, NavOp::Root(FixtureArg::Home));
-    d.frame(&mut rig, tick(0), vec![], vec![], &mut NoTap);
+    frame_and_swap(&mut d, &mut rig, tick(0), vec![], vec![], &mut NoTap);
     let home = d.nav.top_page().and_then(|e| e.inst.as_ref()).unwrap().id;
     (d, rig, home)
 }
@@ -2055,7 +2413,9 @@ fn below_drawn(d: &Dispatcher<FixtureHost>) -> u32 {
 #[test]
 fn a_video_plane_screen_replaces_its_host_and_takes_no_snapshot() {
     let _g = plx_base::testlock::serial();
-    // A transition that DRAWS BELOW while it is in flight (`RoutePush`, the Settings family's).
+    // A transition that DRAWS BELOW while it is in flight (`transition::RoutePush`, the stack
+    // transition that draws both levels; the Settings family's own push is `route_screen::RoutePush`,
+    // a different type).
     // The default `Immediate` never draws the level under the top one, so on it this test's first
     // half would be vacuous — it would pass whether or not the rule exists.
     let mut d: Dispatcher<FixtureHost> = Dispatcher::with_transition(Box::new(
@@ -2222,24 +2582,45 @@ fn an_app_switch_suspends_every_body_and_the_loop_is_what_delivers_it() {
     assert_eq!(heard(&d, "resume"), 1, "every mounted body must hear `Resume`");
 
     // The second claim: the LOOP calls them. No host test can drive `app::run` — it needs a live
-    // SDL window — so this is pinned from its source, in the two arms that own the question.
+    // SDL window — so this is pinned from its source, in the two functions that own the question
+    // (the loop's reaction to a `HostEvent::Lifecycle` edge: `host_background`, then
+    // `host_foreground`, in that order).
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app/run.rs"),
     )
     .expect("read run.rs");
     let bg = src
-        .find("et == 0x103 || et == 0x104")
+        .find("unsafe fn host_background(")
         .expect("the background arm");
     let fg = src
-        .find("et == 0x105 || et == 0x106")
+        .find("unsafe fn host_foreground(")
         .expect("the foreground arm");
+    let fg_end = fg + src[fg..].find("\n}\n").expect("the end of the foreground arm");
     assert!(
         src[bg..fg].contains("bridge::background(&mut app.pages);"),
         "the BACKGROUND arm must park the container tree, or Settings and Search answer an event \
          that never arrives",
     );
     assert!(
-        src[fg..].contains("bridge::foreground(&mut app.pages);"),
+        src[fg..fg_end].contains("bridge::foreground(&mut app.pages);"),
         "…and the FOREGROUND arm must un-park it, or the tree stays parked for the rest of the run",
     );
+
+    // …and the loop's one consumer sends BOTH edges of each pair to them. An arm narrowed to the
+    // DID edge would pass everything above: the WILL edge would reach `{}`, and webOS may send
+    // either edge of a pair first.
+    let host = src
+        .find("unsafe fn ingest_host_event(")
+        .expect("the loop's one HostEvent consumer");
+    let host_end = host + src[host..].find("\n}\n").expect("the end of the consumer");
+    let flat = src[host..host_end].split_whitespace().collect::<Vec<_>>().join(" ");
+    for (edges, call) in [
+        ("Lifecycle::WillBackground | Lifecycle::DidBackground", "host_background("),
+        ("Lifecycle::WillForeground | Lifecycle::DidForeground", "host_foreground("),
+    ] {
+        assert!(
+            flat.contains(&format!("{edges} => {{ {call}")) || flat.contains(&format!("{edges} => {call}")),
+            "the consumer must send both `{edges}` to `{call}`",
+        );
+    }
 }

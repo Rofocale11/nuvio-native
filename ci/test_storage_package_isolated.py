@@ -2,8 +2,8 @@
 """Fail if building the storage helper compiles the app library.
 
 `plxnative-storage` is the small LS2 service binary that holds the private store; it shares a few
-source files with the platform layer crate (`platform/src/storage_service/*.rs`,
-`platform/src/storage/state.rs`) but never links the
+source files with the os layer crate (`os/src/storage_service/*.rs`,
+`os/src/storage/state.rs`) but never links the
 app crate. While it was a `[[bin]]` of the `plxnative-modules` package, cargo nevertheless built
 the whole ~423k-line library for it first (a bin of a package depends on that package's lib), so
 `make check` paid two extra host library builds and the `pkg/plxnative-storage` rule paid a third,
@@ -11,10 +11,10 @@ ARM one, for a binary that used none of it. The helper is its own workspace pack
 holds that line.
 
 It asks cargo for the resolved UNIT GRAPH of BOTH invocations the repo uses for the helper
-(`cargo ... --unit-graph`, nightly `-Zunstable-options`) instead of compiling them:
+(`cargo ... --unit-graph`, `-Zunstable-options`, let through with RUSTC_BOOTSTRAP=1 on the stable pin) instead of compiling them:
   * `cargo test <bin> --no-run`, what `make check` builds before running the helper's unit tests;
   * `cargo rustc <bin> --no-default-features`, the shape of the `pkg/plxnative-storage` rule. That
-    rule passes `--release --target arm-unknown-linux-gnueabi`; here it is the HOST, dev-profile
+    rule passes `--release --target armv7-unknown-linux-gnueabi`; here it is the HOST, dev-profile
     graph of the same package and binary, because the property checked (which crates cargo would
     compile for this binary) is decided by the package graph, not by the profile or the triple.
 and fails on any unit that belongs to the app package -- its library, and also its build script,
@@ -33,12 +33,13 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from rust_toolchain import pinned
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_CRATE = "plxnative_modules"
 APP_PACKAGE = "plxnative-modules"
 BIN = "plxnative-storage"
-NIGHTLY = os.environ.get("RUST_NIGHTLY", "nightly")
+TOOLCHAIN = pinned()  # the repo's one toolchain
 
 
 def app_package_units(graph):
@@ -59,9 +60,13 @@ def app_package_units(graph):
 def cargo(*args, cwd=None):
     env = dict(os.environ)
     env["PATH"] = str(Path.home() / ".cargo/bin") + os.pathsep + env.get("PATH", "")
-    # cwd matters: cargo finds rust-modules/.cargo/config.toml (build-std and the codegen flags)
-    # from the working directory.
-    return subprocess.run(["cargo", f"+{NIGHTLY}", *args], cwd=cwd or ROOT / "rust-modules",
+    # `--unit-graph` is cargo's only interface to the resolved compile units and it is nightly-only
+    # (`-Zunstable-options`). The repo's toolchain is stable, so RUSTC_BOOTSTRAP=1 lets that one
+    # read-only query through; nothing is compiled and nothing here ships.
+    env["RUSTC_BOOTSTRAP"] = "1"
+    # cwd matters: cargo finds rust-modules/.cargo/config.toml (the codegen flags) from the working
+    # directory.
+    return subprocess.run(["cargo", f"+{TOOLCHAIN}", *args], cwd=cwd or ROOT / "rust-modules",
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
 

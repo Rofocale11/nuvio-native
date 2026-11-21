@@ -12,14 +12,14 @@ fn bookmark_commands_are_addressed_and_identical_snapshots_are_quiet() {
     let stores = plx_data::stores::Stores::default();
     stores.browse.borrow_mut().seed_two_source_table_for_test();
     let mut directory = plx_data::stores::browse::DirectorySnapshot::default();
-    stores.capture_browse(&mut directory);
+    stores.capture_seeded_browse_for_test(&mut directory, plx_plex::plex::current_server());
     let section = &directory.view().sections()[0];
     let target = SectionAddress {
         epoch: directory.view().epoch().unwrap(),
         sid: section.sid.unwrap(),
         section: section.key,
     };
-    stores.browse_run(BrowseCmd::SetCur(0));
+    stores.browse_run_for_test(BrowseCmd::SetCur(0));
     let mut retained = None;
     for at in [
         plx_data::stores::browse::CursorAt::SlotIndex(52),
@@ -38,7 +38,7 @@ fn bookmark_commands_are_addressed_and_identical_snapshots_are_quiet() {
                 cursor: cursor.clone(),
             },
         };
-        assert!(stores.browse_run(command.clone()));
+        assert!(stores.browse_run_for_test(command.clone()));
         let snapshot = stores.browse.borrow_mut().listing_snapshot();
         assert_eq!(snapshot.view().cursor(), Some(&cursor));
         if let Some((old, value)) = &retained {
@@ -52,13 +52,13 @@ fn bookmark_commands_are_addressed_and_identical_snapshots_are_quiet() {
         retained = Some((snapshot, cursor.clone()));
         stores.take_notices();
         let generation = stores.gen(StoreId::Browse);
-        assert!(!stores.browse_run(command));
+        assert!(!stores.browse_run_for_test(command));
         assert_eq!(stores.gen(StoreId::Browse), generation);
         assert!(
             stores.take_notices().is_empty(),
             "identical snapshots owe no store notice"
         );
-        assert!(!stores.browse_run(BrowseCmd::Addressed {
+        assert!(!stores.browse_run_for_test(BrowseCmd::Addressed {
             target: SectionAddress {
                 epoch: target.epoch.wrapping_add(1),
                 ..target
@@ -73,7 +73,7 @@ fn bookmark_commands_are_addressed_and_identical_snapshots_are_quiet() {
             stores.take_notices().is_empty(),
             "rejected snapshots owe no store notice"
         );
-        assert!(!stores.browse_run(BrowseCmd::Addressed {
+        assert!(!stores.browse_run_for_test(BrowseCmd::Addressed {
             target,
             work: LibraryWork::SaveCursor {
                 query: query.wrapping_add(1),
@@ -86,7 +86,7 @@ fn bookmark_commands_are_addressed_and_identical_snapshots_are_quiet() {
             "an obsolete query snapshot is quiet too"
         );
     }
-    stores.browse_run(BrowseCmd::Reset);
+    stores.browse_run_for_test(BrowseCmd::Reset);
     assert!(stores.browse.borrow_mut().listing_snapshot()
         .view()
         .cursor()
@@ -134,7 +134,8 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
         plx_plex::plex::register_for_test("bookmark-shared", "127.0.0.1", 10, "synthetic", "fixture");
     plx_plex::plex::set_current(sid);
     let mut d = Dispatcher::<AppHost>::new();
-    let mut rig = Bridge::for_test(|| 0);
+    let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+    let mut rig = owner.bridge();
     rig.stores.browse.borrow_mut().seed_registered_table_for_test([sid, shared]);
     rig.refresh_browse_directory();
     rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
@@ -154,7 +155,7 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
     let (item, opener) = rig.library_selection(&d, old_entry, d.focus()).unwrap();
     let before = opener.rect.unwrap();
     let select = |d: &mut Dispatcher<AppHost>, rig: &Bridge, index: usize| {
-        let view = rig.directory.view();
+        let view = rig.retained.directory.view();
         let section = &view.sections()[index];
         let target = plx_data::stores::browse::SectionAddress {
             epoch: view.epoch().unwrap(),
@@ -172,7 +173,7 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
     };
     // Menu selection addresses a covered host: its Cx must read that host entry's
     // engine memory, never the menu's current row or its unrelated remembered groups.
-    let listing_id = rig.listing.view().id().unwrap();
+    let listing_id = rig.retained.listing.view().id().unwrap();
     d.nav.next_style = plx_ui::containers::modal::Style::Compact;
     d.request(
         MachineId::Nav,
@@ -181,6 +182,8 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
                 host: d.nav.top_page().unwrap().inst.as_ref().unwrap().id,
                 kind: plx_screens::registry::LibraryMenuKind::Filter,
                 anchor: [0; 4],
+                folded: Vec::new(),
+                opener: None,
                 target: plx_data::stores::browse::SectionAddress {
                     epoch: listing_id.epoch,
                     sid: listing_id.sid,
@@ -210,7 +213,7 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
         && matches!(&cursor.at, plx_data::stores::browse::CursorAt::ItemKey { sid, rk, slot: 52 } if *sid == item.sid && rk == &item.rk)),
         "section switching must emit the outgoing A snapshot through the StoreCmd drain");
     assert_eq!(
-        rig.directory.view().current(),
+        rig.retained.directory.view().current(),
         Some(2),
         "the actual deferred transaction enters section B"
     );
@@ -267,14 +270,17 @@ fn retired_library_entry_seeds_its_previous_section_card_and_viewport() {
     for i in 290..370 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
-    assert_eq!(rig.directory.view().current(), Some(0));
-    let (returned, opener) = rig
+    assert_eq!(rig.retained.directory.view().current(), Some(0));
+    // A switch leaves focus on the library name and the page at the top (the header stays on
+    // screen); the Down that enters the grid lands on the tile this library was left at.
+    frame(&mut d, &mut rig, AppArg::Library, tick(370), script_key(Key::Down, tick(370)));
+    for i in 371..400 {
+        frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
+    }
+    let (returned, _) = rig
         .library_selection(&d, entry, d.focus())
-        .expect("new entry restores the saved card");
-    assert_eq!(
-        (returned.sid, returned.rk.as_str()),
-        (item.sid, item.rk.as_str())
-    );
-    let after = opener.rect.unwrap();
-    assert!((before.y - after.y).abs() < 0.01, "{before:?} -> {after:?}");
+        .expect("the switched-to grid takes focus on Down");
+    assert_eq!(returned.sid, item.sid, "the grid is the library that was switched to");
+    assert_eq!(returned.rk, item.rk, "Down lands on the tile the library was left at (slot 52, not the first row)");
+    let _ = before;
 }

@@ -111,7 +111,7 @@ impl OffFrame {
 ///
 /// It gates the two things in `player/` that were main-thread-confined by comment only:
 ///
-/// * **the ACB/Starfish seam** — `player::ffi`'s wrappers. The raw `extern "C"` block is private
+/// * **the ACB/Starfish seam** — the platform sink's wrappers. The raw `extern "C"` block is private
 ///   to that module, so the token is the only way in. Bind order (`setMediaId` → `LOADED` →
 ///   `setMediaVideoData` → `setDisplayWindow` → `PLAYING`) is a sequence of calls with no
 ///   locking behind it; a second thread stepping into the middle of it corrupts the sink.
@@ -129,7 +129,9 @@ impl OffFrame {
 pub struct MainThread(PhantomData<*const ()>);
 
 impl MainThread {
-    /// Mint the token. `plex_run` calls this once, at the top, and nothing else should.
+    /// Mint the token. In production `enter_application` (`app/mod.rs`) calls this once, for every entry
+    /// (`plex_run` on the television and `plx_platform_desktop::run` on a desktop reach it through
+    /// `run_application`), and nothing else should; a test rig assumes its own.
     ///
     /// # Safety
     /// The caller asserts this is the SDL main thread. It is not a memory-safety obligation in
@@ -151,11 +153,28 @@ fn refused(what: &str, e: &io::Error) {
     ));
 }
 
+/// Longest thread name Linux keeps: `TASK_COMM_LEN` is 16 including the NUL.
+const THREAD_NAME_MAX: usize = 15;
+
+/// The OS thread name for the worker labelled `what`: `what` cut to [`THREAD_NAME_MAX`] bytes at a
+/// char boundary, with NULs dropped (`Builder::spawn` panics on an interior NUL, and a label must
+/// never be able to make a spawn fail). It shows in `/proc/<pid>/task/*/comm`, kernel scheduler
+/// traces and `tools/plxnative-sample`, so a label meant for those is kept to 15 bytes and
+/// distinct from its neighbours in its first 15 bytes; a longer one is cut, not rejected.
+fn thread_name(what: &str) -> String {
+    let mut name = String::with_capacity(THREAD_NAME_MAX);
+    for c in what.chars().filter(|&c| c != '\0') {
+        if name.len() + c.len_utf8() > THREAD_NAME_MAX {
+            break;
+        }
+        name.push(c);
+    }
+    name
+}
+
 fn try_spawn(what: &str, stack: Option<usize>, f: impl FnOnce() + Send + 'static) -> io::Result<JoinHandle<()>> {
-    // `what` names the worker for the host tests' drain report; the shipping build has no use for it.
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = what;
-    let mut b = Builder::new();
+    crate::step::assert_io_allowed("task::try_spawn");
+    let mut b = Builder::new().name(thread_name(what));
     if let Some(n) = stack {
         b = b.stack_size(n);
     }
@@ -187,7 +206,7 @@ struct SmallWorker(Option<u64>);
 #[cfg(any(test, feature = "test-support"))]
 impl SmallWorker {
     fn enter(counted: bool, what: &str) -> Self {
-        // Not counted: the library-discovery worker (`browse::spawn_discovery`) dials whatever
+        // Not counted: the library-discovery worker (the runner's `launch_browse_discovery`) dials whatever
         // server the test registered, which may be an address that answers only by its connect
         // timeout, and it posts into the per-owner adapter the test owns and drops with itself —
         // no process global — so waiting for it would charge every such test seconds for nothing.
@@ -327,6 +346,169 @@ pub fn spawn_small_keeping(
     spawn_with(what, Some(SMALL_STACK), f)
 }
 
+/// What a [`Beside`] still owes: the work (not run yet, or its thread was refused) or its answer.
+enum Work<'scope, T> {
+    Todo(Box<dyn FnOnce() -> T + Send + 'scope>),
+    Done(T),
+    Taken,
+}
+
+/// A request asked for BESIDE the caller's own, on a scoped sibling thread ([`beside`]).
+///
+/// Where [`spawn`] starts a detached worker that outlives its caller, this is structured: the
+/// thread belongs to a [`std::thread::scope`], so the closure may borrow what the scope's caller
+/// borrows, and the scope joins the thread on EVERY exit of the scope body — an early `return`
+/// and a panic included — so a request started here cannot be left running behind a result that
+/// was built without it. Reading the answer is [`Beside::finish`].
+pub struct Beside<'scope, T> {
+    thread: Option<std::thread::ScopedJoinHandle<'scope, ()>>,
+    work: std::sync::Arc<std::sync::Mutex<Work<'scope, T>>>,
+}
+
+/// Ask for `f`'s answer on a scoped sibling thread named `what`, to be read with
+/// [`Beside::finish`] once the caller's own work is done. Use it for requests that need nothing
+/// from each other, so the caller waits for the slower of them rather than for the sum.
+///
+/// **A refused thread is not a lost answer**: unlike [`spawn`], which drops the work, the closure
+/// is kept and `finish` runs it on the caller's thread (the serial order it had before it was
+/// asked beside), and the refusal is logged. **A panic in `f` is the caller's panic**: `finish`
+/// re-raises it, as the same call made inline would have; nothing is swallowed into a default.
+///
+/// Only the borrows of the scope's CALLER can be captured (a thread started inside the scope body
+/// cannot borrow the body's own locals) — move owned copies in.
+///
+/// **For an IO body, never a machine step.** The scope joins the sibling before its caller
+/// returns, so the caller waits for the network: that is fine in a body a runner already runs off
+/// the frame (`fetch_full`, `fetch_source`, `build_stream`) and would stall the frame in a step.
+/// That join is also why this is not a worker start: `ci/check-deps.sh`'s `workers` gate counts
+/// a detached worker a machine owns (`task::spawn`, `spawn_small*`, ...), its pattern does not
+/// match `beside` in any spelling, and a `beside` call is not a `ci/allow/workers/` ledger line.
+/// The gate cannot tell a body from a step, so this debug assertion does: a call on the frame
+/// thread panics on any tested path, as an `OffFrame` mint does.
+pub fn beside<'scope, 'env, T, F>(
+    s: &'scope std::thread::Scope<'scope, 'env>,
+    what: &str,
+    f: F,
+) -> Beside<'scope, T>
+where
+    T: Send + 'scope,
+    F: FnOnce() -> T + Send + 'scope,
+{
+    beside_with(s, what, None, f)
+}
+
+fn beside_with<'scope, 'env, T, F>(
+    s: &'scope std::thread::Scope<'scope, 'env>,
+    what: &str,
+    stack: Option<usize>,
+    f: F,
+) -> Beside<'scope, T>
+where
+    T: Send + 'scope,
+    F: FnOnce() -> T + Send + 'scope,
+{
+    crate::step::assert_io_allowed("task::beside_with");
+    use std::sync::{Arc, Mutex};
+    debug_assert!(!blocking::in_frame(), "beside was asked for on the frame thread");
+    // The lock is never held while `f` runs, so a panic in `f` cannot poison it.
+    fn lock<'a, 'scope, T>(work: &'a Mutex<Work<'scope, T>>) -> std::sync::MutexGuard<'a, Work<'scope, T>> {
+        work.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn run<T>(work: &Mutex<Work<'_, T>>) {
+        let todo = match std::mem::replace(&mut *lock(work), Work::Taken) {
+            Work::Todo(f) => f,
+            other => {
+                *lock(work) = other;
+                return;
+            }
+        };
+        let answer = todo();
+        *lock(work) = Work::Done(answer);
+    }
+    let work = Arc::new(Mutex::new(Work::Todo(Box::new(f) as Box<dyn FnOnce() -> T + Send + 'scope>)));
+    let mut b = Builder::new().name(thread_name(what));
+    if let Some(n) = stack {
+        b = b.stack_size(n);
+    }
+    let worker = Arc::clone(&work);
+    let thread = match b.spawn_scoped(s, move || run(&worker)) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            crate::eventlog::log(&format!(
+                "task: spawn '{what}' REFUSED ({e}) — asking for it on the caller's thread instead"
+            ));
+            None
+        }
+    };
+    Beside { thread, work }
+}
+
+impl<T> Beside<'_, T> {
+    /// The answer: waits for the sibling thread, or — when its thread was refused — asks here.
+    /// Re-raises a panic of the work.
+    pub fn finish(self) -> T {
+        if let Some(h) = self.thread {
+            if let Err(panic) = h.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        let work = std::mem::replace(&mut *self.work.lock().unwrap_or_else(|e| e.into_inner()), Work::Taken);
+        match work {
+            Work::Done(answer) => answer,
+            Work::Todo(f) => f(),
+            Work::Taken => unreachable!("a Beside is finished once, and its work ran once"),
+        }
+    }
+}
+
+/// This thread's kernel thread id: what `ps -L`, `/proc/<pid>/task/` and `tools/tv-sched-trace.sh
+/// --tid` name. `None` off Linux and Android, where there is none to name.
+///
+/// The raw system call, which is what `gettid(2)` is: glibc grew the wrapper in 2.30, and the
+/// televisions' libc has it only from webOS 7 (`tools/fwcompat.py --lib libc.so.6 --grep gettid`),
+/// so naming `gettid` would stop the binary starting on older sets. `syscall` itself is in every
+/// release's libc.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn thread_id() -> Option<u32> {
+    // SAFETY: `SYS_gettid` takes no arguments and cannot fail.
+    u32::try_from(unsafe { libc::syscall(libc::SYS_gettid) }).ok()
+}
+
+/// See the Linux definition.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn thread_id() -> Option<u32> {
+    None
+}
+
+/// Run the calling thread at niceness `nice` (0 is the default a thread starts at, 19 the lowest
+/// priority; a level past either end is cut to it), so the threads that keep the frame loop on
+/// time win a core from it. Returns whether it took effect.
+///
+/// Linux keeps a niceness per kernel thread (NPTL threads are not "processes" in this one respect),
+/// so `setpriority(PRIO_PROCESS, tid, nice)` lowers this thread and no other, which is what a
+/// worker needs: the ASS render workers run at `+5` (the first) and `+10` (a helper), below the
+/// frame thread and the playback threads that stay at 0, on a four-core set where a moving cue's
+/// workers would otherwise take the cores the frame loop needs. Lowering one's own priority is
+/// always permitted; it is the other way (a worker that asks for less than the niceness it has)
+/// that the kernel refuses without `CAP_SYS_NICE`, which is why the result is a `bool` and not a
+/// panic: a refusal only leaves the thread where it was.
+///
+/// Off Linux and Android there is no per-thread niceness and the call does nothing (`false`): this
+/// is a platform difference in the OS interface, not a test fork.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn lower_priority(nice: i32) -> bool {
+    let Some(tid) = thread_id() else { return false };
+    // SAFETY: plain integers; `PRIO_PROCESS` is `c_int` in the binding and `c_uint` (glibc's
+    // `__priority_which_t`) in the signature, which `as _` settles for either libc.
+    unsafe { libc::setpriority(libc::PRIO_PROCESS as _, tid as libc::id_t, nice.clamp(0, 19)) == 0 }
+}
+
+/// See the Linux definition.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn lower_priority(_nice: i32) -> bool {
+    false
+}
+
 /// A join this long parked the SDL loop for ~15 frames — the shortest stall a person reads as a
 /// freeze rather than a stutter.
 const STALL_MS: u64 = 250;
@@ -384,8 +566,9 @@ mod tests {
     /// page — `stack_size + page_size - 1` — and on `usize::MAX` that addition overflows, so a
     /// debug-assertions build panics *inside std* before `pthread_create` is ever reached. The
     /// test then fails claiming the very thing it exists to prove. It is toolchain-dependent
-    /// (green on 1.96 stable, red on 1.98-nightly) and this crate is nightly-only for
-    /// `-Z build-std`, so `make check` was the one that saw it.
+    /// (green on 1.96 stable, red on 1.98-nightly; the ARM build was nightly-only for
+    /// `-Z build-std` then, so `make check` was the one that saw it, and one pinned stable release
+    /// now serves both).
     ///
     /// Half the address space is just as unsatisfiable — no allocator anywhere will find 8 EiB —
     /// while leaving room for the page rounding to land, and it stays correct on the 32-bit
@@ -397,6 +580,106 @@ mod tests {
             h.is_none(),
             "a spawn that cannot succeed must report, not hand back a handle"
         );
+    }
+
+    /// Workers carry their label as the thread name (what a scheduler trace and
+    /// `plxnative-sample` print), cut to 15 bytes at a char boundary; a label too long, or with a
+    /// NUL in it, still spawns.
+    #[test]
+    fn workers_carry_their_names_and_an_over_long_label_still_spawns() {
+        fn name_of(what: &'static str) -> Option<String> {
+            let (tx, rx) = mpsc::channel();
+            let h = super::spawn(what, move || {
+                tx.send(std::thread::current().name().map(str::to_owned)).unwrap();
+            })
+            .expect("spawn");
+            h.join().unwrap();
+            rx.recv().unwrap()
+        }
+        assert_eq!(name_of("ass-render").as_deref(), Some("ass-render"));
+        assert_eq!(name_of("exactly15bytes!").as_deref(), Some("exactly15bytes!"));
+        assert_eq!(name_of("a label that is much too long").as_deref(), Some("a label that is"));
+        // 'é' is two bytes: the cut lands inside it and backs off to the boundary.
+        assert_eq!(name_of("abcdefghijklmné").as_deref(), Some("abcdefghijklmn"));
+        assert_eq!(name_of("nul\0inside").as_deref(), Some("nulinside"));
+        let (tx, rx) = mpsc::channel();
+        let h = super::spawn_small_keeping("small-worker", move || {
+            tx.send(std::thread::current().name().map(str::to_owned)).unwrap();
+        })
+        .expect("spawn");
+        h.join().unwrap();
+        assert_eq!(rx.recv().unwrap().as_deref(), Some("small-worker"));
+    }
+
+    /// The kernel's own record of the name, which is what a scheduler trace reads.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernel_comm_matches_the_name() {
+        let (tx, rx) = mpsc::channel();
+        super::spawn("comm-probe", move || {
+            tx.send(std::fs::read_to_string("/proc/thread-self/comm").unwrap()).unwrap();
+        })
+        .expect("spawn");
+        assert_eq!(rx.recv().unwrap().trim_end(), "comm-probe");
+    }
+
+    /// The thread's own niceness, which is what a scheduler trace reads: Linux keeps a niceness
+    /// per kernel thread, and `setpriority(PRIO_PROCESS, tid)` reaches that thread alone.
+    #[cfg(target_os = "linux")]
+    fn nice_of(tid: u32) -> i32 {
+        // getpriority's -1 is a legitimate niceness, so a failure is told by errno; a test thread
+        // that has just read its own tid cannot fail it.
+        unsafe { *libc::__errno_location() = 0 };
+        let n = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, tid as libc::id_t) };
+        assert_eq!(unsafe { *libc::__errno_location() }, 0, "getpriority of a live thread");
+        n
+    }
+
+    /// A worker that lowers its priority is niced and the thread that started it is not: the
+    /// niceness is per kernel thread, so the ASS workers' `+5`/`+10` never reach the frame thread.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lowering_priority_nices_the_calling_thread_alone() {
+        let parent = super::thread_id().expect("a Linux thread has an id");
+        let parent_before = nice_of(parent);
+        let (tx, rx) = mpsc::channel();
+        let h = super::spawn("nice-probe", move || {
+            let me = super::thread_id().expect("a Linux thread has an id");
+            let before = nice_of(me);
+            let applied = super::lower_priority(before + 7);
+            tx.send((before, applied, nice_of(me))).unwrap();
+        })
+        .expect("spawn");
+        let (before, applied, after) = rx.recv().unwrap();
+        h.join().unwrap();
+        assert!(applied, "lowering a thread's own priority is never refused");
+        assert_eq!(after, (before + 7).min(19));
+        assert_eq!(nice_of(parent), parent_before, "the spawning thread keeps its niceness");
+    }
+
+    /// The level is a niceness: past the ends it is cut to them, not refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_level_past_the_lowest_priority_is_cut_to_it() {
+        let (tx, rx) = mpsc::channel();
+        let h = super::spawn("nice-clamp", move || {
+            let me = super::thread_id().expect("a Linux thread has an id");
+            tx.send((super::lower_priority(1_000), nice_of(me))).unwrap();
+        })
+        .expect("spawn");
+        let (applied, nice) = rx.recv().unwrap();
+        h.join().unwrap();
+        assert!(applied);
+        assert_eq!(nice, 19);
+    }
+
+    /// Off Linux there is no per-thread niceness to set (the host simulator is the one place the
+    /// ASS workers run there): the call says so and changes nothing.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[test]
+    fn lowering_priority_reports_that_it_did_nothing_off_linux() {
+        assert_eq!(super::thread_id(), None);
+        assert!(!super::lower_priority(5));
     }
 
     /// [`super::MainThread`] earns its keep entirely by NOT being `Send` — that absence is what
@@ -446,6 +729,95 @@ mod tests {
         assert_send::<super::OffFrame>();
         assert_eq!(std::mem::size_of::<super::OffFrame>(), 0, "it is a proof, not data");
         let _ = super::OffFrame::for_test();
+    }
+
+    /// A sibling asked for beside the caller's work is running while the caller works: the caller
+    /// parks on a channel only the sibling can feed, so a `beside` that ran the work later (or
+    /// inline, serially) would never get the answer.
+    #[test]
+    fn a_beside_request_runs_while_the_caller_works() {
+        let (tx, rx) = mpsc::channel();
+        let answer = std::thread::scope(|s| {
+            let sibling = super::beside(s, "beside-probe", move || {
+                tx.send(7).unwrap();
+                "asked"
+            });
+            assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(7), "the sibling never ran beside us");
+            sibling.finish()
+        });
+        assert_eq!(answer, "asked");
+    }
+
+    /// The closure may borrow what the scope's caller borrows, and the thread carries its label.
+    #[test]
+    fn a_beside_request_borrows_the_callers_data_and_carries_its_name() {
+        let owned = String::from("borrowed");
+        let (len, name) = std::thread::scope(|s| {
+            super::beside(s, "beside-name", || (owned.len(), std::thread::current().name().map(str::to_owned))).finish()
+        });
+        assert_eq!((len, name.as_deref()), (8, Some("beside-name")));
+    }
+
+    /// The OS-refused arm: the thread cannot start, and the work is NOT dropped (unlike `spawn`) —
+    /// `finish` runs it, here, exactly once.
+    #[test]
+    fn a_refused_beside_thread_is_asked_on_the_callers_thread() {
+        let ran = std::sync::atomic::AtomicU32::new(0);
+        let caller = std::thread::current().id();
+        let (answer, on_caller) = std::thread::scope(|s| {
+            let sibling = super::beside_with(s, "unsatisfiable", Some(usize::MAX / 2), || {
+                ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (9, std::thread::current().id())
+            });
+            let (answer, ran_on) = sibling.finish();
+            (answer, ran_on == caller)
+        });
+        assert_eq!(answer, 9);
+        assert!(on_caller, "a refused thread asks on the caller's thread");
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1, "and exactly once");
+    }
+
+    /// A panic in the sibling's work is the caller's panic at `finish`, as the same call made
+    /// inline would have been, and not a default that hides it.
+    #[test]
+    fn a_beside_panic_is_reraised_at_finish() {
+        let outcome = std::panic::catch_unwind(|| {
+            std::thread::scope(|s| {
+                let sibling = super::beside(s, "beside-panic", || -> u8 { panic!("sibling work") });
+                sibling.finish()
+            })
+        });
+        let panic = outcome.expect_err("finish must re-raise");
+        assert_eq!(panic.downcast_ref::<&str>().copied(), Some("sibling work"));
+    }
+
+    /// `beside` makes its caller wait for the sibling at the end of the scope, so it is for an IO
+    /// body a runner runs off the frame; a machine step that called it would block the frame on
+    /// the network. The frame thread is refused in debug builds, as an `OffFrame` mint is.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "beside was asked for on the frame thread")]
+    fn a_beside_request_on_the_frame_thread_is_refused() {
+        let _frame = super::FrameScope::enter();
+        std::thread::scope(|s| {
+            super::beside(s, "beside-on-frame", || ()).finish();
+        });
+    }
+
+    /// The scope joins a sibling its owner never `finish`ed: an early return out of the scope body
+    /// cannot leave the request running behind the result.
+    #[test]
+    fn a_beside_request_never_finished_is_still_joined_by_the_scope() {
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let early: Option<()> = std::thread::scope(|s| {
+            let _dropped = super::beside(s, "beside-slow", || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            None
+        });
+        assert!(early.is_none());
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst), "the scope returned before the sibling finished");
     }
 
     /// The OS-refused arm: forced with an unsatisfiable stack, the work still runs, here, under

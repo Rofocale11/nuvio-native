@@ -2,11 +2,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Own interoperability adapter declarations, written from the public ABI contract.
  * LG runtime binaries are not distributed with this file. */
-/* starfish.h — the low-level C subsystem: LG StarfishMediaAPIs (C++) + ACB
+/* starfish.h — flat ABI for starfish.c (buffer-feed) and video_plane.c (shared display).
+ * LG StarfishMediaAPIs (C++) + ACB
  * video-plane binding, behind flat C verbs. Hides the 11 mangled __asm__ symbols,
  * the sret std::string in Feed, the never-reused 64KB in-place objects, and the 3-arg ACB
- * taskId ABI. Library-thread callbacks are forwarded to sf_on_event/acb_on_event,
- * which the Rust player engine defines (player/mod.rs). This is the one piece that
+ * taskId ABI. Library-thread callbacks are forwarded to sf_on_event (the Feed backend's Rust
+ * entry, play-feed/src/sf_event.rs) and acb_on_event (the webOS port, webos/video_sink.rs, which queues it for the
+ * plane owner in tv/plane.rs). This is the one piece that
  * stays C in the Rust-first app — porting the mangled-C++ FFI to Rust is
  * worse-than-C. */
 #ifndef PLXNATIVE_STARFISH_H
@@ -21,9 +23,11 @@ int  sf_ready(void);
 int  sf_is_load_completed(void);
 int  sf_play(void);
 int  sf_pause(void);
+int  sf_set_volume(int volume);  /* this pipeline's volume 0..100 (setVolume {"volume":n}); library bool */
 int  sf_flush(void);
 int  sf_set_time_to_decode(long long position_ns); /* Kodi in-place seek: setTimeToDecode (returns 0 on webOS<11) */
 int  sf_set_content_info(long long position_ns);   /* webOS<11 in-place seek: loadSpi_getInfo + setContentInfo(ptsToDecode); 0 = pipeline not reachable */
+int  sf_seek_ms(long long ms);                     /* public StarfishMediaAPIs::Seek(millis): flushes + re-anchors the segment at ms; 0 = refused */
 int  sf_send_segment(void);                        /* Kodi in-place seek: CustomPipeline::sendSegmentEvent; 0 = pipeline not reachable */
 char sf_feed(const unsigned char *p, unsigned size, long long pts, int esData); /* 'O'/'B'/'e' */
 int  sf_feed_abi_is_cow(void);       /* 1 = Feed is the pre-C++11 copy-on-write build (webOS 3.x); resolves Feed on first use */
@@ -43,7 +47,7 @@ void sf_quarantine(void);
  * Two mechanisms, never both, split at exactly webOS 5.0 where LG deleted libAcbAPI and gave SDL
  * an exported-window API instead. `vp_mode` resolves which this television has, once, by trying to
  * dlopen/dlsym each — neither is linked, because naming a library or symbol the device lacks makes
- * the loader kill the process before main. See the long comment at the top of starfish.c. */
+ * the loader kill the process before main. See the long comment in video_plane.c. */
 #define VP_NONE     0   /* neither: video cannot be displayed, but the app still runs */
 #define VP_ACB      1   /* webOS 2.2.3 .. 4.10.0 — libAcbAPI.so.1 */
 #define VP_EXPORTED 2   /* webOS 5.3.1 .. 11.2.0 — SDL_webOS*ExportedWindow* (device-verified webOS 6.5.2, issue #22) */
@@ -61,14 +65,36 @@ void vp_destroy_window(void);
 
 /* ACB (App Common Binding) — VP_ACB only; every verb is a no-op in the other modes, so callers
  * need not branch. On webOS 5 this whole sequence has no replacement: it is deleted outright. */
-long acb_create(const char *appId, int playerType);        /* create+initialize; 0 = failed */
+long acb_create(const char *appId, int playerType);        /* create+initialize; 0 = failed. At most two per process (one per backend: Feed's at the boot, the URI engine's on demand), none ever destroyed; the newest is current */
+int acb_select(long handle);                               /* make a handle acb_create returned the one every verb below addresses; 1 = done, 0 = not ours */
+/* The paced URI bind (play-uri `acb_bind`): the same calls acb_bind() makes, split so the caller can
+ * pace them. 1 = the library confirmed AcbAPI_initialize (a created handle alone is not that), 0 not. */
+int acb_initialized(void);
+int acb_probe_dass_available(void);                         /* developer arm only */
+int acb_media_id(const char *mediaId);                      /* setSinkType(MAIN)+setMediaId; 1 = both accepted */
+int acb_loaded(void);                                       /* setState(FOREGROUND, LOADED); setState's answer */
+int acb_probe_connect_dass(void);                           /* developer arm only */
+/* setDisplayWindow(0,0,1280,720,fullscreen)+setState(PLAYING); 1 = both accepted. *displayTask and
+ * *playingTask (either may be NULL) are set to the task id each call wrote ONLY when that call
+ * answered 1, else 0; the firmware completes each call with its own id (acb_on_event), and the plane
+ * owner's `Shown` fence matches on them. A refused window skips PLAYING, so *playingTask stays 0. */
+int acb_finish(long *displayTask, long *playingTask);
 void acb_bind(const char *mediaId);                        /* setSinkType(MAIN)+setMediaId+setState(LOADED) */
-int  acb_send_video_data(const char *sourceInfoVerbatim);  /* setMediaVideoData; -1 = rejected */
+int  acb_send_video_data(const char *sourceInfo);  /* setMediaVideoData; normal playback forwards the native envelope; explicit developer fixture descriptor is experimental. -1 = rejected */
 void acb_start(long x, long y, long w, long h);            /* setDisplayWindow + setState(PLAYING) */
-void acb_unload(void);                                     /* setState(UNLOADED) */
+/* setState(UNLOADED). Returns setState's own answer: 1 accepted (the firmware will deliver a
+ * completion callback carrying *taskOut), -2 not registered (nothing was sent, no callback comes),
+ * 0 no ACB handle (nothing was sent). *taskOut (may be NULL) is set to the task id the call wrote
+ * ONLY when the return is 1, else 0. The evidence for matching the release on that task id, and for
+ * the -2 rule, is docs/measurements/acb-release-fence-2026-11-04.md. */
+int acb_unload(long *taskOut);
 
 /* ---- library-thread callbacks the seam forwards to (consumer-defined) ---- */
 void sf_on_event(unsigned int epoch, int type, long long num, const char *str);
-void acb_on_event(long ev, const char *reply);
+/* Completion callback of any ACB call, on the library's thread. `id` is the handle acb_create
+ * returned for the core that issued the call (the callback's first argument); `task` is the task id
+ * the originating call returned, numbered by that core alone; `ev` is -2 timeout, -1 error, 0 cancel,
+ * 1 complete. */
+void acb_on_event(long id, long task, long ev, const char *reply);
 
 #endif /* PLXNATIVE_STARFISH_H */

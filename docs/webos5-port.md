@@ -179,7 +179,7 @@ Three sizes DO move within major 58 — `sizeof(AVStream)` is 688/704/**424** (4
 fields into `AVStreamInternal`) — and none is in the table, because the app allocates none of those
 structs and reads nothing in `AVStream` past `codecpar`.
 
-### 3.3 The video-plane binding (`src/starfish.c`)
+### 3.3 The video-plane binding (`src/video_plane.c`)
 
 webOS 5 replaced ACB with a Wayland **exported window**, surfaced through LG's SDL fork. The app
 asks the compositor for one, gets back a string id (`_Window_Id_<n>`), and puts that id into the
@@ -200,12 +200,13 @@ void        SDL_webOSDestroyExportedWindow(const char *windowId);
 ```
 
 The window-type constants are spelled **`EXPORED`**, not `EXPORTED`, in the real header — LG's
-typo. webosbrew's developer guide spells them correctly, which would not compile. `starfish.c` uses
+typo. webosbrew's developer guide spells them correctly, which would not compile. `video_plane.c` uses
 the literal `0` and says why.
 
 **What webOS 5 keeps:** all 15 mangled `StarfishMediaAPIs` / `CustomPipeline` symbols, unchanged,
 through 11.2.0. The BUFFERSTREAM payload is identical but for that one key. So the engine, the
-pump, the feed loop, seek and `pushEOS` are untouched.
+pump, the feed loop and `pushEOS` are untouched; seek takes LG's public `Seek` (see "The public
+`Seek`" in section 4).
 
 **What it deletes, with no replacement:** `setSinkType`, `setMediaId`,
 `setMediaVideoData(<sourceInfo>)` and the `LOADED`/`PLAYING`/`PAUSED` mirroring. Both reference
@@ -235,7 +236,7 @@ could have revealed it except asking.
 
 > **2026-08-11 — item 1 is SETTLED, in the affirmative.** The webosbrew reviewer ran v0.2.1 on a
 > real LG 65UP7560AUD (webOS **6.5.2**, `Rockhopper 6.5.2-43`):
-> [issue #22](https://github.com/GLinnik21/plx-native/issues/22). The whole `VP_EXPORTED`
+> [issue #22](https://github.com/plxnative/plx-native/issues/22). The whole `VP_EXPORTED`
 > sequence ran — created, `windowId` spliced into the Load payload, placed `rv=1`, VDEC/ADEC
 > allocated, fed to EOS with clean teardown. Six of eight playbacks worked: H.264 1080p, H.264
 > 4K, HEVC, AAC and AC3, episodes, end-of-file. The two failures were server-side and
@@ -243,7 +244,8 @@ could have revealed it except asking.
 > same day). Items 4 and 5 are implicitly settled by the same report — the reviewer browsed,
 > navigated and played with the UI composited over live video. The `UNTESTED PATH` log banners
 > are gone. Note the verification is one firmware (6.5.2): 5.x and 10/11 remain start-verified
-> only, and item 3's in-place seek stays disabled on `VP_EXPORTED`.
+> only. Item 3's private-offset in-place seek stays off on `VP_EXPORTED`: webOS 5+ seeks through LG's
+> public `Seek` instead (see "The public `Seek`" below).
 
 Ranked by how much damage a wrong assumption does. *(Item 1 settled — see above.)*
 
@@ -259,9 +261,12 @@ Ranked by how much damage a wrong assumption does. *(Item 1 settled — see abov
    *Settled by:* `/tmp/plxnative-ffprobe` with a known file on a webOS 5 set; if codec_id, width,
    height and time_base come back sane, the table is right.
 3. **The current slot's `object+0x4c` / `MEDIA_CUSTOM_CONTENT_INFO+0x28` pokes.**
-   Decompile-derived offsets into LG-private C++ objects, used by the in-place seek. No symbol table
-   can confirm them on another firmware, and a field added to `StarfishMediaAPIs` by any 5.x build
-   moves `+0x4c`. Failure is a SIGSEGV, not a wrong answer. *Settled by:* seeking on a webOS 5 set.
+   Decompile-derived offsets into LG-private C++ objects, used by the `Segment` in-place seek
+   (webOS 4.x only). No symbol table can confirm them on another firmware, and a field added to
+   `StarfishMediaAPIs` by any 5.x build moves `+0x4c`. Failure is a SIGSEGV, not a wrong answer.
+   webOS 5+ no longer touches them: it seeks through the public `Seek` (issue #568, "The public
+   `Seek`" below), which assumes no layout. *Still to settle on a webOS 5+ set:* that `Seek` really
+   keeps the picture (no black frame, no DV/HDR badge re-pop) and the first post-seek frame lands.
 4. **The keyboard event offsets.** `app.rs` reads state/wcode/sym at +16/+20/+24 because LG's SDL
    inserts `Uint32 inputSource` after `windowID`. That patch is applied by the openlgtv NDK to
    modern SDL2 as well, so the struct offsets very likely hold — but which value LG writes into
@@ -298,13 +303,72 @@ not to be enough, not a correction.
 `createPipeline`, `requestResource`, `setAppSrcCaps`, `removeAudioBin` and the rest. A class that
 grew that much has almost certainly changed layout, which is the strongest evidence yet that
 `starfish.c`'s current-slot `object+0x4c` → `player+0x04` walk to reach it must not run on those
-firmwares. The in-place seek that depends on it is now disabled on `VP_EXPORTED` for exactly that
-reason.
+firmwares. The private-offset in-place seek that depends on it is disabled on `VP_EXPORTED` for exactly that
+reason; webOS 5+ seeks through the public `Seek` instead.
 
 **The whole of libplayerAPIs+libpf moved a long way**: 2144 exported symbols on 4.10.0, 2736 on
 6.4.0, 2628 on 10.2.0. `FeedStream` even gains a second overload with four more arguments on
 10.2.0. We call none of those directly — `Feed` takes JSON — but it is the scale of the change
 that matters when judging how much a webOS 4 assumption is worth elsewhere.
+
+### The public `Seek` (issue #568)
+
+On webOS 5+ every direct-play seek used to be a full fresh `Load` (black screen, the DV/HDR badge
+re-popping), because the Kodi in-place path was switched off there. It now goes through
+`StarfishMediaAPIs::Seek(const char *millis)` (`_ZN17StarfishMediaAPIs4SeekEPKc`, returns `bool`),
+exported on every firmware 1.2 to 11.2 (`tools/fwcompat.py`) and used by LG's own Chromium MSE
+player in the same buffer-feed mode. The chain below was decompiled from the webOS 4.5
+`libplayerAPIs` and `libpf` (Ghidra, by address). **PROVEN** means the decompiled code shows it;
+**INFERRED** means it rests on stock GStreamer semantics. Nothing here has been checked on webOS 5+.
+
+```
+StarfishMediaAPIs::Seek(const char*)
+  -> AbstractPlayer::seek(ull)  ->  CustomPlayer::seekSpi(ull)  ->  Pipeline::seek(ull)
+  -> CustomPipeline::seekSpi(long long ms)  ->  gst_element_seek(...)
+SEEKDONE: ASYNC_DONE with the pending-seek flag set -> app callback type 25
+```
+
+- **Argument (PROVEN).** The string is tried as JSON first (`{"position":N}`), otherwise parsed as a
+  decimal. The unit is milliseconds; `CustomPipeline::seekSpi` multiplies by exactly 1e6. A negative
+  target does nothing and returns false.
+- **Seek flushes itself (PROVEN).** `gst_element_seek(pipeline, rate, TIME, FLUSH | KEY_UNIT,
+  SET, ms * 1e6, NONE, -1)`, and on success the cached segment is rewritten with `start = time =
+  position = ms * 1e6`. It resets the same feed/EOS counters `flush()` resets. It sends no explicit
+  segment event, touches neither `setTimeToDecode` nor `MEDIA_CUSTOM_CONTENT_INFO`, pauses and
+  resumes nothing, and re-creates no decoder, sink or ACB binding.
+- **`flush()` is a seek to 0 (PROVEN).** `CustomPipeline::flush()` is `gst_element_seek` with
+  `FLUSH | SKIP` and start -1, which INFERRED maps to start 0. So a `flush()` after `Seek` re-anchors
+  the segment at 0 and recreates the stale-segment stall (the sink stops draining about 48 s later:
+  permanent BufferFull and "Playing error"). The app never flushes for a native seek.
+- **Timeline (PROVEN core, INFERRED consequence).** The segment starts at the millis passed, so the
+  PTS fed afterwards must be on that timeline: the app switches to content time (`pts_shift = 0`)
+  and passes the landed keyframe's own PTS. `Feed` parses `pts` as an unsigned 64-bit value, so a
+  negative PTS must never be fed; the app clamps. Whether LG's sink clips frames between the
+  keyframe and the target is NOT determined.
+- **Concurrency (PROVEN).** `Seek` takes the mutex `Play()` takes, but `Feed` and `flush()` take
+  none. The only guard is a plain int in `CustomPlayer` that is zeroed around the gst seek, so a
+  `Feed` during a seek gets an error reply and one already past the check races the flush. The app
+  calls `Seek` from the main thread, the only `Feed` caller, before the landed keyframe is fed.
+- **Refusal (PROVEN).** A failure inside `Pipeline::seek` or `CustomPipeline::seekSpi` returns false
+  with that int left at 0, so every later `Feed` is rejected until a flush or seek succeeds. A
+  refusal before it (negative target, not loaded, stopped state) leaves it alone. Either way a
+  false return makes the app drop the rest of the session to the reload path.
+- **State (PROVEN).** Accepted while loaded and Paused or Playing; refused when stopped.
+- **SEEKDONE (PROVEN).** The type-25 callback arrives on ASYNC_DONE, which INFERRED needs post-seek
+  data to preroll, so the app does not wait for it. The pending flag is a boolean, so overlapping
+  seeks can yield a single callback: never pair them one to one.
+- **Not determined.** Whether LG's decoder or sink re-emits HDR info on the first post-flush frame;
+  the meaning of one more `Pipeline::seek` precondition field; everything on webOS 5+.
+
+**On webOS 3 (device, not decompiled).** The old-ABI library exports the same `Seek` symbol, and the
+app uses it there too (`plx_play_feed::seek::old_abi_seek_tested`, a known release 3 only). Checked on an LG
+OLED55B7V-Z, platform release 3.9.3, `feed abi: cow`, in Developer Mode: 80 direct-play seeks (53 forced
+with `plxnative-seekmode`, 27 chosen by `old_abi_seek_tested`) over an
+MP4 (H.264 1080p, AAC 5.1), an MKV (4K HDR10 HEVC Main 10, E-AC-3 Atmos) and an MKV (1080p HEVC, E-AC-3,
+SRT subtitles on). Every `Seek` returned 1 and anchored; no downgrade, stuck-seek retry, BufferFull or
+`Playing error`, and playback ran on for up to 197 s after a seek. The 3.9.3 `seekSpi` chain itself was
+not decompiled. Other 3.x releases (3.4 included) report release 3 and so use `Seek` too, untested; the
+refusal and stuck-seek nets apply there.
 
 ## 5. Things a webOS 5 port must NOT forget
 
@@ -315,11 +379,14 @@ that matters when judging how much a webOS 4 assumption is worth elsewhere.
   point: `ty == 0` (FRAMEREADY) and, since 2026-09-03, `ty == 18` (the pipeline's error event —
   `num=601 Resource Allocation Error` is the shape measured on 10.3.1), which before any picture
   is published as a refused Load. This bullet said "one numeric test" until then; the 18 arm was
-  added with the shift in view, not in ignorance of it. **The first numeric handling ABOVE 0x1c
+  added with the shift in view, not in ignorance of it. Since 2026-10-20 a third sits exactly AT the shift point and is
+  therefore the same on both: `ty == 28` (0x1c, `ENDOFSTREAM` itself), which after a picture marks
+  the stream played out (`Shared::pipeline_eos`). **The first numeric handling ABOVE 0x1c
   landed the same day and does account for it:** the two libpf frame counters (46 dropped / 47
   displayed on webOS 4, hence 48/49 on 5+) go through `player::sink_counter_kind(ty, major)`
   before being logged as `sink: displayed=` / `sink: dropped=`, and the harness reads that line
-  rather than a raw type. Any further numeric handling above 0x1c must do the same.
+  rather than a raw type. Any further numeric handling above 0x1c must do the same. A played session
+  that never receives the displayed counter says so in one event-log line (§5a, row 7).
 - **`StarfishMediaAPIs::setHdrInfo(const char*)` exists from 5.3.1 on** and is absent on 4.10.0
   (which confirms this repo's earlier finding that it could not be used). On webOS 5 it replaces
   the webOS-4 trick of injecting `hdrType` into the ACB `setMediaVideoData` payload. The JSON key
@@ -327,9 +394,14 @@ that matters when judging how much a webOS 4 assumption is worth elsewhere.
 - **The exported window has a SUBTITLE type** (value 1) that webOS 4's ACB had no equivalent for.
   Whether it opens a route to the TV's hardware subtitle engine in buffer-feed mode — currently
   documented here as URI-mode only — is unexplored.
-- **Codec capability is still asserted, not probed.** `profile_extra()` tells PMS "HEVC + 4K +
-  10-bit" unconditionally because that is what the author's panel does. On a lower-end webOS 5 set
-  that is wrong, and so is the transcode fallback, which also targets HEVC.
+- **Codec capability is probed, with two claims still asserted.** The profile PMS reads is
+  derived from the set's own codec table: `devcaps::Caps` parses
+  `/etc/umediaserver/device_codec_capability_config.json`, and `transcoder::profile_for` takes the
+  HEVC / VP9 / AV1 lanes, the width/height bounds and the audio list from it, so a set whose table
+  lists no HEVC decoder is not offered HEVC: the direct-play list drops it and the transcode
+  target's encode head is H.264 (`Caps::encode_vcodec`). Still asserted: `bitDepth=10` (the table
+  has no bit-depth axis, so it can neither confirm nor deny it), and the assumed-caps fallback
+  (`Caps::assumed`, the author's panel) when the table is unreadable or unparseable.
 - **Resolution: do NOT use `SDL_webOSGetPanelResolution`.** It exists on both eras, which makes it
   an inviting answer and the wrong one — it reports the **panel**, not your drawable. Measured on
   the dev TV (a 4K set): `window=1920x1080 drawable=1920x1080 panel=3840x2160`. Sizing the UI from
@@ -343,6 +415,34 @@ that matters when judging how much a webOS 4 assumption is worth elsewhere.
   **Rendering at panel resolution would be the wrong trade even where offered.** 60 fps at 1080p on
   this Mali part took real optimisation work; 3840×2160 is four times the pixels through the same
   shaders, while the compositor's upscale is free and in hardware.
+
+## 5a. Private firmware dependencies, one table
+
+Written 2026-10-26 from the code at the cited `file:line` (issue #1076, part of #918). It states what the code
+does and nothing else: **"none" in the self-check column means the code has no check**, not that one is planned.
+A row's era is the firmware family the code was written against, with the evidence the code or this document
+gives for it; it is not a claim that the dependency was observed on every release. Line numbers drift: search
+the symbol, not the number.
+
+`tools/fwcompat.py` is the only tool that checks a row against other firmwares, and it stays a presence check:
+it grades whether a symbol is exported (`tools/fwcompat.py`, module docstring), and none of these dependencies is
+a question of presence alone, so a green matrix proves none of them.
+
+| # | Dependency | Era it assumes | Symbol or key | Self-check | Fallback |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **Video-plane binding** | ACB on webOS 2.2.3 to 4.10.0, the SDL exported window on 5.3.1+ (the header comment of `src/video_plane.c`) | `dlopen("libAcbAPI.so.1")` and seven required `AcbAPI_*` entry points (`vp_mode` in `src/video_plane.c`); `SDL_webOSCreateExportedWindow` and `SDL_webOSSetExportedWindow` by `dlsym(RTLD_DEFAULT)` (`vp_mode`) | `vp_mode` resolves once and logs `vplane: ACB (webOS 4.x)`, `vplane: SDL exported window (webOS 5+)` or `vplane: NONE` (`vp_mode`); every required pointer must resolve | A library that opens with a missing entry point logs it and falls through to the SDL probe (`vp_mode`); neither resolving gives `VP_NONE`, logged as "video cannot be shown" (the end of `vp_mode`) and no plane is bound |
+| 2 | **Callback context overload and the `callbackFunctionHook` interposer** | Device-proven on webOS 4.10.2; the inventories only show the symbols exist (the comment above `SMP_LoadWithContextFn` in `src/starfish.c`) | `_ZN17StarfishMediaAPIs4LoadEPKcPFvixS1_PvES2_`, `_ZN17StarfishMediaAPIs20callbackFunctionHookEixPKc` (`SMP_LOAD_WITH_CONTEXT_SYMBOL` and `SMP_CALLBACK_HOOK_SYMBOL` in `src/starfish.c`) | Both resolve with `dlsym` and must be owned by a library whose path contains `libplayerAPIs.so`; the result is logged as `native callback gate: hook=...` or `BLOCKED` (`sf_resolve_callback_hook_once` in `src/starfish.c`) | None. `BLOCKED` latches `g_lifecycle_blocked` and `sf_load` returns 0 (the refusal at the top of `sf_load` in `src/starfish.c`), so every Load is refused: playback does not start on that release |
+| 3 | **Two `Feed` ABIs** | `B5cxx11` name from 4.4.2 on, the pre-C++11 copy-on-write string on 3.9.2 and earlier (the comment above `SMP_FeedFn` in `src/starfish.c`) | `_ZN17StarfishMediaAPIs4FeedB5cxx11EPKc`, else `_ZN17StarfishMediaAPIs4FeedEPKc` with `_ZNSsD1Ev` to release the reply (`sf_resolve_feed_once` in `src/starfish.c`) | The first name that resolves wins and is logged as `feed abi: cxx11\|cow\|NONE fn=... dtor=...` (`sf_resolve_feed_once`); a COW library whose `_ZNSsD1Ev` is missing leaks every reply and the log shows `dtor=(nil)` | Neither name resolving makes `sf_feed` return `e` for every unit (`sf_feed`): nothing is ever accepted. Which ABI resolved is read by Rust through `feed_abi_is_cow` (`StarfishSink::feed_abi_is_cow` in `rust-modules/os/src/webos/video_sink.rs`, over `sf_feed_abi_is_cow` in `src/starfish.c`) and feeds row 4 |
+| 4 | **Decompiled struct offsets** | Read off the webOS 4.5 `libplayerAPIs` and `libpf`; nothing confirms them on another build (`docs/webos5-port.md` §4 item 3) | `StarfishMediaAPIs` object `+0x4c` to the player, player `+0x04` to the pipeline (`sf_pipeline` in `src/starfish.c`); `MEDIA_CUSTOM_CONTENT_INFO` size `0x138`, `ptsToDecode` at `+0x28` (`CI_SIZE` and `CI_PTS_OFF` in `src/starfish.c`, used by `sf_set_content_info`) | `inplace_layout_known(major, feed_abi_is_cow)`: true when the Feed ABI is not COW and the major is 0 or at least 4 (`rust-modules/play-feed/src/seek.rs`, used by `select_seek_mode_for_load` at every Load). `sf_pipeline` only checks the two pointers for NULL. None for the offsets themselves: a wrong layout that still yields non-NULL pointers is not detected | A layout-unknown library never selects `Segment` (row 5); a NULL pipeline pointer makes `sf_send_segment` return 0, which downgrades the session to `Reload` (`feed_stream` in `rust-modules/play-feed/src/native_executor.rs`) |
+| 5 | **Segment seek: `setTimeToDecode`, `loadSpi_getInfo` + `setContentInfo`, `sendSegmentEvent`** | webOS 4.x on the ACB plane: selected when the layout is known and the window is not `VP_EXPORTED` (`select_seek_mode` in `rust-modules/play-feed/src/seek.rs`) | `_ZN17StarfishMediaAPIs15setTimeToDecodeEPKc`, `mediapipeline::CustomPipeline::{loadSpi_getInfo, setContentInfo, sendSegmentEvent}`, all strong `__asm__` references (the `SMP_setTimeToDecode` and `CP_*` externs in `src/starfish.c`) | `setTimeToDecode` returning 0 is expected on 4.5 and routes to the content-info call (`set_time_to_decode` then `set_content_info` in `feed_stream`). `sendSegmentEvent` returns void, so its effect is not checked; `sf_send_segment` reports only whether a pipeline pointer existed (`sf_send_segment` in `src/starfish.c`). A seek that never anchors is caught by the reopen watchdog (`SEEK_STUCK_MS` in `rust-modules/media/src/player/pump.rs`). After Play, the Segment seek stays pending until the clock has ticked and the reported position is on the accepted video timeline, and, on a session that has received any displayed-frame callback, a zero count included (`Shared::sink_counter_seen`), until a fresh positive count has arrived since Play (`stuck_seek_due` in `rust-modules/play-feed/src/feed_pump.rs`). A session with no such callback lands on the clock and the runway alone: a set that cannot send the counter would otherwise reload every in-place seek (#1436) | `sendSegment=0` sets the session's mode to `Reload` (`feed_stream` in `rust-modules/play-feed/src/native_executor.rs`); a stuck seek retries the reopen up to twice, then calls `reload_at` (`retry_stuck_seek` in `rust-modules/play-feed/src/feed_pump.rs` and the `StuckSeekAction::Reload` arm beside `SEEK_STUCK_MS` in `pump.rs`). A primed Segment seek that still cannot present after `SEGMENT_PRESENTATION_MS` (4 s) falls back directly to a fresh Load at the seek target, and the one `seek: Segment presentation deadline` event-log line names which of the clock, the runway and the fresh count was missing. `/tmp/plxnative-seekmode` overrides the choice on a debug build (`dev_seek_mode` in `seek.rs`) |
+| 6 | **Public `StarfishMediaAPIs::Seek`** | Always on `VP_EXPORTED` (webOS 5+, decompiled on 4.5, never run on 5+ per §4); on the ACB plane only for a known release 3, device-tested on 3.9.3 (`old_abi_seek_tested` in `seek.rs`, §4 "On webOS 3") | `_ZN17StarfishMediaAPIs4SeekEPKc` (`SMP_Seek` and `sf_seek_ms` in `src/starfish.c`) | A return of 0 is read as a refusal (`feed_stream`); the stuck watchdog above also covers it. None for a `Seek` that is accepted and then anchors wrong (the `select_seek_mode` doc in `seek.rs`) | A refused `Seek` sets the session to `Reload` and latches `native_seek_refused` so the rest of that playback reloads per seek; a fresh play clears it (`FeedCommand::BeginPlayback` in `rust-modules/play-feed/src/control.rs`, `feed_stream`) |
+| 7 | **Era-chosen callback numbers: the sink frame counters** | 46 dropped / 47 displayed below webOS 5 and for an unreadable major, 48 / 49 on 5+; decompiled from libpf on 4.10, the 5+ numbers follow Kodi's `type += 2` rule and are unmeasured (`sink_counter_kind`) | Raw callback types 46-49 through `sink_counter_kind(ty, major)` (`rust-modules/play-feed/src/sf_event.rs`); the Load payload keys `streamQualityInfo` and `streamQualityInfoNonFlushable`, identical for every era (`PAYLOAD_V`, `PAYLOAD_AV` and `PAYLOAD_H265` in `rust-modules/play-feed/src/lib.rs`) | The displayed counter has one: `era_callbacks::Watch` (`rust-modules/play-feed/src/era_callbacks.rs`, stepped by `note_missing_era_callback` in `rust-modules/play-feed/src/feed_pump.rs`, which `pump.rs` reaches through `PlayerAdapter::note_missing_era_callback`) writes `era callbacks: no displayed-frame counter (type=N for firmware major M) in 25 position ticks; K callbacks numbered 46-49 that this numbering does not name` once per Engine when 25 position ticks passed and no displayed-frame callback arrived. The dropped counter has none: libpf sends it only when non-zero. The other numeric types the code reads, 0, 18, 23 and 28, sit below or at the shift point and are era-independent (`sf_on_event_inner` in `rust-modules/play-feed/src/sf_event.rs`) | A session that has received any displayed-frame callback needs a fresh positive count to land a Segment seek, and a primed seek without one falls back to a reload (row 5). A session that has received none lands on the clock and the runway alone, so a set that cannot send the counter (the OLED C8 on webOS 4.4.3, #1436) still seeks in place; a seek made before a counting set's first callback of the session is in that second group. The harness also reads the `sink: displayed=` lines (`tests/run.py`, `presented_fps`) |
+| 8 | **SEI and VUI keys in the ACB envelope** | webOS 4 family only: the envelope reaches the TV through ACB. The 5+ names `sei` and `vui` (§5, `setHdrInfo`) are not written by any code; `setHdrInfo` appears only in a comment (`rust-modules/play-feed/src/vp9_hdr.rs:20`) | `hdrType`, `mediaVui` and `mediaSei` rewritten into the captured `sourceInfo` envelope (`rewrite_source_info` in `play-feed/src/vp9_hdr.rs`), sent by `AcbAPI_setMediaVideoData` (`acb_send_video_data` in `src/video_plane.c`; call site in `rust-modules/play-feed/src/feed_pump.rs`, through `plane_send_video_data`) | The rewrite happens only when the container says PQ (`trc == 16`) and the pipeline's own `hdrType` is `none` or absent (`rewrite_source_info`). The send is checked only for the client-side JSON rejection, `rv == -1` (the `setMediaVideoData rv=` site in `feed_pump.rs`). None for whether the panel entered HDR | Anything else leaves the envelope as the pipeline made it; `/tmp/plxnative-novp9hdr` forces that (`feed_pump.rs`). Without ACB the send is a no-op returning 0 (`acb_send_video_data` in `src/video_plane.c`), so on 5+ nothing is sent |
+| 9 | **`AcbAPI_setMediaAudioData`** (the Atmos descriptor) | Exported on 3.9.2, 4.4.2 and 4.10.0, absent on 2.2.3 and 3.4.0 (the `setMediaAudioData` comment in `src/video_plane.c`) | `AcbAPI_setMediaAudioData` by `dlsym` (`vp_mode` in `src/video_plane.c`) | A NULL pointer is the answer, deliberately left out of the all-present gate (the same comment and `acb_send_atmos` in `src/video_plane.c`); the return value is logged (`acb_send_atmos` in `src/video_plane.c`; the `atmos: acb setMediaAudioData rv=` line in `feed_pump.rs`) | `acb_send_atmos` returns 0 and sends nothing; video is unaffected |
+| 10 | **Every other mangled `StarfishMediaAPIs` and `CustomPipeline` name** (`Play`, `Pause`, `flush`, `Unload`, `pushEOS`, `setVolume`, `isLoadCompleted`, `notifyForeground`, the ctor and dtor, and the rows 5 and 6 names) | §3.3 records 15 mangled names present through 11.2.0 in the inventories; this table does not re-derive which 15. Behaviour is whatever §4 records | Strong `__asm__` references (the `SMP_*` and `CP_*` externs in `src/starfish.c`) | Only `tools/fwcompat.py`, offline, for presence. In the binary: none. A strong reference is a lazily bound PLT slot, and the comment records that one killed the process at the first `Feed` on 3.4.0 (the comment above `SMP_FeedFn` in `src/starfish.c`) | None |
+
+Where a row says "None" for the fallback, the failure is the viewer's: the session ends in the read-out or on a
+black plane, and the event-log lines named in the self-check column are what a report carries.
 
 ## 6. Emulators — no, and the reason is not a gap in the search
 

@@ -4,13 +4,22 @@
 #
 #   tv-session.sh up [opts]      wake -> deploy-if-stale -> clear triggers -> arm -> launch -> verify
 #   tv-session.sh status         re-assert an existing session without disturbing it
-#   tv-session.sh key <token>…   send key tokens (down, ok, back, play, pause, stop, …)
+#   tv-session.sh key <token>…   send key tokens (down, ok, back, play, pause, stop, …); never `focus:`,
+#                                `press:` or `state:` (the three verbs below are their one door)
 #   tv-session.sh click <x> <y>  click at authored 1920x1080 coords
+#   tv-session.sh focus <id>     move focus to the element an accessibility id names (`nav.watchlist`)
+#   tv-session.sh press <id> [--rk <ratingKey>]
+#                                focus that element and press OK; an element that acts on a title it names
+#                                (the list is `SUBJECT_BEARING` in tools/a11y.py) needs --rk: see "BY ID" below
+#   tv-session.sh state [--out FILE]
+#                                what is on screen, by id: the focused id, the groups, every element
 #   tv-session.sh shot [out.png] grab the panel (video plane included) via the capture service
 #   tv-session.sh log [pattern]  fetch the on-device event log, optionally grepped
 #   tv-session.sh screen off|on  blank the PANEL while the app keeps running (see below)
 #   tv-session.sh sound off|on|status
 #                                mute/unmute the TELEVISION, independent of the panel (see below)
+#   tv-session.sh background [APPID]|foreground|fg
+#                                send the app to the background / bring it back (see below)
 #   tv-session.sh wan off [TTL]|on|status
 #                                cut the TELEVISION's route to the internet, LAN intact (see below)
 #   tv-session.sh down           hand the TV back: strip automation, close the app (no relaunch)
@@ -56,6 +65,19 @@
 #   --arm NAME[=VAL]  also arm trigger plxnative-NAME (repeatable), written with the screen's own
 #                     triggers BEFORE the launch, which is the only time a boot trigger is read.
 #                     For a scene's extras, e.g. `--arm menu=1 --arm submenuosc=900 --arm framedrop=25`
+#   --mock-plextv=PORT
+#                     sign the TV in through tests/mock_pms.py's own plex.tv (the mock must be
+#                     serving on THIS host at PORT, started with `--host 0.0.0.0 --advertise-ip
+#                     <this host's LAN IPv4> --authorize-after 2`, so its resources row names a
+#                     LAN address the set can reach). Debug install only. Arms
+#                     `plxnative-plextv=http://127.0.0.1:PORT` and opens the reverse ssh tunnel
+#                     that makes that loopback address real ON THE DEVICE (the trigger accepts only
+#                     loopback, deliberately). Implies --no-token; pair it with `--screen login`:
+#                     the QR sign-in authorizes itself on the 2nd poll and the mock's server arrives
+#                     OWNED, so the owned-only rules (server updates) run unmodified. Refuses
+#                     --guest/--owner, any screen but login, --server, --keep, and a mock whose
+#                     identity is not the synthetic one. The
+#                     tunnel lives in `.tv-plextv.pid`; `down` (and the next `up`) closes it.
 #   --keep            do not clear existing triggers first (rarely what you want)
 #
 # SCREEN OFF is a panel state, not an app state. `luna://com.webos.service.tvpower/power/
@@ -67,13 +89,20 @@
 # taken this way. `power/turnOnScreen` is the reverse; both are on this firmware's api-permissions
 # list, unlike the newer-webOS `power/turnOff` the wake-tv skill records as `Unknown method` here.
 #
-# USE IT FOR the measurement tiers — ABR, transaction cost, anything read out of the event log —
-# where it saves the panel over long runs and costs nothing. DO NOT use it for the fps scenes,
-# `shot`, or the capture stream: `plx_machine::idle` gates presents and the panel is the thing those
-# measure, so a dark screen makes them either meaningless or silently wrong.
-# The one exception is a scene on the PLAYER route: the bound video plane forces presents
-# (`plx_machine::idle`'s VIDEO_PLANE gate), so its frame times are real with the panel off
-# (docs/player-submenus.md, "Device frame-time check").
+# Screen off is only the backlight, and it is fine for every measurement tier — ABR, transaction
+# cost, anything read out of the event log, and the fps scenes too (`tests/run.py --fps --mock`
+# blanks it by default). Nothing in the app reads the panel state, so the app keeps presenting at full rate:
+# `plx_machine::idle` keys on the UI's own changes ("nothing on screen changed, so don't repaint
+# it"), not on the physical panel. Measured on the dev TV 2026-10-24 (Home `grid-pong`, release
+# build): panel off 73 frames/cycle at 59.9 fps with 9 missed refreshes in cycles 2-60; panel on
+# 73 frames/cycle at 59.6-59.9 fps with 8, 13 and 14. It saves the panel over long runs and costs
+# nothing.
+# `shot` (the DISPLAY compositor read) works with the panel off: docs/measurements/
+# tv-session-7-2026-09-10.md ran `screen off` first and got a 1920x1080 DISPLAY capture with real
+# pixel values (opener p95 246.9, row-mate 167.0), and docs/measurements/
+# library-all-types-and-fps-2026-09-26.md checked native captures of the final card rendering with
+# the panel off. NOT on record: the live capture stream (`/tmp/plxnative-capture`, the app's own
+# GLES frames) with the panel off; check the first frame instead of assuming either way.
 #
 # SOUND is the television's own mute, separate from the panel above and from playback: it silences
 # whatever the set would otherwise put out, panel on or off, app running or not.
@@ -96,9 +125,28 @@
 # its own reasons is the only one that knows when unmuting is correct; restoring automatically
 # would fight a human who muted the set on purpose before handing it to a lane.
 #
-# THE TV LOCK: every subcommand that DRIVES the set (up, key, click, shot, down) requires the
-# television's lock and refuses when another lane holds it; `status` and `log` are read-only and
-# only name the holder. Take one for a whole session rather than letting each command take its own
+# BY ID, NOT BY WALK: `focus`, `press` and `state` are the FIFO's accessibility-id tokens (`focus:<id>`,
+# `press:<id>[@<ratingKey>]`, `state:<nonce>`; debug builds only, `devtriggers`). Ids are place-based dot paths
+# (`nav.watchlist`, `home.hero.play`, `detail.hero.play`, `watchlist.grid.card.3`); `state` lists the real ones.
+# Prefer them to `key` walks, which are for tests whose subject is travel. Never press OK on a title whose
+# ratingKey you have not read: `press` refuses, without `--rk`, any id whose element ACTS ON a title it names (it
+# plays, restarts, finishes or retries it, marks it watched or unwatched, bookmarks it, acts on the title a menu was
+# opened for, or opens that title's own page or menu where the title can change under the press: a card, a credit,
+# the Home carousel's Info). Navigation is not the test: only a control whose target the page fixes (Go to Show, Also
+# available, the Play Version opener, More, a panel opener, a seek) is pressed bare. The list of those ids is
+# `SUBJECT_BEARING` in tools/a11y.py, read off the code (`a11y_subject_bearing` below is the same list), and the
+# `--rk` is the ratingKey of the title the press acts on, which `state` prints as the element's subject (on a started
+# show's Mark watched it is the on-deck episode, on a player's Next the queue neighbour, not the page's or the playing
+# item's). The app
+# refuses the press when the element now there carries another subject (`a11y: refused press <id> subject_mismatch
+# ...` in the event log). `key` refuses a
+# `focus:`, `press:` or `state:` word, so there is ONE door per action, and a word with whitespace in it is
+# refused (the app would cut it into two tokens, the second past every check here).
+# A `state` snapshot holds titles and rating keys: it is for you, not for an issue or a recording.
+#
+# THE TV LOCK: every subcommand that DRIVES the set (up, key, click, focus, press, state, shot, down) requires the
+# television's lock and refuses when another lane holds it; `status`, `log` and `fg` are read-only
+# and only name the holder. Take one for a whole session rather than letting each command take its own
 # 10-minute implicit lease — the gap between two of your own commands is exactly where another
 # job lands:  tools/tv-lock.sh acquire --why "…"  …  tools/tv-lock.sh release.
 #
@@ -186,6 +234,9 @@ STREAM_PID_FILE="$REPO/.tv-stream.pid"
 # for is the one failure mode here that is silent AND outward-facing.
 DPAD_PID_FILE="$REPO/.tv-dpad.pid"
 TUNNEL_PID_FILE="$REPO/.tv-tunnel.pid"
+# --mock-plextv's reverse ssh tunnel (device 127.0.0.1:PORT -> this host's mock). Not outward-facing,
+# but it is a long-lived process holding a port on the set, so `down` closes it like the rest.
+PLEXTV_PID_FILE="$REPO/.tv-plextv.pid"
 REMOTE_URL_FILE="$REPO/.tv-remote-url"
 DPAD_PASS_FILE="$REPO/.tv-dpad-pass"
 
@@ -197,7 +248,7 @@ DPAD_PASS_FILE="$REPO/.tv-dpad-pass"
 # `venc: N frm ...`), the TS goes to the dead socket, and the new streamer sees ZERO bytes while
 # every log line says the pipeline is healthy. So this runs BEFORE the relaunch, not after.
 stop_viewers() {
-  for f in "$TUNNEL_PID_FILE" "$DPAD_PID_FILE" "$STREAM_PID_FILE"; do
+  for f in "$PLEXTV_PID_FILE" "$TUNNEL_PID_FILE" "$DPAD_PID_FILE" "$STREAM_PID_FILE"; do
     [ -f "$f" ] && { kill "$(cat "$f")" 2>/dev/null; rm -f "$f"; }
   done
   pkill -f 'stream-screen.py --port' 2>/dev/null
@@ -234,7 +285,7 @@ app_pids() {
 # One television, no OS-level mutex: two jobs on it do not fail cleanly, they produce plausible
 # WRONG data (an fps number measured while somebody else's binary was deployed underneath, a
 # capture of a screen the other job navigated away from). Every subcommand here that DRIVES the
-# set goes through the lock; the two read-only ones only say who is on it. tools/tv-lock.sh is the
+# set goes through the lock; the three read-only ones (log, status, fg) only name the holder. tools/tv-lock.sh is the
 # mechanism and .agents/skills/tv-lock/SKILL.md is the workflow.
 LOCKTOOL="$REPO/tools/tv-lock.sh"
 require_lock() {  # $1 = what this session is for, for the holder read-out
@@ -662,10 +713,36 @@ await_direct_screen() {
   return 1
 }
 
+# `up --mock-plextv=PORT`: prove the host side is tests/mock_pms.py (its synthetic identity, the
+# same two answers tools/mock-guest.py demands) and then open the reverse tunnel that makes
+# 127.0.0.1:PORT on the DEVICE reach it. The host-side check is what refuses a real server on that
+# port; the device-side probe only proves the tunnel carries.
+open_mock_plextv() {
+  local port="$1" ident user
+  ident=$(curl -s -m 5 -H 'Accept: application/json' "http://127.0.0.1:$port/identity" 2>/dev/null)
+  user=$(curl -s -m 5 -H 'Accept: application/json' "http://127.0.0.1:$port/api/v2/user" 2>/dev/null)
+  case "$ident" in *1.41.0.0000-synthetic*) ;; *) bad "nothing synthetic answers on 127.0.0.1:$port — start tests/mock_pms.py first"; return 1 ;; esac
+  case "$user" in *'"demo-user"'*) ;; *) bad "127.0.0.1:$port is not the mock's plex.tv"; return 1 ;; esac
+  [ -f "$PLEXTV_PID_FILE" ] && { kill "$(cat "$PLEXTV_PID_FILE")" 2>/dev/null; rm -f "$PLEXTV_PID_FILE"; }
+  (nohup env PLX_TV_ADDR="$HOST" "$REPO/tools/tv-ssh" ssh -N -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=15 -R "$port:127.0.0.1:$port" tv \
+      > /dev/null 2>&1 </dev/null & echo $! > "$PLEXTV_PID_FILE") ; disown 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6 7 8; do
+    sleep 1
+    if tv "curl -s -m 3 http://127.0.0.1:$port/identity" 2>/dev/null | grep -q 1.41.0.0000-synthetic; then
+      ok "mock plex.tv reachable on the device at 127.0.0.1:$port (reverse tunnel, pid file .tv-plextv.pid)"
+      return 0
+    fi
+  done
+  bad "the reverse tunnel did not come up (the device cannot reach the mock on 127.0.0.1:$port)"
+  return 1
+}
+
 # ------------------------------------------------------------ commands -------
 cmd_up() {
   local screen=home guest=0 mock=0 owner=0 dry_run=0 stream="" no_token=0 keep=0 remote="" server_slot="" server_set=0
-  local direct_kind="" direct_rk="" direct_marker="" extra_arm=()
+  local direct_kind="" direct_rk="" direct_marker="" extra_arm=() mock_plextv=""
   local identity_desc="" push_guest=0 push_owner=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -684,6 +761,7 @@ cmd_up() {
       --remote=*) remote="${1#*=}"; shift ;;
       --no-token) no_token=1; shift ;;
       --keep) keep=1; shift ;;
+      --mock-plextv=*) mock_plextv="${1#*=}"; shift ;;
       --arm) [ $# -ge 2 ] || { bad "--arm needs NAME[=VALUE]"; exit 2; }
              extra_arm+=("$2"); shift 2 ;;
       --arm=*) extra_arm+=("${1#*=}"); shift ;;
@@ -702,6 +780,22 @@ cmd_up() {
   if [ "$guest" = 1 ] && [ "$no_token" = 1 ]; then
     echo "--guest and --no-token are mutually exclusive: --no-token boots the stored session (or the who's-watching picker), which is a THIRD identity, distinct from both --guest and --owner" >&2
     exit 2
+  fi
+  if [ -n "$mock_plextv" ]; then
+    case "$mock_plextv" in ''|*[!0-9]*) bad "--mock-plextv=PORT needs a port number"; exit 2 ;; esac
+    if [ "$guest" = 1 ] || [ "$owner" = 1 ]; then
+      bad "--mock-plextv signs in through the mock's plex.tv; it cannot be combined with --guest or --owner"; exit 2
+    fi
+    if [ "$FLAVOR" != debug ]; then bad "--mock-plextv requires the debug install"; exit 2; fi
+    # The mock identity is pinned only by the QR sign-in on a boot with no stored session. Any
+    # other screen, --server (stored roster) or --keep (triggers left by an earlier boot) would
+    # reach the owner's stored session beside a mock plex.tv, so each is refused, not dropped.
+    if [ "$screen" != login ]; then bad "--mock-plextv requires --screen login (the mock sign-in is the only boot it pins)"; exit 2; fi
+    if [ "$server_set" = 1 ]; then bad "--mock-plextv cannot be combined with --server (that boots the stored roster)"; exit 2; fi
+    if [ "$keep" = 1 ]; then bad "--mock-plextv cannot be combined with --keep (leftover triggers could select another identity)"; exit 2; fi
+    no_token=1
+    extra_arm+=("plextv=http://127.0.0.1:$mock_plextv")
+    extra_arm+=("discover=http://127.0.0.1:$mock_plextv")
   fi
   configure_direct_screen || exit 2
   # --remote is --stream plus a front door: there is nothing to publish without a stream, so it
@@ -846,6 +940,8 @@ cmd_up() {
     push_token || info "continuing without a token — expect the QR sign-in screen"
   fi
 
+  if [ -n "$mock_plextv" ]; then open_mock_plextv "$mock_plextv" || exit 1; fi
+
   PREV_PIDS=$(app_pids)
   relaunch
   assert_running || { info "check: tools/crash-report.sh --flavor $FLAVOR"; exit 1; }
@@ -932,6 +1028,153 @@ cmd_up() {
   echo "== session up"
 }
 
+# `fifo_write` / `fifo_send`: any ONE-WORD token reaches the remote shell as ONE quoted word; a token with
+# whitespace in it (any the app cuts a line at: see `fifo_token_ok`) is refused, and nothing is sent for a
+# refusal. Round trip through `sh -c`, the way the set's shell reads it. Then the doors in front of it: `key`
+# refuses the three by-id tokens and judges every word before sending any, while `click`, `focus` and `press`
+# still send through `send_tokens` (no television: `tv` and `require_lock` are stubbed in a subshell).
+selftest_fifo() {
+  local REMOTE_FIFO probe word stmt got sent_to_tv=0 sent_arg="" _real_tv marker
+  probe=$(mktemp "${TMPDIR:-/tmp}/plx-fifo-selftest.XXXXXX") || { bad "no scratch file for the FIFO quoting check"; return 1; }
+  REMOTE_FIFO=$probe
+  # one-word tokens, injection attempts spelled without a space (a space is refused below), and non-ASCII text
+  # that is NOT whitespace: Cyrillic, an accented letter, a curly apostrophe, an em dash and an ellipsis
+  # (U+2019, U+2014, U+2026 share their lead bytes with the Unicode spaces `fifo_token_ok` refuses)
+  for word in "txt:it's" "txt:';echo\${IFS}pwned>&2;'" "'" "''" 'a"b' 'a$HOME`id`b;&|()<>' 'x\y\n' "txt:a+b" "txt:*" \
+              "back" "ck:10,20" "txt:привет" "txt:caf$(printf '\303\251')" "txt:it’s—a…b"; do
+    stmt=$(fifo_write "$word") || { bad "fifo_write refused a one-word token: $word"; rm -f "$probe"; return 1; }
+    : > "$probe"
+    sh -c "$stmt" 2>/dev/null
+    got=$(cat "$probe")
+    [ "$got" = "$word" ] || { bad "the FIFO got '$got' for the word '$word'"; rm -f "$probe"; return 1; }
+  done
+  rm -f "$probe"
+  # A token is ONE word: the app cuts a line at ANY whitespace, so each of these would be two tokens, the second
+  # (a title's press with no subject) past every check in this file. The multi-byte ones are U+0085, U+00A0,
+  # U+1680, U+2000, U+200A, U+2028, U+2029, U+202F, U+205F and U+3000.
+  local refused=(
+    $'back\nok' "back ok" $'back\tok' $'back\rok' $'back\vok' $'back\fok' " back" "back " "txt:a b"
+    "back press:home.hero.play" "ok press:home.shelf.2.card.5" $'back\n press:x'
+    $'back\xc2\x85press:x' $'back\xc2\xa0press:x' $'back\xe1\x9a\x80press:x' $'back\xe2\x80\x80press:x'
+    $'back\xe2\x80\x8apress:x' $'back\xe2\x80\xa8press:x' $'back\xe2\x80\xa9press:x' $'back\xe2\x80\xafpress:x'
+    $'back\xe2\x81\x9fpress:x' $'back\xe3\x80\x80press:x'
+  )
+  for word in "${refused[@]}"; do
+    if fifo_write "$word" >/dev/null 2>&1; then bad "fifo_write accepted a token with whitespace in it: $(printf '%s' "$word" | od -An -c | tr -s ' ' | head -c 60)"; return 1; fi
+  done
+  # fifo_send: a refusal sends nothing, a word is sent as one ssh command carrying the escaped quote.
+  _real_tv=$(declare -f tv)
+  tv() { sent_to_tv=1; sent_arg=$1; }
+  for word in "${refused[@]}"; do
+    fifo_send "$word" >/dev/null 2>&1; got=$?
+    [ "$got" = 2 ] && [ "$sent_to_tv" = 0 ] || { eval "$_real_tv"; bad "a token with whitespace was sent (status $got)"; return 1; }
+  done
+  fifo_send "txt:it's" >/dev/null 2>&1; got=$?
+  eval "$_real_tv"
+  [ "$got" = 0 ] && [ "$sent_to_tv" = 1 ] || { bad "an ordinary word was not sent (status $got)"; return 1; }
+  case "$sent_arg" in
+    *"'txt:it'\\''s'"*) ;;
+    *) bad "the apostrophe was not escaped for the remote shell: $sent_arg"; return 1 ;;
+  esac
+  ok "tv-session FIFO quoting (any one-word token is sent as one remote word; a token with whitespace is not sent)"
+
+  # ---- `key` is not a second door for the by-id tokens. `key_word_ok` is the predicate (returns 2, so it can be
+  # tested here: `cmd_key` exits).
+  for word in down ok back "ck:10,20" "txt:a+b" "txt:press:x" "pat:x" "shot" "hang:1000" "focused" "pressed:x" "stated"; do
+    key_word_ok "$word" >/dev/null 2>&1 || { bad "key refused the key token: $word"; return 1; }
+  done
+  for word in "focus:nav.watchlist" "press:home.continue.card.0" "press:home.hero.play" "press:home.shelf.2.card.5@1234" \
+              "press:nav.watchlist" "state:abc" "focus:" "press:" "state:"; do
+    if key_word_ok "$word" >/dev/null 2>&1; then bad "key accepted the by-id token: $word"; return 1; fi
+  done
+  got=$(key_word_ok "press:home.continue.card.0" 2>&1 || true)   # (not a pipe into grep: the refusal's status 2 fails a pipefail pipeline)
+  case "$got" in
+    *"use the press verb"*) ;;
+    *) bad "key's refusal does not point to the press verb: $got"; return 1 ;;
+  esac
+  # ... and every door still sends what it should, and a refusal sends NOTHING (not even the words in front of
+  # the bad one).
+  selftest_key_doors || return 1
+  ok "tv-session key door (focus:/press:/state: only through their verbs; a refusal sends nothing)"
+}
+
+# The usage text ends on the header's last option row (`--keep`) and holds every option whole: it began as a line
+# count that stopped inside `--remote` once the list outgrew it.
+selftest_usage() {
+  local out last
+  out=$(usage) || { bad "usage: the header's end marker (# SCREEN OFF is a panel state) is gone"; return 1; }
+  case "$(printf '%s\n' "$out" | sed -n 1p)" in
+    "tv-session.sh "*) ;;
+    *) bad "usage does not start at the header's title"; return 1 ;;
+  esac
+  last=$(printf '%s\n' "$out" | tail -n 1)
+  case "$last" in
+    "  --keep "*) ;;
+    *) bad "usage ends at '$last', not at the header's last option row (--keep; if an option was added after it, move this check)"; return 1 ;;
+  esac
+  printf '%s\n' "$out" | grep -q 'never a router port forward' || { bad "usage stops inside the --remote entry"; return 1; }
+  ok "tv-session usage text (the whole command and option list, ending on --keep)"
+}
+
+# Run one door (`cmd_key`, `cmd_press`, ...) in a subshell, the set and its lock stubbed out: each `tv` call is one
+# line in `$1`. Prints "<exit status> <tokens sent>". `exit` inside a door only ends the subshell.
+selftest_door() {  # $1 = scratch file, then the door and its words
+  local marker=$1 rc
+  shift
+  : > "$marker"
+  ( tv() { printf '%s\n' "$1" >> "$marker"; }; require_lock() { :; }; info() { :; }; "$@" ) >/dev/null 2>&1; rc=$?
+  printf '%s %s' "$rc" "$(grep -c . "$marker")"
+}
+
+selftest_key_doors() {
+  local marker rc=0
+  marker=$(mktemp "${TMPDIR:-/tmp}/plx-key-selftest.XXXXXX") || { bad "no scratch file for the key check"; return 1; }
+  selftest_key_doors_in "$marker" || rc=1
+  rm -f "$marker"
+  return "$rc"
+}
+
+selftest_key_doors_in() {  # $1 = scratch file
+  local m=$1
+  # a refusal: status 2 and nothing sent
+  local -a refused=(
+    "cmd_key press:home.continue.card.0" "cmd_key focus:nav.watchlist" "cmd_key state:abc"
+    "cmd_key back press:home.continue.card.0" "cmd_key press:home.hero.play back"
+    "cmd_press home.hero.play" "cmd_press home.hero.info" "cmd_press home.hero.watchlist"
+    "cmd_press itemmenu.play" "cmd_press itemmenu.watchlist_remove" "cmd_press itemmenu.version.0"
+    "cmd_press detail.hero.play" "cmd_press detail.hero.restart" "cmd_press detail.hero.trailer"
+    "cmd_press detail.hero.mark_watched" "cmd_press detail.hero.mark_unwatched" "cmd_press detail.hero.watchlist"
+    "cmd_press home.shelf.2.card.5" "cmd_press home.hero.play --rk" "cmd_press home.hero.play --rk 1+2"
+    "cmd_press versions.row.1" "cmd_press player.control.next" "cmd_press player.control.previous"
+    "cmd_press player.control.next_episode" "cmd_press player.control.from_beginning" "cmd_press player.control.skip"
+    "cmd_press player.control.5" "cmd_press player.section.0" "cmd_press player.failure.try_again"
+    "cmd_press player.failure.play_automatically" "cmd_press more.fold.next" "cmd_press more.fold.from_beginning"
+    "cmd_press more.rung.auto" "cmd_press menu.audio.0" "cmd_press menu.sub.1" "cmd_press menu.off"
+    "cmd_press menu.forced" "cmd_press menu.hit.2"
+  )
+  local door
+  for door in "${refused[@]}"; do
+    # shellcheck disable=SC2086  # the words are spelled in the entry, none holds a space
+    [ "$(selftest_door "$m" $door)" = "2 0" ] || { bad "$door was not refused with nothing sent ($(selftest_door "$m" $door))"; return 1; }
+  done
+  # one WORD with whitespace in it (a space, an NBSP) is refused before the `back` ahead of it is sent
+  [ "$(selftest_door "$m" cmd_key back "ok press:home.continue.card.0")" = "2 0" ] || { bad "key sent a word with a space in it"; return 1; }
+  [ "$(selftest_door "$m" cmd_key back $'ok\xc2\xa0press:x')" = "2 0" ] || { bad "key sent a word with an NBSP in it"; return 1; }
+  [ "$(selftest_door "$m" cmd_key ok "back
+press:x")" = "2 0" ] || { bad "key sent a word with a newline in it"; return 1; }
+  # the doors that stay open: key tokens through `key`/`click`, and the ids through their verbs
+  [ "$(selftest_door "$m" cmd_key back ok)" = "0 2" ] || { bad "key did not send two key tokens"; return 1; }
+  [ "$(selftest_door "$m" cmd_click 10 20)" = "0 1" ] && grep -q "'ck:10,20'" "$m" || { bad "click did not send ck:10,20"; return 1; }
+  [ "$(selftest_door "$m" cmd_focus nav.watchlist)" = "0 1" ] && grep -q "'focus:nav.watchlist'" "$m" || { bad "focus did not send its token"; return 1; }
+  [ "$(selftest_door "$m" cmd_press home.hero.play --rk 12)" = "0 1" ] && grep -q "'press:home.hero.play@12'" "$m" || { bad "press --rk did not send press:<id>@<rk>"; return 1; }
+  [ "$(selftest_door "$m" cmd_press itemmenu.watchlist_remove --rk 7)" = "0 1" ] && grep -q "'press:itemmenu.watchlist_remove@7'" "$m" || { bad "an item-menu press naming its title was not sent"; return 1; }
+  [ "$(selftest_door "$m" cmd_press home.hero.action)" = "0 1" ] && grep -q "'press:home.hero.action'" "$m" || { bad "a bare press of the failure read-out's retry (no title) was not sent"; return 1; }
+  [ "$(selftest_door "$m" cmd_press detail.hero.mark_watched --rk 200622)" = "0 1" ] && grep -q "'press:detail.hero.mark_watched@200622'" "$m" || { bad "a Detail hero press naming its title was not sent"; return 1; }
+  # a Detail hero control whose target the page fixes (it only navigates or opens a menu) names no title, so a bare press of it goes out
+  [ "$(selftest_door "$m" cmd_press detail.hero.go_to_show)" = "0 1" ] && grep -q "'press:detail.hero.go_to_show'" "$m" || { bad "a bare press of the Detail hero's Go to Show (it only navigates) was not sent"; return 1; }
+  return 0
+}
+
 # Host-only regression for the command contract above. It deliberately performs no TV I/O and is
 # run by `make check`; keeping it in this script proves the same Bash-3 code cmd_up calls rather
 # than a Python reimplementation of the option semantics.
@@ -979,6 +1222,70 @@ cmd_selftest() {
     bad "direct waiter ignored process death"; return 1;
   }
   ok "tv-session direct-screen contract"
+
+  # ---- by accessibility id: the grammar, the card guard and the nonce match. Pure: nothing is sent.
+  local aid
+  for aid in nav.watchlist home.hero.play home.shelf.2.card.5 watchlist.grid.card.0 under-posters.row.3 \
+             library.rail.12 itemmenu.version.0 detail.hero.mark_watched; do
+    a11y_id_ok "$aid" || { bad "a11y_id_ok refused the well-formed id $aid"; return 1; }
+  done
+  for aid in "" home nav. .nav nav..x Nav.watchlist nav.Watchlist nav.watch-list nav.05 nav.-1 "nav.a b" "nav.a;b" \
+             "nav.x'y" 'nav.$HOME' 'nav.a[0]' nav.0x1 under-posters.row-3 "nav.watchlist
+nav.home"; do
+    ! a11y_id_ok "$aid" || { bad "a11y_id_ok accepted a malformed id: $aid"; return 1; }
+  done
+  [ "$(a11y_token focus nav.watchlist)" = "focus:nav.watchlist" ] || { bad "focus token"; return 1; }
+  [ "$(a11y_token press detail.hero.go_to_show)" = "press:detail.hero.go_to_show" ] || { bad "press token"; return 1; }
+  [ "$(a11y_token press home.shelf.2.card.5 1234)" = "press:home.shelf.2.card.5@1234" ] || { bad "press-with-subject token"; return 1; }
+  [ "$(a11y_token press catalog.primary 5d7768ab)" = "press:catalog.primary@5d7768ab" ] || { bad "press subject on the catalog pill"; return 1; }
+  # Every id whose press acts on a title it names is pressed by name (`SUBJECT_BEARING`): a card, a Detail episode
+  # (OK on a still PLAYS it), a season tab, a Filmography credit, the catalog pill, a Home hero Play, Info or
+  # Watchlist button (the carousel advances by itself, so a bare press acts on whichever title is showing), a Detail
+  # hero control that plays or writes (Play, Restart, Trailer, Mark watched, Mark unwatched, Watchlist: each acts on
+  # the ratingKey its subject names), an item-menu row (it acts on the title the hold opened), a Play Version row, a
+  # player control that starts or restarts a title (Previous, Next, Next Episode, From beginning, Skip, an id spelled
+  # by position, an Info card button, a failure retry, a More fold). Without --rk each is refused; with it, each is
+  # sent as press:<id>@<rk>.
+  for aid in home.shelf.2.card.5 home.continue.card.0 watchlist.grid.card.3 detail.episodes.still.0 \
+             detail.episodes.text.0 detail.episodes.still.3 detail.season.1 filmography.row.2 catalog.primary \
+             home.hero.play home.hero.info home.hero.watchlist detail.hero.play detail.hero.restart detail.hero.trailer \
+             detail.hero.mark_watched detail.hero.mark_unwatched detail.hero.watchlist \
+             itemmenu.play itemmenu.watchlist_remove itemmenu.version.0 versions.row.0 versions.row.2 \
+             player.control.next player.control.previous player.control.next_episode player.control.from_beginning \
+             player.control.skip player.control.5 player.section.0 player.section.1 player.failure.try_again \
+             player.failure.play_automatically more.fold.previous more.fold.next more.fold.from_beginning more.rung.auto \
+             more.rung.p720 menu.audio.0 menu.sub.1 menu.off menu.forced menu.hit.2; do
+    if a11y_token press "$aid" >/dev/null 2>&1; then bad "a press of $aid without --rk was accepted"; return 1; fi
+    [ "$(a11y_token press "$aid" 4321)" = "press:$aid@4321" ] || { bad "press of $aid with --rk was not sent as press:<id>@<rk>"; return 1; }
+    [ "$(a11y_token focus "$aid")" = "focus:$aid" ] || { bad "focus of $aid was refused"; return 1; }
+  done
+  # ... and the ones that start or write no title still press with none (nothing is named by `--rk` there): the
+  # Detail hero's controls whose target the page fixes (`go_to_show`, `alt`, `version`, `more`: they navigate or open a
+  # menu or a panel), `home.hero.action` (the failure read-out's retry), which acts on no title, and the player's controls that open a
+  # panel, seek, pause or leave (tests/player_shots.sh presses its panel openers bare) are pressed bare.
+  for aid in detail.about.card detail.about.languages detail.hero.go_to_show detail.hero.alt detail.hero.version \
+             detail.hero.more under-posters.row.3 filmography.tab.2 nav.watchlist home.hero.action \
+             player.control.subtitles player.control.audio player.control.more player.control.play_pause \
+             player.control.seek_back player.control.watch player.control.watch_credits player.tab.info \
+             player.tab.chapters player.chapter.0 player.scrub player.failure.change_quality player.failure.back \
+             more.quality more.speed more.stats more.rate.1500 more.fold.go_to_detail menu.boost menu.loudness menu.timing menu.style \
+             menu.search menu.field.size menu.retry menu.lang.0; do
+    [ "$(a11y_token press "$aid")" = "press:$aid" ] || { bad "press of $aid needlessly wanted --rk"; return 1; }
+  done
+  for aid in "1 2" "12'34" '12@3' '12$x' "12;x" ""; do
+    if a11y_token press watchlist.grid.card.3 "$aid" >/dev/null 2>&1; then bad "an unsafe --rk was accepted: $aid"; return 1; fi
+  done
+  if a11y_token focus nav.watchlist 123 >/dev/null 2>&1; then bad "focus accepted a ratingKey"; return 1; fi
+  if a11y_token press "nav.Bad" >/dev/null 2>&1; then bad "press accepted a malformed id"; return 1; fi
+  a11y_answers abc '{"schema":1,"nonce":"abc","elements":[]}' || { bad "a11y_answers missed its own nonce"; return 1; }
+  a11y_answers abc '{ "nonce" : "abc" }' || { bad "a11y_answers is whitespace-sensitive"; return 1; }
+  if a11y_answers abc '{"nonce":"abd"}'; then bad "a11y_answers took another request's file"; return 1; fi
+  if a11y_answers abc '{"label":"abc"}'; then bad "a11y_answers matched a value that is not the nonce"; return 1; fi
+  aid=$(a11y_nonce)
+  [ "${#aid}" -eq 16 ] || { bad "a11y_nonce is not 16 characters"; return 1; }
+  ok "tv-session by-id contract (grammar, a title's element needs --rk, nonce match)"
+  selftest_fifo || return 1
+  selftest_usage || return 1
 
   # ---- identity: `--guest` must resolve the real managed-user token or REFUSE, and must never
   # fall through to the owner's — the 2026-09-10 TV session 5 defect (a warning printed, then the
@@ -1087,20 +1394,218 @@ cmd_status() {
   fi
 }
 
-cmd_key() {
-  [ $# -gt 0 ] || { echo "usage: tv-session.sh key <token>..." >&2; exit 2; }
+# One token into the remote FIFO. The app drains it each frame; the write is time-boxed so a FIFO
+# with no reader (app not running) cannot wedge this shell. `fifo_write` single-quotes the token for the
+# remote shell the POSIX way (`'` becomes `'\''`) and refuses a token with whitespace in it, so ANY one-word
+# token is safe here: an apostrophe in a `txt:` token included (`txt:` spells a space `+`). `focus`, `press` and
+# `state` additionally validate their ids, subjects and nonce against the app's grammar (`a11y_id_ok`,
+# `a11y_subject_ok`) before they get here.
+#
+# A TOKEN IS ONE WORD. The app cuts the FIFO into tokens at ANY whitespace: `rust-modules/src/remote.rs` finds
+# the end of the complete run at ASCII whitespace (space, tab, newline, CR, FF) and then `split_whitespace`
+# cuts it at every Unicode White_Space (VT, U+0085, U+00A0, U+2000-200A, U+2028/9, U+202F, U+205F, U+3000, ...).
+# So `key $'back press:<card>'` would write TWO tokens, the second a title's press with no subject named, past
+# every check in this file. Refusing only a newline left that door open; every one of those separators is
+# refused now, and the word is judged as BYTES (`LC_ALL=C`), so the multi-byte ones are matched in any locale.
+fifo_token_ok() {  # $1 = one token; says why not (stderr) and returns 2 for a word the app would read as several
+  local LC_ALL=C
+  case "$1" in
+    *[$' \t\n\r\v\f']*|*$'\xc2\x85'*|*$'\xc2\xa0'*|*$'\xe1\x9a\x80'*|*$'\xe3\x80\x80'*|\
+    *$'\xe2\x80'[$'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\xa8\xa9\xaf']*|*$'\xe2\x81\x9f'*)
+      echo "tv-session: a FIFO token is ONE word with no whitespace in it (the app reads a space, tab, newline or any other whitespace as the end of a token, so a second word would be a second token, past every check here)" >&2
+      return 2 ;;
+  esac
+  return 0
+}
+
+fifo_write() {  # $1 = one token; prints the one remote statement that writes it to the FIFO, or returns 2
+  local sq="'" esc
+  fifo_token_ok "$1" || return 2
+  esc=${1//$sq/$sq\\$sq$sq}
+  printf '%s' "printf '%s\n' '$esc' > $REMOTE_FIFO"
+}
+
+# Returns 2 (and sends nothing) for a word `fifo_write` refuses, else 0: the remote `kill` that ends the
+# time box exits non-zero whenever the write finished, so its status says nothing about the send.
+fifo_send() {  # $1 = one token
+  local stmt
+  stmt=$(fifo_write "$1") || return 2
+  tv "($stmt) & P=\$!; sleep 2; kill \$P 2>/dev/null" 2>/dev/null
+  return 0
+}
+
+# `key` is for KEYS and the like (`down`, `ok`, `ck:<x>,<y>`, `txt:...`): never for the by-id tokens, which have
+# ONE door each, `focus`, `press` and `state`, because those are where an id is checked against the grammar and a
+# title's press is made to name the title (`--rk`). Returns 2 (and says why) for a word that starts one.
+key_word_ok() {  # $1 = one word given to `key`
+  case "$1" in
+    focus:*|press:*|state:*)
+      echo "tv-session: key does not send '${1%%:*}:' tokens: use the ${1%%:*} verb (focus <id>, press <id> [--rk <ratingKey>], state), which checks the id and makes a title's press name the title" >&2
+      return 2 ;;
+  esac
+  return 0
+}
+
+# Every word is judged BEFORE any is sent (and before the lock is asked for): `key back "ok press:x"` must not
+# send `back` and then refuse. The sender behind `key`, `click`, `focus` and `press`; exits 2 on a refusal.
+send_tokens() {  # $@ = tokens, in order
+  local t
+  for t in "$@"; do fifo_write "$t" >/dev/null || exit 2; done
   require_lock "tv-session key"
-  # the app drains the FIFO each frame; time-box the write so a FIFO with no reader
-  # (app not running) cannot wedge this shell
   for t in "$@"; do
-    tv "(printf '%s\n' '$t' > $REMOTE_FIFO) & P=\$!; sleep 2; kill \$P 2>/dev/null" 2>/dev/null
+    fifo_send "$t" || exit 2
     info "sent $t"
   done
 }
 
+cmd_key() {
+  [ $# -gt 0 ] || { echo "usage: tv-session.sh key <token>...   (key tokens: down ok back ... ; focus/press/state have their own verbs)" >&2; exit 2; }
+  local t
+  for t in "$@"; do key_word_ok "$t" || exit 2; done
+  send_tokens "$@"
+}
+
 cmd_click() {
   [ $# -eq 2 ] || { echo "usage: tv-session.sh click <x> <y>   (authored 1920x1080)" >&2; exit 2; }
-  cmd_key "ck:$1,$2"
+  send_tokens "ck:$1,$2"
+}
+
+# ----------------------------------------------------- by accessibility id ----
+# `focus:<id>`, `press:<id>[@<subject>]` and `state:<nonce>` are FIFO tokens of a `devtriggers` build
+# (rust-modules/ui/src/a11y.rs, dispatch/by_id.rs, src/app/a11y_state.rs). The checks below are the
+# grammar's own, so a malformed id stops HERE rather than as a refusal line on the set. (Quoting for the
+# remote shell is `fifo_write`'s, for every word `key` and `click` send as well, and so is the refusal of a word
+# with whitespace in it; `key` itself refuses these three tokens: see `key_word_ok`.)
+#
+#   id       <ns>.<path>: ns [a-z][a-z0-9_-]*, then one or more segments, each a name [a-z][a-z0-9_]*
+#            or a canonical decimal index (0, or digits with no leading zero)
+#   subject  a ratingKey (or a catalog hex id): [A-Za-z0-9_-]+, a subset of what the app accepts
+A11Y_ID_RE='^[a-z][a-z0-9_-]*(\.([a-z][a-z0-9_]*|0|[1-9][0-9]*))+$'
+A11Y_SUBJECT_RE='^[A-Za-z0-9_-]+$'
+A11Y_STATE_TRIES=24     # `state` polls the runtime root this many times, a half second apart
+
+a11y_id_ok() {  # $1 = a full accessibility id. LC_ALL=C: [a-z] must not follow a locale's collation.
+  case "$1" in *$'\n'*) return 1 ;; esac
+  printf '%s\n' "$1" | LC_ALL=C grep -Eq "$A11Y_ID_RE"
+}
+
+a11y_subject_ok() {  # $1 = a ratingKey / subject
+  case "$1" in *$'\n'*) return 1 ;; esac
+  printf '%s\n' "$1" | LC_ALL=C grep -Eq "$A11Y_SUBJECT_RE"
+}
+
+# The token for focusing or pressing an id; says why not (stderr) and returns 2 when it must not be sent.
+#   a11y_token focus <id>            -> focus:<id>
+#   a11y_token press <id> [<rk>]     -> press:<id> or press:<id>@<rk>
+# An element whose subject is a title is pressed BY NAME (`--rk`): the real-account rule's own guard (never
+# press OK on a title whose ratingKey you have not read), and the app compares it against the subject of the
+# element it finds there. `press` refuses without it; `focus` moves nothing that is account-affecting, so it
+# takes none. Which ids those are is `a11y_subject_bearing`.
+#
+# THE LIST IS READ OFF THE CODE (`git grep -n with_subject rust-modules`), one entry per production
+# `A11y::with_subject` call SITE, and is the same list as `SUBJECT_BEARING` in tools/a11y.py, which carries the table of
+# what each entry is and why (a test holds the two equal; another holds the number of calls per file equal to the
+# sites it was derived from, and another the set of files that construct a title-acting message equal to the files it
+# covers). THE RULE (stated in full at `SUBJECT_BEARING`): an id is in it when its press ACTS ON a title it names, which
+# includes opening that title's own page or menu where the title can change under the press (a card, a credit, the Home
+# carousel's Info); only a control whose target the page fixes is pressed bare. A bare `*.row.*` would also catch `under-posters.row.3`, so the namespaced ones are spelled
+# out, and the player's controls are spelled by word (`player.control.subtitles` opens a panel and stays bare) with
+# the positional spelling `player.control.[0-9]*` guarded whole, and the player's menus' rows by kind (a folded command
+# that starts a title and `more.rung.*`, the quality rungs, which re-resolve it; the Tracks menu's track picks and
+# subtitle-search results, which write to the title on the server; `more.speed|stats` and the rest stay bare). The rows of a Catalog item menu have no ratingKey,
+# so `press` cannot name them and refuses them (a Watchlist title no server holds: the safe side).
+a11y_subject_bearing() {  # $1 = a full accessibility id
+  case "$1" in
+    *.card.*|detail.episodes.*|detail.season.*|filmography.row.*|catalog.primary|home.hero.play|home.hero.info|home.hero.watchlist|detail.hero.play|detail.hero.restart|detail.hero.trailer|detail.hero.mark_watched|detail.hero.mark_unwatched|detail.hero.watchlist|itemmenu.*|versions.row.*|player.control.previous|player.control.next|player.control.next_episode|player.control.from_beginning|player.control.skip|player.control.[0-9]*|player.section.*|player.failure.try_again|player.failure.play_automatically|more.fold.previous|more.fold.next|more.fold.from_beginning|more.rung.*|menu.audio.*|menu.sub.*|menu.off|menu.forced|menu.hit.*) return 0 ;;
+  esac
+  return 1
+}
+
+a11y_token() {
+  local act="$1" id="${2:-}" rk="${3:-}"
+  a11y_id_ok "$id" || { echo "tv-session: not an accessibility id: '$id' (want <ns>.<segment>..., e.g. nav.watchlist)" >&2; return 2; }
+  case "$act" in
+    focus)
+      [ -z "$rk" ] || { echo "tv-session: focus takes no ratingKey" >&2; return 2; }
+      printf 'focus:%s\n' "$id" ;;
+    press)
+      if a11y_subject_bearing "$id"; then
+        [ -n "$rk" ] || {
+          echo "tv-session: press $id: pressing this element acts on a title it names (the ids are SUBJECT_BEARING in tools/a11y.py), so name the title with --rk <ratingKey>, the ratingKey of the title the press acts on (read it from \`state\`'s subject for the element, or the log, first)" >&2
+          return 2; }
+      fi
+      if [ -n "$rk" ]; then
+        a11y_subject_ok "$rk" || { echo "tv-session: --rk wants a ratingKey of letters, digits, _ and -" >&2; return 2; }
+        printf 'press:%s@%s\n' "$id" "$rk"
+      else
+        printf 'press:%s\n' "$id"
+      fi ;;
+    *) echo "tv-session: internal: a11y_token focus|press" >&2; return 2 ;;
+  esac
+}
+
+cmd_focus() {
+  [ $# -eq 1 ] || { echo "usage: tv-session.sh focus <id>   (e.g. nav.watchlist)" >&2; exit 2; }
+  local tok; tok=$(a11y_token focus "$1") || exit 2
+  send_tokens "$tok"
+}
+
+cmd_press() {
+  local id="" rk="" usage="usage: tv-session.sh press <id> [--rk <ratingKey>]   (a title's element needs --rk)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --rk)   [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
+              rk="$2"; shift 2 ;;
+      --rk=*) rk="${1#*=}"; shift ;;
+      -*)     echo "$usage" >&2; exit 2 ;;
+      *)      [ -z "$id" ] || { echo "$usage" >&2; exit 2; }
+              id="$1"; shift ;;
+    esac
+  done
+  [ -n "$id" ] || { echo "$usage" >&2; exit 2; }
+  local tok; tok=$(a11y_token press "$id" "$rk") || exit 2
+  send_tokens "$tok"
+}
+
+# A nonce in the app's grammar ([A-Za-z0-9_-]{1,32}): 16 hex digits.
+a11y_nonce() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# Does the state file text `$2` answer the request that carried nonce `$1`? The file is compact JSON,
+# so the member reads `"nonce":"<nonce>"`; a stale file names another nonce and does not match.
+a11y_answers() { printf '%s' "$2" | grep -Eq "\"nonce\" *: *\"$1\""; }
+
+# Ask the app what is on screen: write `state:<nonce>`, then read `$RUNDIR/plxnative-a11y.json` over ssh
+# until it names that nonce (a bounded wait: the app is not running, was built without devtriggers, or is
+# stalled). Prints the snapshot, or writes it to FILE (owner-only) and prints one line about it.
+cmd_state() {
+  local out="" usage="usage: tv-session.sh state [--out FILE]"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out)   [ $# -ge 2 ] && [ -n "$2" ] || { echo "$usage" >&2; exit 2; }
+               out="$2"; shift 2 ;;
+      --out=*) out="${1#*=}"; [ -n "$out" ] || { echo "$usage" >&2; exit 2; }; shift ;;
+      *)       echo "$usage" >&2; exit 2 ;;
+    esac
+  done
+  require_lock "tv-session state"
+  local nonce doc i
+  nonce=$(a11y_nonce)
+  fifo_send "state:$nonce"
+  for i in $(seq 1 "$A11Y_STATE_TRIES"); do
+    doc=$(tvq "cat $RUNDIR/plxnative-a11y.json")
+    if [ -n "$doc" ] && a11y_answers "$nonce" "$doc"; then
+      if [ -n "$out" ]; then
+        ( umask 077; printf '%s\n' "$doc" > "$out" ) || { bad "cannot write $out"; return 1; }
+        ok "state:$nonce answered; $(printf '%s' "$doc" | wc -c | tr -d ' ') bytes written to $out"
+      else
+        printf '%s\n' "$doc"
+      fi
+      return 0
+    fi
+    sleep 0.5
+  done
+  bad "no snapshot named state:$nonce appeared in $RUNDIR (app not running, a RELEASE=1 build, or its loop is stalled)"
+  return 1
 }
 
 cmd_shot() {
@@ -1141,8 +1646,8 @@ cmd_down() {
   echo "== TV is yours"
 }
 
-# Blank or restore the PANEL, leaving the app and playback untouched. See the header for why
-# this is safe for the measurement tiers and disqualifying for the visual ones.
+# Blank or restore the PANEL, leaving the app and playback untouched. See the header: it is only
+# the backlight, so the app presents the same either way (`shot` works with it dark; see the header).
 cmd_screen() {
   local want="${1:-}"
   case "$want" in
@@ -1163,14 +1668,79 @@ cmd_screen() {
   flat=$(printf '%s' "$reply" | tr -d '\r\n' | tr -s ' ')
   if printf '%s' "$flat" | grep -q '"returnValue": *true'; then
     ok "panel $want ($(printf '%s' "$flat" | sed -n 's/.*"state": *"\([^"]*\)".*/\1/p'))"
-  elif printf '%s' "$flat" | grep -q '"errorCode": *"-101"'; then
+  elif [ "$want" = off ] && printf '%s' "$flat" | grep -q '"errorCode": *"-101"'; then
     # -101 "The current state must be 'Active'" means the panel is ALREADY off. Asking for a state
     # the set is already in is a no-op, not a failure -- and reporting it as one makes every script
-    # that re-asserts screen-off after a relaunch look broken.
+    # that re-asserts screen-off after a relaunch look broken. Only for `off`: a -101 answering
+    # `on` would say "panel already on" about a panel the reply calls dark, and skip a real
+    # turn-on, so it falls through to the refusal below.
     ok "panel already $want"
+  elif [ "$want" = on ] && printf '%s' "$flat" | grep -q '"errorCode": *"-102"' \
+    && printf '%s' "$flat" | grep -q '"state": *"Active"'; then
+    # The mirror: -102 "The current state must be 'Screen Off'" with state Active means the panel is
+    # ALREADY lit (`tests/run.py --fps --panel on` asks for `screen on` and would refuse to run on a
+    # lit set). Any other state -- "Active Standby" -- is a set that is NOT lit, so it stays a refusal.
+    ok "panel already on"
   else
     bad "screen $want refused: $flat"; return 1
   fi
+}
+
+# Send the app to the BACKGROUND and bring it back: the lifecycle edges (SDL WILL/DID enter
+# background `0x103`/`0x104`, WILL/DID enter foreground `0x105`/`0x106`) as the OS delivers them.
+# On this webOS 4.5 set the LG launcher/Home/Settings are OVERLAYS and deliver NO edge (see the
+# skill), so `background` launches a real full-screen app through the application manager instead
+# (default `org.webosbrew.hbchannel`, override with an argument or PLX_BG_APP) and asserts it is now
+# the foreground app. `foreground` launches THIS flavour's own id again -- the same call `up` makes,
+# but with NO close-first, so the pid must be unchanged (a changed pid means the app died, which is
+# a finding, not a relaunch) -- and asserts the app is the foreground app again. No setting is
+# changed and nothing is injected; `fg` only reads the foreground app (read-only: advisory lock, no lease,
+# and an asleep set is never woken: it reports that nothing was read, which is not "idle").
+fg_app() {
+  tvq "script -qc \"luna-send -n 1 -f luna://com.webos.applicationManager/getForegroundAppInfo '{}'\" /dev/null" \
+    | tr -d '\r\n' | tr -s ' ' | sed -En 's/.*"appId": *"([^"]*)".*/\1/p'
+}
+launch_app() {  # $1 = app id. -i keeps the subscriber open for the launch to take (see relaunch).
+  tv "luna-send -i luna://com.webos.applicationManager/launch '{\"id\":\"$1\"}' >/dev/null 2>&1 & \
+      LP=\$!; sleep 5; kill \$LP 2>/dev/null" >/dev/null 2>&1
+}
+cmd_lifecycle() {
+  local what="${1:-}" target pid before after
+  case "$what" in
+    fg)
+      # The one lifecycle word that is a pure read, and tv-lock-guard.py lets it through with no
+      # lease for that reason: so it must stay one. `ensure_awake` would send Wake-on-LAN to a
+      # sleeping set (a mutation, and the exact thing a person in the next room notices); a set
+      # that does not answer is left alone and the line says so: nothing was read and no wake was
+      # sent (tv-lock.sh's idle_verdict calls an unread foreground UNKNOWN unless the panel reads Active
+      # Standby, and `fg` never reads the panel, so it says "nothing read", not "idle").
+      # advise_lock is `tv-lock.sh require --advisory`: it only names a holder (and renews a lease
+      # THIS lane already holds), takes nothing and wakes nothing.
+      tvq true || { info "TV unreachable or asleep (nothing read, no wake sent)"; return 0; }
+      advise_lock "tv-session fg"
+      ok "TV reachable"; info "foreground app: $(fg_app)"; return 0 ;;
+    background) target="${2:-${PLX_BG_APP:-org.webosbrew.hbchannel}}" ;;
+    foreground) target="$APPID" ;;
+    *) echo "usage: tv-session.sh background [APPID] | foreground | fg" >&2; exit 2 ;;
+  esac
+  require_lock "tv-session $what"
+  ensure_awake || exit 1
+  pid=$(app_pids)
+  [ -n "$pid" ] || { bad "$APPID is not running; nothing to $what"; return 1; }
+  before=$(fg_app)
+  if [ "$what" = background ] && [ "$before" != "$APPID" ]; then
+    bad "$APPID is not the foreground app ($before); refusing to launch over someone else's screen"; return 1
+  fi
+  info "foreground before: $before; launching $target (pid $pid)"
+  launch_app "$target"
+  after=$(fg_app)
+  if [ "$after" != "$target" ]; then
+    bad "foreground is '$after', not $target: the launch did not take"; return 1
+  fi
+  if [ "$(app_pids)" != "$pid" ]; then
+    bad "app pid changed ($pid -> $(app_pids)): the app died or restarted instead of $what"; return 1
+  fi
+  ok "$what: $target is the foreground app; $APPID still pid $pid"
 }
 
 # Mute/unmute the TELEVISION's own audio (see SOUND in the header), or just read the flag back.
@@ -1336,17 +1906,32 @@ CUT
   esac
 }
 
+# The text an unknown subcommand prints: the header's command and option list, from line 3 down to the paragraph
+# that opens the prose (`# SCREEN OFF is a panel state`), found by THAT LINE and not by a line count. The count it
+# replaced (`sed -n '3,60p'`) went stale each time the list grew, and the text stopped in the middle of `--remote`;
+# `selftest_usage` holds the end.
+usage() {
+  local text
+  text=$(awk 'NR < 3 { next } /^# SCREEN OFF is a panel state/ { found = 1; exit } { print } END { exit !found }' \
+         "${BASH_SOURCE[0]}") || { echo "tv-session: internal: the header's usage text has no end marker (# SCREEN OFF ...)" >&2; return 1; }
+  printf '%s\n' "$text" | sed 's/^# \{0,1\}//'
+}
+
 case "${1:-}" in
   selftest) cmd_selftest ;;
   wan)    shift; cmd_wan "$@" ;;
   up)     shift; cmd_up "$@" ;;
   screen) shift; cmd_screen "$@" ;;
   sound)  shift; cmd_sound "$@" ;;
+  background|foreground|fg) cmd_lifecycle "$@" ;;
   status) shift; cmd_status ;;
   key)    shift; cmd_key "$@" ;;
   click)  shift; cmd_click "$@" ;;
+  focus)  shift; cmd_focus "$@" ;;
+  press)  shift; cmd_press "$@" ;;
+  state)  shift; cmd_state "$@" ;;
   shot)   shift; cmd_shot "$@" ;;
   log)    shift; cmd_log "$@" ;;
   down)   shift; cmd_down ;;
-  *) sed -n '3,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) usage; exit 2 ;;
 esac

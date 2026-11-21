@@ -70,6 +70,22 @@ pub(crate) struct FixtureResources {
     /// Every onboarding report the owner asked for, in order. The fixture answers a standing
     /// report as queued and a one-off with [`FIXTURE_RECEIPT`].
     pub incident_reports: Vec<(plx_session::auth::owner::IncidentLane, plx_session::auth::owner::IncidentReport)>,
+    /// The session cache refresh the owner asked for. A fixture adapter starts no storage-worker
+    /// job for it (`SessionAdapter::begin_cache_refresh`), so its answer cannot depend on which
+    /// frame a worker happened to beat: the refresh is parked here and a test runs it when it
+    /// chooses (`SessionAdapter::run_held_cache_refresh`).
+    pub cache_refresh: FixtureRefresh,
+}
+
+/// Where a fixture adapter's one cache refresh stands.
+#[cfg(test)]
+pub(crate) enum FixtureRefresh {
+    /// Nothing was asked for, or the answer has been taken.
+    Idle,
+    /// The owner's request `.0`, parked: the production job, not yet run.
+    Held(u32, Box<dyn FnOnce() -> plx_plex::plex::session::CacheRefreshOutcome + Send>),
+    /// The request `.0` ran on the test thread and ended as `.1`; `take_cache_refresh` hands it back.
+    Ran(u32, plx_plex::plex::session::CacheRefreshOutcome),
 }
 
 /// The Report ID a fixture adapter answers a one-off with.
@@ -258,16 +274,17 @@ struct PendingErase {
     retry_at: u32,
     /// Consecutive clears that reported a surviving credential; drives [`erase_retry_delay`].
     incomplete: u32,
-    /// The install language the first attempt read before clearing. A retry carries it, because
-    /// once the credential file is gone a re-read can no longer see what to retain.
-    language: Option<plx_platform::i18n::Preference>,
+    /// The install language and Interface resolution the first attempt read before clearing. A
+    /// retry carries them, because once the credential file is gone a re-read can no longer see
+    /// what to retain.
+    kept: Option<plx_plex::plex::session::Retained>,
 }
 
 struct EraseWorkerOutcome {
     complete: bool,
     failures: Vec<String>,
-    /// The next-launch language after this erase: retained by sign-out, System after delete-all.
-    language: plx_platform::i18n::Preference,
+    /// The next-launch choices after this erase: retained by sign-out; delete-all resets the language.
+    kept: plx_plex::plex::session::Retained,
 }
 
 pub(crate) struct SessionAdapter {
@@ -287,6 +304,13 @@ pub(crate) struct SessionAdapter {
     /// letting the owner infer durability from `accepted`.
     live_completion: Option<plx_plex::plex::session::async_persistence::PersistenceCompletion>,
     captures: std::collections::VecDeque<(u32, u64, plx_base::storage_worker::TypedTicket<String>)>,
+    /// The one cache refresh in flight, `(owner's request, ticket)`. Its own slot, not `captures`:
+    /// `cancel`/`cancel_all` clear captures by request id and the owner's refresh ids come from
+    /// its own counter, so a login `Cancel` must never reach it. Dropped with the adapter, which is
+    /// why the bridge reconciles an owner still waiting on a slot that holds nothing
+    /// ([`Self::cache_refresh_req`]). A fixture adapter keeps its refresh in `FixtureResources`
+    /// instead and never submits one.
+    cache_refresh: Option<(u32, plx_base::storage_worker::TypedTicket<plx_plex::plex::session::CacheRefreshOutcome>)>,
     erasures: std::collections::VecDeque<PendingErase>,
     commits: std::collections::VecDeque<PendingCommit>,
     /// The report the owner now shows as queued — `(offer id, receipt)`, from either lane — until
@@ -368,7 +392,7 @@ impl SessionAdapter {
             disk, endpoints: BTreeMap::new(), native_endpoints: BTreeMap::new(), registry_writes: Vec::new(), profile: None,
             recently_unreachable: false, minted_client_id: "synthetic-client".into(),
             coordinator_events: Vec::new(), root_press_available: true, back_results: Vec::new(), sweep_leftovers: 0,
-            next_completion_outcome: None, incident_reports: Vec::new(),
+            next_completion_outcome: None, incident_reports: Vec::new(), cache_refresh: FixtureRefresh::Idle,
         }))
     }
 
@@ -389,7 +413,7 @@ impl SessionAdapter {
         Self { landing: Arc::new(Landing::with_limits(SESSION_DATA_RECORDS,
                 SESSION_OWNER_RESERVATIONS, SESSION_TOTAL_RESERVATIONS)),
             launches: BTreeMap::new(), native: BTreeMap::new(), resources, controlled_home: false, replay_resources: false,
-            receipts: BTreeMap::new(), live_completion: None, captures: Default::default(), erasures: Default::default(), commits: Default::default(), incident_watch: None, spawn, main_thread: PhantomData, recording_leftovers: 0,
+            receipts: BTreeMap::new(), live_completion: None, captures: Default::default(), cache_refresh: None, erasures: Default::default(), commits: Default::default(), incident_watch: None, spawn, main_thread: PhantomData, recording_leftovers: 0,
             #[cfg(test)] fixture_work: BTreeMap::new(),
             #[cfg(test)] resource_test_io: None }
     }
@@ -415,6 +439,82 @@ impl SessionAdapter {
         let (req, epoch, _) = self.captures.pop_front()?;
         Some(SessionReadReply { addr: Addr { to: MachineId::Session, req: RequestId(req) }, epoch,
             value: SessionReadValue::LoginClientId(client_id) })
+    }
+
+    /// Run one `RefreshCache` on the storage worker. `Some(Refused)` when the queue refused it, so
+    /// the owner hears at once and backs off; otherwise the answer comes from
+    /// [`Self::take_cache_refresh`].
+    ///
+    /// A fixture adapter submits nothing: the job is parked in its `FixtureResources` and runs
+    /// only when a test calls `run_held_cache_refresh`, the way `StoreRunner::Held` parks the
+    /// store jobs.
+    pub(crate) fn begin_cache_refresh(&mut self, req: u32, generation: u64)
+        -> Option<plx_plex::plex::session::CacheRefreshOutcome> {
+        #[cfg(test)]
+        if let Resources::Fixture(fixture) = &mut self.resources {
+            debug_assert!(matches!(fixture.cache_refresh, FixtureRefresh::Idle), "one refresh in flight");
+            fixture.cache_refresh = FixtureRefresh::Held(req,
+                Box::new(plx_plex::plex::session::refresh_cache_job(generation)));
+            return None;
+        }
+        match plx_base::storage_worker::submit(plx_plex::plex::session::refresh_cache_job(generation)) {
+            Ok(ticket) => { self.cache_refresh = Some((req, ticket)); None }
+            Err(_) => Some(plx_plex::plex::session::CacheRefreshOutcome::Refused),
+        }
+    }
+
+    /// A finished cache refresh: its request and how it ended. A job that panicked or was dropped
+    /// unrun disconnects its ticket and reads as `Refused`.
+    pub(crate) fn take_cache_refresh(&mut self)
+        -> Option<(u32, plx_plex::plex::session::CacheRefreshOutcome)> {
+        use plx_plex::plex::session::CacheRefreshOutcome;
+        #[cfg(test)]
+        if let Resources::Fixture(fixture) = &mut self.resources {
+            return match std::mem::replace(&mut fixture.cache_refresh, FixtureRefresh::Idle) {
+                FixtureRefresh::Ran(req, outcome) => Some((req, outcome)),
+                held => { fixture.cache_refresh = held; None }
+            };
+        }
+        let (_, ticket) = self.cache_refresh.as_ref()?;
+        let outcome = match ticket.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => CacheRefreshOutcome::Refused,
+            Ok(outcome) => outcome,
+        };
+        let (req, _) = self.cache_refresh.take()?;
+        Some((req, outcome))
+    }
+
+    /// The request of the refresh this adapter holds (running, parked, or finished and not yet taken).
+    pub(crate) fn cache_refresh_req(&self) -> Option<u32> {
+        #[cfg(test)]
+        if let Resources::Fixture(fixture) = &self.resources {
+            return match &fixture.cache_refresh {
+                FixtureRefresh::Idle => None,
+                FixtureRefresh::Held(req, _) | FixtureRefresh::Ran(req, _) => Some(*req),
+            };
+        }
+        self.cache_refresh.as_ref().map(|(req, _)| *req)
+    }
+
+    /// TEST ONLY: run the cache refresh a fixture adapter is holding, on THIS thread, through the
+    /// production job (`refresh_cache_job`); the next [`Self::take_cache_refresh`] hands its
+    /// outcome back. Returns whether one ran: `false` for a live adapter (its job runs on the
+    /// worker) and when nothing is parked.
+    ///
+    /// The job takes the session IO lock on the CALLER's thread, so the caller must not hold it
+    /// (`session::with_io_for_test`) and must not be inside a `FrameScope`: the first deadlocks and
+    /// the second trips `task::assert_may_block`.
+    #[cfg(test)]
+    pub(crate) fn run_held_cache_refresh(&mut self) -> bool {
+        let Resources::Fixture(fixture) = &mut self.resources else { return false };
+        match std::mem::replace(&mut fixture.cache_refresh, FixtureRefresh::Idle) {
+            FixtureRefresh::Held(req, job) => {
+                fixture.cache_refresh = FixtureRefresh::Ran(req, job());
+                true
+            }
+            other => { fixture.cache_refresh = other; false }
+        }
     }
 
     pub(crate) fn capture(&mut self, req: u32, epoch: u64, request: SessionReadRequest) -> SessionReadReply {
@@ -535,7 +635,7 @@ impl SessionAdapter {
         let cancelled = Arc::clone(&pending.cancelled);
         pending.ticket = plx_base::storage_worker::submit(move || {
             let result = if cancelled.load(Ordering::Acquire) { Err(()) } else { write_credentials(&plan, &cancelled) };
-            plx_machine::idle::wake();
+
             plx_machine::present::wake_from_worker();
             result
         }).ok();
@@ -724,11 +824,22 @@ impl SessionAdapter {
         self.live_completion.take()
     }
 
-    pub(crate) fn publish_profile(&mut self, publication: plx_session::auth::owner::ProfilePublication) {
+    /// Publish the owner's profile, and say which seat the PROCESS occupies because of it: `None` for a
+    /// publication a controlled replay keeps to itself (it seats nobody in the process).
+    pub(crate) fn publish_profile(&mut self, publication: plx_session::auth::owner::ProfilePublication)
+        -> Option<plx_plex::plex::session::Seat> {
+        let seat = plx_plex::plex::session::Seat::of(publication.profile.as_ref(), &publication.stamp);
         match &mut self.resources {
-            Resources::Live { publisher } => publisher.publish(publication.profile, publication.scope.0),
+            Resources::Live { publisher } => {
+                let seats_the_process = !publisher.is_scoped();
+                publisher.publish(publication.profile, publication.scope.0, publication.stamp);
+                seats_the_process.then_some(seat)
+            }
             #[cfg(test)]
-            Resources::Fixture(resources) => resources.profile = Some(publication),
+            Resources::Fixture(resources) => {
+                resources.profile = Some(publication);
+                Some(seat)
+            }
         }
     }
 
@@ -742,10 +853,10 @@ impl SessionAdapter {
             let diagnostics = all_local;
             #[cfg(test)]
             let diagnostics = diagnostics && self.resource_test_io.is_none();
-            if diagnostics { plx_platform::storage::diagnostics::disable(); }
+            if diagnostics { plx_os::storage::diagnostics::disable(); }
             self.erasures.push_back(PendingErase {
                 epoch, all_local, diagnostics, ticket: None, retry_at: crate::app::clock::now(), incomplete: 0,
-                language: None,
+                kept: None,
             });
             self.submit_erase();
             None
@@ -757,9 +868,9 @@ impl SessionAdapter {
         let now = crate::app::clock::now();
         // SDL's millisecond counter wraps; the retry is due within the forward half-range.
         if pending.ticket.is_some() || now.wrapping_sub(pending.retry_at) >= u32::MAX / 2 { return; }
-        let (diagnostics, all_local, language) = (pending.diagnostics, pending.all_local, pending.language);
+        let (diagnostics, all_local, kept) = (pending.diagnostics, pending.all_local, pending.kept);
         pending.ticket = plx_base::storage_worker::submit(move || {
-            let erasure = plx_plex::plex::session::clear_for_erase(all_local, language);
+            let erasure = plx_plex::plex::session::clear_for_erase(all_local, kept);
             let cleared = matches!(erasure.outcome,
                 plx_plex::plex::session::ClearOutcome::Durable { legacy_swept: true });
             // A sign-out that could not retain the language retries, carrying it; delete-all
@@ -770,7 +881,7 @@ impl SessionAdapter {
             }
             plx_plex::plex::session::revoke_cached_session();
             let mut failures: Vec<String> = if diagnostics {
-                plx_platform::storage::diagnostics::finish_disable(plx_base::paths::runtime_dir())
+                plx_os::storage::diagnostics::finish_disable(plx_base::paths::runtime_dir())
                     .err()
                     .into_iter()
                     .collect()
@@ -778,9 +889,9 @@ impl SessionAdapter {
                 Vec::new()
             };
             if all_local { failures.extend(erasure.preference_failures); }
-            plx_machine::idle::wake();
+
             plx_machine::present::wake_from_worker();
-            EraseWorkerOutcome { complete, failures, language: erasure.retained_language }
+            EraseWorkerOutcome { complete, failures, kept: erasure.retained }
         }).ok();
         pending.retry_at = now.wrapping_add(STORAGE_RETRY_MS);
     }
@@ -799,13 +910,13 @@ impl SessionAdapter {
             Ok(outcome) if !outcome.complete => {
                 let pending = self.erasures.front_mut()?;
                 pending.ticket = None;
-                pending.language = Some(outcome.language);
+                pending.kept = Some(outcome.kept);
                 pending.incomplete = pending.incomplete.saturating_add(1);
                 pending.retry_at = crate::app::clock::now().wrapping_add(erase_retry_delay(pending.incomplete));
                 return None;
             }
             Ok(outcome) => {
-                plx_platform::i18n::set_saved_preference(outcome.language);
+                plx_os::i18n::set_saved_preference(outcome.kept.language);
                 outcome.failures
             }
         };
@@ -827,7 +938,7 @@ impl SessionAdapter {
                         super::super::input::remove_or_prove_absent).len())
                     } else { 0 }; // Other host cache/runtime sweeps remain disabled in resource tests.
                 }
-                plx_platform::imgcache::clear();
+                plx_os::imgcache::clear();
                 if all_local {
                     let leftovers = super::super::input::delete_all_local_data(meta, worker_failures);
                     if super::super::input::delete_outcome(leftovers.len()).report_leftovers {
@@ -937,7 +1048,7 @@ impl SessionAdapter {
     pub(crate) fn claim_root_press(&mut self) -> bool {
         if self.controlled_home { return false; }
         match &mut self.resources {
-            Resources::Live { .. } => plx_platform::tv::home::take_root_press(),
+            Resources::Live { .. } => plx_os::tv::home::take_root_press(),
             #[cfg(test)]
             Resources::Fixture(resources) => std::mem::replace(&mut resources.root_press_available, false),
         }
@@ -948,8 +1059,8 @@ impl SessionAdapter {
         match &mut self.resources {
             Resources::Live { .. } => {
                 match super::super::input::after_cancel(resumed) {
-                    super::super::input::AfterCancel::BackedOut => plx_platform::tv::home::release_root_press(),
-                    super::super::input::AfterCancel::Home => plx_platform::tv::home::go_home(),
+                    super::super::input::AfterCancel::BackedOut => plx_os::tv::home::release_root_press(),
+                    super::super::input::AfterCancel::Home => plx_os::tv::home::go_home(),
                 }
             }
             #[cfg(test)]
@@ -1159,6 +1270,94 @@ impl SessionAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cache refresh whose job panics (or is dropped unrun) disconnects its ticket: the owner
+    /// still gets exactly one answer, `Refused`, so its in-flight marker cannot stick.
+    #[test]
+    fn a_cache_refresh_job_that_panics_is_answered_refused() {
+        use plx_plex::plex::session::CacheRefreshOutcome;
+        let _serial = plx_base::testlock::serial();
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut adapter = SessionAdapter::live_resources_for_test(&mt, false);
+        assert_eq!(adapter.cache_refresh_req(), None);
+        assert_eq!(adapter.take_cache_refresh(), None);
+        let ticket = plx_base::storage_worker::submit(|| -> CacheRefreshOutcome {
+            panic!("injected cache refresh failure")
+        }).expect("the queue admits the job");
+        adapter.cache_refresh = Some((7, ticket));
+        assert_eq!(adapter.cache_refresh_req(), Some(7), "held until taken");
+        let mut taken = None;
+        for _ in 0..5_000 {
+            taken = adapter.take_cache_refresh();
+            if taken.is_some() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(taken, Some((7, CacheRefreshOutcome::Refused)));
+        assert_eq!(adapter.cache_refresh_req(), None, "answered once");
+        assert_eq!(adapter.take_cache_refresh(), None);
+    }
+
+    /// A fixture adapter is the test resource boundary, so it starts no storage-worker job for a
+    /// cache refresh: a worker would answer on whatever later frame it beat, and every
+    /// `Bridge::for_test` message stream would depend on that timing. The refresh is parked and runs
+    /// only when the test asks.
+    #[test]
+    fn a_fixture_adapter_submits_no_storage_worker_job_for_a_cache_refresh() {
+        use plx_plex::plex::session::{self, CacheRefreshOutcome};
+        let _serial = plx_base::testlock::serial();
+        let _session = session::TempSession::new("fixture-cache-refresh");
+        session::save(&session::Session {
+            client_id: "cid-1".into(), account_token: "acct".into(), ..Default::default()
+        });
+        session::invalidate_for_test();
+        let need = session::refresh_need().expect("an unloaded cache needs a read");
+        let mut adapter = SessionAdapter::fixture();
+        assert_eq!(adapter.begin_cache_refresh(7, need.generation), None, "a parked refresh answers nothing at once");
+        assert_eq!(adapter.cache_refresh_req(), Some(7), "the adapter holds the owner's request");
+        plx_base::storage_worker::drain_for_test();
+        assert!(session::peek_settled().is_none(), "no worker ran the read");
+        assert_eq!(adapter.take_cache_refresh(), None, "and nothing answers until the test runs it");
+        assert!(adapter.run_held_cache_refresh(), "the test runs the parked job, on its own thread");
+        assert!(session::peek_settled().is_some(), "the production job filled the cache");
+        assert_eq!(adapter.cache_refresh_req(), Some(7), "the answer is held until it is taken");
+        assert_eq!(adapter.take_cache_refresh(), Some((7, CacheRefreshOutcome::Settled)));
+        assert_eq!(adapter.cache_refresh_req(), None, "answered once");
+        assert_eq!(adapter.take_cache_refresh(), None);
+        assert!(!adapter.run_held_cache_refresh(), "nothing is left to run");
+    }
+
+    /// The live `begin_cache_refresh` is the one a frame runs, so it may only SUBMIT the job: it must
+    /// not take the session IO lock, wait on the job's ticket, or read. This thread holds the lock
+    /// inside a `FrameScope`, so a begin that took it panics on `task::assert_may_block` (and
+    /// without the scope would deadlock) instead of merely running slowly. The admitted job queues
+    /// behind the held lock on the storage worker and runs once the lock is released.
+    #[test]
+    fn a_live_adapter_begins_a_cache_refresh_without_taking_the_session_io_lock() {
+        use plx_plex::plex::session::{self, CacheRefreshOutcome};
+        let _serial = plx_base::testlock::serial();
+        let _session = session::TempSession::new("live-cache-refresh-lock-held");
+        session::save(&session::Session {
+            client_id: "cid-1".into(), account_token: "acct".into(), ..Default::default()
+        });
+        session::invalidate_for_test();
+        let need = session::refresh_need().expect("an unloaded cache needs a read");
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut adapter = SessionAdapter::live_resources_for_test(&mt, false);
+        session::reset_reads_for_test();
+        session::with_io_for_test(|| {
+            let _frame = plx_base::task::FrameScope::enter();
+            assert_eq!(adapter.begin_cache_refresh(7, need.generation), None, "the queue admitted the job");
+            assert_eq!(adapter.cache_refresh_req(), Some(7), "and the adapter holds its ticket");
+            assert_eq!(adapter.take_cache_refresh(), None, "the job cannot have run behind the held lock");
+            assert_eq!(session::reads_for_test(), 0, "beginning a refresh reads nothing on this thread");
+        });
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(adapter.take_cache_refresh(), Some((7, CacheRefreshOutcome::Settled)),
+            "released, the production job ran on the worker and settled the cache");
+        assert!(session::peek_settled().is_some());
+        assert_eq!(adapter.cache_refresh_req(), None, "answered once");
+    }
+
     use plx_session::auth::{LoginProgress, owner::SessionOp};
     use plx_session::auth::owner::ObservationSink;
 
@@ -1199,7 +1398,7 @@ mod tests {
         let mut adapter = SessionAdapter::live_resources_for_test(&mt, false);
         if erase {
             adapter.erasures.push_back(PendingErase { epoch: 1, all_local: false, diagnostics: false, ticket: None,
-                retry_at: crate::app::clock::now(), incomplete: 0, language: None });
+                retry_at: crate::app::clock::now(), incomplete: 0, kept: None });
         } else {
             enqueue_test_commit(&mut adapter, queued_plan(&plx_plex::plex::session::Session::default()));
         }
@@ -1271,7 +1470,7 @@ mod tests {
         let mt = unsafe { plx_base::task::MainThread::assume() };
         let mut adapter = SessionAdapter::live_resources_for_test(&mt, false);
         adapter.erasures.push_back(PendingErase { epoch: 1, all_local: false, diagnostics: false, ticket: None,
-            retry_at: crate::app::clock::now().wrapping_add(STORAGE_RETRY_MS), incomplete: 0, language: None });
+            retry_at: crate::app::clock::now().wrapping_add(STORAGE_RETRY_MS), incomplete: 0, kept: None });
         enqueue_test_commit(&mut adapter, queued_plan(&plx_plex::plex::session::Session::default()));
         adapter.submit_commit();
         assert!(adapter.commits.front().unwrap().ticket.is_none(), "erase retains its FIFO position");
@@ -1280,11 +1479,11 @@ mod tests {
     /// The webOS 4.10.2 mount: the session candidate does not exist and every unlink in its
     /// directory answers EROFS. Returns the fault guard and the adapter.
     fn erase_behind_a_read_only_mount(session: &plx_plex::plex::session::TempSession,
-        mt: &plx_base::task::MainThread) -> (plx_platform::storage::UnlinkFaultForTest, SessionAdapter) {
+        mt: &plx_base::task::MainThread) -> (plx_os::storage::UnlinkFaultForTest, SessionAdapter) {
         plx_plex::plex::session::save(&plx_plex::plex::session::Session {
             client_id: "install".into(), account_token: "old".into(), ..Default::default() });
         std::fs::remove_file(session.path()).unwrap();
-        let erofs = plx_platform::storage::UnlinkFaultForTest::install(session.path().parent().unwrap(), libc::EROFS);
+        let erofs = plx_os::storage::UnlinkFaultForTest::install(session.path().parent().unwrap(), libc::EROFS);
         (erofs, SessionAdapter::live_resources_for_test(mt, false))
     }
 
@@ -1335,20 +1534,22 @@ mod tests {
     /// next-launch preference the Language screen shows.
     #[test]
     fn signout_keeps_the_install_language_and_only_delete_all_resets_it() {
-        use plx_platform::i18n::Preference;
+        use plx_os::i18n::Preference;
+        use plx_plex::plex::session::UiResolution;
         let _serial = plx_base::testlock::serial();
         let session = plx_plex::plex::session::TempSession::new("erase-language");
         struct Restore(Preference);
         impl Drop for Restore {
-            fn drop(&mut self) { plx_platform::i18n::set_saved_preference(self.0); }
+            fn drop(&mut self) { plx_os::i18n::set_saved_preference(self.0); }
         }
-        let _restore = Restore(plx_platform::i18n::saved_preference());
+        let _restore = Restore(plx_os::i18n::saved_preference());
         plx_plex::plex::session::save(&plx_plex::plex::session::Session {
-            client_id: "install".into(), account_token: "old".into(), ..Default::default() });
+            client_id: "install".into(), account_token: "old".into(), ..Default::default() }
+            .with_ui_resolution(UiResolution::Hd720));
         assert!(plx_plex::plex::session::set_language(Preference::Be), "setup: a durable language");
         let relaunch = || {
             plx_plex::plex::session::redirect_for_test(Some(session.path()));
-            plx_platform::i18n::set_saved_preference(Preference::System);
+            plx_os::i18n::set_saved_preference(Preference::System);
             plx_plex::plex::session::load()
         };
         let mt = unsafe { plx_base::task::MainThread::assume() };
@@ -1359,22 +1560,26 @@ mod tests {
         plx_base::storage_worker::drain_for_test();
         assert!(matches!(adapter.take_erased(&mut meta),
             Some(plx_session::auth::owner::SessionEvent::Erased { epoch: 1, .. })));
-        assert_eq!(plx_platform::i18n::saved_preference(), Preference::Be,
+        assert_eq!(plx_os::i18n::saved_preference(), Preference::Be,
             "sign-out must not change the confirmed next-launch language");
         let signed_out = relaunch();
         assert!(signed_out.account_token.is_empty(), "sign-out still revokes the credential");
         assert_eq!(signed_out.language, Preference::Be,
             "an ordinary sign-out must keep the install-wide language across relaunch");
+        assert_eq!(signed_out.ui_resolution(), UiResolution::Hd720,
+            "and the install-wide Interface resolution");
 
-        plx_platform::i18n::set_saved_preference(Preference::Be);
+        plx_os::i18n::set_saved_preference(Preference::Be);
         assert!(adapter.begin_erase(2, true, &mut meta).is_none());
         plx_base::storage_worker::drain_for_test();
         assert!(matches!(adapter.take_erased(&mut meta),
             Some(plx_session::auth::owner::SessionEvent::Erased { epoch: 2, .. })));
-        assert_eq!(plx_platform::i18n::saved_preference(), Preference::System,
+        assert_eq!(plx_os::i18n::saved_preference(), Preference::System,
             "Delete all local data resets the confirmed next-launch language");
         assert_eq!(relaunch().language, Preference::System,
             "Delete all local data must not leave the language behind on disk");
+        assert_eq!(relaunch().ui_resolution(), UiResolution::Auto,
+            "the file backend's retained file goes whole, resolution included");
     }
 
     #[test]
@@ -1513,7 +1718,8 @@ mod tests {
         plx_plex::plex::session::revoke_cached_session();
         let mut init = SessionInit::captured((*disk).clone());
         init.epoch = 1;
-        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+        // Generic adapter/OCC/durability fixtures use background correlation, not a Ready handoff.
+        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::ServerRoster },
             expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0),
             phase: StreamPhase::Running, capture: None,
             admission: plx_session::auth::owner::AdmissionState::NotRequested });
@@ -1552,7 +1758,7 @@ mod tests {
         let disk = plx_plex::plex::session::peek();
         let mut init = SessionInit::captured((*disk).clone());
         init.epoch = 1;
-        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::ServerRoster },
             expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0),
             phase: StreamPhase::Running, capture: None,
             admission: plx_session::auth::owner::AdmissionState::NotRequested });
@@ -1621,7 +1827,7 @@ mod tests {
         let disk = plx_plex::plex::session::peek();
         let mut init = SessionInit::captured((*disk).clone());
         init.epoch = 1;
-        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::ServerRoster },
             expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0),
             phase: StreamPhase::Running, capture: None,
             admission: plx_session::auth::owner::AdmissionState::NotRequested });
@@ -1811,7 +2017,7 @@ mod tests {
         struct ClearInjectedFailure;
         impl Drop for ClearInjectedFailure {
             fn drop(&mut self) {
-                plx_platform::storage::clear_injected_commit_failure_for_test();
+                plx_os::storage::clear_injected_commit_failure_for_test();
             }
         }
         let _clear_injected_failure = ClearInjectedFailure;
@@ -1839,7 +2045,7 @@ mod tests {
         let disk = plx_plex::plex::session::peek();
         let mut init = SessionInit::captured((*disk).clone());
         init.epoch = 1;
-        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::ServerRoster },
             expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0),
             phase: StreamPhase::Running, capture: None,
             admission: plx_session::auth::owner::AdmissionState::NotRequested });
@@ -1859,7 +2065,7 @@ mod tests {
         // the record has actually been renamed into place (the real production seam; see
         // `storage::JsonStore::commit`), so `save_locked_with_authority` takes the `!durable`
         // branch and falls through to the legacy write, which succeeds.
-        plx_platform::storage::inject_next_commit_failure_for_test(plx_platform::storage::CommitStage::ParentSync);
+        plx_os::storage::inject_next_commit_failure_for_test(plx_os::storage::CommitStage::ParentSync);
 
         let reply = adapter.commit(owner.commit_permit(1, 1, 0).unwrap(), &plan);
         // The registry/admission bookkeeping is unrelated to this finding; only the completion's
@@ -1871,7 +2077,7 @@ mod tests {
         assert!(
             matches!(completion.outcome,
                 plx_plex::plex::session::async_persistence::CompletionOutcome::Uncertain {
-                    stage: plx_platform::storage::CommitStage::ParentSync, ..
+                    stage: plx_os::storage::CommitStage::ParentSync, ..
                 }),
             "an Uncertain canonical commit must surface as Uncertain even though the legacy \
              fall-through write succeeded — it must NEVER be reported as Durable: {:?}",
@@ -1906,8 +2112,8 @@ mod tests {
     /// `client_id` makes `update_with_outcome` refuse before `edit` ever runs.
     #[test]
     fn a_fresh_sign_in_over_an_unopenable_envelope_is_persisted_for_the_next_launch() {
-        use plx_session::auth::owner::{CommitAdmission, CommitDelta, CredentialPatch, Identity, Pending,
-            PendingCommit, SessionInit, SessionMachine, StreamPhase};
+        use plx_session::auth::owner::{CommitAdmission, Command, CredentialPatch, Identity, SessionEvent, SessionFx,
+            SessionInit, SessionMachine};
         use plx_plex::plex::session::async_persistence::PersistencePurpose;
         let _serial = plx_base::testlock::serial();
 
@@ -1979,15 +2185,21 @@ mod tests {
 
         let disk = plx_plex::plex::session::peek();
         let mut init = SessionInit::captured((*disk).clone());
-        init.epoch = 1;
-        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Login },
-            expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0),
-            phase: StreamPhase::Running, capture: None,
-            admission: plx_session::auth::owner::AdmissionState::NotRequested });
-        init.pending_commit = Some(PendingCommit { req: 1, epoch: 1, arrival: 0, terminal: true,
-            writes_credentials: true, receipt: None, delta: CommitDelta::default(),
-            admitted_revision: None, purpose: Some(PersistencePurpose::Final), fresh: true });
-        let owner = SessionMachine::from_init(init);
+        // Capture the completed fresh sign-in, retaining the Locked disk identity as its OCC fence.
+        init.phase = plx_session::auth::Phase::Ready;
+        init.apply_pending = true;
+        init.authorized_in_flow = true;
+        init.persisted.client_id = "cid-fresh".into();
+        init.persisted.account_token = "acct".into();
+        init.persisted.server.address = "127.0.0.1".into();
+        init.persisted.server.port = 32400;
+        init.persisted.server.token = "synthetic-pms".into();
+        init.persisted.user.token = "synthetic-pms".into();
+        let mut owner = SessionMachine::from_init(init);
+        let effects = plx_session::auth::owner::scenarios::step(&mut owner, SessionEvent::Command(Command::TakeReady));
+        assert!(matches!(effects.as_slice(), [SessionFx::Commit { req: 1, epoch: 1, arrival: 0, plan }]
+            if plan.purpose == PersistencePurpose::Final
+                && plan.authority == plx_plex::plex::session::SaveAuthority::FreshReauthentication));
 
         let mut next = (*disk).clone();
         next.client_id = "cid-fresh".into();
@@ -2051,7 +2263,7 @@ mod tests {
             let expected = Identity::of(&disk);
             let mut init = SessionInit::captured((*disk).clone());
             init.epoch = 1;
-            init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+            init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::ServerRoster },
                 expected: expected.clone(), lifecycle: None, last_arrival: Some(0),
                 phase: StreamPhase::Running, capture: None,
                 admission: plx_session::auth::owner::AdmissionState::NotRequested });
@@ -2081,12 +2293,35 @@ mod tests {
     }
 
     #[test]
+    fn fixture_adapter_has_no_permit_for_a_forged_idle_ready_commit() {
+        use plx_session::auth::owner::{AdmissionState, CommitDelta, Identity, Pending, PendingCommit,
+            SessionInit, SessionMachine, StreamPhase};
+        let disk = plx_plex::plex::session::Session { client_id: "synthetic-client".into(), ..Default::default() };
+        let mut init = SessionInit::captured(disk.clone());
+        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+            expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0), phase: StreamPhase::Running,
+            capture: None, admission: AdmissionState::NotRequested });
+        let mut delta = CommitDelta::default();
+        delta.ready = Some(false);
+        init.pending_commit = Some(PendingCommit { req: 1, epoch: 1, arrival: 0, terminal: true,
+            writes_credentials: true, receipt: None, delta, admitted_revision: None, purpose: None, fresh: false });
+        let expected = serde_json::to_value(&init).unwrap();
+        let owner = SessionMachine::from_init(init);
+        let mut adapter = SessionAdapter::fixture_with(disk);
+        assert!(owner.commit_permit(1, 1, 0).is_none());
+        assert_eq!(serde_json::to_value(owner.snapshot_init()).unwrap(), expected);
+        assert!(adapter.fixture_resources().disk.account_token.is_empty());
+        assert!(adapter.fixture_resources().profile.is_none());
+        assert!(adapter.fixture_resources().registry_writes.is_empty());
+    }
+
+    #[test]
     fn fixture_commit_uses_latest_preferences_and_never_writes_another_adapter() {
         use plx_session::auth::owner::{CommitDelta, CredentialPatch, Identity, Pending, PendingCommit,
             SessionInit, SessionMachine, StreamPhase};
         let disk = plx_plex::plex::session::Session { client_id: "synthetic-client".into(), ..Default::default() };
         let mut init = SessionInit::captured(disk.clone());
-        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::Ready },
+        init.pending.insert(1, Pending { key: SessionWorkKey { epoch: 1, op: SessionOp::ServerRoster },
             expected: Identity::of(&disk), lifecycle: None, last_arrival: Some(0),
             phase: StreamPhase::Running, capture: None, admission: plx_session::auth::owner::AdmissionState::NotRequested });
         init.pending_commit = Some(PendingCommit { req: 1, epoch: 1, arrival: 0, terminal: true,
@@ -2095,7 +2330,7 @@ mod tests {
         let owner = SessionMachine::from_init(init);
         let mut a = SessionAdapter::fixture_with(disk.clone());
         let mut b = SessionAdapter::fixture_with(disk.clone());
-        a.fixture_resources().disk.playback_quality = Some(plx_plex::plex::session::PlaybackQuality::Original);
+        a.fixture_resources().disk.prefs.playback_quality = Some(plx_plex::plex::session::PlaybackQuality::Original);
         let mut next = disk.clone();
         next.account_token = "synthetic-new-token".into();
         let plan = CommitPlan { registry_client_id: disk.client_id.clone(), expected_disk: Identity::of(&disk),
@@ -2104,7 +2339,7 @@ mod tests {
             writes_durable: true, authority: plx_plex::plex::session::SaveAuthority::Routine };
         assert!(a.commit(owner.commit_permit(1, 1, 0).unwrap(), &plan).admission.accepted());
         assert_eq!(a.fixture_resources().disk.account_token, "synthetic-new-token");
-        assert_eq!(a.fixture_resources().disk.playback_quality, Some(plx_plex::plex::session::PlaybackQuality::Original));
+        assert_eq!(a.fixture_resources().disk.prefs.playback_quality, Some(plx_plex::plex::session::PlaybackQuality::Original));
         assert!(b.fixture_resources().disk.account_token.is_empty());
         assert!(a.fixture_resources().profile.is_none());
         assert!(a.fixture_resources().registry_writes.is_empty());
@@ -2343,7 +2578,7 @@ mod tests {
         assert!(begin.find("plx_plex::plex::session::revoke_cached_session()").unwrap() < submitted);
         let worker = source.split("fn submit_erase(").nth(1).unwrap()
             .split("pub(crate) fn take_erased(").next().unwrap();
-        assert!(worker.contains("plx_plex::plex::session::clear_for_erase(all_local, language)"));
+        assert!(worker.contains("plx_plex::plex::session::clear_for_erase(all_local, kept)"));
     }
 
     /// The adapter half of a watched report: while it is queued or on the network nothing is

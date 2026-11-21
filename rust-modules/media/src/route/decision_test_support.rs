@@ -36,7 +36,8 @@ pub(super) fn p5() -> plx_data::metadata::Dovi {
 /// synthetic boundary explicit in the fixture layer so production `apply_plan` and tests of
 /// the start reducer both retain the real `Prepared -> Starting -> result` semantics.
 pub(super) fn apply_plan(ps: &mut PlaybackSession, plan: Plan, rk: &str) {
-    let start = super::apply_plan(ps, &mut plx_data::stores::metadata::MetadataStore::default(), plan, rk);
+    let start = super::apply_plan(ps, &mut plx_data::stores::metadata::MetadataStore::default(),
+        plan, rk, super::CandidatePurpose::NewCandidate);
     settle_plan_start_in_unit_test(ps, start);
 }
 
@@ -93,7 +94,7 @@ pub(super) fn fresh_registry(ps: &mut PlaybackSession) -> plx_base::testlock::Se
     // mid-flight leaves both — belongs to nothing this test owns.
     drop(take_claim_landing());
     clear_injected_fault();
-    crate::player::claim_hold::clear();
+    crate::player::route_fx::clear_claim_hold();
     // Establish the idle projection before resetting the reducer: its applied snapshot must
     // describe this test's empty route, not the previous test's final encoder.  Quality is
     // part of the same baseline; cases which need Auto opt in after this boundary and then
@@ -106,14 +107,20 @@ pub(super) fn fresh_registry(ps: &mut PlaybackSession) -> plx_base::testlock::Se
     crate::player::restore_audio_enhancements(plx_plex::plex::AudioEnhancements::NONE);
     crate::player::reset_route_requests_for_test(ps);
     plx_plex::plex::reset_servers_for_test();
-    crate::player::clear_original_failure();
+    crate::player::route_fx::clear_original_failure(ps);
     g
+}
+
+/// The demuxer ordinal the next native audio reload will feed (`-1`: none staged): the session's own
+/// choice, which the feed's demuxer copy follows at the next start (`SelectAudio`).
+pub(super) fn desired_audio_idx(ps: &PlaybackSession) -> i32 {
+    ps.readout().audio_choice()
 }
 
 /// A `ServerId` naming a slot nothing is registered in — so `client_for` answers `None` and
 /// `build_stream` takes its no-client exit without opening a socket.
 pub(super) fn unregistered_sid() -> ServerId {
-    let id = ServerId::from_raw((plx_plex::plex::MAX_SERVERS - 1) as u16);
+    let id = ServerId::from_raw(40);
     assert!(
         plx_plex::plex::client_for(id).is_none(),
         "the test needs an EMPTY slot"
@@ -233,7 +240,20 @@ type PlanPms = (
 /// [`plan_pms_within`] with `exact = false`. A count that is too LOW is caught by the caller's own assertions, because
 /// the server stops answering at `n`.
 pub(super) fn plan_pms(n: usize, mde_body: &'static [u8]) -> PlanPms {
-    serve_plan_pms(n, mde_body, None, PLAN_PMS_DEADLINE, true)
+    serve_plan_pms(n, mde_body, None, PLAN_PMS_DEADLINE, true, None)
+}
+
+/// What a loopback PMS answers a `/decision` with, chosen by the request line (U8): the body for
+/// the ratingKey the line names, or `None` for the scenario's default. One server can then play two
+/// episodes whose items the server answers differently, which is how a test follows one viewer
+/// from one episode to the next without a server per episode.
+pub(super) type Respond = fn(&str) -> Option<&'static [u8]>;
+
+/// [`plan_pms`] whose `/decision` answers come from `respond` first (the ratingKey-keyed responder),
+/// `mde_body` for any line it does not name.
+#[cfg(feature = "devtriggers")]
+pub(super) fn plan_pms_keyed(n: usize, mde_body: &'static [u8], respond: Respond) -> PlanPms {
+    serve_plan_pms(n, mde_body, None, PLAN_PMS_DEADLINE, true, Some(respond))
 }
 
 /// Same as [`plan_pms`], plus a bounded `start.mkv` body so Remote Auto can probe a remux.
@@ -244,7 +264,7 @@ pub(super) fn plan_pms_with_start_mkv(
     mde_body: &'static [u8],
     start_bytes: usize,
 ) -> PlanPms {
-    serve_plan_pms(n, mde_body, Some(start_bytes), PLAN_PMS_DEADLINE, true)
+    serve_plan_pms(n, mde_body, Some(start_bytes), PLAN_PMS_DEADLINE, true, None)
 }
 
 /// [`plan_pms`] with its own deadline and its own say on the guard: `exact = false` is the
@@ -257,7 +277,7 @@ pub(super) fn plan_pms_within(
     deadline: std::time::Duration,
     exact: bool,
 ) -> PlanPms {
-    serve_plan_pms(n, mde_body, None, deadline, exact)
+    serve_plan_pms(n, mde_body, None, deadline, exact, None)
 }
 
 fn serve_plan_pms(
@@ -266,6 +286,7 @@ fn serve_plan_pms(
     start_bytes: Option<usize>,
     deadline: std::time::Duration,
     exact: bool,
+    respond: Option<Respond>,
 ) -> PlanPms {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port() as i32;
@@ -303,7 +324,7 @@ fn serve_plan_pms(
                         .expect("400");
                     } else {
                         let body = if first.contains("/decision?") {
-                            mde_body
+                            respond.and_then(|r| r(&first)).unwrap_or(mde_body)
                         } else {
                             EMPTY_MC
                         };
@@ -346,9 +367,10 @@ pub(super) fn selection_probe_pms(
                 Ok((mut socket, _)) => {
                     let line = drain_http(&mut socket);
                     if line.starts_with("PUT /library/parts/") {
+                        // An absent key leaves that half as it was (the spec marks both optional).
                         selection = (
-                            query_param(&line, "audioStreamID").unwrap().parse().unwrap(),
-                            query_param(&line, "subtitleStreamID").unwrap().parse().unwrap(),
+                            query_param(&line, "audioStreamID").map_or(selection.0, |v| v.parse().unwrap()),
+                            query_param(&line, "subtitleStreamID").map_or(selection.1, |v| v.parse().unwrap()),
                         );
                     }
                     let ready = selection == (2, burn);
@@ -402,16 +424,19 @@ pub(super) fn fourk_item_with_subs(
         sid,
         rk: "rk-4k".into(),
         show_rk: String::new(),
+        kind: String::new(),
+        duration_ms: None,
         audio,
         subs,
         video_fps: 23.976,
         width: 3840,
         height: 2160,
         bitrate: 48_000,
+        video_kbps: 0,
         dovi: plx_data::metadata::Dovi::NONE,
         markers: Vec::new(),
         chapters: Vec::new(),
-        blur: None,
+        hdr: false,
     }
 }
 
@@ -471,6 +496,119 @@ pub(super) fn stub_pms() -> (
         }
     });
     (port, rx, h)
+}
+
+/// A loopback PMS that answers up to `max` requests, one connection each, and hands every request
+/// line down the channel in arrival order. The multi-request sibling of [`stub_pms`], for a test
+/// that must read WHICH reports one playback sent and in what order (the retired-session `stopped`
+/// is graded on the line itself). It gives up after ten idle seconds, so a test that fails on an
+/// earlier assertion leaves no thread parked on `accept` for the rest of the run.
+pub(super) fn recording_pms(
+    max: usize,
+) -> (
+    i32,
+    std::sync::mpsc::Receiver<String>,
+    std::thread::JoinHandle<()>,
+) {
+    recording_pms_answering(max, "")
+}
+
+pub(super) fn recording_pms_answering(
+    max: usize,
+    body: &'static str,
+) -> (
+    i32,
+    std::sync::mpsc::Receiver<String>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    l.set_nonblocking(true).expect("nonblocking listener");
+    let port = l.local_addr().unwrap().port() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = std::thread::spawn(move || {
+        let mut idle = std::time::Instant::now();
+        let mut served = 0;
+        while served < max && idle.elapsed() < std::time::Duration::from_secs(10) {
+            match l.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let mut line = String::new();
+                    let _ = BufReader::new(&s).read_line(&mut line);
+                    let answer = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(answer.as_bytes());
+                    let _ = tx.send(line);
+                    served += 1;
+                    idle = std::time::Instant::now();
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    });
+    (port, rx, h)
+}
+
+/// [`recording_pms`] with one request held open: the server reads that request's line, hands it
+/// down the channel, and answers nothing until `release` is sent (or dropped, which a failing test
+/// does on its way out). A report whose POST is parked there is a tick IN FLIGHT: it has passed its
+/// epoch check, holds the timeline effect lane, and will record its session id when it returns.
+/// `hold` is the 1-based index of the request to hold. Gives up after ten idle seconds.
+pub(super) fn held_pms(
+    hold: usize,
+) -> (
+    i32,
+    std::sync::mpsc::Receiver<String>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    held_pms_answering(hold, "")
+}
+
+pub(super) fn held_pms_answering(
+    hold: usize,
+    first_body: &'static str,
+) -> (
+    i32,
+    std::sync::mpsc::Receiver<String>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    l.set_nonblocking(true).expect("nonblocking listener");
+    let port = l.local_addr().unwrap().port() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let h = std::thread::spawn(move || {
+        let mut idle = std::time::Instant::now();
+        let mut served = 0;
+        while idle.elapsed() < std::time::Duration::from_secs(10) {
+            match l.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let mut line = String::new();
+                    let _ = BufReader::new(&s).read_line(&mut line);
+                    served += 1;
+                    let _ = tx.send(line);
+                    if served == hold {
+                        let _ = released.recv();
+                    }
+                    let body = if served == 1 { first_body } else { "" };
+                    let answer = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(answer.as_bytes());
+                    idle = std::time::Instant::now();
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    });
+    (port, rx, release, h)
 }
 
 pub(super) fn ordered_stub_pms(
@@ -536,6 +674,10 @@ pub(super) enum PartAnswer {
     /// remux that is still live), `206`/`200` for any other session id or none. This is what a
     /// real PMS measured on 2026-10-06 (`docs/pms-api.md` M8).
     RefuseSession(&'static str),
+    /// The connection is closed with no response at all: curl reports `CURLE_GOT_NOTHING`, a
+    /// transport failure of the OPEN (no header ever arrives), which is the shape of #1425's
+    /// `Open(Transport(_))` (a preflight that gets no answer), not a status the server chose.
+    Hangup,
 }
 
 /// [`enhancement_pms`] with the raw Part's answer chosen separately from `start.mkv`'s.
@@ -565,6 +707,8 @@ pub(super) fn enhancement_pms_parts(
                         || (line.starts_with("GET /library/parts/") && matches!(parts, PartAnswer::Refuse))
                     {
                         write_status(&mut socket, 503);
+                    } else if line.starts_with("GET /library/parts/") && matches!(parts, PartAnswer::Hangup) {
+                        drop(socket);
                     } else if line.starts_with("GET /library/parts/") && matches!(parts, PartAnswer::Reset) {
                         // A valid 206 answer to the exact Range the admission asked for, then the
                         // connection dies before any of the promised body arrives: curl reports
@@ -615,4 +759,211 @@ pub(super) fn enhancement_pms_parts(
         requests
     });
     (port, done, handle)
+}
+
+// ---- selection_pms: a loopback PMS that models the Part's SELECTION (write-back, §4.8) --------
+
+/// One Part of `rk-4k` as [`selection_pms`] models it: the streams it carries and what PMS holds
+/// selected for the viewer. `sub_sel == 0` is "no subtitle selected".
+#[derive(Clone)]
+pub(super) struct PartModel {
+    pub id: i64,
+    pub audio: Vec<i64>,
+    /// `(stream id, external)`. An external stream is a download: PMS deletes it the moment the
+    /// selection moves off it, and a PUT naming it afterwards is a 400 (docs/pms-api.md, 2026-10-06).
+    pub subs: Vec<(i64, bool)>,
+    pub audio_sel: i64,
+    pub sub_sel: i64,
+    /// Subtitle ids PMS flags `forced`.
+    pub forced: Vec<i64>,
+}
+
+struct SelectionState {
+    parts: std::collections::BTreeMap<i64, PartModel>,
+    requests: Vec<String>,
+    /// Every PUT answers 500 and changes nothing.
+    fault: bool,
+    /// A PUT is applied, then its answer waits here, so the serial worker is held in mid-request.
+    hold: bool,
+    /// What `/decision` answers (direct play unless a test says otherwise).
+    mde: &'static [u8],
+}
+
+/// The handle to a running [`selection_pms`]. The server answers until the handle is dropped (the
+/// sender closing is what ends its thread), so a test that panics leaks no listener.
+pub(super) struct SelectionPms {
+    pub port: i32,
+    state: std::sync::Arc<std::sync::Mutex<SelectionState>>,
+    _alive: std::sync::mpsc::Sender<()>,
+}
+
+impl SelectionPms {
+    fn state(&self) -> std::sync::MutexGuard<'_, SelectionState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Every request line the server has seen, in arrival order.
+    pub fn requests(&self) -> Vec<String> {
+        self.state().requests.clone()
+    }
+    /// The selection PUTs among them.
+    pub fn puts(&self) -> Vec<String> {
+        self.requests().into_iter().filter(|r| r.starts_with("PUT /library/parts/")).collect()
+    }
+    /// `(audio, subtitle)` the server holds for `part` (`0` = no subtitle selected).
+    pub fn selection(&self, part: i64) -> (i64, i64) {
+        let state = self.state();
+        let p = &state.parts[&part];
+        (p.audio_sel, p.sub_sel)
+    }
+    pub fn set_fault(&self, on: bool) {
+        self.state().fault = on;
+    }
+    pub fn set_hold(&self, on: bool) {
+        self.state().hold = on;
+    }
+    pub fn set_mde(&self, body: &'static [u8]) {
+        self.state().mde = body;
+    }
+}
+
+fn selection_item_json(rk: &str, part: &PartModel) -> Vec<u8> {
+    let mut streams = Vec::new();
+    for (n, id) in part.audio.iter().enumerate() {
+        streams.push(serde_json::json!({
+            "id": id, "streamType": 2, "index": n + 1, "languageCode": if n == 0 { "eng" } else { "jpn" },
+            "codec": "eac3", "channels": 6, "selected": i64::from(*id == part.audio_sel),
+        }));
+    }
+    for (n, (id, external)) in part.subs.iter().enumerate() {
+        let mut stream = serde_json::json!({
+            "id": id, "streamType": 3, "index": n + 10, "languageCode": if n == 0 || part.forced.contains(id) { "eng" } else { "spa" },
+            "codec": "srt",
+            "selected": i64::from(*id == part.sub_sel),
+        });
+        if *external {
+            stream["key"] = serde_json::json!(format!("/library/streams/{id}"));
+        }
+        if part.forced.contains(id) {
+            stream["forced"] = serde_json::json!(1);
+        }
+        streams.push(stream);
+    }
+    serde_json::to_vec(&serde_json::json!({"MediaContainer": {"Metadata": [{
+        "ratingKey": rk, "type": "episode", "grandparentRatingKey": "4242",
+        "Media": [{"width": 3840, "height": 2160, "bitrate": 48000, "Part": [{
+            "id": part.id, "key": format!("/library/parts/{}/1/file.mkv", part.id), "Stream": streams,
+        }]}],
+    }]}})).unwrap()
+}
+
+/// **A loopback PMS with a per-Part selection model** (§4.8; the third fake beside
+/// [`serve_plan_pms`] and [`selection_probe_pms`]). It answers a resolve (`/decision` as direct play,
+/// PlayQueue and show reads empty), serves `GET /library/metadata/rk-4k` FROM the model (so a fresh
+/// fetch sees what an earlier PUT wrote), and applies `PUT /library/parts/{id}`:
+///   - an absent `audioStreamID` / `subtitleStreamID` leaves that half unchanged (tests/mock_pms.py's
+///     own rule); `subtitleStreamID=0` selects none;
+///   - moving the selection off an EXTERNAL (downloaded) subtitle deletes it, and a PUT naming a
+///     stream the Part lacks answers 400;
+///   - [`SelectionPms::set_fault`] answers 500, [`SelectionPms::set_hold`] stalls the answer.
+///
+/// It runs until the handle is dropped, so a queued PUT that arrives after the resolve is seen.
+pub(super) fn selection_pms(parts: Vec<PartModel>) -> SelectionPms {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port() as i32;
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let state = std::sync::Arc::new(std::sync::Mutex::new(SelectionState {
+        parts: parts.into_iter().map(|p| (p.id, p)).collect(),
+        requests: Vec::new(),
+        fault: false,
+        hold: false,
+        mde: MDE_DIRECTPLAY,
+    }));
+    let served = state.clone();
+    std::thread::spawn(move || loop {
+        match plx_base::testnet::accept(&listener) {
+            Ok((mut socket, _)) => {
+                let line = drain_http(&mut socket);
+                let lock =|| served.lock().unwrap_or_else(|e| e.into_inner());
+                lock().requests.push(line.clone());
+                if line.starts_with("PUT /library/parts/") {
+                    let part: i64 = line["PUT /library/parts/".len()..]
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    let status = {
+                        let mut state = lock();
+                        if state.fault {
+                            500
+                        } else {
+                            match state.parts.get_mut(&part) {
+                                None => 404,
+                                Some(p) => {
+                                    let audio = query_param(&line, "audioStreamID").and_then(|v| v.parse::<i64>().ok());
+                                    let sub = query_param(&line, "subtitleStreamID").and_then(|v| v.parse::<i64>().ok());
+                                    let bad = audio.is_some_and(|a| !p.audio.contains(&a))
+                                        || sub.is_some_and(|s| s != 0 && !p.subs.iter().any(|(id, _)| *id == s));
+                                    if bad {
+                                        400
+                                    } else {
+                                        if let Some(a) = audio {
+                                            p.audio_sel = a;
+                                        }
+                                        if let Some(s) = sub {
+                                            if s != p.sub_sel {
+                                                let leaving = p.sub_sel;
+                                                p.subs.retain(|(id, external)| !(*id == leaving && *external));
+                                            }
+                                            p.sub_sel = s;
+                                        }
+                                        200
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while lock().hold && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    write_status(&mut socket, status);
+                } else if line.contains("/decision?") {
+                    if line.contains("hasMDE=1") && line.contains("directPlay=1") && query_param(&line, "subtitles") != Some("none") {
+                        write!(socket, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("400");
+                    } else {
+                        let mde = lock().mde;
+                        write_json(&mut socket, mde);
+                    }
+                } else if line.starts_with("GET /library/metadata/rk-4k") {
+                    let body = {
+                        let state = lock();
+                        state.parts.values().next().map(|p| selection_item_json("rk-4k", p))
+                    };
+                    write_json(&mut socket, &body.unwrap_or_else(|| EMPTY_MC.to_vec()));
+                } else {
+                    write_json(&mut socket, EMPTY_MC);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // A message OR a dropped handle ends it, so a test that panics leaks no listener.
+                if !matches!(stopped.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(e) => panic!("fixture accept: {e}"),
+        }
+    });
+    SelectionPms { port, state, _alive: stop }
+}
+
+/// The player adapter delivers the container's subtitle track names (by ordinal) the demuxer published
+/// when it opened a part: the session holds its own copy, so a world starts with none.
+pub(super) fn publish_container_names(ps: &mut PlaybackSession, subs: &[&str]) {
+    let stamp = ps.container_names_stamp().wrapping_add(1);
+    ps.ingest_container_names(stamp, crate::player::TrackNames {
+        audio: Vec::new(), subs: subs.iter().map(|s| s.to_string()).collect(),
+    });
 }

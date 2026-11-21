@@ -13,7 +13,7 @@ use super::composed_tests::{consent_opened, frame, opened, path, settle_frames, 
 use super::*;
 use super::test_support::*;
 use plx_plex::plex::account::{AudioPreferences, PreferenceRequest};
-use super::super::family::PickerKind;
+use super::super::family::{PickerKind, PosterKind};
 use crate::registry;
 use plx_ui::dispatch::Dispatcher;
 use plx_ui::fixture::{key, tick};
@@ -93,7 +93,7 @@ fn assert_every_nav_item_pushes_exactly_its_dest(label: &str, items: &[(u32, Set
 }
 
 fn root_items() -> Vec<(u32, SettingsPage)> {
-    let page = RootPage::new(EntryId(0), plx_data::stores::browse::DirectoryView::empty_for_test());
+    let page = RootPage::new(EntryId(0), plx_data::stores::browse::DirectoryView::empty_for_test(), &crate::registry::capture_fixture());
     nav_items(&page.form)
 }
 
@@ -118,14 +118,47 @@ fn every_root_nav_item_pushes_exactly_its_dest_signed_in() {
 #[test]
 fn every_playback_field_pushes_its_picker() {
     let _g = plx_base::testlock::serial();
-    let _sess = scratch_session("nav-structure-playback");
+    let _sess = seated_scratch_session("nav-structure-playback");
     let items = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
     assert_eq!(items.iter().map(|(_, d)| *d).collect::<Vec<_>>(),
-        [SettingsPage::Picker(PickerKind::Quality), SettingsPage::Picker(PickerKind::DirectPlay),
-         SettingsPage::Picker(PickerKind::SubtitleSize), SettingsPage::Picker(PickerKind::SubtitlePosition),
-         SettingsPage::Picker(PickerKind::NextEpisode), SettingsPage::Picker(PickerKind::DeckPress),
-         SettingsPage::Picker(PickerKind::SkipInterval), SettingsPage::Picker(PickerKind::RatingSource)]);
+        // Fork Rofocale11: RatingSource is the Nuvio IMDb/Rotten Tomatoes picker and is listed at
+        // the end of the Playback page's Video group; upstream's reordered groups are kept.
+        [SettingsPage::Picker(PickerKind::Quality), SettingsPage::Picker(PickerKind::DirectPlay), SettingsPage::Picker(PickerKind::DolbyVision), SettingsPage::Picker(PickerKind::UriEngine),
+         SettingsPage::Picker(PickerKind::RatingSource),
+         SettingsPage::Picker(PickerKind::SkipInterval), SettingsPage::Picker(PickerKind::InstantDpadSeeking), SettingsPage::Picker(PickerKind::HdrOverlay),
+         SettingsPage::PlayerHud,
+         SettingsPage::Picker(PickerKind::NextEpisode), SettingsPage::Picker(PickerKind::DeckPress)],
+        "Video: quality, direct play, Dolby Vision, playback engine, rating source. Player: skip interval, D-pad seeking, HDR overlay, the HUD page. Up next: next episode, continue watching");
     assert_every_nav_item_pushes_exactly_its_dest("playback", &items, &|| consent_opened(SettingsPage::Playback));
+}
+
+/// **Settings > Video & playback > Player HUD, walked with the remote** (the row is not a picker, so the
+/// checked-line walk below leaves it out): OK on the row pushes the Player HUD page, one page on top of Playback,
+/// and BACK pops it, leaves the surface up and re-seats the row that opened it. (`every_playback_field_pushes_its_picker`
+/// above also drives this row by OK, RIGHT and a click; this one names the page that stands and what BACK does.)
+#[test]
+fn the_player_hud_row_pushes_its_page_and_back_pops_to_the_row() {
+    let _g = plx_base::testlock::serial();
+    let _sess = seated_scratch_session("nav-walk-player-hud");
+    let items = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
+    let &(row, dest) = items.iter().find(|(_, d)| *d == SettingsPage::PlayerHud).expect("the Playback page has a Player HUD row");
+    let (d, rig, id) = consent_opened(SettingsPage::Playback);
+    let mut w = Walk { d, rig, id, ms: 0 };
+    w.ms = settle_frames(&mut w.d, &mut w.rig, 16);
+    w.ms = walk_to(&mut w.d, &mut w.rig, w.ms, row);
+    let before = path(&w.d, w.id);
+    assert!(w.on("playback:"), "premise: standing on Playback: {before}");
+    w.press(Key::Ok);
+    let pushed = path(&w.d, w.id);
+    assert_eq!(pushed.matches(&segment(dest)).count(), 1, "OK on key {row} pushed the Player HUD page: {pushed}");
+    assert_eq!(pushed.matches('/').count(), before.matches('/').count() + 1, "exactly one page on top: {pushed}");
+    w.press(Key::Back);
+    let popped = path(&w.d, w.id);
+    assert_eq!(popped.matches(&segment(dest)).count(), 0, "BACK popped the Player HUD page: {popped}");
+    assert!(w.on("playback:"), "and stands on Playback again: {popped}");
+    assert!(matches!(w.d.nav.modals.top().map(|s| s.phase), Some(plx_ui::containers::modal::Phase::Opening | plx_ui::containers::modal::Phase::Open)),
+        "BACK popped one page and left the surface up, not closing: {:?}", w.d.nav.modals.top().map(|s| s.phase));
+    assert_eq!(w.elem(), Some(row), "BACK re-seats the row that opened the page");
 }
 
 #[test]
@@ -135,14 +168,16 @@ fn every_audio_and_subtitles_field_pushes_its_picker() {
     let previous = plx_plex::plex::session::current_snapshot();
     struct Restore(std::sync::Arc<plx_plex::plex::session::CurrentProfile>);
     impl Drop for Restore {
-        fn drop(&mut self) { plx_plex::plex::session::publish_profile_for_test(self.0.user.clone(), self.0.generation); }
+        fn drop(&mut self) { plx_plex::plex::session::publish_seat_for_test(self.0.user.clone(), self.0.generation, self.0.stamp.clone()); }
     }
     let _restore = Restore(previous);
-    let user = plx_plex::plex::session::UserRef { id: 7, uuid: "nav-structure-audio".into(), ..Default::default() };
-    plx_plex::plex::session::publish_profile_for_test(Some(user.clone()), 81);
-    let (request, snapshot) = PreferenceRequest::fixture_for_test(user, 81, AudioPreferences::default());
+    let user = plx_plex::plex::session::UserRef { id: 7, uuid: "nav-structure-audio".into(), plex_tv_token: Some("synthetic-token".into()), ..Default::default() };
+    // seated: the Look rows (this app's own per-profile picks) are read-only for nobody
+    plx_plex::plex::session::publish_seat_for_test(Some(user.clone()), 81, "nav-structure-stamp".into());
+    let (_, snapshot) = PreferenceRequest::fixture_for_test(user, 81, AudioPreferences::default());
+    let request = PreferenceRequest::capture().expect("the host captures the stamped fixture seat");
     let items = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::AudioSubtitles, Some(&AudioPreferences::default()));
-    assert_eq!(items.len(), 4, "{items:?}");
+    assert_eq!(items.len(), 7, "the four account fields and the three Look rows (subtitle size, position and color): {items:?}");
     assert_every_nav_item_pushes_exactly_its_dest("audio & subtitles", &items, &|| {
         let (mut d, mut rig, id) = consent_opened(SettingsPage::AudioSubtitles);
         frame(&mut d, &mut rig, 32, vec![]);
@@ -155,6 +190,394 @@ fn every_audio_and_subtitles_field_pushes_its_picker() {
     });
 }
 
+#[test]
+fn the_under_posters_details_rows_push_their_pickers() {
+    let _g = plx_base::testlock::serial();
+    let _sess = seated_scratch_session("nav-structure-under-posters");
+    let items = super::under_posters::nav_items_for_test();
+    assert_eq!(items.iter().map(|(_, d)| *d).collect::<Vec<_>>(), [SettingsPage::UnderPostersDetails(PosterKind::Movie), SettingsPage::UnderPostersDetails(PosterKind::Show)]);
+    assert_every_nav_item_pushes_exactly_its_dest("under posters", &items, &|| consent_opened(SettingsPage::UnderPosters));
+}
+
+/// Holds the live Under posters cell on its default for the test and puts it back after it.
+struct UnderPostersCell;
+impl UnderPostersCell {
+    fn reset() -> Self { Self::holding(plx_plex::plex::session::UnderPosters::DEFAULT) }
+    fn holding(value: plx_plex::plex::session::UnderPosters) -> Self {
+        plx_media::route::restore_under_posters(value);
+        UnderPostersCell
+    }
+}
+impl Drop for UnderPostersCell {
+    fn drop(&mut self) { plx_media::route::restore_under_posters(plx_plex::plex::session::UnderPosters::DEFAULT); }
+}
+
+/// The Settings surface on a real dispatcher, driven by keys, with the app's write door played by
+/// [`Self::answer`]: the page sends `Choose`, the app persists and publishes the value, then replies.
+struct Walk {
+    d: Dispatcher<InnerHost>,
+    rig: SurfaceRig,
+    id: EntryId,
+    ms: u32,
+}
+
+impl Walk {
+    fn press(&mut self, k: Key) {
+        self.ms += 16;
+        frame(&mut self.d, &mut self.rig, self.ms, vec![key(k, tick(self.ms))]);
+        self.ms = settle_frames(&mut self.d, &mut self.rig, self.ms);
+    }
+    /// The writes the page asked for since the last call (in order), each one answered durable.
+    fn answer(&mut self) -> Vec<plx_plex::plex::session::UnderPosters> {
+        let mut asked = Vec::new();
+        for command in std::mem::take(&mut self.rig.preference_commands) {
+            let registry::PreferenceCmd::Choose(plx_media::route::Choice::UnderPosters(value), reply) = command else {
+                panic!("the page asked for something other than an Under posters write");
+            };
+            plx_media::route::restore_under_posters(value);
+            reply.send(true).unwrap();
+            asked.push(value);
+        }
+        self.ms = settle_frames(&mut self.d, &mut self.rig, self.ms);
+        self.ms = settle_frames(&mut self.d, &mut self.rig, self.ms);
+        asked
+    }
+    fn elem(&self) -> Option<u32> { self.d.focus().map(|k| k.elem) }
+    fn on(&self, page: &str) -> bool { path(&self.d, self.id).contains(page) }
+}
+
+/// **A details picker opens on its FIRST part**, whatever is ticked: it is a list of switches, not a
+/// single choice, so there is no one checked line to seat on. OK ticks or unticks the part under the
+/// cursor and STAYS on the page (the cursor does not move, nothing pops).
+#[test]
+fn the_details_picker_opens_on_its_first_part_and_ok_toggles_and_stays() {
+    use plx_plex::plex::session::{DetailPart, DetailParts, UnderPosters};
+    let _g = plx_base::testlock::serial();
+    let _sess = seated_scratch_session("nav-walk-under-posters-seat");
+    for kind in [PosterKind::Movie, PosterKind::Show] {
+        let _cell = UnderPostersCell::holding(UnderPosters { title: false, sort_value: false, ..UnderPosters::DEFAULT });
+        let (d, rig, id) = opened();
+        let mut w = Walk { d, rig, id, ms: 0 };
+        w.ms = settle_frames(&mut w.d, &mut w.rig, 16);
+        let row = root_key(RootId::UnderPosters);
+        w.ms = walk_to(&mut w.d, &mut w.rig, w.ms, row);
+        w.press(Key::Ok);
+        w.press(Key::Down);
+        assert_eq!(w.elem(), Some(2), "Down from Title reaches Movie details");
+        if kind == PosterKind::Show {
+            w.press(Key::Down);
+            assert_eq!(w.elem(), Some(4), "Down from Movie details reaches TV show details");
+        }
+        w.press(Key::Ok);
+        assert!(w.on("under_posters_details"), "OK on Details pushed the picker: {}", path(&w.d, w.id));
+        assert_eq!(w.elem(), Some(super::under_posters::details_elem_for_test(DetailPart::Year)), "{kind:?}: the picker opens on its first part");
+        // The second part (Length for a movie, Seasons for a show) is ticked by default: OK unticks it.
+        w.press(Key::Down);
+        let second = match kind { PosterKind::Movie => DetailPart::Length, PosterKind::Show => DetailPart::Seasons };
+        assert_eq!(w.elem(), Some(super::under_posters::details_elem_for_test(second)));
+        w.press(Key::Ok);
+        let year_only = DetailParts::of(&[DetailPart::Year]);
+        let want = match kind {
+            PosterKind::Movie => UnderPosters { details: year_only, sort_value: false, ..UnderPosters::DEFAULT },
+            PosterKind::Show => UnderPosters { show_details: year_only, sort_value: false, ..UnderPosters::DEFAULT },
+        };
+        assert_eq!(w.answer(), [want], "{kind:?}: OK unticks the part, one write");
+        assert!(w.on("under_posters_details"), "{kind:?}: the picker stays after a tick: {}", path(&w.d, w.id));
+        assert_eq!(w.elem(), Some(super::under_posters::details_elem_for_test(second)), "{kind:?}: and so does the cursor");
+        // …and OK again ticks it back.
+        w.press(Key::Ok);
+        assert_eq!(w.answer(), [UnderPosters { sort_value: false, ..UnderPosters::DEFAULT }], "{kind:?}: OK ticks it again");
+    }
+}
+
+/// Puts every Playback live setting back to what it was when the test began.
+struct PlaybackCells {
+    quality: plx_media::route::Quality,
+    direct_play: plx_media::route::DirectPlayMode,
+    size: plx_media::route::SubtitleSize,
+    position: plx_media::route::SubtitlePosition,
+    tone: plx_plex::plex::session::SubtitleTone,
+    hdr: plx_media::route::HdrOverlayBrightness,
+    next_episode: plx_media::route::NextEpisodeMode,
+    instant_dpad_seeking: plx_plex::plex::session::InstantDpadSeeking,
+    uri_engine: plx_plex::plex::session::UriEngine,
+    dolby_vision: plx_plex::plex::session::DolbyVisionMode,
+    deck_press: plx_media::route::DeckPress,
+    skip: plx_media::route::SkipInterval,
+}
+impl PlaybackCells {
+    fn capture() -> Self {
+        use plx_media::route as r;
+        PlaybackCells { quality: r::quality(), direct_play: r::direct_play_mode(), size: r::subtitle_size(),
+            position: r::subtitle_position(), tone: plx_media::player::subtitle_tone(), hdr: r::hdr_overlay_brightness(), next_episode: r::next_episode_mode(), instant_dpad_seeking: r::instant_dpad_seeking(), uri_engine: r::uri_engine(),
+            dolby_vision: r::dolby_vision_mode(), deck_press: r::deck_press(), skip: r::skip_interval() }
+    }
+}
+impl Drop for PlaybackCells {
+    fn drop(&mut self) {
+        use plx_media::route as r;
+        r::restore_quality(self.quality); r::restore_direct_play_mode(self.direct_play);
+        r::restore_subtitle_size(self.size); r::restore_subtitle_position(self.position);
+        plx_media::player::restore_subtitle_tone(self.tone);
+        r::restore_hdr_overlay_brightness(self.hdr); r::restore_next_episode_mode(self.next_episode); r::restore_instant_dpad_seeking(self.instant_dpad_seeking); r::restore_uri_engine(self.uri_engine);
+        r::restore_dolby_vision_mode(self.dolby_vision); r::restore_deck_press(self.deck_press); r::restore_skip_interval(self.skip);
+    }
+}
+
+/// Open the page `build` mounts, walk to the row `row` and press OK; the page it pushed must be
+/// `dest`, seated on `line` (the checked line, never the first row); BACK pops to the row.
+fn assert_a_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row(
+    label: &str, build: &dyn Fn() -> (Dispatcher<InnerHost>, SurfaceRig, EntryId), row: u32, dest: SettingsPage, line: u32)
+{
+    assert_ne!(line, 0, "{label}: a stored first row cannot tell a seated picker from an unseated one");
+    let (d, rig, id) = build();
+    let mut w = Walk { d, rig, id, ms: 0 };
+    w.ms = settle_frames(&mut w.d, &mut w.rig, 16);
+    w.ms = walk_to(&mut w.d, &mut w.rig, w.ms, row);
+    w.press(Key::Ok);
+    assert_eq!(path(&w.d, w.id).matches(&segment(dest)).count(), 1, "{label}: OK on key {row} pushed {dest:?}: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(line), "{label}: the pushed page opens on its checked line: {}", path(&w.d, w.id));
+    w.press(Key::Back);
+    assert_eq!(path(&w.d, w.id).matches(&segment(dest)).count(), 0, "{label}: BACK popped {dest:?}: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(row), "{label}: BACK re-seats the row that opened the page");
+}
+
+/// **Every Settings page that pushes a page with a checked line opens it on that line**, and BACK
+/// re-seats the row it came from. The pushed page asks for its seat from `Mount`, and
+/// `RouteSurface::request` queues the destination's default first-row seat BEFORE that mount runs;
+/// queued after, it put every one of them back on the first row. Each row stores the LAST line of
+/// its ladder, so a first-row seat is a red row:
+/// Video & playback (Quality, Direct play, Dolby Vision, Playback engine, HDR overlay, Next episode, Continue Watching,
+/// Skip interval, Instant D-pad seeking), Audio & subtitles (Audio language, Subtitle mode, Subtitle language,
+/// Forced subtitles, and the Look rows Subtitle size and position), the Settings root (Language). The Interface
+/// resolution picker is not in the table: its row exists only where the platform offers it.
+#[test]
+fn every_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row() {
+    use plx_media::route as r;
+    use plx_plex::plex::session as ses;
+    let _g = plx_base::testlock::serial();
+    let _sess = seated_scratch_session("nav-structure-checked-lines");
+
+    // Playback: the live setting each picker reads, set to the last line of its ladder.
+    let _cells = PlaybackCells::capture();
+    let quality = *r::available_quality_ladder().last().expect("a quality ladder");
+    let ladder_last = |len: usize| (len - 1) as u32;
+    r::restore_quality(quality);
+    r::restore_direct_play_mode(r::DirectPlayMode::Disabled);
+    r::restore_subtitle_size(*ses::SubtitleSize::LADDER.last().unwrap());
+    r::restore_subtitle_position(*ses::SubtitlePosition::LADDER.last().unwrap());
+    plx_media::player::restore_subtitle_tone(*ses::SubtitleTone::LADDER.last().unwrap());
+    r::restore_hdr_overlay_brightness(*ses::HdrOverlayBrightness::LADDER.last().unwrap());
+    r::restore_next_episode_mode(*ses::NextEpisodeMode::LADDER.last().unwrap());
+    r::restore_deck_press(*ses::DeckPress::LADDER.last().unwrap());
+    r::restore_skip_interval(*ses::SkipInterval::LADDER.last().unwrap());
+    r::restore_instant_dpad_seeking(*ses::InstantDpadSeeking::LADDER.last().unwrap());
+    r::restore_uri_engine(*ses::UriEngine::LADDER.last().unwrap());
+    r::restore_dolby_vision_mode(*ses::DolbyVisionMode::LADDER.last().unwrap());
+    let captured = ses::ProfilePrefs {
+        playback_quality: Some(quality), direct_play_mode: Some(r::DirectPlayMode::Disabled),
+        subtitle_size: ses::SubtitleSize::LADDER.last().copied(), subtitle_position: ses::SubtitlePosition::LADDER.last().copied(),
+        subtitle_tone: ses::SubtitleTone::LADDER.last().copied(), hdr_overlay_brightness: ses::HdrOverlayBrightness::LADDER.last().copied(),
+        next_episode_mode: ses::NextEpisodeMode::LADDER.last().copied(), deck_press: ses::DeckPress::LADDER.last().copied(),
+        skip_interval: ses::SkipInterval::LADDER.last().copied(), instant_dpad_seeking: ses::InstantDpadSeeking::LADDER.last().copied(),
+        uri_engine: ses::UriEngine::LADDER.last().copied(), dolby_vision_mode: ses::DolbyVisionMode::LADDER.last().copied(),
+        ..Default::default()
+    };
+    let lines = |kind: PickerKind| match kind {
+        PickerKind::Quality => ladder_last(r::available_quality_ladder().len()),
+        PickerKind::DirectPlay => 2,
+        PickerKind::SubtitleSize => ladder_last(ses::SubtitleSize::LADDER.len()),
+        PickerKind::SubtitlePosition => ladder_last(ses::SubtitlePosition::LADDER.len()),
+        PickerKind::SubtitleColor => ladder_last(ses::SubtitleTone::LADDER.len()),
+        PickerKind::HdrOverlay => ladder_last(ses::HdrOverlayBrightness::LADDER.len()),
+        PickerKind::NextEpisode => ladder_last(ses::NextEpisodeMode::LADDER.len()),
+        PickerKind::DeckPress => ladder_last(ses::DeckPress::LADDER.len()),
+        PickerKind::SkipInterval => ladder_last(ses::SkipInterval::LADDER.len()),
+        PickerKind::InstantDpadSeeking => ladder_last(ses::InstantDpadSeeking::LADDER.len()),
+        PickerKind::UriEngine => ladder_last(ses::UriEngine::LADDER.len()),
+        PickerKind::DolbyVision => ladder_last(ses::DolbyVisionMode::LADDER.len()),
+        other => panic!("{other:?} is not a local picker"),
+    };
+    let playback = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
+    assert_eq!(playback.len(), 10, "every Playback picker and the Player HUD page are in the table: {playback:?}");
+    assert_eq!(playback.iter().filter(|(_, d)| *d == SettingsPage::PlayerHud).count(), 1, "the Player HUD row is the one that is not a picker");
+    for &(row, dest) in playback.iter().filter(|(_, d)| *d != SettingsPage::PlayerHud) {
+        let SettingsPage::Picker(kind) = dest else { panic!("a Playback row pushes a picker: {dest:?}") };
+        assert_a_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row(
+            &format!("playback {kind:?}"), &|| {
+                let (d, mut rig, id) = consent_opened(SettingsPage::Playback);
+                rig.preferences = Some(captured.clone());
+                (d, rig, id)
+            }, row, dest, lines(kind));
+    }
+
+    // Audio & Subtitles: the account's stored answers.
+    {
+        use plx_plex::plex::account::AudioPreferences;
+        let previous = ses::current_snapshot();
+        struct Restore(std::sync::Arc<ses::CurrentProfile>);
+        impl Drop for Restore {
+            fn drop(&mut self) { ses::publish_seat_for_test(self.0.user.clone(), self.0.generation, self.0.stamp.clone()); }
+        }
+        let _restore = Restore(previous);
+        let user = ses::UserRef { id: 7, uuid: "nav-structure-checked-lines".into(), plex_tv_token: Some("synthetic-token".into()), ..Default::default() };
+        ses::publish_seat_for_test(Some(user.clone()), 81, "nav-structure-stamp".into());
+        let language_line = |code: &str| 1 + plx_plex::plex::languages::picker().position(|l| l.code == code)
+            .unwrap_or_else(|| panic!("{code} is in the language picker")) as u32;
+        let prefs = AudioPreferences { stated_language: Some("fr".into()), subtitle_language: Some("de".into()),
+            subtitle_mode: 2, subtitle_forced: 3, ..Default::default() };
+        let (_, snapshot) = PreferenceRequest::fixture_for_test(user, 81, prefs.clone());
+        let request = PreferenceRequest::capture().expect("the host captures the stamped fixture seat");
+        let items = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::AudioSubtitles, Some(&prefs));
+        assert_eq!(items.len(), 7, "every Audio & Subtitles picker is in the table: {items:?}");
+        for &(row, dest) in &items {
+            let SettingsPage::Picker(kind) = dest else { panic!("an Audio row pushes a picker: {dest:?}") };
+            let line = match kind {
+                PickerKind::AudioLanguage => language_line("fr"),
+                PickerKind::SubtitleLanguage => language_line("de"),
+                PickerKind::SubtitleMode => 2,
+                PickerKind::ForcedSubtitles => 3,
+                PickerKind::SubtitleSize => lines(PickerKind::SubtitleSize),
+                PickerKind::SubtitlePosition => lines(PickerKind::SubtitlePosition),
+                PickerKind::SubtitleColor => lines(PickerKind::SubtitleColor),
+                other => panic!("{other:?} is not an Audio & Subtitles picker"),
+            };
+            assert_a_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row(&format!("audio {kind:?}"), &|| {
+                let (mut d, mut rig, id) = consent_opened(SettingsPage::AudioSubtitles);
+                rig.preferences = Some(captured.clone());
+                frame(&mut d, &mut rig, 32, vec![]);
+                let Some(registry::PreferenceCmd::Load { reply }) = rig.preference_commands.pop() else {
+                    panic!("the page asks its host for the load");
+                };
+                reply.send(registry::AccountPreferenceReply { request: Some(request.clone()), outcome: Ok(snapshot.clone()) }).unwrap();
+                frame(&mut d, &mut rig, 48, vec![]);
+                (d, rig, id)
+            }, row, dest, line);
+        }
+    }
+
+    // The Settings root: the Language page, on the saved language. (The Interface resolution picker
+    // is pushed only where the platform offers a resolution choice, `offers_ui_resolution`: the host
+    // root has no such row, so that one picker is the TV's to verify.)
+    {
+        let language = *LANGUAGES.last().expect("a language list");
+        let _saved = SavedLanguageForTest::new(language);
+        let root = root_items();
+        let row_of = |dest: SettingsPage| root.iter().find(|(_, d)| *d == dest).map(|(row, _)| *row)
+            .unwrap_or_else(|| panic!("the root has a row for {dest:?}: {root:?}"));
+        assert_a_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row("root language", &opened,
+            row_of(SettingsPage::Language), SettingsPage::Language, LangId::Choice(language).key().0);
+    }
+}
+
+struct SavedLanguageForTest(plx_os::i18n::Preference);
+impl SavedLanguageForTest {
+    fn new(value: plx_os::i18n::Preference) -> Self { Self(plx_os::i18n::saved_preference_for_test(value)) }
+}
+impl Drop for SavedLanguageForTest {
+    fn drop(&mut self) { plx_os::i18n::saved_preference_for_test(self.0); }
+}
+
+/// **Settings > Libraries > Under posters, walked with the remote** (`routes.md` R13): from the
+/// Settings root, Down to the row and OK; the Title switch toggles; Details opens the picker, BACK
+/// from it re-seats Details with nothing written; a tick writes, the picker stays and the row reads
+/// it on return; Reset restores both; BACK leaves to the root, on the row that opened the page, and BACK again
+/// dismisses the surface.
+#[test]
+fn the_under_posters_page_walks_title_both_details_reset_and_back_with_keys() {
+    use plx_plex::plex::session::{DetailPart, DetailParts, UnderPosters};
+    let _g = plx_base::testlock::serial();
+    let _sess = seated_scratch_session("nav-walk-under-posters");
+    let _cell = UnderPostersCell::reset();
+    let (d, rig, id) = opened();
+    let mut w = Walk { d, rig, id, ms: 0 };
+    w.ms = settle_frames(&mut w.d, &mut w.rig, 16);
+    let row = root_key(RootId::UnderPosters);
+    w.ms = walk_to(&mut w.d, &mut w.rig, w.ms, row);
+    w.press(Key::Ok);
+    assert!(w.on("under_posters sel=1 "), "OK on the root row opened the page, seated on the Title switch: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(1));
+
+    // The Title switch.
+    w.press(Key::Ok);
+    assert_eq!(w.answer(), [UnderPosters { title: true, ..UnderPosters::DEFAULT }], "OK on Title asks for the switch on");
+    assert!(plx_media::route::under_posters().title);
+    assert!(w.on("title=true"), "the page reads the stored value: {}", path(&w.d, w.id));
+
+    // Movie details: BACK from the picker writes nothing and re-seats the row.
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(2), "Down from Title reaches Details");
+    w.press(Key::Ok);
+    assert!(w.on("under_posters_details"), "OK on Details pushed the picker: {}", path(&w.d, w.id));
+    w.press(Key::Back);
+    assert!(w.on("under_posters sel=2 "), "BACK from the picker re-seats the Details row: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(2));
+    assert!(w.answer().is_empty(), "BACK from the picker wrote nothing");
+
+    // A tick: Down from the first part to Genre, OK writes it and the picker STAYS.
+    w.press(Key::Ok);
+    let year = super::under_posters::details_elem_for_test(DetailPart::Year);
+    let length = super::under_posters::details_elem_for_test(DetailPart::Length);
+    let genre = super::under_posters::details_elem_for_test(DetailPart::Genre);
+    assert_eq!(w.elem(), Some(year), "the picker opens on its first part (Year)");
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(length), "Down moves to the next part (Length)");
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(genre), "and the next (Genre)");
+    w.press(Key::Ok);
+    let with_genre = DetailParts::of(&[DetailPart::Year, DetailPart::Length, DetailPart::Genre]);
+    assert_eq!(w.answer(), [UnderPosters { title: true, details: with_genre, ..UnderPosters::DEFAULT }], "the tick is one write, title and the show line kept");
+    assert!(w.on("under_posters_details"), "a tick leaves the picker where it is: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(genre), "and the cursor on the part");
+    assert_eq!(plx_media::route::under_posters().details, with_genre);
+    w.press(Key::Back);
+    assert!(w.on("under_posters sel=2 "), "BACK pops onto the Details row: {}", path(&w.d, w.id));
+    assert!(w.on(&format!("details={} ", with_genre.bits())), "the Details row reads the ticks: {}", path(&w.d, w.id));
+
+    // The page writes from what is stored, not from what it last wrote: a Title toggle after the
+    // tick keeps the tick.
+    w.press(Key::Up);
+    assert_eq!(w.elem(), Some(1), "Up from Details reaches Title");
+    w.press(Key::Ok);
+    assert_eq!(w.answer(), [UnderPosters { title: false, details: with_genre, ..UnderPosters::DEFAULT }], "a Title toggle after the tick keeps the ticked details");
+
+    // TV show details: its own picker, its own parts, the movie parts kept.
+    w.press(Key::Down);
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(4), "Down from Movie details reaches TV show details");
+    w.press(Key::Ok);
+    assert!(w.on("under_posters_details"), "OK on TV show details pushed its picker: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(year), "the show picker opens on its first part");
+    w.press(Key::Down);
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(genre), "a show offers Year, Seasons, Genre in that order");
+    w.press(Key::Ok);
+    let show_with_genre = DetailParts::of(&[DetailPart::Year, DetailPart::Seasons, DetailPart::Genre]);
+    assert_eq!(w.answer(), [UnderPosters { title: false, details: with_genre, show_details: show_with_genre, sort_value: true }],
+        "the show tick writes the show parts only");
+    w.press(Key::Back);
+    assert!(w.on("under_posters sel=4 "), "BACK pops onto the TV show details row: {}", path(&w.d, w.id));
+    assert!(w.on(&format!("show_details={} ", show_with_genre.bits())), "the row reads the ticks: {}", path(&w.d, w.id));
+
+    // Reset restores both.
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(3), "Down from TV show details reaches Sort value");
+    w.press(Key::Ok);
+    assert!(!w.answer()[0].sort_value, "the default is On, so OK asks for Off");
+    w.press(Key::Down);
+    assert_eq!(w.elem(), Some(30), "Down from Sort value reaches Reset");
+    w.press(Key::Ok);
+    assert_eq!(w.answer(), [UnderPosters::DEFAULT], "Reset asks for the default of both");
+    assert_eq!(plx_media::route::under_posters(), UnderPosters::DEFAULT);
+
+    // BACK leaves the page onto the row that opened it, and BACK again dismisses the surface.
+    w.press(Key::Back);
+    assert!(w.on("root sel="), "BACK left the page: {}", path(&w.d, w.id));
+    assert_eq!(w.elem(), Some(row), "BACK re-seats the root row that opened the page");
+    w.press(Key::Back);
+    assert_eq!(w.d.nav.modals.top().map(|s| s.phase), Some(plx_ui::containers::modal::Phase::Closing), "BACK at the root dismisses the surface");
+}
+
 /// The Language page's Nav rows, driven through the real `RouteSurface` by OK (`Activate`) and
 /// RIGHT. Not through the dispatcher like the other pages: the pushed `Contribute` page draws a QR
 /// code, which the host test build has no GL context for.
@@ -162,12 +585,11 @@ fn every_audio_and_subtitles_field_pushes_its_picker() {
 fn every_language_nav_item_pushes_exactly_its_dest() {
     let _g = plx_base::testlock::serial();
     let _sess = scratch_session("nav-structure-language");
-    let items = nav_items(&LanguagePage::new(EntryId(0)).form);
+    let items = nav_items(&LanguagePage::new(EntryId(0), &crate::registry::capture_fixture()).form);
     assert_eq!(items.iter().map(|(_, d)| *d).collect::<Vec<_>>(), [SettingsPage::Contribute]);
     for &(elem, dest) in &items {
         for method in [Method::Ok, Method::Right] {
-            let mut surface = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Language,
-                plx_data::pms::HubsSnapshot::empty_for_test().view());
+            let mut surface = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Language);
             step(&mut surface, ScreenEvent::Mount, None);
             let focus = FocusKey { entry: EntryId(0), elem };
             let ev = match method {

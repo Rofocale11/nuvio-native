@@ -15,8 +15,8 @@ description: >
 > **FIRST: take the television's lock.** One set, no OS-level mutex — two jobs on it produce
 > plausible WRONG data rather than a clean failure. `tools/tv-lock.sh acquire --ttl 30 --why "…"` before
 > one run (`up` … `down`) and `release` right after it (and `tools/tv-lock.sh status` to see who
-> has it). Every driving subcommand below refuses without it; `log` and `status` are read-only and
-> only name the holder. The **`tv-lock` skill** is the workflow: one lease spans the commands of
+> has it). Every driving subcommand below refuses without it; `log`, `status` and `fg` are read-only
+> and only name the holder. The **`tv-lock` skill** is the workflow: one lease spans the commands of
 > ONE run, because the gap between two of your own commands is where another lane lands — but
 > never a whole working session. Build, read captures and fix with the lease released, then queue
 > again for the next run; other lanes are waiting on the same set.
@@ -41,15 +41,58 @@ read from the gitignored `src/config.local.h` at runtime and never printed.
 ```bash
 tools/tv-session.sh up [--flavor <f>] [--screen <name>] [--server <slot>] [--stream[=PORT]] [--remote[=PORT]] [--no-token]
 tools/tv-session.sh status [--flavor <f>]   # re-assert without disturbing the session
-tools/tv-session.sh key down down ok        # key tokens through the real handlers
+tools/tv-session.sh key down down ok        # key tokens through the real handlers (never focus:/press:/state:)
 tools/tv-session.sh click 960 540           # authored 1920x1080 coords
+tools/tv-session.sh focus watchlist.grid.card.7   # move focus to an element BY ID (no key walk)
+tools/tv-session.sh press nav.watchlist     # focus it, then an OK press
+tools/tv-session.sh press home.shelf.0.card.2 --rk <ratingKey>  # an element that acts on a title it names (card, credit, hero button, menu row, player Next...) REQUIRES the title it must be
+tools/tv-session.sh state [--out FILE]      # the app's JSON snapshot: route, owner, focused id, every element
 tools/tv-session.sh shot [out.png]          # panel capture (video plane included)
 tools/tv-session.sh log [--flavor <f>] [regex]   # the on-device event log
 tools/tv-session.sh screen off|on           # blank/restore the PANEL only (app keeps running)
 tools/tv-session.sh sound off|on|status     # mute/unmute the TELEVISION (independent of the panel)
+tools/tv-session.sh background [APPID]      # launch a full-screen app over ours: WILL/DID background (0x103/0x104)
+tools/tv-session.sh foreground              # launch ours again, no close-first: WILL/DID foreground (0x105/0x106)
+tools/tv-session.sh fg                      # read-only: the foreground app id
 tools/tv-session.sh wan off [TTL]|on|status  # cut the SET's uplink (LAN intact), self-restoring
 tools/tv-session.sh down [--flavor <f>]     # hand the TV back
 ```
+
+`up --mock-plextv=PORT --screen login` signs the debug install in through `tests/mock_pms.py`'s own
+plex.tv (mock started with `--host 0.0.0.0 --advertise-ip <host LAN IPv4> --authorize-after 2`): it
+arms `plxnative-plextv`, opens the reverse ssh tunnel that makes that loopback address real on the
+set, and the mock's server arrives OWNED through the app's normal sign-in, so server-updates
+(owned-only) can be checked without a real account. `down` closes the tunnel (`.tv-plextv.pid`).
+The stored session it leaves on the install is mock-only; clear `state/` under the debug runtime
+root when done.
+
+**Watchlist writes.** The same `--mock-plextv` boot arms `plxnative-discover`, so a Watchlist
+add/remove on the set goes to the mock, and so do a person page's biography and filmography reads
+(the mock's Discover stand-in answers them with synthetic data; the app's Discover also follows a bare
+`plxnative-plextv`). A `--guest` boot (with or without `--mock`) has no loopback stand-in to arm, so it
+never reaches `discover.provider.plex.tv` either: the boot logs `discover: base=real reads=refused`
+and a person page's two reads are refused once and logged (`discover: GET … refused`). **That is a
+standing decision, and its cost is that such a boot shows no person biography and no filmography
+credits** (the page settles as for an unknown person); arm the stand-in to see them. Without a stand-in a debug build also refuses a Watchlist
+write, and the page header says `Debug: watchlist write blocked`. `plxnative-watchlist-live` is the OWNER's switch that lets a
+debug build write to their real plex.tv Watchlist: **never create it, and never pass
+`--arm watchlist-live`, unless the owner asks for it in this same session** (AGENTS.md; the
+`watchlist-live-guard.py` hook refuses both). `up` sweeps every trigger, so an agent run turns it off.
+
+A REAL-LOOKING network loss between the set and the mock needs no root and no change to the set's
+network: `tools/netloss-proxy.py` is a host-side TCP proxy the mock advertises as its own address
+(`tests/mock_pms.py --host 0.0.0.0 --port M --advertise-ip <host LAN IPv4> --advertise-port P
+--home-users 2 --authorize-after 2`, then `tools/netloss-proxy.py --upstream 127.0.0.1:M --listen
+0.0.0.0:P --control-port C`; plex.tv sign-in still reaches the mock directly through the
+`--mock-plextv=M` tunnel, and every PMS connection after it, the SSE feed included, crosses the
+proxy). `curl -X POST -d '{"mode":"blackhole"}' http://127.0.0.1:C/_proxy/mode` then flips it:
+`pass`; `blackhole` (existing connections stay open and go silent in both directions, new ones are
+accepted and never answered: no FIN, no RST, the closest userland analogue to a dead link, and what
+was held is delivered on `pass`); `reset` (RST every connection, RST new ones on accept); `refuse`
+(listener closed). `--schedule blackhole@10,pass@70` flips on a timer for a one-lease run. Every
+mode change and connection is logged with a timestamp. Stopping or SIGSTOPping the mock is NOT
+this: use it when the question is what the app does when the link itself dies. Stop the proxy and
+the mock when the run ends.
 
 `screen off` blanks the picture while the app keeps running and playback keeps decoding — a PANEL
 state, not an app state (see the owner's panel rule below). `sound off`/`on` calls
@@ -59,17 +102,31 @@ set — no lane needs the raw luna-send/`PLX_TV_LOCK_BYPASS` route for it. Neith
 `sound` is restored automatically by `down`; a lane that muted or blanked the panel for its own
 reasons is the one that knows when to undo it.
 
-**The panel rule (the owner's standing directive, restated 2026-09-07):** run every device tier —
-playback, fps scenes, `shot`, capture — with the panel OFF and the sound OFF; the set is in a
-living room, and rendering continues with the LCD off. `tools/tv-session.sh screen off` and
-`tools/tv-session.sh sound off` are both it. See `docs/agent-reference.md` (Tier 2) for the full
-history of this rule.
+**The panel rule (the owner's standing directive, amended 2026-10-24):** the sound is OFF for every
+device run, and so is the panel (the set is in a living room), fps / smoothness runs included: the
+panel is only the backlight, and the app keeps presenting at full rate with it dark (Home `grid-pong`,
+release build: 73 frames/cycle at 59.9 fps panel off, 59.6-59.9 on; the panel state changed neither
+pacing nor misses). `tests/run.py --fps --mock` blanks it by default; `--panel on` lights it for a run
+someone wants to watch. `tools/tv-session.sh screen on|off` and `tools/tv-session.sh sound off` are
+both it. `shot` (the DISPLAY compositor read) works with the panel off:
+`docs/measurements/tv-session-7-2026-09-10.md` ran `screen off` first and got a 1920x1080 capture
+with real pixel values, and `docs/measurements/library-all-types-and-fps-2026-09-26.md` checked
+native captures with the panel off. The live capture stream (the app's own GLES frames) with the
+panel off is not on record: check its first frame instead of assuming either way. See
+`docs/agent-reference.md` (Tier 2) for the full history of this rule.
 
 `wan off` is the offline-mode test condition: a netfilter chain on the television rejects every
 v4 packet leaving the LAN and every DNS query, an `unreachable 2000::/3` route cuts public v6
 (the firmware has no `ip6tables` filter table), and a watchdog on the set restores both after the
 TTL whatever happens to your shell. Read what the APP saw from its own log (`net: curl
 rc=6`, `pinned: … name resolved locally`), not from this command's status lines.
+
+`background`/`foreground` are the sanctioned way to drive the app's lifecycle edges (the Home/launcher
+ribbon is an overlay on this set and delivers none, see the traps below). `background` launches
+`org.webosbrew.hbchannel` (or the id you pass, or `PLX_BG_APP`) through the application manager, refuses
+unless our app is the foreground one, and asserts the launched app took the foreground with our pid
+unchanged; `foreground` launches our own id again WITHOUT closing first and asserts the same. Read the
+edges from the app's log (`suspend`, `resume`, `network changed`), not from this command's lines.
 
 `down` hands back the APP (triggers cleared, app closed and NOT relaunched); `tools/tv-lock.sh release` hands
 back the TELEVISION. Do both, in that order — a released lock with an automated app still on
@@ -230,7 +287,40 @@ a log you did not watch being produced.
 
 Every `plxnative-*` trigger in the install's runtime root is read **once at boot**, so it
 must be in place before the launch. Anything you want to do to a *running* app goes through
-the remote FIFO (`tv-session.sh key` / `click`).
+the remote FIFO (`tv-session.sh key` / `click`, or by id: `focus` / `press` / `state`). `key` sends keys
+and the like (`down`, `ok`, `ck:<x>,<y>`, `txt:...`) and refuses a `focus:`, `press:` or `state:` word, so each
+by-id action has ONE door, the verb, where the id is checked and a title's press must name the title. A word
+with whitespace in it is refused too (`key back "ok press:<card>"`): the app cuts a FIFO line at any
+whitespace, so it would be two tokens, the second a press nothing had checked.
+
+**Prefer `focus` / `press` by id over key walks.** A walk of `down down right ok` breaks when a row
+gains a card; an id (`watchlist.grid.card.7`, `detail.hero.go_to_show`; the grammar is in `tools/a11y.py`)
+names the element whatever the row holds. Ids resolve in the namespace of whoever owns input, so a
+menu answers `itemmenu.*`, not the screen under it. A press of any element that ACTS ON a title it names (it
+plays, restarts, finishes or retries it, marks it watched or unwatched, bookmarks it, acts on the title a menu was
+opened for, or opens that title's own page or menu where the title can change under the press: a card, a credit,
+the Home carousel's Info, a hero button, an item-menu row, a Play Version row, a player control that starts a
+title) needs `--rk <ratingKey>`, the ratingKey of the title the press acts on, which `state` prints as the element's
+subject (Mark watched on a started show is the on-deck episode, a player's Next the queue neighbour). Navigation is
+not the test: only a control whose target the page fixes (`detail.hero.go_to_show`, the Play Version opener, a
+panel opener such as `player.control.subtitles`, a seek, `home.hero.action`) is pressed bare. The ids are
+`SUBJECT_BEARING` in `tools/a11y.py`, the one list (`a11y_subject_bearing` in `tools/tv-session.sh` is the same
+list, and a test holds them equal), so a re-sorted row, a moved hero or a menu opened on another card cannot press a
+different title: the subject is compared where the press is delivered, and the press commits about 200 ms later, so
+Home's carousel does not turn while a press stands on a hero control (the 8 s countdown restarts from full while
+the press stands, as a focus move restarts it, so no turn is owed when the press settles and the next one comes a
+full interval later; Flip and Left/Right at the edge are refused while it stands, dropped rather than applied
+when it settles, so send them again then), which keeps the title the press was accepted
+against the title it plays (a landing that takes that title out of the hero pool inside the 200 ms is the one
+change nothing holds: the press then acts on its successor). At Home's hero/grid door
+a quick OK after a key lands on what the picture shows, not on the focused
+element: while the picture lags (about 8 frames, 130 ms at 60 fps: the dive's midpoint), a by-id press of the focused element, named or bare, is
+refused as `unloaded` (`a11y: refused press <id> unloaded`), and you press again once the screen has settled. On a
+real account the `ratingKey` you name must be one you read from the log (the boot rule: never `ok` a title you have not read). `state` is the
+structured readback: it sends a random nonce and reads `plxnative-a11y.json` until the nonce comes
+back, so a stale file never passes for the answer. Walks stay for tests whose subject is travel
+(fps walks, focus fingerprints, `hold`, timed keys). These need a debug (`devtriggers`) build;
+a release build answers none of them.
 
 **Some exceptions are deliberate and read LIVE**: `plxnative-failtest` (so a read-out variant
 can be swapped mid-playback), `plxnative-testpat` (the same for the synthetic ground),
@@ -239,6 +329,11 @@ settled, because arming it before the launch also makes the boot count as automa
 screen you land on), and `plxnative-signinfail` (`auth::scripted::signinfail_spec` is re-read on
 every sign-in code request and every poll, so *Try again* keeps failing the same way until the file
 is removed).
+
+**`plxnative-drawable=<W>x<H>` (debug builds only) asks for that window size at boot**, e.g.
+`1280x720`, bounded to 640x360..=1920x1080 (anything outside is ignored and logged). It outranks
+Settings > System > Interface resolution, so a TV run can compare sizes without touching the
+stored setting. Like every trigger it marks the boot as automated.
 
 **Two traps that cost real time:**
 

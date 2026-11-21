@@ -26,8 +26,23 @@
 # WHAT IS SAFE. Everything this script deletes is reproducible by `make` from tracked sources, and
 # it never touches a file git knows about. It deletes only paths matching the derived-tree names
 # below, and it will not touch the MAIN checkout's `target/` unless asked (that is the tree a human
-# iterates in; a lane's is cut for one task).
+# iterates in; a lane's is cut for one task). The one exception that asks nothing is `--evict`, which
+# may take the main checkout's `incremental` dirs, and only as the planner's last rung (a refusal
+# otherwise); it never takes the main checkout's `target` itself. The other exception is `--worktrees`:
+# it removes a whole finished checkout, and `git worktree remove` takes the checkout's IGNORED files with
+# it, which can be private and hand-made (`src/config.local.h`, `pkg/auth.json`, a lane's notes). By hand
+# it lists them; unattended (`--auto`) it removes only a checkout whose ignored files are all build output.
 set -eu
+
+# NO GIT CALL HERE MAY WRITE A LANE'S INDEX OR THE REPOSITORY'S OBJECT STORE. `git status` refreshes
+# (rewrites) a worktree's index when a tracked file's stat data went stale, unless it is told the lock
+# is optional: this script runs `status` in every lane it considers (`--worktrees`, and the inventory
+# `--evict`'s plans come from), and a "report" that rewrites a lane's index races that lane's own
+# `git add`. Exported so every git child, including the ones `tools/disk-budget.py` starts, inherits
+# it. (`merge-tree --write-tree` writes objects, not the index: `worktree_reason` points it at a
+# throwaway object directory.)
+GIT_OPTIONAL_LOCKS=0
+export GIT_OPTIONAL_LOCKS
 
 # BEFORE THE `cd`, because `ci/build-ffmpeg.sh` resolves a relative PLX_BUILD_CACHE against the
 # CALLER's directory and this script is about to change to the repository root. Left alone, the two
@@ -49,9 +64,9 @@ MAIN=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed '
 # The Makefile sets `CARGO_INCREMENTAL=0` in a linked worktree, with a long comment explaining why
 # a lane cut for one task must not pay a multi-gigabyte cache of its last build. That rule is
 # correct and it does not hold, because it lives in ONE of the several places a `cargo` runs here:
-# every agent (and `AGENTS.md`'s own `--no-default-features` gate) invokes cargo directly, and a
-# direct invocation never reads the Makefile. Measured 2026-09-17 across this machine's 113
-# worktrees: **12.9 GB of `target*/debug/incremental` inside LINKED worktrees**, on a volume with
+# every agent (and, until `make check-nodef` replaced it, `AGENTS.md`'s own `--no-default-features`
+# gate) invokes cargo directly, and a direct invocation never reads the Makefile. Measured 2026-09-17
+# across this machine's 113 worktrees: **12.9 GB of `target*/debug/incremental` inside LINKED worktrees**, on a volume with
 # 5.1 GiB free — i.e. the policy's whole stated saving, still on the disk, in the checkouts it
 # names.
 #
@@ -92,8 +107,8 @@ install_worktree_cargo_policy() {
 #
 # Cargo merges config upward from the working directory, so this file applies to every linked
 # worktree under `.claude/worktrees/` and to NOTHING else: the main checkout lives above this
-# directory and keeps its incremental cache and full DWARF, which is the policy the Makefile
-# states beside `RUST_FEATFLAGS`. The Makefile can only enforce it for its own cargo invocations;
+# directory and keeps its incremental cache and full DWARF in `dev` builds, which is the policy the
+# Makefile states beside `RUST_FEATFLAGS`. The Makefile can only enforce it for its own cargo invocations;
 # an agent running `cargo test` or `cargo check` by hand bypassed it, and 12.9 GB of lane
 # incremental caches is what that cost.
 #
@@ -122,17 +137,25 @@ incremental = false
 # 11% cut to the whole tree and a 26% cut to the object files directly, from ONE crate's `--lib`
 # closure. The saving is modest, plainly: most of the object-file bulk is code, not DWARF.
 #
-# `CARGO_PROFILE_DEV_DEBUG=2` in the environment still overrides this, the same escape hatch as
-# `CARGO_INCREMENTAL=1` above: an env var outranks a config file, so a lane genuinely attaching
-# `lldb`/`rust-lldb` to a host test can buy full DWARF back for itself without touching this file.
+# `CARGO_PROFILE_DEV_DEBUG=2` in the environment still overrides this for a `dev` build (the
+# simulator, clippy, `cargo check`), the same escape hatch as `CARGO_INCREMENTAL=1` above: an env
+# var outranks a config file. A host TEST is another profile (since 2026-11-14): `cargo test` builds
+# every unit, third-party crates included, with `[profile.test]`, and rust-modules/Cargo.toml sets
+# that one to line tables itself, which a `[profile.dev]` setting (this file's or the
+# environment's) no longer reaches. A lane genuinely attaching `lldb`/`rust-lldb` to a host test
+# buys full DWARF back for itself with `CARGO_PROFILE_TEST_DEBUG=2`; third-party crates keep the
+# `debug = false` below either way.
 #
-# Checked before landing that nothing else in the nearer config chain already sets this and would
-# make the addition a no-op or a conflict: neither `rust-modules/Cargo.toml` (only
-# `[profile.release]`) nor `rust-modules/.cargo/config.toml` (only `[target...]` rustflags and
-# `[unstable] build-std`) mentions `[profile.dev]` debug. Cargo resolves a manifest `[profile]`
-# against a config `[profile]` by letting config win, and the nearest config wins over a farther
-# one — both rules favour this file over anything upstream, which is the reason it is safe to add
-# here rather than in the crate manifest.
+# Checked before landing, for `dev` builds, that nothing else in the nearer config chain already
+# sets this and would make the addition a no-op or a conflict: neither `rust-modules/Cargo.toml`
+# (its profiles are `release`, `tvdev` and, since 2026-11-14, `test`; none is `dev`) nor
+# `rust-modules/.cargo/config.toml` (only `[target...]` rustflags and formerly `[unstable]
+# build-std`) mentions `[profile.dev]` debug. Cargo resolves a manifest `[profile]` against a
+# config `[profile]` by letting config win, and the nearest config wins over a farther one — both
+# rules favour this file over anything upstream, which is the reason it is safe to add here rather
+# than in the crate manifest. A `cargo test` build takes its debug level from `[profile.test]`
+# instead (the paragraph above), so for it the `debug` line below is redundant; the
+# `debug = false` for third-party crates is what this file still adds there.
 [profile.dev]
 debug = "line-tables-only"
 [profile.dev.package."*"]
@@ -142,18 +165,25 @@ POLICY
 }
 MODE=report
 DRY=
+PLAN_FILE=
+WANT_PLAN=
 for a in "$@"; do
+  if [ -n "$WANT_PLAN" ]; then PLAN_FILE=$a; WANT_PLAN=; continue; fi
   case "$a" in
     --report)      MODE=report ;;
+    --evict)       MODE=evict; WANT_PLAN=1 ;;
+    --evict=*)     MODE=evict; PLAN_FILE=${a#--evict=} ;;
     --incremental) MODE=incremental ;;
     --lanes)       MODE=lanes ;;
     --stale)       MODE=stale ;;
     --orphans)     MODE=orphans ;;
     --worktrees)   MODE=worktrees ;;
     --cache)       MODE=cache ;;
+    --ffmpeg-cache) MODE=ffmpeg-cache ;;
     --seed)        MODE=seed ;;
     --all)         MODE=all ;;
     --auto)        MODE=auto ;;
+    --park)        MODE=park ;;
     -n|--dry-run)  DRY=1 ;;
     -h|--help)
       sed -n '2,/^set -eu/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
@@ -161,11 +191,39 @@ for a in "$@"; do
 
 usage: tools/build-gc.sh [MODE] [-n]
 
-  (no mode)       report every checkout's derived trees, the shared cache and free space
+  (no mode)       report every checkout's derived trees, the shared cache and free space, then
+                  the disk budget (tools/disk-budget.py report): each tree's PRIVATE bytes, the
+                  PlxNative cargo trees under /tmp, and what a reclaim WOULD take, in order.
+                  Read-only: it deletes nothing. `--evict` is the mode that acts on a plan
+  --evict PLAN    delete what a PLAN names, and nothing else: PLAN is the file
+                  `tools/disk-budget.py reclaim --to GIB --emit` prints (what to evict, in what
+                  order, down to what free space). The one narrow deleting mode, and the one
+                  `--auto` drives. Every line of the plan is
+                  UNTRUSTED: the path must still BE a derived PlxNative build tree (a checkout's
+                  `rust-modules/target*` or an `incremental` dir in one, a `target*` under
+                  $PLX_FLEET_DIR, an interrupted delete's leftover under the build cache, or a
+                  PlxNative cargo tree under /tmp or $TMPDIR, found by the planner's own
+                  discovery, never a registered worktree's); a tracked file, `pkg/`, `vendor/`,
+                  another project's tree, a symlink, the cargo seed, a live FFmpeg cache entry,
+                  the main checkout's whole `target` and any rung the ladder does not make from
+                  that kind of tree are REFUSED (exit 1). A tree that has turned live since the
+                  plan was written is SKIPPED, not refused: it is re-probed immediately before
+                  each rename (a builder in its checkout, a held cargo or `make check` lock, an
+                  open file, the lane touched within the plan's idle window, a /tmp tree changed
+                  within it by the later of mtime and ctime), and an `lsof` that cannot answer
+                  counts as live. A removal is a rename to `<tree>.tombstone.<pid>.<n>` then
+                  `rm -rf`, logged with what was freed and from whom. Unlike every other mode it
+                  does NOT refuse for a held FFmpeg cache lock (it never writes there, and a full
+                  disk is when an FFmpeg build is likeliest). It stops as soon as free space is
+                  back over the plan's goal, runs the plan's `--stale` step at its own slot, and
+                  ends with a `settle:` line: whether the free space it re-read covers the next
+                  build's estimate plus the reserve (exit 3 when it does not). Needs python3 and
+                  tools/disk-budget.py. `-n` prints what it would remove and logs nothing.
   --incremental   delete `target*/debug/incremental` everywhere. Always safe: it is a compile
-                  cache. A linked worktree is not supposed to write one (the one sanctioned
-                  exception is the opt-in `make test-fast`, whose own `target-fast` this
-                  reclaims like any other; its next run is a cold build) — but the Makefile's
+                  cache. A linked worktree is not supposed to write one (the sanctioned
+                  exceptions are the opt-in `make test-fast` and `make test-hostsim`, whose own
+                  `target-fast` / `target-hostsim` this reclaims like any other; their next run
+                  is a cold build) — but the Makefile's
                   `CARGO_INCREMENTAL=0` only reaches the cargo runs `make` launches, and 12.9 GB
                   of them had accumulated past it by 2026-09-17, which is why this script now
                   installs the same rule as a `.cargo/config.toml` any cargo can see.
@@ -180,7 +238,8 @@ usage: tools/build-gc.sh [MODE] [-n]
                   will ever refer to those trees again, and no live lane pays a rebuild.
   --worktrees     remove FINISHED linked worktrees outright: working tree clean, not locked, not
                   the main checkout, not the checkout this script is running from, and its HEAD
-                  is already on `main` (`git merge-base --is-ancestor`, or a squash-merge check
+                  is already on `origin/main` (the local `main` only where there is no origin;
+                  `git merge-base --is-ancestor`, or a squash-merge check
                   via `git merge-tree --write-tree` against `main`'s tree — the check
                   `git branch --merged` cannot make, and the shape every lane here actually
                   lands as, per AGENTS.md's squash-only trunk rule). Removal is a plain
@@ -189,11 +248,26 @@ usage: tools/build-gc.sh [MODE] [-n]
                   $PLX_FLEET_DIR if one exists. Branches are never deleted; a removed worktree
                   whose branch still exists is reported as "branch left" so the owner decides.
                   Every worktree NOT removed is reported with one reason: dirty | locked |
-                  unmerged | building | current | main.
+                  unmerged | building | current | main | private.
+                  `git worktree remove` takes the checkout's IGNORED files with it, and "clean"
+                  cannot see them: a lane can hold `src/config.local.h`, `pkg/auth.json`,
+                  `.tv-host`, its own notes or captures. By hand (a human typing `--worktrees`)
+                  the removal stays, and the preview (`-n`) and the run list, under each lane,
+                  every ignored path that is not build output `make` regenerates, so the human
+                  sees what goes with it. Under `--auto` such a lane is KEPT instead (reason
+                  `private`, the paths that kept it listed and written to the log), and so is one
+                  whose ignored files git could not list; a lane whose ignored files are all
+                  build output (cargo target dirs, the FFmpeg/Sentry/libass trees, what `make`
+                  stages in `pkg/`, `__pycache__`, `.DS_Store`) is removed as before. The list is
+                  `derived_output` in this script, an allow-list: an unclassified path keeps a lane.
+                  Under `--auto` a lane whose worktree is on another volume than the build is
+                  skipped without being read (removing it frees nothing on the volume that is
+                  short, and reading it can be slow); by hand it is judged like any other.
   --stale         delete SUPERSEDED per-hash cargo artifacts from every `deps/` directory this
                   script can find — inside the lanes, inside the external $PLX_FLEET_DIR lane
-                  target dirs, AND inside the MAIN checkout's own `rust-modules/target*` (the one
-                  tree every other destructive mode leaves alone). Cargo keys each build by a
+                  target dirs, AND inside the MAIN checkout's own `rust-modules/target*` (the only mode
+                  that reaches into that tree's `deps/`; `--incremental` and `--evict` take only
+                  its `incremental` dirs). Cargo keys each build by a
                   metadata hash that folds in the exact feature/flag/profile combination (lib
                   test, `--no-default-features` check, devtools/hostsim, ARM); a source edit
                   reuses the SAME hash's files, but a hash nothing builds anymore — yesterday's
@@ -221,45 +295,76 @@ usage: tools/build-gc.sh [MODE] [-n]
                   cloned from, by the last time a lane restored from or refreshed it; a lane
                   built from it is unaffected (a clone owns its blocks), and the next lane to
                   finish a build makes a new one.
+  --ffmpeg-cache  the FFmpeg half of --cache and nothing else: the same shared build trees, the
+                  same per-key lock, the same $PLX_CACHE_MAX_DAYS, and the cargo seed left alone.
+                  It is the stage `--auto` runs under pressure, at $PLX_GC_AUTO_CACHE_DAYS.
   --seed          delete the cargo seed (`tools/cargo-seed.py`) that fresh lanes are cloned from
                   when no lane has restored from or refreshed it for $PLX_SEED_MAX_DAYS days
-                  (default 7). Once the lanes it was cloned from are gone its ~1.3 GB belongs
-                  to it alone, and this is the stage `--auto` runs for it under disk pressure
-                  (`--cache` waits for 30 days and never runs from `--auto`). The next lane to
-                  finish a build makes a new one; lanes already seeded are unaffected.
+                  (default 7). By hand only: neither `--auto` nor the planner ever evicts the
+                  seed, because the lanes cloned from it share its blocks on APFS, so deleting
+                  it frees almost nothing and makes every new lane's first build cold. The next
+                  lane to finish a build makes a new one; lanes already seeded are unaffected.
   --all           --incremental everywhere plus --lanes, --stale, --orphans and --cache, and the
                   main checkout's vendor build trees. Leaves the main checkout's target dirs
                   themselves in place — `--stale` only removes the superseded hashes inside them.
-  --auto          staged reclaim, driven by free space on this volume, and the mode a hook or
-                  launchd job runs unattended — see `tools/install-disk-watch.sh`. Always runs
-                  --orphans first (cheap, safe, unconditional). Below $PLX_GC_MIN_FREE_GIB GiB
-                  free (default 20): --incremental, then --worktrees, then --lanes restricted to
-                  lanes idle for at least $PLX_GC_IDLE_MIN minutes (default 60, judged by the
-                  newest mtime anywhere under the worktree, target dirs included) — a lane an
-                  agent might resume in the next few minutes is not the same as one nobody is
-                  touching, and a needless rebuild costs real money — then --stale, which is
-                  the one stage allowed to touch the MAIN checkout (age-gated only there, per
-                  --stale's own conservative rule; never the newest hash per crate). Never
-                  --cache, never a tracked file, never any main-checkout file --stale itself
-                  would not also remove standalone; finally --seed (the cargo seed, once no lane has
-                  used it for a week; under pressure only). Single-instance: a mkdir lock
-                  (stale-safe, $PLX_GC_LOCK_DIR) means a second --auto exits 0 quietly rather than
-                  racing the first. Logs one line per stage to $PLX_GC_LOG (default
+  --auto          reclaim driven by free space on this volume, and the mode a hook or launchd job
+                  runs unattended — see `tools/install-disk-watch.sh`. Always runs --orphans
+                  first (cheap, safe, unconditional). Below $PLX_GC_MIN_FREE_GIB GiB free
+                  (default 20): --worktrees restricted to lanes idle for at least
+                  $PLX_GC_IDLE_MIN minutes (default 60, judged by the newest mtime anywhere under
+                  the worktree and its fleet build tree, target dirs included — a lane an agent
+                  might resume in the next few minutes is not the same as one nobody is touching,
+                  and a needless rebuild costs real money) and holding no ignored file that is
+                  not build output (a lane with `src/config.local.h`, `pkg/auth.json` or its own
+                  notes is kept and the log says which paths kept it: nobody is there to read
+                  what the removal takes); then, if still below, an FFmpeg-only age-out of the
+                  shared build trees under $PLX_BUILD_CACHE untouched for $PLX_GC_AUTO_CACHE_DAYS
+                  days (default 7; --ffmpeg-cache, so the cargo seed is not touched and a held
+                  key lock keeps its key); then, if still below, the PLANNER's
+                  order: `tools/disk-budget.py reclaim --to $PLX_GC_MIN_FREE_GIB --emit` writes the
+                  plan and `--evict` follows it (garbage, other lanes' incremental caches, younger
+                  /tmp trees, whole idle lane trees, the `--stale` sweep, and the main checkout's
+                  incremental dirs only as the last resort), stopping at the threshold plus 4 GiB
+                  so the next tick does not reclaim again. A planner that fails or is missing
+                  deletes nothing. What the five fixed stages it replaces did differently: the
+                  main checkout's incremental cache and a lane's vendor build trees are no longer
+                  cleared by default, the cargo seed is never evicted, and PlxNative trees left
+                  under /tmp are now in scope. Never the cargo seed, never a tracked file. Single-instance:
+                  a mkdir lock (stale-safe, $PLX_GC_LOCK_DIR) means a second --auto exits 0 quietly
+                  rather than racing the first. Logs one line per stage to $PLX_GC_LOG (default
                   ~/Library/Logs/plxnative-build-gc.log on macOS,
                   ${XDG_STATE_HOME:-~/.cache}/plxnative/build-gc.log elsewhere), truncated to its
                   last ~200 lines past ~1 MB. `--auto -n` previews every stage the current free
-                  space would trigger, deletes nothing, and still takes the lock.
+                  space would trigger and deletes nothing; it takes no lock. With the OPT-IN
+                  cold store configured (tools/cold-store.py, docs/disk-budget.md "The cold store")
+                  there is one more stage, between --orphans and --worktrees: with free space
+                  under the store's park_below_gib (default 40) but at least the comfort line
+                  (PLX_GC_MIN_FREE_GIB) it MOVES idle lane and /tmp build trees to the cold
+                  volume (nothing is deleted) up to park_max_gib_per_run; under the comfort line
+                  it says so and parks nothing (the ladder deletes in seconds, a park holds the
+                  lock for a whole copy); without a config file --auto is exactly what it was.
+  --park          the cold store's pass by hand: move the idle build trees (idle for the store's
+                  park_idle_min, never the main checkout's, a live lane's or the seed) to the cold
+                  volume now, whatever the free space, up to park_max_gib_per_run, then prune the
+                  parked copies that no longer earn their space. Takes the auto lock (release and
+                  re-take between trees; stops after the current tree when a preflight is waiting
+                  for it). -n names what would move and changes nothing. No config file: says so.
   -n, --dry-run   print what would go, delete nothing.
 
 Nothing here touches a tracked file or the television. The only thing it removes from the shared
 cache under $PLX_BUILD_CACHE is what `--cache` finds unused for $PLX_CACHE_MAX_DAYS days (FFmpeg
-trees and the cargo seed); `--auto` never runs `--cache`, only `--seed` (the seed, after
-$PLX_SEED_MAX_DAYS days). Everything it removes is rebuilt by `make`.
+trees and the cargo seed), and what `--auto` finds unused for $PLX_GC_AUTO_CACHE_DAYS days while
+free space is below the comfort line (FFmpeg trees only: `--auto` never touches the seed).
+Everything it removes is rebuilt by `make`.
 USAGE
       exit 0 ;;
     *) echo "build-gc: unknown argument $a (try --help)" >&2; exit 2 ;;
   esac
 done
+if [ -n "$WANT_PLAN" ] || { [ "$MODE" = evict ] && [ -z "$PLAN_FILE" ]; }; then
+  echo "build-gc: --evict needs a plan file (tools/disk-budget.py reclaim --to GIB --emit prints one)" >&2
+  exit 2
+fi
 
 # --- `--auto` support ------------------------------------------------------------------------
 # Everything below is DEFINITIONS ONLY (a shell function body is not evaluated until it is
@@ -272,11 +377,12 @@ done
 # takes the FFmpeg lock, not after.
 #
 # `--auto` reclaims by SHELLING OUT to this same script, one mode at a time
-# (`sh "$SELF" --incremental`, `sh "$SELF" --worktrees`, ...), rather than reimplementing any
-# mode's logic a second time. That is not laziness — `--worktrees`' squash-merge ancestry check,
-# its live-build re-check immediately before `git worktree remove`, and `--lanes`' external-tree
-# cleanup are exactly the kind of logic that drifts the moment it is copied, and every one of
-# those modes already carries its own preflight (the busy guard, the empty-enumeration refusal).
+# (`sh "$SELF" --orphans`, `sh "$SELF" --worktrees`, `sh "$SELF" --evict PLAN`), rather than
+# reimplementing any mode's logic a second time. That is not laziness — `--worktrees`' squash-merge
+# check, its live-build re-check immediately before `git worktree remove`, and `--evict`'s re-probe of
+# every path before it renames one away are exactly the kind of logic that drifts the moment it is
+# copied, and every one of those modes already carries its own preflight (the busy guard, the
+# empty-enumeration refusal).
 # Re-running that preflight once per stage costs a few `pgrep`/`lsof` calls, not a rebuild.
 SELF="$ROOT/tools/build-gc.sh"
 
@@ -322,8 +428,10 @@ gc_log() {
 }
 
 # Has anything under this lane's worktree — sources, staged files, the target dirs beneath it —
-# been touched in the last $2 minutes? Used only to SPARE a lane from `--lanes` under `--auto`
-# pressure, never to decide whether a build is running (that is `in_live_checkout`, which this
+# been touched in the last $2 minutes? Used only to SPARE a lane: from `--worktrees` under `--auto`
+# (PLX_GC_AUTO_IDLE_MIN), and from `--evict` for a lane other than the running one (`ev_lane_active`,
+# the plan's own idle window) — and from `--lanes` when a human exports PLX_GC_AUTO_IDLE_MIN. Never
+# to decide whether a build is running (that is `in_live_checkout`, which this
 # does not replace). Deliberately a recursive `find -mmin`, not the directory's own mtime: a
 # target dir's top-level entry does not move while a compiler writes beneath it — see
 # `live_checkouts`' note on the identical trap — so the only honest answer is a walk. Piped into
@@ -360,10 +468,15 @@ idle_lane() {
 # process most likely to leave a lock behind — one killed mid `--worktrees` `du` sweep, or a
 # laptop that slept through it — is exactly the one that can never release it itself.
 AUTO_LOCK_DIR=${PLX_GC_LOCK_DIR:-${TMPDIR:-/tmp}/plx-build-gc-auto.lock}
+# 1 while THIS process holds the lock. The cold store's park pass releases and re-takes it between trees (and
+# hands it to a waiting preflight), so by the time the EXIT trap runs the directory may be somebody else's:
+# `release_auto_lock` removes it only while this flag says it is ours.
+AUTO_LOCK_HELD=0
 acquire_auto_lock() {
   if mkdir "$AUTO_LOCK_DIR" 2>/dev/null; then
     echo $$ >"$AUTO_LOCK_DIR/pid" 2>/dev/null || true
     ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' >"$AUTO_LOCK_DIR/pgid" || true
+    AUTO_LOCK_HELD=1
     return 0
   fi
   if ! owner_is_alive "$AUTO_LOCK_DIR" \
@@ -372,12 +485,19 @@ acquire_auto_lock() {
     if mkdir "$AUTO_LOCK_DIR" 2>/dev/null; then
       echo $$ >"$AUTO_LOCK_DIR/pid" 2>/dev/null || true
       ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' >"$AUTO_LOCK_DIR/pgid" || true
+      AUTO_LOCK_HELD=1
       return 0
     fi
   fi
   return 1
 }
-release_auto_lock() { rm -rf "$AUTO_LOCK_DIR" 2>/dev/null || true; }
+release_auto_lock() {
+  if [ "$AUTO_LOCK_HELD" = 1 ]; then rm -rf "$AUTO_LOCK_DIR" 2>/dev/null || true; AUTO_LOCK_HELD=0; fi
+}
+# Does the lock directory still name this process? (The park pass re-takes it with this pid after each tree.)
+auto_lock_is_ours() {
+  [ -d "$AUTO_LOCK_DIR" ] && [ "$(cat "$AUTO_LOCK_DIR/pid" 2>/dev/null)" = "$$" ]
+}
 
 # Run one stage as a fresh invocation of this script, log the free-space delta and reclaimed-line
 # count, and echo its own report through — under `-n` a caller (human or the gate that runs
@@ -397,14 +517,123 @@ run_auto_stage() {
   gc_log "$_name: reclaimed=$_n free $(fmt_kb "$_before")->$(fmt_kb "$_after")"
 }
 
-# The orchestrator. Stops staging the moment free space clears the threshold (real runs only —
-# under `-n` nothing is ever freed, so `cur` never moves and every stage the CURRENT pressure
-# would trigger is shown, which is the honest reading of "preview the plan"). `--orphans` runs
-# first and unconditionally: it is the cheapest, safest mode this script has, reclaiming trees
-# that literally nothing on the machine can refer to again, so there is no reason to gate it on
-# pressure at all. Everything past it is gated, and `--lanes` additionally passes
-# `PLX_GC_AUTO_IDLE_MIN` so that mode's own dispatch (below) spares any lane touched inside the
-# idle window — see `idle_lane`. Manual `--lanes` never sets that variable and is unaffected.
+# The planner pass. `tools/disk-budget.py reclaim` decides WHAT to evict and in WHAT ORDER (the ladder
+# in docs/disk-budget.md: garbage, then other lanes' incremental caches, then younger /tmp trees,
+# then whole idle lane trees, then the `--stale` sweep, and the main checkout's incremental dirs
+# only when nothing else is left); `--evict` is the only thing that deletes, and it re-checks every
+# path against the live machine immediately before it renames it away. The plan is a temp file read
+# once, so a planner that fails or is missing deletes NOTHING: a stage that cannot be planned is
+# skipped and logged, never replaced by a guess.
+#
+# `--no-build`: nothing is about to build (this runs from a hook or a timer), so there is no current
+# checkout to spare and no estimate to meet. `--to` is the threshold; the plan runs up to that plus
+# 4 GiB of hysteresis, so the very next tick does not reclaim again, and `--evict` re-reads free
+# space after every path and stops at that line.
+run_auto_planner() {
+  _planner="$ROOT/tools/disk-budget.py"
+  if [ ! -f "$_planner" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "auto: tools/disk-budget.py is not available here — the planner pass is skipped"
+    gc_log "planner: unavailable, skipped"
+    return 0
+  fi
+  _plan=$(mktemp "${TMPDIR:-/tmp}/plx-build-gc-plan.XXXXXX") || { gc_log "planner: no temp file, skipped"; return 0; }
+  if python3 -B "$_planner" reclaim --to "$1" --no-build --idle-min "$2" --root "$ROOT" --emit \
+       >"$_plan" 2>"$_plan.err" </dev/null; then
+    run_auto_stage "evict (planner order)" --evict "$_plan"
+  else
+    echo "auto: the planner failed — nothing was evicted by it:"
+    sed 's/^/  /' "$_plan.err"
+    gc_log "planner failed: $(head -n 1 "$_plan.err" 2>/dev/null)"
+  fi
+  rm -f "$_plan" "$_plan.err"
+}
+
+# The cold store's park-ahead stage (tools/cold-store.py, `docs/disk-budget.md` "The cold store"): between
+# `--orphans` and `--worktrees`, when a cold store is configured and free space is under its `park_below_gib`
+# (default 40) but still at least the comfort line (so idle trees move to the second volume BEFORE the ladder
+# must delete them, and never once it must: a park holds this lock for a whole copy to a slow disk while a
+# preflight that waits for it gives up after 60 s without evicting), `disk-budget.py park --auto` moves the
+# planner's idle whole-tree candidates, oldest first, up to `park_max_gib_per_run`; under the comfort line it
+# prints one line saying it skipped, and the stages below delete as they always did. It runs in python and takes
+# the lock from this shell for the duration: it releases and re-takes it between trees (naming this process each
+# time), and stops after the tree it is on (or the sweep it is in), giving the lock back, when a preflight is
+# waiting for it. Exit 3 is "nothing to say" (no cold store, or room enough): this
+# function then prints and logs NOTHING, which is what keeps an unconfigured `--auto` the run it always was.
+# Returns 1 when the lock is no longer ours and this run must end without touching it again.
+PARK_RAN=
+run_auto_park() {
+  PARK_RAN=
+  _planner="$ROOT/tools/disk-budget.py"
+  if [ ! -f "$_planner" ] || ! command -v python3 >/dev/null 2>&1; then return 0; fi
+  _before=$(free_kib); _before=${_before:-0}
+  _rc=0
+  if [ -n "$DRY" ]; then
+    _out=$(python3 -B "$_planner" park --auto --root "$ROOT" -n 2>&1 </dev/null) || _rc=$?
+  else
+    _out=$(python3 -B "$_planner" park --auto --lock-held --holder-pid $$ --root "$ROOT" 2>&1 </dev/null) || _rc=$?
+  fi
+  if [ "$_rc" -eq 3 ]; then return 0; fi
+  PARK_RAN=1
+  printf '%s\n' "$_out"
+  _after=$(free_kib); _after=${_after:-0}
+  _n=$(printf '%s\n' "$_out" | grep -cE '^  parked|^  would park' || true)
+  _why=$(printf '%s\n' "$_out" | sed -n 's/^park: stopped: //p' | head -n 1)
+  _note=
+  [ "$_rc" -eq 0 ] || [ "$_rc" -eq 4 ] || _note=" (the pass exited $_rc)"
+  gc_log "park: parked=$_n free $(fmt_kb "$_before")->$(fmt_kb "$_after")${_why:+ (stopped: $_why)}$_note"
+  if [ -z "$DRY" ] && ! auto_lock_is_ours; then
+    AUTO_LOCK_HELD=0
+    echo "auto: the park pass gave build-gc's lock back (a waiting preflight, or another reclaim took it): this run ends here"
+    return 1
+  fi
+  return 0
+}
+
+# `--park`, by hand: the same pass without the free-space gate (park what is idle now, up to the budget), with the
+# lock taken here. `-n` names what would move, changes nothing and takes no lock.
+run_park_mode() {
+  _planner="$ROOT/tools/disk-budget.py"
+  if [ ! -f "$_planner" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "build-gc: --park runs tools/disk-budget.py with python3; one is missing here — refusing." >&2
+    return 1
+  fi
+  if [ -z "$DRY" ]; then
+    if ! acquire_auto_lock; then
+      echo "build-gc: another reclaim holds $AUTO_LOCK_DIR — nothing parked; try again when it is done."
+      return 0
+    fi
+    trap release_auto_lock EXIT
+  fi
+  _rc=0
+  if [ -n "$DRY" ]; then
+    python3 -B "$_planner" park --root "$ROOT" -n </dev/null || _rc=$?
+  else
+    python3 -B "$_planner" park --lock-held --holder-pid $$ --root "$ROOT" </dev/null || _rc=$?
+    if ! auto_lock_is_ours; then AUTO_LOCK_HELD=0; fi
+  fi
+  if [ "$_rc" -eq 4 ]; then _rc=0; fi       # it gave the lock to a waiting preflight, which is its job
+  return "$_rc"
+}
+
+# The orchestrator. `--orphans` runs first and unconditionally: it is the cheapest, safest mode this
+# script has, reclaiming trees that literally nothing on the machine can refer to again, so there is
+# no reason to gate it on pressure at all. Then the cold store's park pass (`run_auto_park`, only with a
+# cold store configured, and only between the comfort line and the store's own `park_below_gib`: it MOVES
+# idle trees, deletes nothing, and sits before the comfort-line test because that line is below its own).
+# Below the threshold: `--worktrees` (a finished lane outright, but only one idle for the guard window,
+# as `--lanes` always demanded, and only one whose ignored files are all build output: nobody reads
+# what the removal takes), then the FFmpeg cache's age-out (`--ffmpeg-cache` at $PLX_GC_AUTO_CACHE_DAYS, default 7: a key unused for a week is
+# dead weight and the cheapest thing left to take; the cargo seed stays out of it), then the
+# planner's order. Under `-n` nothing is ever freed, so every stage the CURRENT pressure would
+# trigger is shown, which is the honest reading of "preview the plan".
+#
+# What changed from the five fixed stages (--incremental, --worktrees, --lanes, --stale, --seed):
+# the order is the planner's, so the main checkout's incremental cache and a lane's vendor build
+# trees are no longer cleared by default (the former is the tree a human iterates in and waits for
+# the last rung; the latter are not derived from cargo and are `--lanes`/`--all` only), the cargo seed
+# is never evicted (its blocks are shared with the lanes cloned from it, so it frees almost nothing;
+# `--seed` remains for hand use), PlxNative trees left under /tmp are now in scope, and the stop
+# line is the threshold plus the hysteresis rather than the threshold itself.
 run_auto_mode() {
   if [ -z "$DRY" ]; then
     if ! acquire_auto_lock; then
@@ -416,37 +645,47 @@ run_auto_mode() {
 
   _min_gib=${PLX_GC_MIN_FREE_GIB:-20}
   _idle_min=${PLX_GC_IDLE_MIN:-60}
+  _cache_days=${PLX_GC_AUTO_CACHE_DAYS:-7}
   case "$_min_gib" in ''|*[!0-9]*) _min_gib=20 ;; esac
   case "$_idle_min" in ''|*[!0-9]*) _idle_min=60 ;; esac
+  case "$_cache_days" in ''|*[!0-9]*) _cache_days=7 ;; esac
   _min_kib=$((_min_gib * 1048576))
 
   _cur=$(free_kib); _cur=${_cur:-0}
-  echo "== auto: staged reclaim (threshold ${_min_gib} GiB free, lane idle guard ${_idle_min}m) =="
+  echo "== auto: planner-ordered reclaim (threshold ${_min_gib} GiB free, lane idle guard ${_idle_min}m) =="
   gc_log "start free=$(fmt_kb "$_cur") threshold=${_min_gib}GiB idle=${_idle_min}m dry=${DRY:-0}"
 
   run_auto_stage orphans --orphans
   _cur=$(free_kib); _cur=${_cur:-0}
 
+  # The park-ahead stage runs from the comfort line up to the cold store's own line (park_below_gib, default 40),
+  # which is above the comfort line the stages below use, so it sits BEFORE the "already above threshold" early
+  # exit (which still skips the worktrees, the FFmpeg age-out and the planner pass, as it always did); under the comfort line it
+  # says it skipped and parks nothing. A no-op, and silent, without a cold store.
+  if ! run_auto_park; then
+    gc_log "end free=$(fmt_kb "$(free_kib)") (the lock was handed over during the park pass)"
+    return 0
+  fi
+  if [ -n "$PARK_RAN" ] && [ -z "$DRY" ]; then _cur=$(free_kib); _cur=${_cur:-0}; fi
+
   if [ "$_cur" -lt "$_min_kib" ] 2>/dev/null; then
-    run_auto_stage incremental --incremental
+    PLX_GC_AUTO_IDLE_MIN=$_idle_min
+    export PLX_GC_AUTO_IDLE_MIN
+    run_auto_stage "worktrees (idle >= ${_idle_min}m)" --worktrees
+    unset PLX_GC_AUTO_IDLE_MIN
     [ -n "$DRY" ] || { _cur=$(free_kib); _cur=${_cur:-0}; }
   else
-    echo "auto: free space already above threshold — incremental/worktrees/lanes skipped"
+    echo "auto: free space already above threshold — worktrees, the FFmpeg age-out and the planner pass skipped"
   fi
   if [ "$_cur" -lt "$_min_kib" ] 2>/dev/null; then
-    run_auto_stage worktrees --worktrees
+    # FFmpeg keys only, by this stage's own days: a subshell, so the override is gone for the planner pass.
+    # The cargo seed is `--cache`'s and `--seed`'s, never this stage's (see `--ffmpeg-cache`).
+    ( PLX_CACHE_MAX_DAYS=$_cache_days; export PLX_CACHE_MAX_DAYS
+      run_auto_stage "ffmpeg cache (unused > ${_cache_days}d)" --ffmpeg-cache )
     [ -n "$DRY" ] || { _cur=$(free_kib); _cur=${_cur:-0}; }
   fi
   if [ "$_cur" -lt "$_min_kib" ] 2>/dev/null; then
-    PLX_GC_AUTO_IDLE_MIN=$_idle_min run_auto_stage "lanes (idle >= ${_idle_min}m)" --lanes
-    [ -n "$DRY" ] || { _cur=$(free_kib); _cur=${_cur:-0}; }
-  fi
-  if [ "$_cur" -lt "$_min_kib" ] 2>/dev/null; then
-    run_auto_stage stale --stale
-    [ -n "$DRY" ] || { _cur=$(free_kib); _cur=${_cur:-0}; }
-  fi
-  if [ "$_cur" -lt "$_min_kib" ] 2>/dev/null; then
-    run_auto_stage seed --seed
+    run_auto_planner "$_min_gib" "$_idle_min"
     [ -n "$DRY" ] || { _cur=$(free_kib); _cur=${_cur:-0}; }
   fi
 
@@ -518,12 +757,12 @@ checkout_kb() {
 }
 
 # The derived-tree names, in one place. `rust-modules/target*` covers every feature set's dir
-# (target, -release, -sim, -lab, -sym, -macapp, -shots); the vendor entries are the FFmpeg and
+# (target, -release, -sim, -lab, -sym, -macapp, -shots, -fast, -hostsim); the vendor entries are the FFmpeg and
 # Sentry source and object trees, whose only product is the small prefix beside them.
 lane_trees() {
   for d in "$1"/rust-modules/target*; do
     case "$d" in *'*'*) continue ;; esac
-    if [ -d "$d" ]; then echo "$d"; fi
+    if [ ! -L "$d" ] && [ -d "$d" ]; then echo "$d"; fi
   done
   vendor_trees "$1"
 }
@@ -542,7 +781,7 @@ vendor_trees() {
 incremental_trees() {
   for d in "$1"/rust-modules/target*/debug/incremental; do
     case "$d" in *'*'*) continue ;; esac
-    if [ -d "$d" ]; then echo "$d"; fi
+    if [ ! -L "${d%/debug/incremental}" ] && [ -d "$d" ]; then echo "$d"; fi
   done
 }
 
@@ -603,6 +842,19 @@ STALE_SECS=$((STALE_HOURS * 3600))
 HASH16_RE='[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
 file_mtime() { stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null; }
 file_size()  { stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null; }
+# The device a path lives on, or nothing when it cannot be read. GNU's `stat -c %d` comes FIRST, unlike the
+# two helpers above: on Linux `stat -f` is the FILESYSTEM format, where `%d` is a free-inode count, so trying
+# the BSD spelling first would answer wrongly there instead of failing over (macOS's `stat` rejects `-c`).
+path_dev() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; }
+# Is `$1` on another volume than the build (`$ROOT`)? Removing a lane there frees nothing the build can use,
+# and reading it (an idle-window `find`, `git status`, the squash check) walks a disk the build never touches,
+# which on a spinning USB disk takes minutes per lane. A device that cannot be read on either side reads as
+# the same volume, i.e. the behaviour this check did not exist for.
+on_other_volume() {
+  _ov_a=$(path_dev "$1" || true)
+  _ov_b=$(path_dev "$ROOT" || true)
+  [ -n "$_ov_a" ] && [ -n "$_ov_b" ] && [ "$_ov_a" != "$_ov_b" ]
+}
 
 # Every `deps/` directory under one `target*` root — covers a plain `target/debug/deps` as well
 # as a cross-build's `target/<triple>/debug/deps`, and every other feature-set root this script
@@ -615,7 +867,7 @@ stale_deps_dirs() {
 target_roots() {
   for d in "$1"/rust-modules/target*; do
     case "$d" in *'*'*) continue ;; esac
-    if [ -d "$d" ]; then echo "$d"; fi
+    if [ ! -L "$d" ] && [ -d "$d" ]; then echo "$d"; fi
   done
 }
 external_target_roots() {
@@ -720,14 +972,16 @@ run_stale_sweep_dir() {
   }
 }
 
-# AN EXPORTED `CARGO_TARGET_DIR` IS REPORTED AND NEVER DELETED, and the asymmetry is the whole
+# AN EXPORTED `CARGO_TARGET_DIR` IS LISTED AND NEVER TARGETED, and the asymmetry is the whole
 # point. A path from the environment is arbitrary: it can be a directory shared by several
 # checkouts, it can be somewhere entirely unrelated to this project, and its PARENT's basename —
 # which is how an external tree is matched back to a lane — means nothing at all, so the orphan
-# test would classify it from a coincidence. Deleting it would be exactly the "preserve unrelated
-# generated artifacts" rule this repository states outright. Every destructive mode is therefore
-# scoped to $FLEET_DIR, whose layout this script defines; anything else is shown so you can decide
-# for yourself.
+# test would classify it from a coincidence. Deleting a tree BECAUSE the environment names it would
+# be exactly the "preserve unrelated generated artifacts" rule this repository states outright. The
+# destructive scope is therefore $FLEET_DIR, whose layout this script defines, plus (for `--evict`
+# only) the planner's own /tmp discovery: a cargo tree under /tmp or $TMPDIR that carries a PlxNative
+# marker and has sat idle past the plan's window. An exported tree that happens to be one of those is
+# found by that rule, never by the export; anything else is shown so you can decide for yourself.
 env_trees_report_only() {
   for d in ${CARGO_TARGET_DIR:+"$CARGO_TARGET_DIR"} ${SIM_TDIR:+"$SIM_TDIR"}; do
     [ -d "$d" ] || continue
@@ -818,10 +1072,14 @@ ffmpeg_lock_held() {
   fi
   return 1
 }
-build_is_running() {
+builders_running() {
   for n in cargo rustc make cc1 arm-webos-linux-gnueabi-gcc; do
     if pgrep -x "$n" >/dev/null 2>&1; then echo "a running $n"; return 0; fi
   done
+  return 1
+}
+build_is_running() {
+  builders_running && return 0
   ffmpeg_lock_held
 }
 
@@ -910,15 +1168,13 @@ live_checkouts() {
   # one tree never collected. That `make` is not compiling anything; it is blocked waiting on this
   # script. Walk the parent chain and exclude it. A sibling `cargo` in the same checkout is still
   # found by its own cwd, so nothing real stops being protected.
-  _anc=" "
-  _p=$$
-  _hops=0
-  while [ "$_p" -gt 1 ] && [ "$_hops" -lt 32 ]; do
-    _anc="$_anc$_p "
-    _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ') || _p=0
-    case "$_p" in ''|*[!0-9]*) _p=0 ;; esac
-    _hops=$((_hops + 1))
-  done
+  # ONE read of the process table and one awk, however deep the chain: a `ps -p` per hop was ten-odd
+  # process spawns per stage, in every stage of an `--auto`, and a spawn is the expensive thing on a
+  # loaded machine. A `ps` that fails leaves just this process, the same answer the per-hop form gave.
+  _anc=" $(ps -axo pid=,ppid= 2>/dev/null | awk -v me="$$" '
+    { parent[$1] = $2 }
+    END { p = me; for (h = 0; p > 1 && h < 32; h++) { printf "%s ", p; p = parent[p] + 0 } }') "
+  case "$_anc" in *" $$ "*) ;; *) _anc=" $$ " ;; esac
   _pids=""
   for n in cargo rustc make cc1 arm-webos-linux-gnueabi-gcc; do
     _found=$(pgrep -x "$n" 2>/dev/null) || true
@@ -1037,6 +1293,23 @@ worktree_records() {
 # so a locked worktree reads as `locked` even if it also happens to be dirty. `building` protects
 # a checkout a live compiler is writing into, the same guard `--lanes`/`--orphans` use via
 # `in_live_checkout`.
+#
+# WHAT "ON MAIN" MEANS: `origin/main` when this repository has one, else the local `main`. The local
+# branch is only as new as the last `git merge` someone ran, and on a machine where lanes land by
+# squash on GitHub it is days behind: judged against it every lane that has landed reads `unmerged`
+# and is kept forever (measured 2026-10-19: the report's "merged" lanes were all "unmerged" here).
+# `tools/disk-budget.py` makes the same choice (`base_ref`), so the report and this mode agree. It
+# is resolved ONCE, at top level, because this function runs inside `worktree_records | while`, a
+# subshell whose assignments would not survive. Empty when there is neither: nothing reads merged.
+resolve_base_ref() {
+  for _r in refs/remotes/origin/main refs/heads/main; do
+    if git -C "$MAIN" rev-parse --verify --quiet "$_r^{commit}" >/dev/null 2>&1; then
+      printf '%s' "$_r"; return 0
+    fi
+  done
+  return 0
+}
+BASE_REF=
 worktree_reason() {
   _w=$1 _sha=$2 _locked=$3
   [ "$_w" = "$MAIN" ] && { echo main; return; }
@@ -1044,18 +1317,451 @@ worktree_reason() {
   [ "$_locked" = "1" ] && { echo locked; return; }
   if in_live_checkout "$_w" 2>/dev/null; then echo building; return; fi
   if [ -n "$(git -C "$_w" status --porcelain 2>/dev/null)" ]; then echo dirty; return; fi
-  if git -C "$_w" merge-base --is-ancestor "$_sha" main 2>/dev/null; then echo ""; return; fi
-  # A detached HEAD that is an ancestor of main is caught above. Everything else — a branch tip,
-  # detached or not — goes through the squash check: three-way merge `main` with `$_sha` and
-  # compare the resulting tree to `main`'s own. No conflicts and no difference means every byte
+  [ -n "$BASE_REF" ] || { echo unmerged; return; }
+  if git -C "$_w" merge-base --is-ancestor "$_sha" "$BASE_REF" 2>/dev/null; then echo ""; return; fi
+  # A detached HEAD that is an ancestor of the base is caught above. Everything else — a branch tip,
+  # detached or not — goes through the squash check: three-way merge the base with `$_sha` and
+  # compare the resulting tree to the base's own. No conflicts and no difference means every byte
   # the lane ever added is already on trunk, whether that arrived by squash-merge or by hand.
-  _mt=$(git -C "$_w" merge-tree --write-tree main "$_sha" 2>/dev/null) || { echo unmerged; return; }
+  # `merge-tree --write-tree` WRITES the merged tree (and any merged blob) into the object store, and
+  # this runs for every lane that is not an ancestor, on every `--worktrees` and so every hourly
+  # `--auto`: against the real store that is a loose object per unmerged lane per change on either
+  # side, kept until a `git gc`. So it runs against a throwaway object directory with the real one as
+  # an alternate to read from (`tools/disk-budget.py`'s `is_merged` does the same). The tree id it
+  # prints is all that is kept.
+  _objs=$(git -C "$_w" rev-parse --path-format=absolute --git-path objects 2>/dev/null) || { echo unmerged; return; }
+  _scratch=$(mktemp -d "${TMPDIR:-/tmp}/plx-build-gc-merge.XXXXXX" 2>/dev/null) || { echo unmerged; return; }
+  _mt=$(GIT_OBJECT_DIRECTORY=$_scratch GIT_ALTERNATE_OBJECT_DIRECTORIES=$_objs \
+        git -C "$_w" merge-tree --write-tree "$BASE_REF" "$_sha" 2>/dev/null) || { rm -rf "$_scratch"; echo unmerged; return; }
+  rm -rf "$_scratch"
   _mt=$(printf '%s\n' "$_mt" | head -1)
-  _maintree=$(git -C "$MAIN" rev-parse 'main^{tree}' 2>/dev/null)
+  _maintree=$(git -C "$MAIN" rev-parse "$BASE_REF^{tree}" 2>/dev/null)
   if [ -n "$_mt" ] && [ "$_mt" = "$_maintree" ]; then echo ""; else echo unmerged; fi
 }
 
+# IGNORED FILES GO WITH A WORKTREE. `git worktree remove` deletes everything in the checkout that git does
+# not track, ignored files included, and "working tree clean" (`worktree_reason`'s `dirty` test) does not see
+# them: a lane can hold `src/config.local.h` (the real Plex token), `tests/manifest.local.json`, `pkg/auth.json`,
+# `pkg/lab.json`, `.tv-host`, `.tv-mac` and the other gitignored private files `.claude/hooks/outbound-guard.py`
+# lists, or its own notes and captures, none of which `make` can rebuild. Before the squash check read
+# `origin/main` this never fired for a squash-merged lane; now `--auto` reaches them unattended, hourly.
+#
+# `derived_output` says whether one IGNORED path (relative to the worktree, no trailing slash) is output that
+# `make` or a tool regenerates from tracked sources. It is an ALLOW-list on purpose: a path nobody classified
+# is NOT build output, and the failure of a missing entry is a lane that stays (logged, with the path) until
+# someone looks, where the failure of a wrong entry is a deleted token. The source is `.gitignore` itself, whose
+# sections say which of their entries are derived; the first line is the `lane_trees` glob and the vendor line
+# covers `vendor_trees` and the sibling trees that function does not list (`--lanes` reclaims a tree's CONTENTS,
+# this asks whether the path is only ever output). `ci/test_build_gc.py` walks every `.gitignore` pattern and fails
+# on one that is neither listed here nor named there as kept, so the two cannot drift. `pkg/*` is deliberately
+# NOT a pattern: `pkg/auth.json`, `pkg/lab.json`, `pkg/telemetry.local.json` and `pkg/diagnostics/` live there.
+# Kept on purpose, though cheap to refetch: what was PULLED FROM THE TV (`.abi-cache/`, `sysroot/`,
+# `tests/fixtures/softfloat/arm.tbl`), which needs the one television to get back.
+derived_output() {
+  case "$1" in
+    rust-modules/target*) ;;                                    # every feature set's cargo target dir
+    vendor/ffmpeg-*|vendor/sentry-native-*|vendor/libass-*|vendor/downloads|vendor/nanosvg|vendor/vendor) ;;
+    pkg/plxnative|pkg/plxnative-storage|pkg/plxnative-stackwalk|pkg/plxnative.debug|pkg/threadprobe) ;;
+    pkg/mali-irq-sample|pkg/sockprobe|pkg/logmprobe) ;;
+    pkg/*.ipk|pkg/ipk.sha256|pkg/lib*-plx.so.*|pkg/libass-plx-host.so.0*|pkg/libass-plx.0.dylib.*.new) ;;
+    pkg/*.dylib|pkg/symbols|pkg/.ffabi-ok|pkg/.ffabi-host-ok|pkg/.build-config|pkg/.config-local-stamp) ;;
+    pkg/.flavor|pkg/PlxNative.app|pkg/PlxNative-*|pkg/*.link.*|pkg/link-evidence) ;;
+    ipkroot/*.tar.gz|ipkroot/debian-binary|ipkroot/data/usr|stub/*.so|*.o) ;;
+    tools/node_modules|__pycache__|*/__pycache__|*.pyc|.DS_Store|*/.DS_Store) ;;
+    fuzz/target|fuzz/Cargo.lock|fuzz/.lock-base|fuzz/seeds|fuzz/corpus|fuzz/coverage) ;;   # `make fuzz-hud`: a copied lock, generated seeds, a corpus that regrows. NOT fuzz/artifacts: a crash input is a finding
+    .tv-*.pid|.tv-*.log) ;;                                     # a session's scratch, not its address or password
+    tests/fixtures/out|tests/fixtures/*.mkv|tests/fixtures/*.mp4|tests/fixtures/*.sup|tests/fixtures/fixtures.json) ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+# The ignored paths in worktree `$1` that are NOT build output, one per line (empty: removing it takes nothing
+# `make` cannot rebuild). `--ignored=matching` names each ignored path at the granularity of the pattern that
+# ignores it (`vendor/downloads/`, not a `vendor/` that merely contains it), and a directory is never walked, so
+# a multi-gigabyte `target/` costs one line. Returns 1 when git cannot answer — the caller must not read that
+# as "nothing". A path git quotes (spaces) never matches `derived_output`, so it is listed: kept, not guessed at.
+private_ignored_paths() {
+  _pst=$(git -C "$1" -c core.quotePath=false status --porcelain --ignored=matching 2>/dev/null) || return 1
+  printf '%s\n' "$_pst" | sed -n 's/^!! //p' | while IFS= read -r _pp; do
+    _pp=${_pp%/}
+    if ! derived_output "$_pp"; then printf '%s\n' "$_pp"; fi
+  done
+}
+# `$1` heading, `$2` newline-separated paths: at most fifty under the heading (a `*.log` pattern can ignore
+# thousands of files), the rest as a count.
+print_paths() {
+  printf '%s\n' "$2" | awk -v h="$1" 'NR <= 50 { if (NR == 1) print h; print "      " $0 }
+                                      END { if (NR > 50) printf "      ... and %d more\n", NR - 50 }'
+}
+# By hand: what removing the worktree takes that `make` cannot rebuild, or that git could not say. Reads the
+# `--worktrees` loop's `_priv` / `_priv_ok`; `$1` is the heading.
+print_private_note() {
+  if [ -z "$_priv_ok" ]; then printf '      git could not list its ignored files\n'
+  elif [ -n "$_priv" ]; then print_paths "$1" "$_priv"; fi
+}
+# The same for the log: one line, the first five.
+join_paths() {
+  printf '%s\n' "$1" | awk 'NR <= 5 { s = s (NR > 1 ? ", " : "") $0 }
+                            END { if (NR > 5) s = s sprintf(", ... and %d more", NR - 5); print s }'
+}
+
 install_worktree_cargo_policy
+BASE_REF=$(resolve_base_ref)
+
+# --- `--evict PLAN`: the ONE narrow deleting mode the planner drives ---------------------------------
+#
+# `tools/disk-budget.py reclaim --to GIB --emit` writes a plan (what to evict, in what order, with
+# what free-space goal; the format is `emit` in that file). THIS is the only code that deletes from
+# it, and it treats the plan as UNTRUSTED INPUT: a stale plan, a hand-edited plan and a plan from a
+# future planner must all fail safe. Every line is therefore re-derived from the machine, not read:
+#
+#   1. WHAT IT IS. The path is resolved physically and must BE one of: a registered checkout's
+#      `rust-modules/target*` (or an `incremental` dir inside one), a `target*` under $PLX_FLEET_DIR,
+#      an interrupted delete's leftover under the build cache, or a PlxNative cargo tree found by the
+#      planner's own `/tmp` discovery (`disk-budget.py tmp-trees`: one scanner, not two). Anything
+#      else (a tracked file, `pkg/`, `vendor/`, a non-PlxNative tree, a symlink, a path nowhere near
+#      a checkout, a live FFmpeg cache entry, the cargo seed) is REFUSED, loudly, and the run exits 1.
+#      `target_roots`, not `lane_trees`: the latter includes the vendor build trees.
+#   2. WHAT RUNG IT MAY BE. (class, rung, scope) must be an eviction the ladder can make: the main
+#      checkout only gives up an `incremental` dir at rung 6; the checkout this runs from only a
+#      rung-6 `incremental` in mode `current` (a rung 0/2/4 line naming it is skipped as spared);
+#      whole trees only from other lanes.
+#   3. WHETHER IT IS LIVE, asked again IMMEDIATELY BEFORE the rename, per path: a builder running in
+#      its checkout (`live_checkouts`, refreshed every time), and `disk-budget.py probe`: a held
+#      cargo lock, a held per-checkout `make check` lock, an open file under the tree, a tracked file,
+#      and for a /tmp tree its age by the LATER of mtime and ctime (a fixture backdated with `utime`
+#      is not old). Lane-level idleness (`idle_lane`, the whole worktree) is judged for OTHER lanes
+#      only, and not again for a lane this run has already taken something from, whose directory
+#      mtimes this run itself just moved. A live tree is skipped, not refused: the plan was right
+#      when it was written.
+#   4. Rename to `<tree>.tombstone.<pid>.<n>` (a sibling of the tree root, so a later sweep finds an
+#      interrupted delete), then `rm -rf`. A log line says what was freed and from whom.
+#
+# It does NOT take the machine-wide FFmpeg-lock refusal the other modes begin with (docs/
+# disk-budget.md, "Concurrency"): it never touches the FFmpeg cache's live entries (bar a tombstone) —
+# it does remove day-old cargo-seed leftovers — so a build in there is not a reason to leave a full disk
+# full. After every path it re-reads free space and stops at the plan's goal; the
+# plan's `stale` line runs `--stale` in its own rung-5 slot; a last `settle:` line says whether the
+# free space it re-read covers the build's estimate plus the reserve.
+EV_WT_FILE=
+EV_MAIN=
+EV_ROOT=
+EV_CLASS=
+EV_TREE=
+EV_CHECKOUT=
+EV_LANE=
+EV_WHY=
+EV_LANE_WHY=
+EV_SPARE=
+EV_TMP_TREES=
+EV_TMP_LOADED=
+EV_TOUCHED="|"
+EV_N=0
+EV_DONE=0
+EV_SKIPPED=0
+EV_REFUSED=0
+EV_FREED_KIB=0
+EV_EXIT=0
+
+ev_py() { python3 -B "$ROOT/tools/disk-budget.py" "$@" </dev/null; }
+ev_cleanup() { cleanup_live; if [ -n "$EV_WT_FILE" ]; then rm -f "$EV_WT_FILE"; fi; }
+ev_refuse() {
+  printf '  REFUSED          %s  (%s)\n' "$1" "$2" >&2
+  EV_REFUSED=$((EV_REFUSED + 1))
+}
+ev_skip() {
+  printf '  in use, skipped  %s  (%s)\n' "$1" "$2"
+  EV_SKIPPED=$((EV_SKIPPED + 1))
+}
+# The physical path of an existing directory (symlinks resolved), or non-zero.
+ev_phys() { [ -n "$1" ] || return 1; (cd -P "$1" 2>/dev/null && pwd -P); }
+
+# Is $1 the tree root $2 itself, or an `incremental` dir one or two levels below it
+# (`<tree>/<profile>/incremental`, `<tree>/<triple>/<profile>/incremental`)? Nothing deeper.
+ev_within() {
+  [ "$1" = "$2" ] && return 0
+  case "$1" in "$2"/*) ;; *) return 1 ;; esac
+  _rel=${1#"$2"/}
+  case "$_rel" in */*/*/*) return 1 ;; esac
+  case "$_rel" in */incremental) return 0 ;; esac
+  return 1
+}
+
+# Sets EV_CLASS (lane|main|fleet|tmp|leftover), EV_TREE (the tree root the path belongs to),
+# EV_CHECKOUT (the owning checkout, physical) and EV_LANE (a fleet tree's lane name); returns
+# non-zero when the path is none of them.
+ev_classify() {
+  _real=$1
+  EV_CLASS= EV_TREE= EV_CHECKOUT= EV_LANE=
+  while IFS= read -r _w; do
+    [ -n "$_w" ] || continue
+    _wp=$(ev_phys "$_w") || continue
+    for _t in "$_wp"/rust-modules/target*; do
+      case "$_t" in *'*'*) continue ;; esac
+      if [ -d "$_t" ] && ev_within "$_real" "$_t"; then
+        EV_TREE=$_t
+        EV_CHECKOUT=$_wp
+        if [ "$_wp" = "$EV_MAIN" ]; then EV_CLASS=main; else EV_CLASS=lane; fi
+        return 0
+      fi
+    done
+  done < "$EV_WT_FILE"
+  if [ -n "$FLEET_DIR" ] && [ -d "$FLEET_DIR" ]; then
+    _fp=$(ev_phys "$FLEET_DIR") || _fp=
+    if [ -n "$_fp" ]; then
+      for _t in "$_fp"/*/target*; do
+        case "$_t" in *'*'*) continue ;; esac
+        if [ -d "$_t" ] && ev_within "$_real" "$_t"; then
+          EV_TREE=$_t
+          EV_CLASS=fleet
+          EV_LANE=${_t#"$_fp"/}
+          EV_LANE=${EV_LANE%%/*}
+          while IFS= read -r _w; do
+            [ -n "$_w" ] || continue
+            if [ "${_w##*/}" = "$EV_LANE" ]; then EV_CHECKOUT=$(ev_phys "$_w") || EV_CHECKOUT=; fi
+          done < "$EV_WT_FILE"
+          return 0
+        fi
+      done
+    fi
+  fi
+  _cache=${PLX_BUILD_CACHE-$HOME/.cache/plxnative}
+  if [ -n "$_cache" ] && [ -d "$_cache" ]; then
+    _cp=$(ev_phys "$_cache") || _cp=
+    case "$_real" in
+      "$_cp"/cargo-seed/*.tmp.*|"$_cp"/cargo-seed/*.restore.*|"$_cp"/cargo-seed/*.old.*|"$_cp"/cargo-seed/*.tombstone.*|"$_cp"/ffmpeg/*.tombstone.*)
+        _rest=${_real#"$_cp"/}
+        case "$_rest" in
+          */*/*) ;;
+          *) EV_CLASS=leftover; EV_TREE=$_real; return 0 ;;
+        esac ;;
+    esac
+  fi
+  if [ -z "$EV_TMP_LOADED" ]; then
+    EV_TMP_TREES=$(ev_py tmp-trees --root "$ROOT" 2>/dev/null) || EV_TMP_TREES=
+    EV_TMP_LOADED=1
+  fi
+  if [ -n "$EV_TMP_TREES" ] && printf '%s\n' "$EV_TMP_TREES" | grep -qxF "$_real"; then
+    EV_CLASS=tmp
+    EV_TREE=$_real
+    return 0
+  fi
+  return 1
+}
+
+# May a tree of class $1 give up `$3` at rung `$2`, in mode `$4`? Sets EV_WHY when not, and EV_SPARE when the
+# line is a fair eviction in itself but not from the checkout this runs from (skipped, not refused).
+ev_allowed() {
+  _c=$1 _r=$2 _s=$3 _m=$4 _p=$5
+  EV_SPARE=
+  # An interrupted delete is a tree ROOT named `<tree>.tombstone.<pid>.<n>`; the mark is read from the last
+  # path component only, so a checkout that happens to have it further up its path gets no such licence.
+  case "${_p##*/}" in
+    *.tombstone.*)
+      if [ "$_r:$_s" = "0:tree" ]; then return 0; fi
+      EV_WHY="an interrupted delete is only ever a rung-0 tree"; return 1 ;;
+  esac
+  # The checkout this runs FROM is the one about to build (a build-entry preflight runs here), so it
+  # gives up exactly one thing: a rung-6 `incremental` dir, in mode `current`. Its own tree at rungs 0,
+  # 2 or 4 is what the planner never writes for a build (the current checkout is excluded from them) and
+  # would be pure waste to take; `reclaim --no-build` run by hand from a lane can name it, though, so
+  # that line is SPARED (skipped, EV_SPARE) rather than refused. Lane and fleet trees both belong to a
+  # checkout (a fleet tree is its lane's CARGO_TARGET_DIR kept outside the worktree).
+  case "$_c:$_r:$_s" in
+    lane:0:tree|lane:2:incremental|lane:4:tree|fleet:0:tree|fleet:2:incremental|fleet:4:tree)
+      if [ -n "$EV_CHECKOUT" ] && [ "$EV_CHECKOUT" = "$EV_ROOT" ]; then
+        EV_SPARE=1
+        EV_WHY="the checkout --evict runs from gives up only a rung-6 incremental dir, in mode current"
+        return 1
+      fi ;;
+    tmp:0:tree|tmp:3:tree) ;;
+    leftover:0:tree) ;;
+    main:6:incremental) ;;
+    lane:6:incremental|fleet:6:incremental)
+      if [ -n "$EV_CHECKOUT" ] && [ "$EV_CHECKOUT" = "$EV_ROOT" ] && [ "$_m" = current ]; then return 0; fi
+      EV_WHY="rung 6 reaches a lane's tree only as the current checkout's, in mode current"; return 1 ;;
+    main:*) EV_WHY="the main checkout gives up only an incremental dir, at rung 6"; return 1 ;;
+    *) EV_WHY="rung $_r $_s is not an eviction the ladder makes from a $_c tree"; return 1 ;;
+  esac
+  return 0
+}
+
+# Has this lane's worktree (and, for a fleet tree, its lane dir under $PLX_FLEET_DIR) changed within
+# $1 minutes? Skips a directory this run has itself already taken something from. A checkout on another
+# volume than the build (a lane on a slow external disk; its fleet tree is on the build's own) is NOT
+# walked: the `find` below is minutes per lane there, so it counts as active and its tree is spared
+# (EV_LANE_WHY says which). Spared is the safe side: it is only ever one more tree this run leaves.
+ev_lane_active() {
+  _m=$1
+  EV_LANE_WHY="its lane changed within $_m min"
+  if [ -n "$EV_CHECKOUT" ] && on_other_volume "$EV_CHECKOUT"; then
+    EV_LANE_WHY="its lane's checkout is on another volume, which is not walked to tell whether the lane is idle"
+    return 0
+  fi
+  if [ -n "$EV_CHECKOUT" ]; then
+    case "$EV_TOUCHED" in *"|$EV_CHECKOUT|"*) ;; *) idle_lane "$EV_CHECKOUT" "$_m" || return 0 ;; esac
+  fi
+  if [ "$EV_CLASS" = fleet ]; then
+    _lanedir=$(dirname "$EV_TREE")
+    case "$EV_TOUCHED" in *"|$_lanedir|"*) ;; *) idle_lane "$_lanedir" "$_m" || return 0 ;; esac
+  fi
+  return 1
+}
+
+# One `evict` line: rung scope est_kib owner idle_min mode path.
+ev_line() {
+  _rung=$1 _scope=$2 _est=$3 _owner=$4 _idle=$5 _mode=$6 _path=$7
+  case "$_rung" in [0-6]) ;; *) ev_refuse "$_path" "bad rung '$_rung'"; return 0 ;; esac
+  case "$_scope" in tree|incremental) ;; *) ev_refuse "$_path" "bad scope '$_scope'"; return 0 ;; esac
+  case "$_est" in ''|*[!0-9]*) ev_refuse "$_path" "bad estimate '$_est'"; return 0 ;; esac
+  case "$_idle" in ''|*[!0-9]*) ev_refuse "$_path" "bad idle minutes '$_idle'"; return 0 ;; esac
+  case "$_mode" in normal|current) ;; *) ev_refuse "$_path" "bad mode '$_mode'"; return 0 ;; esac
+  case "$_path" in /*) ;; *) ev_refuse "$_path" "not an absolute path"; return 0 ;; esac
+  if [ -L "$_path" ]; then ev_refuse "$_path" "a symlink"; return 0; fi
+  if [ ! -e "$_path" ]; then printf '  already gone     %s\n' "$_path"; return 0; fi
+  if [ ! -d "$_path" ]; then ev_refuse "$_path" "not a directory"; return 0; fi
+  _real=$(ev_phys "$_path") || { ev_refuse "$_path" "cannot be resolved"; return 0; }
+  if ! ev_classify "$_real"; then
+    ev_refuse "$_path" "not a derived PlxNative build tree: not under a checkout's rust-modules/target*, the fleet dir, the cache's leftovers or a /tmp cargo tree of ours"
+    return 0
+  fi
+  case "$_scope" in
+    tree) if [ "$_real" != "$EV_TREE" ]; then ev_refuse "$_path" "scope tree, but the path is inside a tree rather than the tree itself"; return 0; fi ;;
+    incremental)
+      if [ "$_real" = "$EV_TREE" ] || [ "${_real##*/}" != incremental ]; then
+        ev_refuse "$_path" "scope incremental, but the path is not an incremental dir inside a tree"; return 0
+      fi ;;
+  esac
+  if ! ev_allowed "$EV_CLASS" "$_rung" "$_scope" "$_mode" "$_real"; then
+    if [ -n "$EV_SPARE" ]; then ev_skip "$_path" "spared: $EV_WHY"; else ev_refuse "$_path" "$EV_WHY"; fi
+    return 0
+  fi
+
+  # --- liveness, re-asked now ---
+  _cur=0
+  if [ "$_mode" = current ] && [ "$_rung" = 6 ] && [ "$EV_CHECKOUT" = "$EV_ROOT" ]; then _cur=1; fi
+  if live_checkouts >/dev/null 2>&1; then
+    :
+  elif _b=$(builders_running); then
+    ev_skip "$_path" "$_b, and this host cannot say which checkout it is building in"
+    return 0
+  fi
+  if [ "$_cur" = 0 ] && in_live_checkout "$_real" 2>/dev/null; then
+    ev_skip "$_path" "a build is live in its checkout"
+    return 0
+  fi
+  if [ "$_idle" -gt 0 ] && { [ "$EV_CLASS" = lane ] || [ "$EV_CLASS" = fleet ]; } && [ "$EV_CHECKOUT" != "$EV_MAIN" ]; then
+    if ev_lane_active "$_idle"; then
+      ev_skip "$_path" "$EV_LANE_WHY"
+      return 0
+    fi
+  fi
+  set -- --root "$ROOT" --tree "$EV_TREE" --class "$EV_CLASS" --min-age-secs $((_idle * 60))
+  if [ -n "$EV_CHECKOUT" ]; then set -- "$@" --checkout "$EV_CHECKOUT"; fi
+  if [ -n "$EV_LANE" ]; then set -- "$@" --lane "$EV_LANE"; fi
+  if [ "$_cur" = 1 ]; then set -- "$@" --current; fi
+  if ! _why=$(ev_py probe "$@" 2>&1); then
+    case "$_why" in
+      *"git tracks"*) ev_refuse "$_path" "$(printf '%s' "$_why" | head -n 1)" ;;
+      *) ev_skip "$_path" "$(printf '%s' "$_why" | head -n 1)" ;;
+    esac
+    return 0
+  fi
+
+  # --- the eviction ---
+  EV_N=$((EV_N + 1))
+  _sz=$(fmt_kb "$_est")
+  _label="(rung $_rung $_scope, from $_owner)"
+  if [ -n "$DRY" ]; then
+    printf '  would remove %8s  %s  %s\n' "~$_sz" "$_real" "$_label"
+    EV_DONE=$((EV_DONE + 1))
+    EV_FREED_KIB=$((EV_FREED_KIB + _est))
+    return 0
+  fi
+  case "$_real" in
+    *.tombstone.*) _tomb=$_real ;;
+    *) _tomb="$EV_TREE.tombstone.$$.$EV_N" ;;
+  esac
+  if [ "$_tomb" != "$_real" ] && ! mv "$_real" "$_tomb" 2>/dev/null; then
+    printf '  FAILED to rename %s — left in place\n' "$_real" >&2
+    EV_SKIPPED=$((EV_SKIPPED + 1))
+    return 0
+  fi
+  if ! rm -rf "$_tomb" 2>/dev/null; then
+    printf '  could not finish removing %s — a later sweep will find it\n' "$_tomb" >&2
+  fi
+  printf '  removed      %8s  %s  %s\n' "~$_sz" "$_real" "$_label"
+  gc_log "evict: rung $_rung $_scope freed ~$_sz from $_owner: $_real"
+  EV_DONE=$((EV_DONE + 1))
+  EV_FREED_KIB=$((EV_FREED_KIB + _est))
+  if [ -n "$EV_CHECKOUT" ]; then EV_TOUCHED="$EV_TOUCHED$EV_CHECKOUT|"; fi
+  if [ "$EV_CLASS" = fleet ]; then EV_TOUCHED="$EV_TOUCHED$(dirname "$EV_TREE")|"; fi
+  return 0
+}
+
+run_evict_mode() {
+  if [ ! -f "$ROOT/tools/disk-budget.py" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "build-gc: --evict re-probes every path with tools/disk-budget.py and python3; one is missing here — refusing." >&2
+    EV_EXIT=1
+    return 0
+  fi
+  if [ ! -f "$PLAN_FILE" ]; then
+    echo "build-gc: no plan file at $PLAN_FILE" >&2
+    EV_EXIT=2
+    return 0
+  fi
+  # A plan this script was not written for is not read at all: the first line names the format.
+  if [ "$(grep -m 1 -v '^[[:space:]]*$' "$PLAN_FILE" 2>/dev/null)" != "# plx-disk-plan v1" ]; then
+    echo "build-gc: $PLAN_FILE is not a 'plx-disk-plan v1' plan — refusing to read it." >&2
+    EV_EXIT=2
+    return 0
+  fi
+  trap ev_cleanup EXIT
+  EV_MAIN=$(ev_phys "$MAIN") || EV_MAIN=$MAIN
+  EV_ROOT=$(ev_phys "$ROOT") || EV_ROOT=$ROOT
+  EV_WT_FILE="${TMPDIR:-/tmp}/plx-build-gc-evict-wt.$$"
+  worktrees > "$EV_WT_FILE"
+  _goal=$(sed -n 's/^# goal_kib //p' "$PLAN_FILE" | head -n 1)
+  case "$_goal" in ''|*[!0-9]*) _goal= ;; esac
+  echo "== evict: the planner's order, each path re-checked against the live machine first =="
+  _tab=$(printf '\t')
+  while IFS="$_tab" read -r _kind _k_rung _k_scope _k_est _k_owner _k_idle _k_mode _k_path <&3; do
+    case "$_kind" in ''|'#'*) continue ;; esac
+    if [ -n "$_goal" ] && [ -z "$DRY" ]; then
+      _now=$(free_kib); _now=${_now:-0}
+      if [ "$_now" -ge "$_goal" ] 2>/dev/null; then
+        echo "evict: free space is back over the plan's goal ($(fmt_kb "$_now")) — the rest of the plan is not run"
+        break
+      fi
+    fi
+    case "$_kind" in
+      evict) ev_line "$_k_rung" "$_k_scope" "$_k_est" "$_k_owner" "$_k_idle" "$_k_mode" "$_k_path" ;;
+      stale)
+        if [ "$_k_rung" != 5 ]; then ev_refuse "$_k_path" "the --stale sweep is a rung-5 step, not rung $_k_rung"; continue; fi
+        echo "== evict: the --stale sweep, at its rung-5 slot =="
+        _out=$(sh "$SELF" --stale ${DRY:+-n} 2>&1 </dev/null) || true
+        printf '%s\n' "$_out"
+        _n=$(printf '%s\n' "$_out" | grep -cE '  removed|would remove' || true)
+        EV_DONE=$((EV_DONE + _n))
+        gc_log "evict: --stale sweep at rung 5 (${_n} hash group(s))"
+        ;;
+      *) ev_refuse "$_k_path" "unknown plan line '$_kind'" ;;
+    esac
+  done 3< "$PLAN_FILE"
+  if [ -n "$DRY" ]; then _verb="would be removed"; else _verb=removed; fi
+  echo "evict: $EV_DONE $_verb (~$(fmt_kb "$EV_FREED_KIB") by estimate), $EV_SKIPPED skipped, $EV_REFUSED refused"
+  if [ "$EV_REFUSED" -gt 0 ]; then EV_EXIT=1; fi
+  if [ -z "$DRY" ]; then
+    _after=$(free_kib); _after=${_after:-0}
+    if _settle=$(ev_py settle --plan "$PLAN_FILE" --free-kib "$_after" 2>&1); then
+      echo "settle: $_settle"
+    else
+      echo "settle: $_settle"
+      if [ "$EV_EXIT" = 0 ]; then EV_EXIT=3; fi
+    fi
+  fi
+  return 0
+}
 
 # `--auto` is fully self-contained (it shells back out to this same script per stage, each of
 # which runs its own preflight) and exits here, BEFORE the ordinary preflight below — the lock
@@ -1063,6 +1769,13 @@ install_worktree_cargo_policy
 # not something reached only after it has already enumerated worktrees and taken the FFmpeg lock.
 if [ "$MODE" = auto ]; then
   run_auto_mode
+  exit $?
+fi
+
+# `--park` is the same pass without the free-space gate: it runs in python, takes the auto lock itself and has
+# nothing to say to the ordinary preflight below, so it leaves here too.
+if [ "$MODE" = park ]; then
+  run_park_mode
   exit $?
 fi
 
@@ -1076,7 +1789,12 @@ if [ "$MODE" != report ]; then
   # The shared FFmpeg cache first, and unconditionally: a live `ci/build-ffmpeg.sh` is writing into
   # a tree that sits outside every checkout, so no per-checkout reasoning can exempt anything from
   # it. This is the refusal this script has always given for a held lock, unchanged.
-  if [ -z "$DRY" ] && busy=$(ffmpeg_lock_held); then
+  #
+  # `--evict` is the one mode that does NOT take it. It deletes derived cargo trees only and never a
+  # live entry of the FFmpeg cache (bar an interrupted delete's tombstone; it does remove day-old
+  # cargo-seed leftovers), so an FFmpeg build writing into the cache is no reason to leave a full disk
+  # full: an FFmpeg build is exactly when disk is short.
+  if [ "$MODE" != evict ] && [ -z "$DRY" ] && busy=$(ffmpeg_lock_held); then
     echo "build-gc: $busy — refusing to delete a build tree underneath it." >&2
     echo "          Wait for it, or re-run when the fleet is idle. (-n previews regardless.)" >&2
     exit 1
@@ -1090,7 +1808,7 @@ if [ "$MODE" != report ]; then
       echo "build-gc: a build is live in these checkouts; their derived trees are left alone:"
       sed 's|^|  |' "$LIVE_LIST"
     fi
-  elif [ -z "$DRY" ] && busy=$(build_is_running); then
+  elif [ -z "$DRY" ] && { if [ "$MODE" = evict ]; then busy=$(builders_running); else busy=$(build_is_running); fi; }; then
     echo "build-gc: $busy, and this host cannot say which checkout it is building in" >&2
     echo "          (no lsof, or its working directory could not be read) — refusing to delete a" >&2
     echo "          build tree underneath it. Wait for it, or re-run when the fleet is idle." >&2
@@ -1115,6 +1833,13 @@ case "$MODE" in
 report)
   printf '%-46s %8s %8s %8s  %s\n' CHECKOUT TOTAL TARGETS INCR BRANCH
   worktrees | while IFS= read -r w; do
+    if on_other_volume "$w"; then
+      # `du` over a worktree on a slow external disk is minutes per lane, for a size that is not on the
+      # volume the build writes to. `git rev-parse` reads only the lane's HEAD.
+      printf '%-46s %8s %8s %8s  %s  (other volume, not sized)\n' "$(basename "$w")" - - - \
+             "$(git -C "$w" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      continue
+    fi
     printf '%-46s %8s %8s %8s  %s\n' "$(basename "$w")" \
            "$(fmt_kb "$(checkout_kb "$w")")" \
            "$(fmt_kb "$(lane_trees "$w" | sum_kb)")" \
@@ -1123,6 +1848,9 @@ report)
   done
   echo "  (a checkout nested inside another is subtracted from that one's TOTAL, not counted twice)"
 
+  if [ -f "$HOME/.config/plxnative/build-root" ] && [ -f "$ROOT/tools/build-root.py" ]; then
+    python3 "$ROOT/tools/build-root.py" inventory
+  fi
   ext=$(external_trees | sort -u)
   if [ -n "$ext" ]; then
     echo
@@ -1135,7 +1863,7 @@ report)
   envx=$(env_trees_report_only | sort -u)
   if [ -n "$envx" ]; then
     echo
-    echo "exported CARGO_TARGET_DIR / SIM_TDIR (reported only — this script never deletes these):"
+    echo "exported CARGO_TARGET_DIR / SIM_TDIR (listed, not targeted: only a PlxNative cargo tree under /tmp or \$TMPDIR that --evict finds idle is ever deleted):"
     printf '%s\n' "$envx" | while IFS= read -r d; do
       printf '  %8s  %s\n' "$(fmt_kb "$(du -sk "$d" 2>/dev/null | awk '{print $1}')")" "$d"
     done
@@ -1155,8 +1883,35 @@ report)
            "$(fmt_kb "$(du -sk "$cache/cargo-seed" 2>/dev/null | awk '{print $1}')")" "$cache/cargo-seed"
   fi
   df -h "$ROOT" | tail -1 | awk '{print "volume              " $4 " free of " $2}'
+  # Is the hourly agent (`make disk-watch`, tools/install-disk-watch.sh) loaded? Not loaded, nothing reclaims
+  # space between builds, and nothing says so: one such Mac sat 19 GiB short for ~19 hours. macOS only.
+  if [ "$(uname -s 2>/dev/null)" = Darwin ] && command -v launchctl >/dev/null 2>&1; then
+    if launchctl list com.plxnative.build-gc >/dev/null 2>&1; then
+      echo "hourly agent        com.plxnative.build-gc is loaded (runs tools/build-gc.sh --auto hourly)"
+    else
+      echo "hourly agent        com.plxnative.build-gc is NOT loaded: nothing reclaims disk between builds; 'make disk-watch' loads it"
+    fi
+  fi
+  # The disk budget's verdicts (tools/disk-budget.py, docs/disk-budget.md): the private bytes each
+  # tree would really free (`du` above counts APFS clones in full), the PlxNative cargo trees under
+  # /tmp that nothing above can see, and the order a reclaim WOULD take them in. Read-only. It is
+  # run, not sourced, and a failure of it must not end the report: this script is `set -eu`, and
+  # the table above is complete without it. The existence test is for the synthetic repositories
+  # ci/test_build_gc.py builds, which copy this script alone.
+  if [ -f "$ROOT/tools/disk-budget.py" ] && command -v python3 >/dev/null 2>&1; then
+    echo
+    python3 "$ROOT/tools/disk-budget.py" report --root "$ROOT" \
+      || echo "  (tools/disk-budget.py report failed; the table above stands on its own)"
+  fi
   echo
-  echo "reclaim with: tools/build-gc.sh --orphans | --incremental | --stale | --cache | --seed | --lanes | --worktrees | --all   (add -n to preview)"
+  echo "reclaim with: tools/build-gc.sh --orphans | --incremental | --stale | --cache | --ffmpeg-cache | --seed | --lanes | --worktrees | --all | --evict PLAN | --park (cold store, opt-in)   (add -n to preview)"
+  echo "the planner's own order: python3 tools/disk-budget.py reclaim --to GIB --emit > plan; tools/build-gc.sh --evict plan -n"
+  ;;
+esac
+
+case "$MODE" in
+evict)
+  run_evict_mode
   ;;
 esac
 
@@ -1223,6 +1978,10 @@ prune_lock() {
 stale_cache_trees() {
   c=${PLX_BUILD_CACHE-$HOME/.cache/plxnative}
   [ -n "$c" ] && [ -d "$c/ffmpeg" ] || return 0
+  # A threshold that is not a number selects nothing, as `find -mtime +abc` (an error, silenced below) did;
+  # `$((abc * 1440))` would read it as 0 and select every key.
+  case "$CACHE_MAX_DAYS" in ''|*[!0-9]*) return 0 ;; esac
+  max_mins=$((CACHE_MAX_DAYS * 1440))
   for d in "$c"/ffmpeg/*; do
     case "$d" in
       *'*'*)   continue ;;
@@ -1242,16 +2001,21 @@ stale_cache_trees() {
     [ -d "$d" ] || continue
     # Age the LAST-USED MARKER that build-ffmpeg.sh touches on every successful run. A directory's
     # own mtime moves only when its direct children change, so the busiest configuration on the
-    # machine — rebuilt into and copied out of daily, all of it below `ffmpeg-9.0/` — would keep
+    # machine — rebuilt into and copied out of daily, all of it below `ffmpeg-<version>/` — would keep
     # the mtime it was created with and be collected on day thirty. An entry with no marker at all
     # predates that mechanism, and falls back to the directory.
     stamp="$d/.last-used"; [ -f "$stamp" ] || stamp="$d"
-    if [ -n "$(find "$stamp" -maxdepth 0 -mtime +"$CACHE_MAX_DAYS" 2>/dev/null)" ]; then echo "$d"; fi
+    # MINUTES, NOT `-mtime`: `-mtime +7` counts whole days and truncates the age, so it matches only from
+    # 8 days on, while every message and doc here says "unused for 7 days". `-mmin` is exact (BSD and GNU).
+    if [ -n "$(find "$stamp" -maxdepth 0 -mmin +"$max_mins" 2>/dev/null)" ]; then echo "$d"; fi
   done
 }
 
+# The FFmpeg trees, which `--auto` runs ALONE (`--ffmpeg-cache`, at $PLX_GC_AUTO_CACHE_DAYS): the
+# cargo seed below follows a different rule ("never evicted by --auto"), so the two halves are two
+# `case`s and `--cache` / `--all` run both.
 case "$MODE" in
-cache|all)
+cache|all|ffmpeg-cache)
   echo "== shared build trees untouched for over $CACHE_MAX_DAYS days =="
   # UNDER EACH ENTRY'S OWN LOCK. The preflight guard is a single check at startup, so a build that
   # starts a moment later takes `$WORK.lock` and begins reading a tree this loop is already
@@ -1269,7 +2033,7 @@ cache|all)
       echo "$d" | drop
     elif prune_lock "$d"; then
       # RENAME FIRST, DELETE THE TOMBSTONE AFTER. `rm -rf` on a 122 MB tree is not instantaneous,
-      # and interrupting it leaves `$WORK/ffmpeg-9.0` PRESENT AND PARTIAL — which is precisely the
+      # and interrupting it leaves the extracted `ffmpeg-<version>` tree PRESENT AND PARTIAL — which is precisely the
       # state `ci/build-ffmpeg.sh` reads as "already extracted", so once the abandoned lock is
       # reclaimed every checkout builds against a source tree with holes in it and the
       # configuration stays broken until somebody deletes it by hand. The rename is atomic, so the
@@ -1285,6 +2049,10 @@ cache|all)
       echo "  in use, skipped  $d"
     fi
   done
+  ;;
+esac
+case "$MODE" in
+cache|all)
   # The cargo seed (`tools/cargo-seed.py`) lives beside the FFmpeg trees but follows its own
   # protocol: the script takes the seed's flock, so a restore or harvest in flight keeps its seed.
   # Absent in the synthetic repositories ci/test_build_gc.py builds, hence the existence test.
@@ -1306,16 +2074,63 @@ esac
 
 case "$MODE" in
 worktrees)
-  echo "== finished linked worktrees (clean, unlocked, already on main; main and the running checkout are never touched) =="
+  echo "== finished linked worktrees (clean, unlocked, already on origin/main (the local main without an origin); main and the running checkout are never touched) =="
   worktree_records | while IFS="$(printf '\t')" read -r w sha branch locked; do
     [ -n "$w" ] || continue
+    # Under `--auto` (the marker below) a lane on another volume than the build is not this pass's business:
+    # removing it frees nothing on the volume that is short, and every question asked of it below (status,
+    # the squash check, the idle-window walk) reads a disk that is typically the slow one. By hand
+    # (`--worktrees`) the human decides, and it is judged like any other lane.
+    if [ -n "${PLX_GC_AUTO_IDLE_MIN-}" ] && on_other_volume "$w"; then
+      printf '  on another volume, skipped  %s  (%s)\n' "$w" "$branch"
+      continue
+    fi
     reason=$(worktree_reason "$w" "$sha" "$locked")
     if [ -n "$reason" ]; then
       printf '  %-9s %s  (%s)\n' "$reason" "$w" "$branch"
       continue
     fi
+    # What removing it would take that `make` cannot rebuild (see `private_ignored_paths`): read BEFORE the
+    # removal, since afterwards there is nothing to read. Only a lane that is otherwise removable gets here,
+    # so the probe is one `git status` per finished lane, never one per lane.
+    _priv_ok=1
+    _priv=$(private_ignored_paths "$w") || _priv_ok=
+    # Under `--auto` only (PLX_GC_AUTO_IDLE_MIN is set by `run_auto_mode`'s call into this mode, never
+    # by a human typing `--worktrees`; it is this mode's "nobody is watching" marker): a lane that LOOKS
+    # finished is not necessarily nobody's. A
+    # squash can land while an agent is still in the worktree reading it or about to branch from it,
+    # and removing it then costs that agent its checkout. The same window `--evict` applies to another
+    # lane's tree (`ev_lane_active`), over the worktree AND the lane's external build tree.
+    # And nobody is watching what goes with it: a lane holding an ignored file that is not build output
+    # (a private token, a lab session, a capture, notes) is kept, with the paths that kept it, and so is a
+    # lane whose ignored files git could not list. By hand the human is shown them instead (below).
+    if [ -n "${PLX_GC_AUTO_IDLE_MIN-}" ]; then
+      _lane_active=
+      if ! idle_lane "$w" "$PLX_GC_AUTO_IDLE_MIN"; then _lane_active=1; fi
+      if [ -z "$_lane_active" ] && [ -n "$FLEET_DIR" ] && [ -d "$FLEET_DIR/$(basename "$w")" ] \
+         && ! idle_lane "$FLEET_DIR/$(basename "$w")" "$PLX_GC_AUTO_IDLE_MIN"; then
+        _lane_active=1
+      fi
+      if [ -n "$_lane_active" ]; then
+        printf '  recently active, skipped  %s  (%s)\n' "$w" "$branch" >&2
+        continue
+      fi
+      if [ -z "$_priv_ok" ] || [ -n "$_priv" ]; then
+        printf '  %-9s %s  (%s)\n' private "$w" "$branch"
+        if [ -z "$_priv_ok" ]; then
+          _why="git could not list its ignored files"
+          printf '      %s\n' "$_why"
+        else
+          _why="holds ignored files that are not build output: $(join_paths "$_priv")"
+          print_paths "      ignored and not build output, so it stays:" "$_priv"
+        fi
+        if [ -z "$DRY" ]; then gc_log "worktrees: kept $w ($branch): $_why"; fi
+        continue
+      fi
+    fi
     if [ -n "$DRY" ]; then
       printf '  would remove  %s  (%s)\n' "$w" "$branch"
+      print_private_note "      ignored and not rebuildable, goes with it:"
       continue
     fi
     # `worktree_reason` answered "building?" from the snapshot taken once before this whole loop
@@ -1338,6 +2153,7 @@ worktrees)
     # all).
     if git worktree remove "$w" 2>&1; then
       printf '  removed       %s  (%s)\n' "$w" "$branch"
+      print_private_note "      ignored and not rebuildable, went with it:"
       # Same staleness risk as above for the external tree, plus `$FLEET_DIR` itself: `${VAR-def}`
       # only substitutes when VAR is UNSET, so `PLX_FLEET_DIR=""` in the environment leaves
       # `FLEET_DIR` empty rather than defaulted, and `"$FLEET_DIR/$(basename "$w")"` would then be
@@ -1369,6 +2185,15 @@ esac
 case "$MODE" in
 orphans)
   echo "== external lane target dirs whose worktree is gone =="
+  if [ -f "$HOME/.config/plxnative/build-root" ] && [ -f "$ROOT/tools/build-root.py" ]; then
+    python3 "$ROOT/tools/build-root.py" orphans | while IFS= read -r tree; do
+      # External ownership is recorded by the setup hook. Recheck open handles
+      # and Cargo locks just before passing a derived directory to the executor.
+      if python3 "$ROOT/tools/disk-budget.py" probe --tree "$tree" --class fleet >&2; then
+        printf '%s\n' "$tree"
+      fi
+    done | skip_live | drop
+  fi
   external_trees | sort -u | while IFS= read -r d; do
     if external_is_orphan "$d"; then echo "$d"; fi
   done | skip_live | drop
@@ -1387,9 +2212,10 @@ esac
 case "$MODE" in
 lanes|all)
   echo "== derived trees in linked worktrees (the main checkout is left alone) =="
-  # PLX_GC_AUTO_IDLE_MIN is set ONLY by `run_auto_mode`'s recursive call into this mode, never by
-  # a human typing `--lanes` — a manual reclaim is an explicit ask and idleness is not this mode's
-  # business; the idle guard belongs to the pressure-driven caller, not to the mode itself.
+  # PLX_GC_AUTO_IDLE_MIN is set by `run_auto_mode` only around its `--worktrees` stage, and `--auto`
+  # no longer calls `--lanes` at all (the planner's `--evict` took its place), so this idle guard is
+  # DORMANT unless a human exports the variable by hand. A manual reclaim is an explicit ask and
+  # idleness is not this mode's business; the guard is kept for a caller that does want it.
   worktrees | while IFS= read -r w; do
     [ "$w" = "$MAIN" ] && continue
     if [ -n "${PLX_GC_AUTO_IDLE_MIN-}" ] && ! idle_lane "$w" "$PLX_GC_AUTO_IDLE_MIN"; then
@@ -1433,3 +2259,4 @@ if [ "$MODE" != report ]; then
   echo
   df -h "$ROOT" | tail -1 | awk '{print "free now: " $4 " of " $2}'
 fi
+exit "$EV_EXIT"

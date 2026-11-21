@@ -5,8 +5,8 @@
 //! page. Structural ops arrive as `NavOp`s at NAV COMMIT and come back out as [`Life`] steps the
 //! dispatcher executes; the container never calls a screen.
 //!
-//! Under `ui/containers/` rather than the spec's `ui/nav/` because `ui/nav.rs` is the LEGACY page
-//! transition and lives until phase 12; the directory takes that name when the file goes.
+//! Navigation presentation is derived from this tree and passed explicitly as
+//! `screen::NavPresentation`; there is no global navigation publication.
 #![allow(dead_code)] // phase 3b: the tree was a shadow of the loop's route; screens arrive from 5b
 
 pub mod modal;
@@ -189,8 +189,14 @@ impl<H: Host> Navigation<H> {
 
     /// The input owner (§2.2): the shared modal stack first, then the top page.
     pub fn input_owner(&self) -> Option<InputOwner> {
+        self.input_owner_unless(|_| false)
+    }
+
+    /// [`input_owner`](Self::input_owner) with every surface `dismissed` names counted as already
+    /// closed: who holds input once those dismissals commit. Page ops are never read.
+    pub fn input_owner_unless(&self, dismissed: impl Fn(EntryId) -> bool) -> Option<InputOwner> {
         self.modals
-            .input_owner()
+            .input_owner_unless(dismissed)
             .or_else(|| self.top_page().map(|e| InputOwner::Entry(e.id)))
     }
 
@@ -242,10 +248,16 @@ impl<H: Host> Navigation<H> {
     /// routing performed here cannot drift.
     pub fn request(&mut self, op: NavOp<H::Arg>, ret: ReturnState<H::Elem, H::Memory>) -> Vec<Life<H>> {
         if self.moves_page(&op) {
-            let ret = if let Some(InputOwner::Entry(owner)) = self.modals.input_owner() {
-                if let Some(e) = self.modals.entry_mut(owner) { e.ret = ret; }
-                self.top_page().map(|e| e.ret.clone()).unwrap_or_default()
-            } else { ret };
+            // `ret` lands on the page only when it was captured there: a live surface keeps its
+            // own, and one captured on a surface that has closed since is dropped.
+            let ret = match self.modals.input_owner() {
+                Some(InputOwner::Entry(owner)) => {
+                    if let Some(e) = self.modals.entry_mut(owner) { e.ret = ret; }
+                    None
+                }
+                _ if ret.focus.is_some_and(|f| self.top_page().map(|e| e.id) != Some(f.entry)) => None,
+                _ => Some(ret),
+            }.unwrap_or_else(|| self.top_page().map(|e| e.ret.clone()).unwrap_or_default());
             self.tabs.stack.request(op, ret);
             return Vec::new();
         }
@@ -343,7 +355,11 @@ impl<H: Host> Navigation<H> {
         if previous != current {
             if let Some(host) = previous {
                 if !self.modals.surfaces.is_empty() || !self.modals.retired.is_empty() {
-                    let modal = std::mem::take(&mut self.modals);
+                    let mut modal = std::mem::take(&mut self.modals);
+                    // A surface already closing (an item menu's "Go to": it dismisses, the page
+                    // opens) is over: covering it would bring it back on BACK, and its host would
+                    // be covered again with nothing left to uncover it.
+                    out.extend(modal.retire_where(|s| s.phase == modal::Phase::Closing));
                     out.extend(modal.surfaces.iter().map(|s| Life::Ev(s.entry.id, ScreenEvent::Cover)));
                     self.covered_modals.push((host, modal));
                 }
@@ -376,7 +392,11 @@ impl<H: Host> Navigation<H> {
                 .is_some_and(|i| i.screen.covered_surfaces_ready());
             if !needs_body || ready {
                 self.modals = self.covered_modals.remove(i).1;
-                if let Some(host) = current { out.push(Life::Ev(host, ScreenEvent::Cover)); }
+                // Only a surface that is still up covers its host again; one that was retired
+                // while the page was away leaves the host as BACK left it, uncovered.
+                if let Some(host) = current.filter(|_| !self.modals.surfaces.is_empty()) {
+                    out.push(Life::Ev(host, ScreenEvent::Cover));
+                }
                 for surface in &self.modals.surfaces {
                     if surface.entry.inst.is_none() { out.push(Life::Mount(surface.entry.id)); }
                     out.push(Life::Ev(surface.entry.id, ScreenEvent::Uncover));

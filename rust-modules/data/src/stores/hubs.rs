@@ -8,19 +8,60 @@ use std::sync::Arc;
 pub enum HubsCmd {
     /// A refetch is owed (a view-state write landed, a profile settled).
     RefetchHubs,
-    Page { sid: plx_plex::plex::ServerId, id: String, key: String, before: bool },
+    /// Move one row's window a page. `seen` is the catalog generation of the view the ask was
+    /// computed from (`HubsView::generation`): a frame captures its views before that frame's
+    /// landings are delivered, so a tick can ask from a window the store has already moved, and
+    /// such an ask is refused. The publication it missed re-arms the row, which asks again from
+    /// the window that stands if the ask is still due.
+    Page { sid: plx_plex::plex::ServerId, id: String, key: String, before: bool, seen: u32 },
     CancelPage { sid: plx_plex::plex::ServerId, id: String, key: String },
+    /// The screen holds cards for rows `lo..=hi` (catalog order); every other row keeps only its
+    /// descriptor. Sent when the range changes, from the tick that knows which rows are on screen.
+    Hold { lo: usize, hi: usize },
     /// The read-out's Retry: clear the back-off and ask again.
     Retry,
     /// The profile/account switch.
     Reset,
-    /// The optimistic half of a view-state write on the hub catalog (`pms::LocalEdit`).
-    EditItem { sid: plx_plex::plex::ServerId, rk: String, edit: crate::pms::LocalEdit },
+    /// The optimistic half of a view-state change on the hub catalog (`viewstate::publish_view`).
+    ApplyView { at: crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit },
+    /// Read source `sid` again WITHOUT publishing it: the answer is held on the source
+    /// (`pms::Src::staged`) until [`HubsCmd::Publish`] says it may land. Unlike `RefetchHubs` it
+    /// never supersedes a flight, touches no other source and moves no generation, so a read in
+    /// flight for the person is never dropped by it. The data layer enforces its own preconditions:
+    /// it is not made while the source is loading or not Ready, or while a whole-source (prompted)
+    /// read of any source is out, which would publish what it would have staged. An ask that cannot
+    /// be made yet (the source has a page read out, or the spacing after its last quiet read has
+    /// not run out) is kept and made by a later tick; a failed quiet read backs off and asks no
+    /// rediscovery. A sender need not gate it.
+    RefetchSourceQuiet { sid: plx_plex::plex::ServerId },
+    /// Sent every frame by the application: may what is staged land now? Nothing staged does
+    /// nothing. `home_top_visible` is "Home is the page the person is looking at"; `focused_hub`
+    /// is the catalog row (the index `HubsView::hub` takes) the focus is in, if it is in a row;
+    /// `press_live` is "a press is armed", which holds the Continue Watching rows only. While Home is hidden the staged answer lands at once.
+    /// While it is visible it lands only if nothing the person can see or is pointing at moves:
+    /// no row added, removed or reordered, and every row that changed is outside the held window
+    /// or is Continue Watching with the focus elsewhere.
+    Publish { home_top_visible: bool, focused_hub: Option<usize>, press_live: bool },
 }
 
 impl HubsCmd {
     /// Page requests move a window, not the catalog, so they do not bump the notice generation.
     pub fn is_paging(&self) -> bool { matches!(self, HubsCmd::Page { .. } | HubsCmd::CancelPage { .. }) }
+
+    /// Commands the application sends on no one's behalf (a quiet read, the per-frame publish
+    /// check): they raise the notice only through what they changed, never because they ran.
+    pub fn is_background(&self) -> bool {
+        matches!(self, HubsCmd::RefetchSourceQuiet { .. } | HubsCmd::Publish { .. })
+    }
+
+    /// Does this command raise the notice whatever it changed? Paging does not (see above), and a
+    /// report of what the server holds (`Facts`, `Offset`) raises it only through the rows it
+    /// altered: one every row already agrees with relays nothing out.
+    fn always_notifies(&self) -> bool {
+        !self.is_paging() && !self.is_background() && !matches!(self, HubsCmd::ApplyView {
+            edit: crate::viewstate::ViewEdit::Facts { .. } | crate::viewstate::ViewEdit::Offset { .. }, ..
+        })
+    }
 }
 
 pub use crate::pms::Landing as HubsResult;
@@ -45,6 +86,11 @@ impl Default for HubsStore {
 }
 
 impl HubsStore {
+    /// Join the owner's view-state publish order (`Stores::view_ledger`).
+    pub(crate) fn share_ledger(&mut self, ledger: &crate::viewledger::ViewLedger) {
+        self.state.share_ledger(ledger);
+    }
+
     /// Retire the mailbox at the store command boundary, including when recording controls how
     /// subsequent work is launched. Every command entry point shares this identity-reset rule.
     fn prepare_command(&mut self, cmd: Option<&HubsCmd>) {
@@ -55,7 +101,12 @@ impl HubsStore {
 
     /// Seed a fresh owner from restored boot initial conditions (`pms::initial::Initial::restore`),
     /// before any `Bridge`/`Stores` exists.
-    pub fn from_parts(state: crate::pms::PmsState, adapter: crate::pms::PmsAdapter) -> Self {
+    ///
+    /// Takes the owner's [`crate::viewledger::ViewLedger`] (`Stores::view_ledger`) so a store built
+    /// this way cannot be left outside the view-state publish order: there is no second step to forget.
+    pub fn from_parts(mut state: crate::pms::PmsState, adapter: crate::pms::PmsAdapter,
+        ledger: &crate::viewledger::ViewLedger) -> Self {
+        state.share_ledger(ledger);
         Self { state, adapter: Arc::new(adapter), notice_gen: AtomicU32::new(0), notice_dirty: AtomicBool::new(false) }
     }
 
@@ -117,6 +168,22 @@ impl HubsStore {
         crate::pms::seed_two_library_home_for_test(&mut self.state, sid, directory);
     }
 
+    /// Test hook: the Home a real library has, `items` Continue Watching episodes as the deck row
+    /// above one Recently Added shelf (`r1`..`r3`): see `crate::pms::seed_deck_home_for_test`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_deck_home_for_test(&mut self, items: usize) {
+        let adapter = self.adapter_for_test();
+        crate::pms::seed_deck_home_for_test(&mut self.state, &adapter, items);
+    }
+
+    /// Test hook: Home as one server's `/hubs` answer makes it, projected as the refresh projects it
+    /// — see `crate::pms::seed_hubs_response_for_test`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_hubs_response_for_test(&mut self, mc: &plx_plex::plex::MediaContainer) {
+        let adapter = self.adapter_for_test();
+        crate::pms::seed_hubs_response_for_test(&mut self.state, &adapter, mc);
+    }
+
     /// Test hook: a grid of `rows` shelves, `items` per shelf — see `crate::pms::seed_grid_for_test`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn seed_grid_for_test(&mut self, rows: usize, items: usize) {
@@ -130,6 +197,11 @@ impl HubsStore {
     pub fn queue_test_landing(&self, items: Option<usize>) -> u32 {
         crate::pms::queue_test_landing(&self.state, &self.adapter, items)
     }
+
+    /// Test hook: land the cards of every held row that waits for them — see
+    /// `crate::pms::land_kept_rows_for_test`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn land_kept_rows_for_test(&mut self) -> bool { crate::pms::land_kept_rows_for_test(&mut self.state) }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn reverse_test_shelves(&mut self) { crate::pms::reverse_test_shelves(&mut self.state); }
@@ -153,11 +225,34 @@ impl HubsStore {
         crate::pms::hub_item(&self.state, hub, col)
     }
 
-    /// A clone of this owner's current worker adapter, for a caller that must spawn its own
-    /// fetch (`crate::pms::spawn_fetch`) rather than go through `controlled_with_directory`'s
-    /// default launcher. Capture it BEFORE calling into this store again — see the module doc
-    /// on why an old worker landing into a retired `Arc` is the whole point of rotation.
+    /// A clone of this owner's current worker adapter. Capture it BEFORE calling into this store
+    /// again: a `Reset` rotates it, and a port made from the old one lands into a mailbox nothing
+    /// reads any more, which is the whole point of rotation.
     pub fn adapter(&self) -> Arc<crate::pms::PmsAdapter> { Arc::clone(&self.adapter) }
+
+    /// Take the fetches this owner's steps have asked for since the last take, in the order they were
+    /// asked ([`crate::stores::StoreJob::Hubs`]). The application's runner starts each, right after the step
+    /// that asked (`Bridge::start_store_jobs_of`).
+    #[must_use]
+    pub fn take_jobs(&mut self) -> Vec<crate::stores::StoreJob> {
+        std::mem::take(&mut self.state.jobs)
+    }
+
+    /// Does the outbox hold a job nobody has taken yet?
+    pub fn has_jobs(&self) -> bool {
+        !self.state.jobs.is_empty()
+    }
+
+    /// TEST ONLY: answer every job on the outbox the way a runner that starts nothing does
+    /// (`Port::refused`), once each.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refuse_jobs_for_test(&mut self) {
+        use plx_machine::job::Port;
+        for job in self.take_jobs() {
+            let crate::stores::StoreJob::Hubs(job, port) = job else { panic!("another store's job on the Hubs outbox") };
+            port.refused(job.addr);
+        }
+    }
 
     /// The adapter boundary: drain owned results without applying any store state.
     pub fn take_results(&self) -> Vec<HubsResult> {
@@ -170,16 +265,40 @@ impl HubsStore {
         crate::pms::owed(&self.adapter)
     }
 
-    /// Test hook: how many spawned workers still owe a landing.
+    /// The cards in the rows Home holds (`HubsCmd::Hold`), for the re-read of what they show.
+    pub fn held_keys(&self) -> super::HeldKeys { crate::pms::held_keys(&self.state) }
+
+    /// Every source Home reads, in display order: what a re-read of the whole page asks one by one
+    /// ([`HubsCmd::RefetchSourceQuiet`]).
+    pub fn source_ids(&self) -> Vec<plx_plex::plex::ServerId> { crate::pms::source_ids(&self.state) }
+
+    /// Is a quiet read's answer waiting for [`HubsCmd::Publish`]?
+    pub fn has_staged(&self) -> bool { crate::pms::has_staged(&self.state) }
+
+    /// Has source `sid`'s read landed (or failed)? See [`crate::pms::source_settled`].
+    pub fn source_settled(&self, sid: plx_plex::plex::ServerId) -> bool {
+        crate::pms::source_settled(&self.state, sid)
+    }
+
+    /// Test hook: how many authoritative refetches (`RefetchHubs`) this store has started.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refetch_count_for_test(&self) -> u32 { crate::pms::hub_gen_for_test(&self.state) }
+
+    /// Test hook: how many launched workers still owe a landing.
     #[cfg(any(test, feature = "test-support"))]
     pub fn owed_for_test(&self) -> u32 { crate::pms::owed_count_for_test(&self.adapter) }
+
+    /// Test hook: the request ids of the launches refused and not yet settled by a step.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refused_for_test(&self) -> Vec<u32> { crate::pms::refused_for_test(&self.adapter) }
 
     pub fn land_with_directory(
         &mut self,
         result: &HubsResult,
         directory: crate::stores::browse::DirectoryView<'_>,
+        clients: &plx_plex::plex::ClientKeys,
     ) -> super::StoreOutcome {
-        let outcome = crate::pms::land_with_directory(&mut self.state, &self.adapter, result, directory);
+        let outcome = crate::pms::land_with_directory(&mut self.state, &self.adapter, result, directory, clients);
         if outcome.changed { self.bump(); }
         outcome
     }
@@ -188,38 +307,13 @@ impl HubsStore {
         &mut self,
         dt: f32,
         directory: crate::stores::browse::DirectoryView<'_>,
+        clients: &plx_plex::plex::ClientKeys,
     ) -> super::StoreOutcome {
-        let before = self.state.catalog_gen;
-        let endpoints = crate::pms::tick_with_directory(&mut self.state, &self.adapter, dt, directory);
-        let changed = self.state.catalog_gen != before;
+        let before = crate::pms::visible_projection(&self.state);
+        let endpoints = crate::pms::tick_with_directory(&mut self.state, &self.adapter, dt, directory, clients);
+        let changed = crate::pms::visible_projection(&self.state) != before;
         if changed { self.bump(); }
         super::StoreOutcome { changed, endpoints }
-    }
-
-    /// Test-only standalone shape for bootstrap fixtures with no Browse directory.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn controlled(&mut self, cmd: Option<HubsCmd>, dt: f32,
-        launch: &mut dyn FnMut(crate::pms::HubRequest) -> bool) -> super::StoreOutcome {
-        plx_base::testlock::assert_held("controlled hubs store");
-        self.prepare_command(cmd.as_ref());
-        let command = cmd.as_ref().is_some_and(|cmd| !cmd.is_paging());
-        let outcome = crate::pms::controlled_work(&mut self.state, &self.adapter, cmd, dt, launch);
-        if command || outcome.changed { self.bump(); }
-        outcome
-    }
-
-    /// Controlled Home work scoped by the Bridge's retained Browse directory. The retained view is
-    /// the decision input for this frame.
-    pub fn controlled_with_directory(&mut self, cmd: Option<HubsCmd>, dt: f32,
-        directory: crate::stores::browse::DirectoryView<'_>,
-        launch: &mut dyn FnMut(crate::pms::HubRequest) -> bool) -> super::StoreOutcome {
-        #[cfg(any(test, feature = "test-support"))]
-        plx_base::testlock::assert_held("controlled hubs store with Browse owner");
-        self.prepare_command(cmd.as_ref());
-        let command = cmd.as_ref().is_some_and(|cmd| !cmd.is_paging());
-        let outcome = crate::pms::controlled_work_with_directory(&mut self.state, &self.adapter, cmd, dt, directory, launch);
-        if command || outcome.changed { self.bump(); }
-        outcome
     }
 
     /// Synchronous addressed command path. Reset rotates the adapter before clearing state, so an
@@ -227,7 +321,7 @@ impl HubsStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn run(&mut self, cmd: HubsCmd) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
-        let notice = !cmd.is_paging();
+        let notice = cmd.always_notifies();
         let answer = crate::pms::run(&mut self.state, &self.adapter, cmd);
         if notice || answer.changed { self.bump(); }
         answer
@@ -240,10 +334,11 @@ impl HubsStore {
         &mut self,
         cmd: HubsCmd,
         directory: crate::stores::browse::DirectoryView<'_>,
+        clients: &plx_plex::plex::ClientKeys,
     ) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
-        let notice = !cmd.is_paging();
-        let answer = crate::pms::run_with_directory(&mut self.state, &self.adapter, cmd, directory);
+        let notice = cmd.always_notifies();
+        let answer = crate::pms::run_with_directory(&mut self.state, &self.adapter, cmd, directory, clients);
         if notice || answer.changed { self.bump(); }
         answer
     }
@@ -257,7 +352,8 @@ mod contract_tests {
     fn every_reset_entry_point_retires_workers_and_accepts_new_landings() {
         let _guard = plx_base::testlock::serial();
         let directory = crate::stores::browse::DirectorySnapshot::fixture(0, 0, vec![]);
-        for path in ["run", "run_with_directory", "controlled", "controlled_with_directory"] {
+        let keys = crate::pms::registry_keys_for_test();
+        for path in ["run", "run_with_directory"] {
             let mut store = HubsStore::default();
             store.seed_for_test(1, crate::pms::HubState::Ready);
             let retired = store.adapter();
@@ -265,11 +361,7 @@ mod contract_tests {
 
             match path {
                 "run" => { let _ = store.run(HubsCmd::Reset); }
-                "run_with_directory" => { let _ = store.run_with_directory(HubsCmd::Reset, directory.view()); }
-                "controlled" => { let _ = store.controlled(Some(HubsCmd::Reset), 0.0, &mut |_| false); }
-                "controlled_with_directory" => {
-                    let _ = store.controlled_with_directory(Some(HubsCmd::Reset), 0.0, directory.view(), &mut |_| false);
-                }
+                "run_with_directory" => { let _ = store.run_with_directory(HubsCmd::Reset, directory.view(), &keys); }
                 _ => unreachable!(),
             }
 
@@ -282,6 +374,27 @@ mod contract_tests {
             store.queue_test_landing(Some(1));
             assert_eq!(store.take_results().len(), 1, "{path} lost a new worker's landing");
         }
+    }
+
+    /// The per-frame publish check and a quiet ask are background chatter: they raise the notice only
+    /// through what they changed, so a Home with nothing staged is not repainted every frame.
+    #[test]
+    fn background_commands_raise_the_notice_only_when_they_change_something() {
+        let _guard = plx_base::testlock::serial();
+        let directory = crate::stores::browse::DirectorySnapshot::fixture(0, 0, vec![]);
+        let keys = crate::pms::registry_keys_for_test();
+        let mut store = HubsStore::default();
+        store.seed_for_test(2, crate::pms::HubState::Ready);
+        let before = store.gen();
+        for visible in [true, false] {
+            let out = store.run_with_directory(
+                HubsCmd::Publish { home_top_visible: visible, focused_hub: None, press_live: false }, directory.view(), &keys);
+            assert!(!out.changed);
+        }
+        assert_eq!(store.gen(), before, "Publish with nothing staged does not raise the notice");
+        assert_eq!(store.take_notice(), None);
+        assert!(HubsCmd::Publish { home_top_visible: true, focused_hub: None, press_live: false }.is_background());
+        assert!(!HubsCmd::RefetchHubs.is_background());
     }
 
     fn section(sid: plx_plex::plex::ServerId, section: usize, pinned: bool)
@@ -301,7 +414,7 @@ mod contract_tests {
     }
 
     #[test]
-    fn controlled_hubs_uses_the_supplied_directory() {
+    fn a_hubs_step_asks_only_for_the_sources_the_supplied_directory_pins() {
         let _guard = plx_base::testlock::serial();
         plx_plex::plex::reset_servers_for_test();
         let own = plx_plex::plex::register_for_test(
@@ -310,26 +423,25 @@ mod contract_tests {
             "hubs-hidden", "127.0.0.1", 10, "synthetic", "fixture");
         let directory = crate::stores::browse::DirectorySnapshot::fixture(
             7, 0, vec![section(own, 0, true), section(hidden, 1, false)]);
+        let keys = crate::pms::registry_keys_for_test();
         let mut store = HubsStore::default();
-        let mut ignored = |_| false;
-        let _ = store.controlled_with_directory(Some(HubsCmd::Reset), 0.0, directory.view(), &mut ignored);
-        let mut launched = Vec::new();
+        let _ = store.run_with_directory(HubsCmd::Reset, directory.view(), &keys);
 
-        let _ = store.controlled_with_directory(Some(HubsCmd::RefetchHubs), 0.0, directory.view(),
-            &mut |request| {
-                launched.push(request.descriptor().2);
-                false
-            });
+        let _ = store.run_with_directory(HubsCmd::RefetchHubs, directory.view(), &keys);
 
-        assert_eq!(launched, [own.raw()],
-            "the retained pin table excludes the unpinned source");
-        let _ = store.controlled_with_directory(Some(HubsCmd::Reset), 0.0, directory.view(), &mut ignored);
+        let asked: Vec<u16> = store.take_jobs().into_iter().map(|job| {
+            let crate::stores::StoreJob::Hubs(job, _) = job else { panic!("another store's job on the Hubs outbox") };
+            job.req.descriptor().2
+        }).collect();
+        assert_eq!(asked, [own.raw()], "the retained pin table excludes the unpinned source");
+        assert!(!store.has_jobs(), "taking the jobs empties the outbox");
+        let _ = store.run_with_directory(HubsCmd::Reset, directory.view(), &keys);
         plx_plex::plex::reset_servers_for_test();
     }
 
-    /// **The two-owner regression.** A worker captures a clone of its owner's `Arc<PmsAdapter>`
-    /// before it spawns (`HubsStore::adapter`); nothing about a landing knows which `HubsStore`
-    /// minted the request it answers except which `Arc` it lands into. Two independently-owned
+    /// **The two-owner regression.** A job's port holds a clone of its owner's `Arc<PmsAdapter>`
+    /// from the step that emitted it (`HubsStore::adapter`); nothing about a landing knows which
+    /// `HubsStore` minted the request it answers except which `Arc` it lands into. Two independently-owned
     /// stores (as two `Bridge`s would be, one per signed-in session) must not see each other's
     /// arrivals, and a `Reset`'s adapter rotation must make a worker started before it land into a
     /// mailbox nobody reads any more.

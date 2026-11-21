@@ -1,5 +1,5 @@
 //! **Dump mode, the gfx half** (the deterministic frame dump; its landing half is
-//! `plx_machine::landgate::Gate::arm_dump`).
+//! `plx_machine::landgate::Gate::arm_dump_paced`, the form the driver arms).
 //!
 //! A dump writes frames from virtual time, so every wall-clock-dependent decision that reaches
 //! logical state must be a constant. The ones that live here are listed below:
@@ -31,8 +31,12 @@
 //!   iterations, held repeats included, so the virtual frame a probe re-reads on was the number of
 //!   boot holds modulo 30 and the Resume pill's ground differed by 1/255 between runs. In dump mode
 //!   it is SYNCHRONOUS and PER CALL (`gfx::probe_mode`): copy the tap boxes, `glReadPixels`, return;
-//!   no cadence, no fence. The refusal paths (`may_read == false`, a blur-source pass, a frozen
-//!   page) still answer with the last latched value.
+//!   no cadence, no fence. The copy reads the SAME source as the product (the bar's band image,
+//!   the Hero row's framebuffer), now, instead of at the next frame boundary, so the answer is a
+//!   function of the frame being drawn: a direct band's image is final before the visible page
+//!   draws (a band under a lower glass captures inline, during the walk; the chrome band does only
+//!   under the dev `plxnative-tileglass` trigger). The refusal paths (`may_read == false`, a
+//!   blur-source pass, a frozen page) still answer with the last latched value.
 //! * **Held repeats** ([`held_repeat`]). A page image's capture step and a page dip's
 //!   floor frame advance once per virtual frame, not once per held iteration.
 //!
@@ -42,13 +46,13 @@
 //! driver asserts empty at the end of a run (`Gate::unconverted_takes`) are stated in
 //! `plx_machine::landgate`'s module doc; this module owns only the gfx decisions listed above.
 //!
-//! **Tests that arm it** hold `plx_base::testlock::serial()`: the switch is process-global, and
-//! every gfx test that reaches a hooked function holds that lock, so nothing leaks between them.
-//! A test in another binary that arms it (`Armed::new()`) holds the lock too, and every OTHER test
-//! of that binary that reaches a consumer below either holds it or calls the consumer's pure twin
-//! (`evict_cooldown_due_in`, `declines_in`, `Budget::take_in`, `PageImage::step_filmed`,
-//! `snapshot_defers_in`, `probe_mode`) with the switch passed as `false`. A test that reads the
-//! global unguarded is not wrong today and flakes the day a neighbour arms it.
+//! **Tests that arm it** use the [`Armed`] guard, which arms THIS THREAD only (a thread-local that
+//! [`armed`] ORs with the process-wide switch the driver's [`arm`] sets), so a test that arms
+//! cannot change what a concurrent test on another thread sees. (The guard was process-global
+//! once, and the `PageImage::plan` tests, which never took `serial()`, flaked with `Capture`
+//! where they expected `Held`.) A guarded test still holds `plx_base::testlock::serial()` when it
+//! also touches other process-global gfx state, such as the text prewarm queue. Calling [`arm`]
+//! directly from a test is the process-wide form and needs `serial()` against every reader.
 //!
 //! # The admission rule
 //!
@@ -65,7 +69,8 @@
 //! present at mount, an order a television rarely has) and is answered there, not patched here one
 //! branch at a time. `ci/check-dump-consumers.py` (in `make check`) holds the list of files that may
 //! name the switch to `ci/allow/dump.txt`; a new file naming it fails the gate until this rule has
-//! been read and the file's branch fits it (and is listed below).
+//! been read and the file's branch fits it (and is listed below). `ci/check-ledger-ratchet.py` also
+//! fails a PR that adds a line to that list, so a new consumer is the owner's call.
 //!
 //! # Every consumer, and which kind it is
 //!
@@ -109,7 +114,7 @@
 //! * `src/dev/framedump.rs` (the driver): [`arm`], [`set_held_repeat`] and the read in `idle_dt`.
 //!
 //! Two other switches exist and are not this one: the landing gate's own
-//! (`plx_machine::landgate::Gate::arm_dump`, which `machine` keeps because it may not name `gfx`)
+//! (`plx_machine::landgate::Gate::arm_dump_paced`, or `arm_dump` for a caller off the frame thread, which `machine` keeps because it may not name `gfx`)
 //! and the placeholder counter's (`plx_ui::placeholder`, armed per thread).
 //!
 //! **A runtime switch, off by default.** [`arm`] is called by the dump driver only; nothing in a
@@ -128,6 +133,10 @@ static DUMP: AtomicBool = AtomicBool::new(false);
 #[cfg(any(feature = "hostsim", feature = "test-support", test))]
 thread_local! {
     static REPEAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set by the host-test [`Armed`] guard and read by [`armed`] alongside [`DUMP`]. Per thread,
+    /// so a test that arms the dump cannot flip a concurrent test's `PageImage::plan` (or any other
+    /// hooked consumer) from the product's behaviour to the dump's.
+    static TEST_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Arm dump mode for this process. A no-op outside the simulator (`hostsim`) and host tests.
@@ -150,7 +159,7 @@ pub fn disarm() {
 pub fn armed() -> bool {
     #[cfg(any(feature = "hostsim", feature = "test-support", test))]
     {
-        DUMP.load(Ordering::Relaxed)
+        DUMP.load(Ordering::Relaxed) || TEST_ARMED.with(std::cell::Cell::get)
     }
     #[cfg(not(any(feature = "hostsim", feature = "test-support", test)))]
     {
@@ -209,14 +218,17 @@ impl Drop for HeldRepeat {
     }
 }
 
-/// A host test's guard: dump mode is disarmed again even if an assertion panics.
+/// A host test's guard: dump mode is armed **for this thread only** until it drops, even if an
+/// assertion panics. It sets a thread-local that [`armed`] ORs with the process-wide switch
+/// [`arm`] sets (the real driver's), so a test that arms cannot leak into a sibling test running
+/// on another thread. Everything a guarded test reaches must therefore run on its own thread.
 #[cfg(any(test, feature = "test-support"))]
 pub struct Armed;
 
 #[cfg(any(test, feature = "test-support"))]
 impl Armed {
     pub fn new() -> Self {
-        arm();
+        TEST_ARMED.with(|a| a.set(true));
         Armed
     }
 }
@@ -229,7 +241,7 @@ impl Default for Armed {
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for Armed {
     fn drop(&mut self) {
-        disarm();
+        TEST_ARMED.with(|a| a.set(false));
     }
 }
 

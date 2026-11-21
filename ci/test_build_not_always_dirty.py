@@ -12,9 +12,10 @@ Two halves, both reading cargo's own `--message-format=json` records (only lines
 objects with a `reason` are looked at; `cargo test` also prints harness text on stdout):
 
 * `SecondBuildIsFreshTests` builds the real crate twice from `rust-modules/` and demands that the
-  second run recompiled nothing of the crate: every `plxnative_modules` (and `plx_platform`, the
-  layer crate whose own build script generates the catalog, and `plx_gfx`, whose build script
-  compiles the nanosvg object for its own test binary) compiler-artifact is `fresh`, and the
+  second run recompiled nothing of the crate: every `plxnative_modules` (and `plx_os`, the
+  layer crate whose own build script generates the catalog, `plx_gfx`, whose build script
+  compiles the nanosvg object for its own test binary, and the two platform crates, whose build
+  scripts print the link argument for theirs) compiler-artifact is `fresh`, and the
   crate's build script did not write its output again (cargo replays a
   `build-script-executed` record even for a fresh script, so the mtime of the script's output file
   is read, wherever this cargo keeps it).
@@ -41,7 +42,7 @@ objects with a `reason` are looked at; `cargo test` also prints harness text on 
   `build.rs` and `src/release_line.rs` against a stub library, in a throwaway repository (the
   appearance is detected through the worktree's `HEAD`, which is what checking out the line moves),
   so the real tree is never touched and nothing app-sized is recompiled. It has no dependencies of
-  its own (the catalog and install-identity generators belong to the platform crate's build script
+  its own (the catalog and install-identity generators belong to the os crate's build script
   now) and runs `--offline`.
   It also pins that a missing `.git/logs/HEAD` (reflog off or deleted) does not make the build
   always-dirty, the same hazard through `emit_build_sha`.
@@ -54,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from rust_toolchain import pinned
 
 ROOT = Path(__file__).resolve().parent.parent
 RUST = ROOT / "rust-modules"
@@ -61,14 +63,18 @@ CRATE = "plxnative_modules"  # the lib target's name (underscored)
 PACKAGE = "plxnative-modules"  # the package's name, as it appears in a package_id
 # The layer crate that owns a build script of its own (catalog + install identities): it must not be
 # always-dirty either, or every crate above it would rebuild with it.
-PLATFORM_CRATE = "plx_platform"
+OS_CRATE = "plx_os"
 GFX_CRATE = "plx_gfx"
-NIGHTLY = os.environ.get("RUST_NIGHTLY", "nightly")
+# The two platform crates carry a build script of their own too (the nanosvg link argument,
+# `rust-modules/build_support/host_link.rs`): an always-dirty one would relink the ARM archive's crate
+# and the simulator's on every build.
+PLATFORM_CRATES = ("plx_platform_webos", "plx_platform_desktop")
+NIGHTLY = pinned()  # the repo's one toolchain (historic name)
 
 
-# The invocation `make check`'s lab line runs (Makefile, "cargo check --lib --tests -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens --features
+# The invocation `make check`'s lab line runs (Makefile, "cargo check --lib --tests -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp --features
 # lab-diagnostics"); identical arguments and CARGO_INCREMENTAL make the first run here a reuse.
-LIB_ARGS = ["check", "--lib", "--tests", "-p", "plxnative-modules", "-p", "plx_base", "-p", "plx_machine", "-p", "plx_platform", "-p", "plx_gfx", "-p", "plx_net", "-p", "plx_ui", "-p", "plx_plex", "-p", "plx_telemetry", "-p", "plx_data", "-p", "plx_session", "-p", "plx_media", "-p", "plx_appkit", "-p", "plx_screens", "--features", "lab-diagnostics"]
+LIB_ARGS = ["check", "--lib", "--tests", "-p", "plxnative-modules", "-p", "plx_base", "-p", "plx_machine", "-p", "plx_os", "-p", "plx_gfx", "-p", "plx_net", "-p", "plx_ui", "-p", "plx_plex", "-p", "plx_telemetry", "-p", "plx_data", "-p", "plx_session", "-p", "plx_media", "-p", "plx_playback_contract", "-p", "plx_play_uri", "-p", "plx_play_feed", "-p", "plx_media_codecs", "-p", "plx_appkit", "-p", "plx_screens", "-p", "plx_shell_sdl", "-p", "plx_platform_webos", "-p", "plx_platform_desktop", "-p", "plx_owp", "--features", "lab-diagnostics"]
 
 
 def cargo_env():
@@ -108,12 +114,12 @@ def package_of(record):
 
 
 def rebuilt(records):
-    """Describe what a build recompiled of the app crate (or of the platform crate, whose build
+    """Describe what a build recompiled of the app crate (or of the os crate, whose build
     script generates the catalog), or [] when it recompiled none of it."""
     return [f"{(rec.get('target') or {}).get('name')} ({'/'.join((rec.get('target') or {}).get('kind') or [])}) was recompiled"
             for rec in records
             if rec.get("reason") == "compiler-artifact"
-            and (rec.get("target") or {}).get("name") in (CRATE, PLATFORM_CRATE, GFX_CRATE) and not rec.get("fresh")]
+            and (rec.get("target") or {}).get("name") in (CRATE, OS_CRATE, GFX_CRATE, *PLATFORM_CRATES) and not rec.get("fresh")]
 
 
 def freeze_stamps(records):
@@ -192,7 +198,9 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(script_stamp(freeze_stamps(json_records(other))), {})
             # A later rewrite of the file shows up in the NEXT build's stamp, not the earlier one.
             records = freeze_stamps(json_records(ours))
+            stamp = (build / "output").stat()
             (build / "output").write_text("cargo:rustc-env=X=2\n")
+            os.utime(build / "output", ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
             self.assertEqual(script_stamp(records), first)
             self.assertNotEqual(script_stamp(freeze_stamps(json_records(ours))), first)
 
@@ -299,7 +307,7 @@ class MarkerStillTriggersTests(unittest.TestCase):
         (crate / "Cargo.toml").write_text(STUB_MANIFEST)
         shutil.copy(RUST / "Cargo.lock", crate / "Cargo.lock")
         # Inputs the script reads but this test never edits.
-        for name in ("src", "vendor"):
+        for name in ("src", "vendor", "ci"):
             (repo / name).symlink_to(ROOT / name)
         self.repo, self.crate = repo, crate
         vcs(repo, "init", "-q", "-b", "trunk")

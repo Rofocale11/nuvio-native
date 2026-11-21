@@ -39,8 +39,8 @@
 //!   pure formatting/policy, no state at all; free functions.
 //!
 //! **Two names that LOOK like reads and are not, on purpose — read the exclusion, not just the
-//! list.** `fetch_playing_item(sid, rk) -> Option<PlayingItem>` performs a BLOCKING `plex::client`
-//! network call (`route.rs`'s one caller runs it on the resolve WORKER, never the main thread); a
+//! list.** `fetch_playing_item(client, sid, rk, version) -> Option<(PlayingItem, Option<PlayedVersion>)>` performs a BLOCKING
+//! network call through the `client` its caller holds (`route.rs`'s one caller runs it on the resolve WORKER, never the main thread); a
 //! screen must route it through a request/pump, never call it from `step`/`draw`. `sync_now_playing()`
 //! mutates `NOW` and its one remaining caller is already inside the WRITE surface below
 //! (`install_landed_detail`) — no external caller reaches it directly today, and none should start
@@ -53,8 +53,11 @@
 //!
 //! ## 2. The WRITE surface — every [`MetadataCmd`] variant, and what it wraps
 //!
-//! - `RequestDetail{sid, rk}` → `metadata::request_detail` — supersede any in-flight load, fetch
-//!   off-thread; lands through the identity-keyed `DETAIL_LANDING` and `pump_detail`.
+//! - `RequestDetail{sid, rk}` → `metadata::request_detail` — supersede any in-flight load, emit the
+//!   fetch as a job the application starts off-thread; lands through the identity-keyed
+//!   `DETAIL_LANDING` and `pump_detail`. A show opens on
+//!   its on-deck episode's season; a re-read of the show already loaded keeps the season selected on
+//!   it (read from the store at request time, `metadata::selected_season_number`).
 //! - `Clear` → `metadata::clear` — drop the loaded item, supersede everything in flight.
 //! - `ClearItem{sid, rk}` → `metadata::clear_item` — a Detail page's teardown: the same, but only
 //!   for the item that page showed, so a page torn down late (a copy on another server fading out
@@ -70,11 +73,19 @@
 //!   another page: a Closing surface carried into covered modals is re-entered by the container and
 //!   asks for its own item too, and nested presented copies (a copy presented from inside another
 //!   copy) are not covered.
-//! - `LoadSeason(usize)` → `metadata::load_season` — flip the season strip optimistically, fetch
-//!   the episodes off-thread (debounced landing through `pump_season`).
+//! - `LoadSeason(usize)` → `metadata::load_season` — flip the season strip optimistically and emit
+//!   the episodes' fetch as a `StoreJob::MetaSeason` the owner starts (debounced landing through
+//!   `pump_season`).
+//! - `WantEpisodes{lo, hi, focus, restore}` → `metadata::want_episodes` — emit the fetch of the pages
+//!   of a long season the screen needs as a `StoreJob::MetaEpisodes` and evict the ones it does
+//!   not (`pump_episode_pages` installs them).
+//! - `WantRelated{before, seen}` → `metadata::want_related` — slide the Related row's tail window:
+//!   take the single-flight claim and emit the read as a `StoreJob::MetaRelated` the owner starts
+//!   (`pump_related`, at the start of the frame, installs the window it lands).
+//! - `SeekRelated{at, seen}` → `metadata::ask_related` with `RelatedAsk::Seek` — the same job, opened at a tail position.
 //! - `SetNowPlaying(Option<NowPlaying>)` → `metadata::set_now_playing`.
-//! - `SetWatchedLocal{sid, rk, on}` → `metadata::set_watched_local` — the optimistic half of a
-//!   view-state write, answers whether it actually changed anything.
+//! - `ApplyView{at, edit}` → `metadata::set_watched_local` — the optimistic half of a view-state
+//!   change, answers whether it actually changed anything.
 //! - `InstallPlaying(Option<PlayingItem>)` → `metadata::install_playing` — the playback plan's leaf
 //!   (`route.rs`).
 //! - `MarkSkipped(Marker)` → `metadata::mark_skipped`.
@@ -163,7 +174,8 @@ use super::StoreEv;
 
 #[derive(Clone)]
 pub enum MetadataCmd {
-    /// Supersede any in-flight load and fetch `(sid, rk)` off-thread; lands through `pump_detail`.
+    /// Supersede any in-flight load and emit the fetch of `(sid, rk)` as a job the application
+    /// starts off-thread; lands through `pump_detail`.
     RequestDetail { sid: ServerId, rk: String },
     /// Close the page: drop the item and supersede everything in flight.
     Clear,
@@ -181,11 +193,35 @@ pub enum MetadataCmd {
     /// Unlike `Clear`, this one must not leave a previous profile's playback descriptor or track
     /// store reachable from the next profile's Bridge.
     Reset,
-    /// The season strip: flip optimistically, fetch the episodes off-thread.
+    /// The season strip: flip optimistically, emit the episodes' fetch as a job the owner starts.
     LoadSeason(usize),
+    /// The selected season's episodes the screen needs, as indices `lo..hi` (what is on screen plus
+    /// a lead in the direction of travel), with the focused index and the target of a pending
+    /// restore. Pages of that range that have not landed are fetched; once pages land, the rows of
+    /// pages outside it are evicted, except the focus's and the restore target's. Idempotent: say
+    /// it again to retry a failed page.
+    WantEpisodes { lo: usize, hi: usize, focus: Option<usize>, restore: Option<usize> },
+    /// The Related row's tail window moves one step: `before` to the previous, else to the next.
+    /// Ignored while a read of it is out or the window has nothing more that way; the shelf says
+    /// it again at its next edge. `seen` is the `(offset, end)` of the tail window in the view the
+    /// ask was computed from: a frame captures its views before its landings are delivered, so
+    /// the ask can come from a window the store has since slid, and such an ask is refused (the
+    /// landing's publication re-arms the shelf, which asks again from the window that stands).
+    WantRelated { before: bool, seen: (usize, usize) },
+    /// Open the Related row's tail window where tail position `at` lies, replacing the window the
+    /// page holds: a page read afresh (a Back from a card opened deep in the row) names the
+    /// position its focus was last seen at. `seen` is the window the ask was computed from, and is
+    /// refused the same way a `WantRelated`'s is; so is an ask while a read is out.
+    SeekRelated { at: usize, seen: (usize, usize) },
+    /// Withdraw the read `WantRelated` started: focus is no longer in the zone it was asked from (it
+    /// left the edge, or, for an ask the row made unfocused because its skeletons were on its axis,
+    /// it entered the row far from the end), and a window sliding in now could move the card it
+    /// stands on. A read already out is
+    /// discarded when it lands, and one landed but not yet installed is dropped.
+    CancelRelated,
     SetNowPlaying(Option<crate::metadata::NowPlaying>),
-    /// The optimistic half of a view-state write on the loaded item, its episodes and Related.
-    SetWatchedLocal { sid: ServerId, rk: String, on: bool },
+    /// The optimistic half of a view-state change on the loaded item, its episodes and Related.
+    ApplyView { at: crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit },
     /// The playback plan's leaf (`route.rs`).
     InstallPlaying(Option<crate::metadata::PlayingItem>),
     /// A subtitle the server just installed for the PLAYING item (the player's subtitle search),
@@ -240,6 +276,11 @@ impl Default for MetadataStore {
 }
 
 impl MetadataStore {
+    /// Join the owner's view-state publish order (`Stores::view_ledger`).
+    pub(crate) fn share_ledger(&mut self, ledger: &crate::viewledger::ViewLedger) {
+        self.state.ledger = ledger.clone();
+    }
+
     fn bump(&self) -> u32 {
         self.notice_dirty.store(true, Ordering::Relaxed);
         self.notice_gen.fetch_add(1, Ordering::Relaxed) + 1
@@ -273,6 +314,26 @@ impl MetadataStore {
 
     pub fn adapter_ref(&self) -> &crate::metadata::MetadataAdapter { &self.adapter }
 
+    /// Take the jobs this owner's commands have emitted since the last take, in order. The caller
+    /// OWES each one to a runner: a job dropped here is a request whose reservation is never
+    /// handed back and whose spinner never settles, so the application drains them in the same
+    /// call that ran the command (`Bridge::metadata_run`).
+    #[must_use]
+    pub fn take_jobs(&mut self) -> Vec<super::StoreJob> {
+        std::mem::take(&mut self.state.jobs)
+    }
+
+    /// Does the outbox hold a job nobody has taken yet?
+    pub fn has_jobs(&self) -> bool {
+        !self.state.jobs.is_empty()
+    }
+
+    /// The port that lands a detail answer into THIS owner's current adapter: what a job emitted
+    /// now carries (`assert_fx!` compares it by adapter identity).
+    pub fn detail_port(&self) -> crate::metadata::DetailPort {
+        crate::metadata::DetailPort::of(&self.adapter)
+    }
+
     /// Arms this owner's replay-tracking `Tracker` for controlled-content recording/replay. Call
     /// exactly once, right after construction (`crate::metadata::record::arm`'s own doc has the
     /// full rationale and history) — the one caller is `Bridge::controlled_home`.
@@ -284,12 +345,24 @@ impl MetadataStore {
     /// `Clear` — see the struct doc. `Reset` (the server/profile switch) DOES rotate, before the
     /// state clears, so a worker spawned before the reset can only land into the retired `Arc` —
     /// mirrors `PersonStore::run`/`SearchStore::run_with_directory`'s `Reset` arm.
-    pub fn run(&mut self, cmd: MetadataCmd) -> bool {
+    pub fn run(&mut self, cmd: MetadataCmd) -> bool { self.run_with_optional_keys(cmd, None) }
+
+    pub fn run_with_keys(&mut self, cmd: MetadataCmd, keys: &plx_plex::plex::ClientKeys) -> bool {
+        self.run_with_optional_keys(cmd, Some(keys))
+    }
+
+    fn run_with_optional_keys(&mut self, cmd: MetadataCmd, keys: Option<&plx_plex::plex::ClientKeys>) -> bool {
         if matches!(&cmd, MetadataCmd::Reset) {
             self.adapter = Arc::new(Default::default());
         }
-        let changed = crate::metadata::run(&mut self.state, &self.adapter, cmd);
-        self.bump();
+        // An optimistic edit that matched no row (a server's `Facts`/`Offset` that agrees with what
+        // is drawn) raises no notice: a notice relayouts a mounted Detail page. Every other
+        // command bumps whatever it returned.
+        let view_edit = matches!(&cmd, MetadataCmd::ApplyView { .. });
+        let changed = crate::metadata::run_with_keys(&mut self.state, &self.adapter, cmd, keys);
+        if changed || !view_edit {
+            self.bump();
+        }
         changed
     }
 
@@ -298,50 +371,93 @@ impl MetadataStore {
         self.adapter.clone()
     }
 
-    /// Route-unconditional landing/spawn pass across detail, season and alt-sources — the same
-    /// three pumps `Machine::step`'s `StoreEv::Pump` arm already drives.
-    pub fn pump(&mut self, gate: &plx_machine::landgate::Gate) -> bool {
-        let detail = self.pump_detail_with_gate(gate);
+    /// Refuse a compatibility Pump with no explicit keys/dev input before taking any landing.
+    fn pump_without_input(&mut self) -> bool {
+        plx_base::eventlog::log("metadata: Pump without keys/dev input — dropped");
+        debug_assert!(false, "metadata Pump requires explicit keys/dev input");
+        false
+    }
+
+    /// Explicit-input aggregate landing pass. Its caller owns the same-call outbox drain.
+    pub fn pump(&mut self, keys: &plx_plex::plex::ClientKeys, controlled: bool, stand_in: Option<Vec<crate::metadata::AltCopy>>, gate: &plx_machine::landgate::Gate) -> bool {
+        let detail = self.pump_detail_with_gate(keys, controlled, gate);
         let season = self.pump_season_with_gate(gate);
-        let alt = crate::metadata::pump_alt_sources_with_gate(&mut self.state, &self.adapter, gate);
+        let related = self.pump_related();
+        let alt = crate::metadata::pump_alt_sources_with_gate(&mut self.state, &self.adapter, keys, controlled, stand_in, gate);
         if alt { self.bump(); }
-        detail || season || alt
+        detail || season || related || alt
     }
 
     /// The async detail landing alone — `app/run.rs`'s own call site, pumped before season.
-    pub fn pump_detail_with_gate(&mut self, gate: &plx_machine::landgate::Gate) -> bool {
-        let changed = crate::metadata::pump_detail_with_gate(&mut self.state, &self.adapter, gate);
+    pub fn pump_detail_with_gate(&mut self, keys: &plx_plex::plex::ClientKeys, controlled: bool, gate: &plx_machine::landgate::Gate) -> bool {
+        let changed = crate::metadata::pump_detail_with_gate(&mut self.state, &self.adapter, keys, controlled, gate);
         if changed { self.bump(); }
         changed
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn pump_detail(&mut self) -> bool {
-        self.pump_detail_with_gate(plx_machine::landgate::fixture_gate())
+    pub fn pump_detail(&mut self, keys: &plx_plex::plex::ClientKeys, controlled: bool) -> bool {
+        self.pump_detail_with_gate(keys, controlled, plx_machine::landgate::fixture_gate())
     }
 
     /// The async season landing alone — `app/run.rs`'s own call site, pumped after detail.
     pub fn pump_season_with_gate(&mut self, gate: &plx_machine::landgate::Gate) -> bool {
         let changed = crate::metadata::pump_season_with_gate(&mut self.state, &self.adapter, gate);
+        let pages = crate::metadata::pump_episode_pages(&mut self.state, &self.adapter);
+        let changed = changed || pages;
+        if changed { self.bump(); }
+        changed
+    }
+
+    /// Install a Related window that landed. **Pumped at the START of the frame, not beside the
+    /// two above**: those run between the frame's step and its draw, so what they install is drawn
+    /// one frame before its notice reaches the page. A Related landing slides a window of cards
+    /// under a focus the Detail page holds by key and resolves to a slot through projections it
+    /// rebuilds on that notice; drawn a frame early, the focused slot showed the card twelve
+    /// places on. Installed before the notices are taken, the page hears of the window in the
+    /// frame that first draws it.
+    pub fn pump_related(&mut self) -> bool {
+        let changed = crate::metadata::pump_related_pages(&mut self.state, &self.adapter);
         if changed { self.bump(); }
         changed
     }
 
     /// The cross-source alt-sources resolve, scoped by the Bridge's retained Browse directory.
-    pub fn pump_alt_sources_with_directory(
-        &mut self,
-        directory: crate::stores::browse::DirectoryView<'_>,
-        gate: &plx_machine::landgate::Gate,
-    ) -> bool {
-        let changed = crate::metadata::pump_alt_sources_with_directory_and_gate(
-            &mut self.state, &self.adapter, directory, gate);
-        if changed { self.bump(); }
-        changed
+    pub fn begin_alt_sources<'a>(&'a mut self, keys: &'a plx_plex::plex::ClientKeys,
+        controlled: bool) -> MetadataAltPass<'a> {
+        MetadataAltPass {
+            pass: crate::metadata::begin_alt_sources(&mut self.state, &self.adapter, keys, controlled),
+            notice_gen: &self.notice_gen, notice_dirty: &self.notice_dirty,
+        }
     }
 
     /// Borrowed read handle, shaped like `crate::person::PersonStore::view`.
     pub fn view(&self) -> crate::metadata::MetadataView<'_> {
         crate::metadata::MetadataView::new(self)
+    }
+}
+
+/// **`step` does not drain the outbox.** It runs the command, so a `RequestDetail` stepped through
+/// here leaves its job in [`MetadataStore::take_jobs`] and nothing starts it: whoever steps this
+/// store owns draining it, in the same call. The application's Bridge runs a command through
+/// `Stores::metadata_run` and drains right after it (`docs/sans-io.md`, "The store job lane"),
+/// which is the rule a new caller of this `step` has to meet by itself.
+/// Store-owned pass folds the entire begin -> host -> finish into ONE notice.
+#[must_use]
+pub struct MetadataAltPass<'a> {
+    pass: crate::metadata::AltSourcesPass<'a>,
+    notice_gen: &'a AtomicU32,
+    notice_dirty: &'a AtomicBool,
+}
+impl MetadataAltPass<'_> {
+    pub fn take_request(&mut self) -> Option<crate::metadata::AltStandInReq> { self.pass.take_request() }
+    pub fn finish(self, answer: Option<crate::metadata::AltStandInAnswer>, gate: &plx_machine::landgate::Gate) -> bool {
+        let changed = self.pass.finish(answer, gate);
+        if changed {
+            self.notice_dirty.store(true, Ordering::Relaxed);
+            self.notice_gen.fetch_add(1, Ordering::Relaxed);
+        }
+        changed
     }
 }
 
@@ -353,7 +469,9 @@ impl<H: Host> Machine<H> for MetadataStore {
                 self.run(c.clone());
             }
             StoreEv::Pump { .. } => {
-                self.pump(&plx_machine::landgate::Gate::default());
+                // No keys/dev input exists on this compatibility event. Refuse BEFORE taking
+                // any landing; explicit pump callers supply both and own their same-call drain.
+                self.pump_without_input();
             }
         }
         Handled::Yes
@@ -364,6 +482,25 @@ impl<H: Host> Machine<H> for MetadataStore {
 #[cfg(test)]
 mod two_owner_tests {
     use super::*;
+
+    #[test]
+    fn a_no_input_machine_pump_refuses_before_consuming_a_ready_detail() {
+        use plx_machine::job::Port;
+        let _serial = plx_base::testlock::serial();
+        let mut store = MetadataStore::default();
+        let sid = plx_plex::plex::ServerId::UNSET;
+        let gen = crate::metadata::begin_detail_for_test(store.adapter_ref(), sid, "item");
+        store.detail_port().done(plx_machine::machine::Addr {
+            to: plx_machine::machine::MachineId::Store(super::super::StoreId::Metadata.ord()),
+            req: plx_machine::machine::RequestId(gen),
+        }, ((sid, "item".into()), Some(crate::metadata::Detail { sid, rk: "item".into(), ..Default::default() })));
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.pump_without_input()));
+        if cfg!(debug_assertions) { assert!(refused.is_err()); } else { assert_eq!(refused.unwrap(), false); }
+        assert!(store.view().current().is_none());
+        assert!(store.view().detail_loading(), "the unprovided-input path took no landing");
+        assert!(store.pump_detail(&plx_plex::plex::ClientKeys::default(), false));
+        assert_eq!(store.view().current().unwrap().rk, "item");
+    }
 
     /// **The two-owner regression (contract Required 3).** A worker captures the `Arc` of its
     /// owner's `MetadataAdapter` before it spawns (mirrors `HubsStore`'s own two-owner test,
@@ -405,11 +542,11 @@ mod two_owner_tests {
 
         {
             let (a_state, a_adapter) = a.split_for_test();
-            crate::metadata::land_detail_for_test(a_state, a_adapter, sid, a_rk, a_gen, Some(a_detail.clone()));
+            crate::metadata::land_detail_for_test(&plx_plex::plex::ClientKeys::default(), false, a_state, a_adapter, sid, a_rk, a_gen, Some(a_detail.clone()));
         }
         {
             let (b_state, b_adapter) = b.split_for_test();
-            crate::metadata::land_detail_for_test(b_state, b_adapter, sid, b_rk, b_gen, Some(b_detail.clone()));
+            crate::metadata::land_detail_for_test(&plx_plex::plex::ClientKeys::default(), false, b_state, b_adapter, sid, b_rk, b_gen, Some(b_detail.clone()));
         }
 
         // POSITIVE: each owner's landing settled its own mailbox and installed its own item, and
@@ -427,5 +564,39 @@ mod two_owner_tests {
         a.run(MetadataCmd::Clear);
         assert_eq!(a.gen(), 1, "A's own command must advance A's own notice generation");
         assert_eq!(b.gen(), 0, "A's command must not advance B's notice generation");
+    }
+}
+
+#[cfg(test)]
+mod view_edit_notice_tests {
+    use super::*;
+    use crate::metadata::{Detail, Related};
+    use crate::viewstate::{ViewAt, ViewEdit};
+
+    /// An `ApplyView` that matched no tile raises no notice: a notice relayouts a mounted Detail
+    /// page, re-measures it and releases its pending Related page requests, so a server's
+    /// `Facts`/`Offset` that agrees with what is drawn must not cost one. A press that does change
+    /// a tile still does.
+    #[test]
+    fn a_view_edit_that_changed_nothing_raises_no_notice() {
+        let _serial = plx_base::testlock::serial();
+        let sid = plx_plex::plex::ServerId::UNSET;
+        let mut store = MetadataStore::default();
+        let tile = |rk: &str| Related { sid, rk: rk.into(), resume_ms: 3_510_000, unwatched: true, ..Default::default() };
+        crate::metadata::install_for_test(store.state_mut(), Some(Detail {
+            sid, rk: "show".into(), related: vec![tile("r0")], ..Default::default()
+        }));
+        let _ = store.take_notice();
+        let facts = ViewEdit::Facts { watched: true, unwatched: false, resume_ms: 0, sort: None };
+        let apply = |store: &mut MetadataStore, rk: &str, edit| {
+            store.run(MetadataCmd::ApplyView { at: ViewAt::leaf(sid, rk), edit })
+        };
+        assert!(apply(&mut store, "r0", facts));
+        assert!(store.take_notice().is_some(), "a changed tile is news");
+        assert!(!apply(&mut store, "r0", facts));
+        assert_eq!(store.take_notice(), None, "facts that agree with the tile raise no notice");
+        assert!(!apply(&mut store, "elsewhere", facts));
+        assert_eq!(store.take_notice(), None, "an item nothing here draws raises none either");
+        crate::metadata::install_for_test(store.state_mut(), None);
     }
 }

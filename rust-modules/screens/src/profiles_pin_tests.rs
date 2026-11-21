@@ -40,20 +40,10 @@ fn closing_pin_publishes_the_closed_state_before_the_next_tick() {
 }
 
 // ---------------------------------------------------------------------------------------
-// pin_flash / digit_of — pure, ported verbatim from `ui/profiles.rs`
+// pin_flash — pure, ported verbatim from `ui/profiles.rs`. The digit reader that used to sit beside
+// it, `digit_of`, is now `plx_ui::consts::pin_digit`, and its table is graded there
+// (`consts::action_tests`); the keypad's own reading of a wcode-only press is graded below.
 // ---------------------------------------------------------------------------------------
-
-#[test]
-fn a_pin_digit_is_read_from_either_field() {
-    assert_eq!(digit_of(b'7' as u32, 0), Some(b'7'), "a dev keyboard's sym");
-    assert_eq!(
-        digit_of(0, 55),
-        Some(b'7'),
-        "the remote's wcode, same digit"
-    );
-    assert_eq!(digit_of(b'0' as u32, 0), Some(b'0'));
-    assert_eq!(digit_of(999, 0), None, "not a digit in either field");
-}
 
 /// A 1.4s error window reads as several distinct red pulses, not one — the assertion a static
 /// tint fails no matter how red it is. Ported from `ui/profiles.rs`'s own property test,
@@ -92,7 +82,8 @@ fn the_wrong_pin_flash_blinks_at_least_four_times() {
 #[test]
 fn a_flash_flip_invalidates_the_present_gate() {
     let mut present = Present::new();
-    present.take(0); // drain the fresh gate's own always-dirty first frame
+    assert!(present.take(0)); // admit the fresh gate's always-dirty first frame
+    present.acknowledge(0); // simulate its actual swap
     let mut pad = Pad {
         open: true,
         error_s: PIN_ERR_S,
@@ -110,6 +101,7 @@ fn a_flash_flip_invalidates_the_present_gate() {
         }
         let now = pin_flash(pad.error_s);
         let asked = present.take(0);
+        if asked { present.acknowledge(0); } // simulate only admitted swaps
         if now != was {
             assert!(
                 asked,
@@ -170,6 +162,27 @@ fn back_closes_the_pad_and_clears_the_verdict() {
         )),
         "closing returns focus to the PROTECTED profile the pad was opened on (index 2), \
          not wherever the roster's default seat lands"
+    );
+}
+
+/// The PUBLISHED state, not just the field: `retire_pad` used to sync before clearing
+/// `pin_denied`, so the receiver saw `pad_open = false, pin_denied = true` until the next Tick.
+#[test]
+fn back_on_a_denied_pad_publishes_a_closed_pad_with_no_verdict() {
+    let mut s = bare(Pad {
+        open: true,
+        target: 2,
+        error_s: PIN_ERR_S,
+        ..Pad::new()
+    });
+    s.pin_denied = true;
+    s.sync_pin_state();
+    assert!(s.state.pad_open && s.state.pin_denied, "precondition");
+    step_ev(&mut s, &key_down(Key::Back, 0, 0), None);
+    assert!(!s.state.pad_open, "the published state shows the pad closed");
+    assert!(
+        !s.state.pin_denied,
+        "…and must not carry a verdict about a pad that is gone"
     );
 }
 
@@ -306,8 +319,34 @@ fn a_digit_key_types_into_the_entry_and_backspace_removes_one() {
         None,
     );
     assert_eq!(s.pad.entry, "127");
-    // backspace via the delete cell's OWN digit path is not reachable through `digit_of` (it
+    // backspace via the delete cell's OWN digit path is not reachable through `pin_digit` (it
     // is not in 48..=57) — `press` handles it directly, exercised below through `Activate`.
+}
+
+/// **Each number key types its own digit, and a wcode-only press keeps typing it.** The pairs are
+/// the ones the keypad is sent as `InputKind::Key { sym, wcode }`, written out as literals: a
+/// printable key's ASCII sym with or without the television's scancode beside it (the number
+/// buttons are sym `'5'` with scancode 34: the sym is the digit and the scancode is not), and the
+/// pair with NO digit sym and a wcode in 48..=57, which `pin_digit` still reads (the keypad's
+/// reading, deliberately wider than `is_remote_bound`'s: `docs/remote-keys.md` section 9). Nothing
+/// else types: the neighbours of both ranges, an unbound key, and a press that names no key.
+#[test]
+fn native_key_effect_pin_digits_type_their_own_digit() {
+    for digit in 0u32..=9 {
+        let typed = |sym: u32, wcode: u32| {
+            let mut s = bare(Pad::opened(0));
+            step_ev(&mut s, &key_down(Key::Other, sym, wcode), None);
+            s.pad.entry
+        };
+        assert_eq!(typed(48 + digit, 0), digit.to_string(), "sym '{digit}'");
+        assert_eq!(typed(48 + digit, 30 + digit), digit.to_string(), "sym '{digit}' with its scancode beside it");
+        assert_eq!(typed(0, 48 + digit), digit.to_string(), "wcode {} alone", 48 + digit);
+    }
+    for (sym, wcode) in [(47, 0), (58, 0), (0, 47), (0, 58), (0, 0), (0, 504), (0x4000_0051, 0), (0, 450), (0, 72)] {
+        let mut s = bare(Pad::opened(0));
+        step_ev(&mut s, &key_down(Key::Other, sym, wcode), None);
+        assert_eq!(s.pad.entry, "", "({sym}, {wcode}) types nothing");
+    }
 }
 
 /// Backspace and typing-again both cancel a running wrong-PIN flash — `press`'s own first

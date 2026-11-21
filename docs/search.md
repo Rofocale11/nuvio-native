@@ -5,8 +5,8 @@ lost — the **research into the television's on-screen keyboard**, which is whe
 went. If you read one section of this file before touching text entry, make it §3.
 
 **Scope: the user's own servers, and nothing else.** Every result comes from a PMS the account can
-reach. Plex Discover / Watchlist / the "Movies & Shows on Plex" catalog are deliberately absent —
-see §6.
+reach. Plex Discover and the "Movies & Shows on Plex" catalog are deliberately absent from the
+results, and the Watchlist is its own strip destination rather than a search scope — see §6.
 
 ---
 
@@ -39,9 +39,17 @@ as "0 post-warmup samples", which is indistinguishable from a real regression.
 
 ### The pill goes LAST
 
-`ui/widgets.rs::search_pill()` is `tab_count() - 1` — Search is always the LAST pill, and since
-2026-09-05 that is the only thing about its position that holds still. The row is
-`Home`, then one pill per type that has a FAVOURITE library, then Search: two to four stops, because
+Search is always the LAST pill: `app/chrome.rs` builds the strip's faces as `Home`, the type pills,
+the Watchlist bookmark (`TabFace::Icon(Icon::Bookmark)`, key `TAB_KEY_WATCHLIST`, `STRIP_BASE + 5`,
+appended after the chip's `+4` so no existing key moved but drawn before Search), then
+`TabFace::Icon(Icon::Search)`. Nothing reads "the last face" as the Search pill: the strip's
+destinations are found by KEY (`widgets::TAB_KEY_SEARCH`, `STRIP_BASE + 3`, and `TAB_KEY_CHIP` at
+`+4`), `app/chrome.rs` builds the faces and the keys together from one `strip_keys` list, and
+`Pill::Search` resolves to wherever that key sits, so an icon pill inserted before it moves no
+other destination. The library and search pages map a pressed key to its destination with those
+constants. The row is
+`Home`, then one pill per type that has a FAVOURITE library, then the bookmark, then Search: three to
+five stops, because
 `browse::tab_count()` now counts `tab_kinds()`, and a type whose last favourite is switched off
 draws no pill. Movies and TV Shows are still type destinations whose concrete owned/shared section
 is resolved later.
@@ -54,9 +62,9 @@ type that has no pill today. Every positional cursor in the app was converted fo
 `HomeCmd::FocusStrip` delivered when Home MOUNTS, since phase 12 folded `Nav`'s four variants into
 `app::bridge::nav_tab`).
 
-It is also the one pill that is a **mark instead of a word**, so it is square (60×60) and skips the
-label padding, inked through the same `TabPill::mixed_ink` the labels use so it travels under the
-focus capsule with them instead of being a separate colour story.
+It is also the one pill whose face is an **icon instead of a word** (`TabFace::Icon`), so it is square
+(60×60) and skips the label padding, inked through the same `TabPill::mixed_ink` the labels use so it
+travels under the focus capsule with them instead of being a separate colour story.
 
 ### The layout is dictated by the keyboard
 
@@ -77,8 +85,9 @@ That is also why **nothing scrolls while the panel is up**: the result set has t
 the user's eyes while they are still typing.
 
 `search::recents::CAP` is **four, not five**, for the same reason — with the keyboard raised the header, the
-rows and the Clear control all have to finish above its edge. The fifth is *dropped*, not scrolled:
-a list you cannot see the end of asks to be paged, and there is no paging in this product.
+rows and the Clear control all have to finish above its edge. The fifth is *dropped*, not scrolled.
+Recents are the user's own typing, not content, so the cap hides nothing they could not retype, and
+four rows fit above the raised keyboard.
 
 ### The caret and the one-character hint stay in the field
 
@@ -157,6 +166,10 @@ checks the captured installation and account credentials against the session und
 an old account's pending history cannot be written into a replacement account. The queue admits
 64 distinct profiles at once (a resource ceiling, not a Plex limit); when full it refuses a new
 profile's edit without evicting accepted saves and retries the background drain.
+The write itself is a store job: the Search step that made the edit emits `StoreJob::SaveRecents`,
+`Bridge::search_run` hands it to the application's runner in the same call, and the runner starts the
+drain on a worker. A drain the runner refuses is remembered, and the next edit (even one that
+changes nothing) asks for it again (`docs/sans-io.md`, "The Search lane").
 The renderer in `screens/search/render.rs` keeps only geometry and a glyph cache keyed on that
 publication. `SearchSnapshot` includes recents beside query/results and is retained at the bridge's
 frame boundary. `SearchScreen` consumes these retained views and never reads the session or stores
@@ -179,8 +192,11 @@ main-thread adapter's existing `textinput::start/stop` operations. Cover and sus
 binding. Both the binding and queued keyboard requests are included in the state hash.
 The owned path normalizes SDL and FIFO commits at ingress, before later edit keys, and uses
 `adopt` (never `start`) for a panel observation. Text recording preserves commit boundaries,
-original timing/source, and the observed panel capability, and replay reuses that observation
-rather than probing its current platform.
+original timing/source, and whether the commit carried the `SystemKeyboard(true)` adoption edge
+(`bridge::text_panel_edge`: the set has a panel and Search owns the text), and replay reuses that
+answer rather than probing its current platform. A commit on any other page records `panel:false`
+even on a set with a panel, so a non-Search recording's `panel:false` does not mean the set has
+none.
 
 **Live cutover is finished.** `AppArg::Search` mounts `screens::search::SearchScreen`
 unconditionally — there is no `AppMounter::search_owned` flag any more, no legacy ingress/lifecycle
@@ -240,7 +256,10 @@ untrue about their library.
 server-side (`docs/shared-servers.md`). So the store fans out one query per `plex::server_ids` and
 merges into the shelves, which is why every `Item` carries its own `ServerId` and why a shelf heading
 can never claim an owner — the owner annotation follows FOCUS and rides the focused tile's caption,
-exactly as Continue Watching's does on Home.
+exactly as Continue Watching's does on Home. On a poster row that caption is the Under posters
+setting's (`registry/captions.rs`) and the handle is credited after its details line, so under
+Under posters → Nothing, which draws no details line, there is no annotation either; a still or a
+headshot keeps its own block and its annotation under every setting.
 
 ---
 
@@ -258,7 +277,7 @@ backend is not in the webOS extension API at all — it is inside **LG's Wayland
 `Wayland_CreateDevice` writes four real hooks into `SDL_VideoDevice`
 (`WebOSHasScreenKeyboardSupport`, `Show`, `Hide`, `IsShown`), `SDL_StartTextInput` dispatches to the
 second, and `WebOSShowScreenKeyboard` is a complete `text_model` IME client. Typed text comes back
-as an ordinary **`SDL_TEXTINPUT`** event, so `app.rs`'s existing `SDL_PollEvent` loop already sees
+as an ordinary **`SDL_TEXTINPUT`** event, so the existing `SDL_PollEvent` loop (`plx_shell_sdl::event`) already sees
 it. moonlight-tv 1.5.8 shipped exactly this against the TV's own SDL.
 
 **Linking is the plain `extern "C"` case, not `dynlib!`.** Verified with
@@ -281,24 +300,24 @@ than assuming.
 webOS inserts a `Uint32 inputSource` before the text, so the UTF-8 bytes start at **+16**, not +12.
 Both halves are checkable on the dev Mac without a television:
 
-- `include/SDL2/SDL_events.h` — the tree we compile against — declares
-  `SDL_TextInputEvent { type, timestamp, windowID, text[] }`, i.e. text at **+12**. That tree is
-  stock **2.0.4** (`include/SDL2/SDL_version.h`).
+- Stock SDL **2.0.4**'s `SDL_events.h` declares
+  `SDL_TextInputEvent { type, timestamp, windowID, text[] }`, i.e. text at **+12**. (The repository
+  keeps no copy of it; no C unit includes an SDL header.)
 - The NDK sysroot's fork copy
   (`$(WEBOS_SDK)/arm-webos-linux-gnueabi/sysroot/usr/include/SDL2/SDL_events.h`, SDL **2.24.1**)
   declares `{ type, timestamp, windowID, inputSource /* webOS specific field */, text[] }` — text at
   **+16**.
 
-This is the same class of bug as the `SDL_KeyboardEvent` shift `app.rs` already reads around with
+This is the same class of bug as the `SDL_KeyboardEvent` shift `plx_shell_sdl::event` already reads around with
 raw offsets, and it has the same fix: read the bytes, do not trust the struct. Note the offset is a
 `cfg`, not a constant — under `hostsim` desktop SDL2 is stock and the offset really is +12, so a
 single hard-coded number ships garbage on one of the two platforms.
 
 **2. `SDL_WINDOW_INPUT_FOCUS` is a silent precondition.**
 
-`SDL_StartTextInput` looks for a window carrying `0x200` (`include/SDL2/SDL_video.h`) before
+`SDL_StartTextInput` looks for a window carrying `0x200` (`SDL_video.h` in the SDK sysroot's `usr/include/SDL2/`) before
 dispatching to the driver hook. Our window is created with
-`SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN` and nothing else — `app.rs`'s `SDL_WINDOW_FLAGS` is
+`SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN` and nothing else — `plx_shell_sdl`'s `SDL_WINDOW_FLAGS` (`shell-sdl/src/window.rs`) is
 `0x2 | 0x1` on the device — so it carries neither `SHOWN` nor a focus flag at creation. **If the flag
 is clear the panel never rises, silently and with no error return.** That is why the boot probe logs
 the flag rather than trusting it: a keyboard that does not appear and a keyboard that appeared and
@@ -320,8 +339,8 @@ Two host-side findings, recorded because both cost time today and neither is a s
 television.
 
 **The boot probe's answer on macOS is `keyboard: support=0 active=1 focus=0 winflags=0x26`.** That
-is **trap 2 observed**: `0x26` is `OPENGL | SHOWN | RESIZABLE` (`app.rs`'s `hostsim` arm asks for
-`0x2 | 0x20`; SDL adds `SHOWN`), and `0x200` — `SDL_WINDOW_INPUT_FOCUS` — is not in it. The trap is
+is **trap 2 observed**: `0x26` is `OPENGL | SHOWN | RESIZABLE` (the `hostsim` arm asked for
+`0x2 | 0x20` when this was measured, and is `plx_shell_sdl`'s `SDL_WINDOW_FLAGS` now; SDL adds `SHOWN`), and `0x200` — `SDL_WINDOW_INPUT_FOCUS` — is not in it. The trap is
 therefore reproducible without a television, which is the useful part; what it does **not** tell you
 is anything about the TV's own answer, since `support=0` here just means desktop SDL has no screen
 keyboard at all.
@@ -332,7 +351,9 @@ carries a `char *text` **pointer** where SDL2 carries an inline `char[32]`; the 
 dereferences what it is handed. There is no Rust panic and no log line — the process is simply gone.
 The existing remote-FIFO injection is safe by luck of shape: key events and `ck:` pointer clicks are
 all scalar fields, and nothing in them is read as a pointer. Anything that wants to test the field
-headlessly must go in **above** SDL — through `textinput`'s own buffer — not by forging the event.
+headlessly must go in **above** SDL: through the `txt:` remote token or `ingest_text`'s event pair
+(`app::events::text_inputs`), never through `textinput`'s own buffer (which holds only text no field
+owns), and never by forging the event.
 
 ### Two dead ends, so nobody spends a day on them again
 
@@ -421,7 +442,7 @@ refuses outright to grade a log carrying the simulator's `sim=1` tag against dev
 
 ---
 
-## 6. Out of scope: Discover, Watchlist, and the catalog
+## 6. Out of scope: Discover results and the catalog (the Watchlist is not a search scope)
 
 The official client's search returns Plex's own catalog and Discover results alongside server ones.
 **Ours does not, by decision.** Those live on `discover.provider.plex.tv` /
@@ -430,6 +451,12 @@ The official client's search returns Plex's own catalog and Discover results alo
 tracked them as their own gap from the start. Adding a catalog row to this screen is a separate
 feature with its own client, its own store and its own failure modes — not a wider `limit=` on
 `/hubs/search`.
+
+The Watchlist did ship, but as a destination of its own: the bookmark tab before the Search pill,
+backed by `plex::watchlist`, `WatchlistStore` and the Watchlist page, with the Discover-only
+`CatalogScreen` for titles no server holds (`docs/watchlist.md`). It reads the account's list, not a
+search; typing a query still searches servers only, and a catalog title never appears among the
+results.
 
 What this screen closes, and what it does not, is written up in `docs/parity-gaps.md` under the
 search entries.

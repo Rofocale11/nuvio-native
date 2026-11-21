@@ -5,9 +5,31 @@ The backdrop-blur material (`gfx.rs`'s blur chain + `shaders/fs_glass.frag`, dra
 **envelope it can be designed inside** — the limits that come from the television rather than from
 taste, so a design can be drawn against them instead of into them.
 
-**Glass is CHROME-ONLY since 2026-09-19.** Its users are the top bar's standing track, the profile
+**Update (DS6, Watchlist wave 2): popover menus are glass again** —
+`widgets::panel_ground` calls `popover_glass::draw` first (gradient face, 1 px rim, top highlight,
+soft shadow, `GlassRim::Menu` rim refraction, 30% compact scrim) and the field ground described next
+is the fallback. Since 2026-10-17 that glass stands on FROZEN ground and is not a user of the live
+blur chain below: its body is a frost of the host snapshot (one blur per snapshot, its own chain,
+`FrameCache::frost_passes`, with the frame's dim baked in; the latched underlay field is the fallback
+body), its rim refracts the host snapshot captured once when the menu opened
+(`gfx::draw_glass_frozen`), and the frame's dim is applied to that rim snapshot at composite. The
+live version it replaced measured about 2 to 2.6M Mali GPU cycles a frame over the field ground;
+read the 2026-09-19 text below as the pre-DS6 history it is.
+
+**The live glass takes the page's wash at composite (2026-10-19).** The tab bar's band and the hold
+hint stand on a full-screen wash that eases on springs through a library switch, which moved the
+exact corner codes by 2-6 every frame and re-sourced both glasses on each (measured on the TV before
+the fix: 77-83% of a switch's refreshing frames, about 0.8M Mali cycles and 2.7-7.1 ms of render
+thread apiece). The wash is now a delta in `fs_glass.frag` (`u_wash_*`, `backdrop::Ground`): the
+source keeps the wash it was drawn under, the composite adds `wash now - wash captured` at the
+refracted uv, and the source is re-taken once when the wash's own springs have landed on their
+target (`AmbientWash::at_rest`; a held 8-bit code in the tail is not rest). Bounded, not exact, over card
+content: the error is the ease's amplitude times the content's coverage under the filter, gone at
+rest. Art grounds, a ramp knee under the region and a moving card keep the wash in the source.
+
+**Glass was CHROME-ONLY from 2026-09-19 until DS6.** Its users are the top bar's standing track, the profile
 chip's capsule, the dev tile band and the one non-interactive standing note, the "Hold OK for
-options" capsule (`ui::hold_hint`: Home's, and on the other card screens once per screen kind per run). Popover panels — the menus, the alert panels, the person bio,
+options" capsule (`ui::hold_hint`: on the card screens and the Detail season pill, once each per install). Popover panels — the menus, the alert panels, the person bio,
 the decision alert — no longer frost a backdrop blur: they stand on `widgets::panel_ground`, the
 15×8 underlay field the modal dim already latches (`ui::underlay`), windowed to the panel's own
 screen rect, graded by `theme::underlay::PANEL_TINT` under a `PANEL_LUMA_MAX` ceiling, with the
@@ -302,10 +324,11 @@ popup menu is too pixelated" was, 2026-08-20 to 2026-08-21.
 - **The tab track's weight is SOLVED, not chosen** (`widgets::track_alpha_for`). A panel carries a
   page of copy at `TEXT_PRIMARY` and can hold one number; a 76px band whose idle labels are the
   dimmest ink in the app cannot, because the ground it sits on is a different picture every eight
-  seconds. So the ink stands still and the material moves: five pixels are read back from under the
-  bar every thirtieth drawn frame, and the scrim is set to the lightest weight at which those labels
-  still clear 3:1 — floored at the design's `--glass-track-top` and capped at the flat capsule's own
-  `.72`. Measured on the set: a dark hero leaves it at the floor, a bright cyan one takes it to .562.
+  seconds. So the ink stands still and the material moves: five patches of the bar's own backdrop
+  image (the blurred ground the labels sit on, which the frame already holds) are copied at a frame
+  boundary and read back once per `GROUND_SAMPLE_EVERY` drawn frames, and the scrim is set to the
+  lightest weight at which those labels still clear 3:1 — floored at the design's
+  `--glass-track-top` and capped at the flat capsule's own `.72`. Measured on the set: a dark hero leaves it at the floor, a bright cyan one takes it to .562.
   The readback is why the rate is low — it stalls a tiler — and the frame rate is unchanged at it.
   **Do not read the ground from `UltraBlurColors`.** That is Plex's derived palette for an ambient
   wash, not the top of the picture: for the hero that measures (0.00, 0.68, 0.91) on the panel it
@@ -315,10 +338,13 @@ popup menu is too pixelated" was, 2026-08-20 to 2026-08-21.
 
 ## 7. Where it can go today
 
-**Glass: the chrome and one standing note.** The top bar's standing track and the profile chip's capsule, and the
-"Hold OK for options" capsule (`ui::hold_hint`, on Home and, once per screen kind per run, on Collection, Person, Search, Library and Detail — the track's material at a fixed weight, its own
-source in the page layer rather than a member of the shared top band, flat fallback when glass is refused), on
-`Glass::DYNAMIC_BACKDROP` (the one preset left). **Popovers and sheets over a UI page are not glass**:
+**Glass: the chrome and the standing notes.** The top bar's standing track and the profile chip's capsule, the
+"Hold OK for options" capsule (`ui::hold_hint`, once per install on the card screens and once on the Detail season pill — the track's material at a fixed weight, its own
+source in the page layer rather than a member of the shared top band, flat fallback when glass is refused), and the
+Library's scroll capsule (`ui::scroll_capsule`: the library's name, count and sort ("Films 1,284 · Date viewed") on the same standing container, `GlassRim::Standing` and `Material::UltraThin`, wearing the
+hold hint's fixed face; flat track fallback; drawn only while the chrome is tucked on a page whose header names two or more libraries;
+region-budgeted by `scroll_capsule::tests::a_long_names_capsule_stays_inside_the_glass_region_budget`), on
+`Glass::DYNAMIC_BACKDROP` (the one preset left). **Popovers and sheets over a UI page were not glass, until DS6 (menus are again, on frozen ground with no live blur chain: the body is a once-per-snapshot frost of the captured page; the field below is every sheet's ground and a menu's fallback)**:
 Sort, Filter, Sources, the item menu, *Also available*, *Track information*, *About*, Account, the
 person biography and the decision alert all draw their ground through `widgets::panel_ground` over
 the latched underlay field — the surfaces reach it as `DrawFrame::underlay`, the decision alert
@@ -330,6 +356,11 @@ no longer priced by §2.
 `chrome_alpha` exists so it holds still while the pages swap under it — so a material that changes
 when you cross between those three breaks the one illusion that code was written to preserve. Either
 all three or none; "glass on Home only" is not an option, however tempting the frame budget makes it.
+**Nor does the bar's WIDTH decide it (2026-10-30):** the bar gains entries and its labels change
+length with the language, so no strip drops to the flat capsule for being wide (it used to, past a
+~672 px cap that silently took the glass from the Belarusian bar); a strip past `TAB_VIEW_MAX`
+scrolls inside a track that stays glass, and the unfurled profile chip is kept off the track by
+eliding its name to the room the bar leaves (`widgets::chip_name_budget`).
 It ships, and `/tmp/plxnative-flattabs` is the way back to the flat capsule for a comparison.
 Its density is not a constant — see §6.
 
@@ -349,6 +380,7 @@ it never joins the top band's grab — and the 300k px² moving-host ceiling the
 - Never over video.
 - Whole surfaces, not scattered ornaments — area alone does not predict the five-pass cost.
 - In steady state, adjacent glass samples the page rather than refracting adjacent glass.
+- Neighbours in the shared band keep one source unless their drawn rects overlap: sitting inside each other's blur reach (68 px) does not split the band.
 - Keep 68 px clear of the screen edge, 60 px minimum short side.
 - Put it over something with colour in it, or it is an expensive way to draw the flat material.
 - Over still chrome it is free; moving glass targets every changed successful present.

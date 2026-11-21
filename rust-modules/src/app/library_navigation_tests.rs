@@ -23,7 +23,8 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
         plx_plex::plex::register_for_test("strip-shared", "127.0.0.1", 10, "synthetic", "fixture");
     plx_plex::plex::set_current(own);
     let mut d = Dispatcher::<AppHost>::new();
-    let mut rig = Bridge::for_test(|| 0);
+    let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+    let mut rig = owner.bridge();
     rig.stores.browse.borrow_mut().seed_registered_table_for_test([own, shared]);
     rig.refresh_browse_directory();
     rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
@@ -41,7 +42,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
             .iter()
             .map(|member| member.elem)
             .collect::<Vec<_>>(),
-        vec![base + 4, base, base + 1, base + 2, base + 3]
+        vec![base + 4, base, base + 1, base + 2, plx_ui::widgets::TAB_KEY_WATCHLIST, base + 3]
     );
     let seat = |d: &mut Dispatcher<AppHost>, elem| {
         d.emit(
@@ -126,10 +127,10 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
             .strip
             .iter()
             .position(|member| member.elem == search.elem),
-        Some(4),
+        Some(5),
         "Search's displayed slot is not its stable control identity"
     );
-    rig.take_library_reqs();
+    rig.take_observed_library_commands();
     let key = |edge, i| {
         vec![InputEvent {
             at: tick(i),
@@ -156,7 +157,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
     assert!(!rig
-        .take_library_reqs()
+        .take_observed_library_commands()
         .iter()
         .any(|(_, req, _)| matches!(req, LibraryReq::Tab(_))));
     frame(
@@ -169,7 +170,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
     for i in 96..130 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
-    let requests = rig.take_library_reqs();
+    let requests = rig.take_observed_library_commands();
     let tabs: Vec<_> = requests
         .iter()
         .filter_map(|(_, req, ret)| match req {
@@ -183,7 +184,7 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
         "the emitted route and captured return focus name the armed pill, not display slot 4"
     );
 
-    let id = rig.listing.view().id().unwrap();
+    let id = rig.retained.listing.view().id().unwrap();
     d.nav.next_style = plx_ui::containers::modal::Style::Compact;
     d.request(
         MachineId::Nav,
@@ -192,6 +193,8 @@ fn library_strip_profile_navigation_and_armed_pill_use_the_actual_engine_identit
                 host: instance,
                 kind: plx_screens::registry::LibraryMenuKind::Filter,
                 anchor: [0; 4],
+                folded: Vec::new(),
+                opener: None,
                 target: plx_data::stores::browse::SectionAddress {
                     epoch: id.epoch,
                     sid: id.sid,

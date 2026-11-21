@@ -5,6 +5,11 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
+/// How many person admissions one tape may hold evidence for. A recording's own bound, not a limit
+/// on servers: it is the value the old registry-sized formula (`4 * (16 * 3 + 2)`) came to, and a
+/// tape only ever binds server 0's three fetches and the two global ones.
+const PERSON_EVIDENCE_LIMIT: u32 = 200;
+
 #[derive(Default)]
 struct Tape {
     active: bool,
@@ -59,7 +64,7 @@ pub fn admit(request: Value, launch: impl FnOnce() -> bool) -> bool {
             let key = request["slot"].as_u64().and_then(|v| u32::try_from(v).ok())
                 .zip(request["gen"].as_u64().and_then(|v| u32::try_from(v).ok()));
             if let Some(key) = key {
-                if t.person.values().copied().sum::<u32>() >= 4 * (plx_plex::plex::MAX_SERVERS * 3 + 2) as u32 {
+                if t.person.values().copied().sum::<u32>() >= PERSON_EVIDENCE_LIMIT {
                     t.failure = Some("person admission evidence capacity exceeded");
                 } else { *t.person.entry(key).or_default() += 1; }
             } else { t.failure = Some("invalid person admission binding"); }
@@ -109,6 +114,9 @@ fn person_completion(t: &mut Tape, slot: u32, data: &Value) -> Result<(), &'stat
 /// A generation-stamped store's landing take, recorded or gated: under controlled bootstrap the
 /// tape answers ([`poll`]) and the landing is reported to the gate itself; otherwise the landing
 /// gate schedules the take. The one spelling of that choice for the Person and Collection stores.
+/// `#[track_caller]`, like every wrapper between a gated take and its caller: the paced dump keys a
+/// claim by call site.
+#[track_caller]
 pub fn take_store_landing<T: serde::Serialize + serde::de::DeserializeOwned>(
     gate: &plx_machine::landgate::Gate, id: super::StoreId, store: &str, slot: u32,
     fetch: &super::Fetch<T>, gen_of: fn(&T) -> u32) -> Option<T> {
@@ -241,12 +249,12 @@ pub fn validate_admission(value: &Value, client: u32) -> Result<(), &'static str
             && r["sid"] == 0 && r["client"] == client && r["rk"].as_str().is_some_and(|s| !s.is_empty()) => {}
         Some("person") => {
             let slot = r["slot"].as_u64().ok_or("invalid person admission slot")?;
-            if slot >= (plx_plex::plex::MAX_SERVERS * 3 + 2) as u64
+            if !usize::try_from(slot).is_ok_and(crate::person::fx_is_valid)
                 || !r["guid"].is_string() || r["arg"].as_array().is_none_or(|v|
                     v.is_empty() || v.iter().any(|v| !v.is_string())) {
                 return Err("invalid person admission");
             }
-            let global = slot >= (plx_plex::plex::MAX_SERVERS * 3) as u64;
+            let global = crate::person::fx_is_global(slot as usize);
             if global {
                 if !keys(r, &["store","slot","gen","arg","guid"]) { return Err("invalid global person admission"); }
             } else if !keys(r, &["store","slot","gen","arg","guid","local","client","sid"])
@@ -283,11 +291,14 @@ mod tests {
     #[test]
     fn p2_person_slot_kinds_are_exhaustive_and_duplicate_mail_is_rejected() {
         let _guard = plx_base::testlock::serial();
-        let last_local = (plx_plex::plex::MAX_SERVERS * 3) as u32;
-        for slot in 0..last_local + 2 {
+        // the recorded layout (0..48, then the two globals) and the range past it (50.., sixteen
+        // servers on): see `person::fx`
+        let last_local = crate::person::F_PROFILE as u32;
+        for slot in 0..last_local + 2 + 3 * 30 {
             let expected = if slot == last_local { "Profile" }
                 else if slot == last_local + 1 { "Credits" }
-                else { ["Resolve", "Media", "Roles"][(slot % 3) as usize] };
+                else if slot < last_local { ["Resolve", "Media", "Roles"][(slot % 3) as usize] }
+                else { ["Resolve", "Media", "Roles"][((slot - last_local - 2) % 3) as usize] };
             for kind in ["Resolve", "Media", "Roles", "Profile", "Credits"] {
                 let data = json!({"gen":7,"what":{kind:null}});
                 assert_eq!(crate::person::validate_record(slot, &data).is_ok(), kind == expected,
@@ -312,7 +323,7 @@ mod tests {
     #[test]
     fn p2_person_null_variant_mutation_cannot_be_graded() {
         let _guard = plx_base::testlock::serial();
-        let slot = (plx_plex::plex::MAX_SERVERS * 3 + 1) as u32;
+        let slot = crate::person::F_CREDITS as u32;
         let request = json!({"store":"person","slot":slot,"gen":7,"arg":["person"],"guid":"guid"});
         let admission = json!({"content_resource":true,"request":request,"admitted":true});
         for (kind, gen, admitted, valid) in [

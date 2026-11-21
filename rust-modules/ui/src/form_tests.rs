@@ -337,10 +337,10 @@ fn choice_rows_derive_checked_from_the_current_value() {
     assert_eq!(t.binding_at(1).map(|b| b.kind.clone()), Some(RowKind::Choice));
 }
 
-/// **A disabled item is dim, still focusable, and never activates** (the `activate` is what OK and
-/// RIGHT both go through).
+/// **A disabled item wears the shared DISABLED state, is still focusable, and never activates** (the
+/// `activate` is what OK, RIGHT and a click all go through).
 #[test]
-fn a_disabled_item_is_dim_focusable_and_inert() {
+fn a_disabled_item_is_disabled_focusable_and_inert() {
     let mut t = table(F::new().section(
         S::new("")
             .item(Id::A, RowKind::Button, Act::A, Row::new("Alpha"))
@@ -350,8 +350,8 @@ fn a_disabled_item_is_dim_focusable_and_inert() {
             .item(Id::C, RowKind::Button, Act::C, Row::new("Gamma"))
             .disabled(false),
     ));
-    assert!(t.table.sections[0].rows[0].dim && t.table.sections[0].rows[1].dim);
-    assert!(!t.table.sections[0].rows[2].dim);
+    assert!(t.table.sections[0].rows[0].disabled && t.table.sections[0].rows[1].disabled);
+    assert!(!t.table.sections[0].rows[2].disabled);
     assert_eq!(t.table.next_selectable(0, 1), Some(1), "focus can land on a disabled row");
     t.table.sel = 1;
     assert_eq!(t.selected_id(), Some(&Id::B));
@@ -372,7 +372,7 @@ fn disabled_after_a_skipped_item_does_not_reach_the_previous_row() {
             .item_keyed_if(false, Id::C, RowKey(9), RowKind::Button, Act::C, Row::new("Gamma"))
             .disabled(true),
     ));
-    assert!(!t.table.sections[0].rows[0].dim, "Alpha is not the skipped row");
+    assert!(!t.table.sections[0].rows[0].disabled, "Alpha is not the skipped row");
     assert_eq!(t.activate(0), Some(Activation::Action(Act::A)));
     // and a later real item is still disableable
     let t = table(F::new().section(
@@ -381,7 +381,33 @@ fn disabled_after_a_skipped_item_does_not_reach_the_previous_row() {
             .item(Id::B, RowKind::Button, Act::B, Row::new("Beta"))
             .disabled(true),
     ));
-    assert!(t.table.sections[0].rows[0].dim);
+    assert!(t.table.sections[0].rows[0].disabled);
+}
+
+/// **One mechanism**: the look and the inertness are set together by `FormSection::disabled`, so a
+/// disabled row never emits an activation (a Button's action, a Choice's pick, a Nav's push) while the
+/// pill can still land on it, and a row that never opted in is exactly what it was.
+#[test]
+fn a_disabled_row_never_activates_and_an_undisabled_row_is_unchanged() {
+    let mut t = table(F::new().section(
+        S::new("")
+            .item(Id::A, RowKind::Button, Act::A, Row::new("Button"))
+            .disabled(true)
+            .item(Id::B, RowKind::Choice, Act::B, Row::new("Choice"))
+            .disabled(true)
+            .item(Id::C, nav(), Act::C, Row::new("Nav"))
+            .disabled(true)
+            .item(Id::D, RowKind::Button, Act::D, Row::new("Live")),
+    ));
+    for i in 0..3 {
+        assert!(t.table.sections[0].rows[i].disabled, "row {i} wears the state");
+        assert_eq!(t.activate(i), None, "row {i} emits no activation");
+        t.table.sel = i as i32;
+        assert_eq!(t.selected_id(), Some(&[Id::A, Id::B, Id::C][i]), "but focus can land on row {i}");
+    }
+    let live = &t.table.sections[0].rows[3];
+    assert!(!live.disabled && !live.dim, "a row that never opted in carries neither state");
+    assert_eq!(t.activate(3), Some(Activation::Action(Act::D)));
 }
 
 fn tall_page(ids: &[Id]) -> F {
@@ -534,4 +560,57 @@ fn map_retypes_bindings_demotes_declined_rows_and_slots_read_the_layout() {
     assert_eq!(t.id_at(1), None, "B keeps its layout index but is never bound");
     assert_eq!(t.table.sections[0].rows[1].label, "Beta", "drawn exactly as declared");
     assert_eq!(t.index_of_key(RowKey(11)), Some(0), "the key the closure answered is the key bound");
+}
+
+/// A row id that names itself for the accessibility ids ([`FormId::a11y`]), or does not.
+#[derive(Clone, Debug, PartialEq)]
+struct Named(u32, Option<&'static str>);
+impl FormId for Named {
+    fn key(&self) -> RowKey {
+        RowKey(self.0)
+    }
+    fn a11y(&self) -> Option<&'static str> {
+        self.1
+    }
+}
+
+/// **A row's id names the row for the a11y ids, and the name is the row's** ([`RowKeys::a11y_name`],
+/// by layout index): the name a `FormId` declares, nothing for a row declared with an explicit key
+/// (it has no `FormId`), a separator or a note, and the name rides along when `Form::map` re-types
+/// the binding, because it belongs to the row and not to the id type.
+#[test]
+fn a_form_id_names_its_row_and_the_name_survives_a_retype() {
+    type Plain = Form<Named, (), ()>;
+    let form: Plain = Form::new().section(
+        FormSection::<Named, (), ()>::new("S")
+            .item(Named(1, Some("alpha")), RowKind::Button, (), Row::new("Alpha"))
+            .separator()
+            .item(Named(2, None), RowKind::Button, (), Row::new("Beta"))
+            .item_keyed(Named(3, Some("ignored")), RowKey(3), RowKind::Button, (), Row::new("Gamma"))
+            .note("careful"),
+    );
+    let mut t: FormTable<Named, (), ()> = FormTable::new(100);
+    t.set(form, None);
+    let names: Vec<_> = (0..6).map(|i| t.a11y_name(i)).collect();
+    assert_eq!(names, [Some("alpha"), None, None, None, None, None], "alpha, separator, beta, gamma (explicit key), note, past the end");
+
+    let retyped: Form<u32, (), ()> = Form::new()
+        .section(
+            FormSection::<Named, (), ()>::new("S")
+                .item(Named(1, Some("alpha")), RowKind::Button, (), Row::new("Alpha"))
+                .item(Named(2, None), RowKind::Button, (), Row::new("Beta")),
+        )
+        .map(|b| Some(Binding { id: b.id.0, key: b.key, kind: b.kind, action: (), disabled: b.disabled }));
+    let mut u: FormTable<u32, (), ()> = FormTable::new(100);
+    u.set(retyped, None);
+    assert_eq!((u.a11y_name(0), u.a11y_name(1)), (Some("alpha"), None), "the name rides along a re-type");
+
+    // a map that names nothing (the default) leaves every row to its position
+    struct Bare;
+    impl RowKeys for Bare {
+        fn key_at(&self, _: usize) -> Option<RowKey> { None }
+        fn index_of_key(&self, _: RowKey) -> Option<usize> { None }
+        fn reseat(&self) -> Option<RowKey> { None }
+    }
+    assert_eq!(Bare.a11y_name(0), None);
 }

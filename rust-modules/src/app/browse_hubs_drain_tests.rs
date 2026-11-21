@@ -1,0 +1,225 @@
+//! Every `Bridge` entry that can step Browse starts the reads the step left in the same call: the
+//! section hubs' (`StoreJob::BrowseHubs`), the filter menus' value lists (`StoreJob::BrowseDirectory`)
+//! and the grid's pages (`StoreJob::BrowsePage`). The test runner parks a started read, so a drain
+//! that goes missing from an entry shows twice: the job is still on Browse's outbox (the frame check
+//! names it) and the runner has nothing parked. Each test names the kinds its entry starts.
+//!
+//! The rig is a Library section whose first read the system refused: its shelves are armed, the
+//! section hubs' one claim is down and the refusal waits to be settled, so the next step the entry runs
+//! asks for the read again. The grid's page and the value lists have never been asked for, so the
+//! entries that pump the store (or that carry `LibraryWork::Genres` / `Letters`) ask for those too.
+
+use super::test_support::*;
+use super::*;
+use plx_data::stores::browse::{BrowseCmd, LibraryWork, SectionAddress};
+use plx_data::stores::StoreJob;
+use plx_data::stores::notify_job::NotifyStreamReq;
+use crate::app::adapters::stores::NotifyTransport;
+use plx_data::stores::notify_map::{Shown, LIBRARY_QUIET_FRAMES};
+use plx_ui::dispatch::Rig as _;
+use plx_plex::plex::notify::{LibraryEntry, LibraryKind, LibraryState, Notification};
+use plx_plex::plex::{GrantEvidence, ServerId};
+
+
+/// Joins a frame's effects and parts, as the dispatcher hands them to `Bridge::deliver`.
+fn deliver_browse_work(rig: &mut Bridge) {
+    let parts = CxParts { modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(), tick: tick(0), press: Default::default(), focus: Default::default(),
+        owner: InputOwner::Entry(EntryId(0)) };
+    let mut present = Present::new();
+    let mut effects = Vec::new();
+    let to = MachineId::Store(StoreId::Browse.ord());
+    let mut fx = Effects::new(&mut effects, to, &mut present);
+    assert_eq!(rig.deliver(to, &AppMsg::StoreWork(plx_data::stores::StoreWork::Browse), &parts, &mut fx),
+        Handled::Yes);
+}
+
+/// The armed section, its first read refused by the system: nothing is out, nothing is on an outbox.
+struct Rig {
+    bridge: crate::app::runtime_owners::Harness,
+    target: SectionAddress,
+    own: ServerId,
+    _cleanup: DirectoryPolicyCleanup,
+}
+
+fn armed_rig() -> Rig {
+    plx_plex::plex::reset_servers_for_test();
+    let own = plx_plex::plex::register_for_test("hubs-drain-own", "127.0.0.1", 9, "synthetic", "fixture");
+    let shared = plx_plex::plex::register_for_test("hubs-drain-shared", "127.0.0.1", 10, "synthetic", "fixture");
+    assert!(plx_plex::plex::set_current(own));
+    let cleanup = DirectoryPolicyCleanup;
+    let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+    let mut bridge = owner.bridge();
+    bridge.park_page_reads_for_test();
+    bridge.seed_registered_browse_for_test([own, shared]);
+    bridge.browse_run(BrowseCmd::SetCur(0));
+    let id = bridge.stores.browse.borrow_mut().hubs_snapshot().view().id().expect("a section is current");
+    let target = SectionAddress { epoch: id.epoch, sid: id.sid, section: id.section };
+    crate::app::adapters::stores::with_refused_hubs_launches_for_test(|| {
+        bridge.browse_run(BrowseCmd::Addressed { target, work: LibraryWork::Hubs { may_publish: true } });
+    });
+    let mut rig = Rig { bridge: owner, target, own, _cleanup: cleanup };
+    rig.assert_down();
+    rig
+}
+
+impl Rig {
+    /// Nothing is out and nothing waits on an outbox.
+    fn assert_down(&mut self) {
+        assert!(!self.bridge.bridge().stores.browse.borrow().hubs_read_out_for_test(), "no claim is up");
+        self.bridge.bridge().assert_no_store_jobs_left_for_test();
+    }
+
+    /// The entry started exactly the reads of these kinds, in the order its step asked: Browse's
+    /// outbox is empty (the entry drained it) and the runner holds them.
+    fn assert_started(&mut self, kinds: &[&str]) {
+        self.bridge.bridge().assert_no_store_jobs_left_for_test();
+        let jobs = self.bridge.bridge().take_held_store_jobs_for_test();
+        let started: Vec<&str> = jobs.iter().map(kind).collect();
+        assert_eq!(started, kinds, "the entry started the reads its step asked for, in the call that emitted them");
+    }
+
+    /// The entry started exactly one section-hubs read, and its claim is up.
+    fn assert_one_read_started(&mut self) {
+        assert!(self.bridge.bridge().stores.browse.borrow().hubs_read_out_for_test(), "the entry's step asked");
+        self.assert_started(&["BrowseHubs"]);
+    }
+}
+
+/// The kind of a Browse job, by name.
+fn kind(job: &StoreJob) -> &'static str {
+    match job {
+        StoreJob::BrowseHubs(..) => "BrowseHubs",
+        StoreJob::BrowseDirectory(..) => "BrowseDirectory",
+        StoreJob::BrowsePage(..) => "BrowsePage",
+        StoreJob::Hubs(..) => "Hubs",
+        _ => "other",
+    }
+}
+
+/// The entry the Library page's shelves go through (`content::library_publication_command`).
+#[test]
+fn browse_run_starts_the_read_its_step_emitted_in_the_same_call() {
+    let _guard = plx_base::testlock::serial();
+    let mut rig = armed_rig();
+    let target = rig.target;
+    rig.bridge.bridge().browse_run(BrowseCmd::Addressed { target, work: LibraryWork::Hubs { may_publish: true } });
+    rig.assert_one_read_started();
+}
+
+/// The Browse pump (`StoreWork::Browse`) settles the refusal and asks again, and starts the read; the
+/// same step asks for the grid's first page, which is started too.
+#[test]
+fn the_browse_pump_arm_starts_the_reads_it_asked_for_again_after_a_refusal() {
+    let _guard = plx_base::testlock::serial();
+    let mut rig = armed_rig();
+    deliver_browse_work(&mut rig.bridge.bridge());
+    assert!(rig.bridge.bridge().stores.browse.borrow().hubs_read_out_for_test(), "the entry's step asked for the shelves");
+    rig.assert_started(&["BrowseHubs", "BrowsePage"]);
+}
+
+/// The Library page's filter menu asks for the genre list, and the A-Z rail for the letters
+/// (`LibraryWork::Genres` / `Letters`, sent every tick): `browse_run` starts each read in the call
+/// that emitted it. Two ticks before the answer ask for nothing more.
+#[test]
+fn browse_run_starts_a_directory_read_its_step_emitted_in_the_same_call() {
+    let _guard = plx_base::testlock::serial();
+    for work in [LibraryWork::Genres, LibraryWork::Letters { today: None }] {
+        let mut rig = armed_rig();
+        rig.bridge.bridge().stores.browse.borrow_mut().owe_letters_for_test();
+        let target = rig.target;
+        rig.bridge.bridge().browse_run(BrowseCmd::Addressed { target, work: work.clone() });
+        rig.bridge.bridge().browse_run(BrowseCmd::Addressed { target, work: work.clone() });
+        rig.assert_started(&["BrowseDirectory"]);
+    }
+}
+
+/// ViewState's terminal `HubsInvalidateAll` reaches the section-hubs step through the `Stores`
+/// closure: `VIEWSTATE_FILLS` names Browse, so the pass drains it.
+#[test]
+fn the_viewstate_pump_starts_the_read_its_burst_end_invalidation_asked_for() {
+    let _guard = plx_base::testlock::serial();
+    let mut rig = armed_rig();
+    rig.bridge.bridge().stores.viewstate.borrow_mut().owe_hubs_refresh_for_test();
+    let _ = rig.bridge.bridge().viewstate_pump();
+    rig.assert_one_read_started();
+}
+
+
+/// A library change on an owned server invalidates its sections' shelves
+/// (`BrowseCmd::HubsInvalidateServer`) through the notification map: `NOTIFY_FILLS` names Browse,
+/// so the pass drains it.
+#[test]
+fn the_notify_pump_starts_the_read_a_library_change_asked_for() {
+    let _guard = plx_base::testlock::serial();
+    let mut rig = armed_rig();
+    plx_plex::plex::describe_server(rig.own, "Server A", "", GrantEvidence::ours());
+    // Browse's armed shelves do not establish a Home source for quiet invalidation.
+    assert!(rig.bridge.bridge().stores.hubs.source_ids().is_empty());
+    {
+        let bridge = rig.bridge.bridge();
+        bridge.stores.hubs.seed_for_directory_test(
+            rig.own, 1, plx_data::pms::HubState::Ready, bridge.retained.directory.view());
+    }
+    assert_eq!(rig.bridge.bridge().stores.hubs.source_ids(), vec![rig.own]);
+    assert_eq!(rig.bridge.bridge().stores.hubs.snapshot().view().state, plx_data::pms::HubState::Ready);
+    if let crate::app::adapters::stores::StoreRunner::Held { live, .. } = &mut *rig.bridge.bridge().store_runner {
+        // Keep Notify's finite script immediate, park BOTH map fan-out kinds.
+        *live = &[crate::app::adapters::stores::LiveKind::NotifyStream];
+    }
+    rig.bridge.bridge().store_runner.set_notify_transport(NotifyTransport::Script {
+        eligible: |req: &NotifyStreamReq| plx_plex::plex::client_for(req.sid)
+            .filter(|c| plx_plex::plex::ClientKey::of(c) == req.key),
+        run: |port, addr, _, _| {
+            port.post(addr, Notification::Library(vec![LibraryEntry {
+                item_id: "a".into(), kind: LibraryKind::Movie, state: LibraryState::Created, section: None }]));
+            true
+        },
+    });
+    // Scripted eligible input is explicit, not an ambient credential-policy override.
+    rig.bridge.bridge().retained.client_keys.refill_roster_with_stream_policy(rig.own, 1, 1, [rig.own],
+        plx_plex::plex::client_for, plx_plex::plex::server_facts, |_| None, |_| true);
+    let (_, endpoints) = rig.bridge.bridge().notify_pump_captured(&[], Shown::ALL);
+    assert!(endpoints.is_empty());
+    // The refresh a library entry owes waits for its server's feed to go quiet (#1458). The frames
+    // up to the one that ends the wait go to the map alone (the script would deliver its entry again
+    // on a reconnect), and the pass that ends it is the pump's.
+    assert!(!rig.bridge.bridge().stores.browse.borrow().hubs_read_out_for_test(), "not while the feed may be busy");
+    {
+        let bridge = rig.bridge.bridge();
+        for _ in 1..LIBRARY_QUIET_FRAMES {
+            let quiet = plx_data::stores::notify::NotifyOut::default();
+            let spent = bridge.stores.notify_map(&quiet, &[], Shown::ALL, bridge.retained.directory.view(), &bridge.retained.client_keys);
+            assert_eq!(spent, Default::default());
+        }
+    }
+    let (_, endpoints) = rig.bridge.bridge().notify_pump_captured(&[], Shown::ALL);
+    assert!(endpoints.is_empty());
+
+    assert!(rig.bridge.bridge().stores.browse.borrow().hubs_read_out_for_test());
+    rig.assert_started(&["BrowseHubs", "Hubs"]);
+    assert_eq!(rig.bridge.bridge().retained.late_store_jobs, 0);
+}
+
+/// The membership re-query a page pushed over the Library page owes is pumped by
+/// `Bridge::reconcile_pump` (the covered Library page does not tick its own store), and that
+/// pump's section-hubs step is drained there too.
+#[test]
+fn the_reconcile_pump_starts_the_read_its_browse_pump_asked_for() {
+    let _guard = plx_base::testlock::serial();
+    let mut rig = armed_rig();
+    let (target, own) = (rig.target, rig.own);
+    rig.bridge.bridge().browse_run(BrowseCmd::Addressed { target, work: LibraryWork::Commit {
+        select: false, choice: false, query: Some(plx_data::stores::browse::QueryEdit::Unwatched(true)) } });
+    rig.bridge.bridge().stores.browse.borrow_mut().seed_items_for_test(3);
+    rig.bridge.bridge().browse_run(BrowseCmd::ApplyView { at: plx_data::viewstate::ViewAt::leaf(own, "1"),
+        edit: plx_data::viewstate::ViewEdit::Facts { watched: true, unwatched: false, resume_ms: 0, sort: None } });
+    rig.bridge.bridge().browse_run(BrowseCmd::Addressed { target, work: LibraryWork::Requery });
+    assert!(rig.bridge.bridge().stores.browse.borrow().requery_owed(), "premise: a membership re-query is owed");
+    rig.assert_down();
+
+    let _ = rig.bridge.bridge().reconcile_pump();
+
+    assert!(rig.bridge.bridge().stores.browse.borrow().hubs_read_out_for_test(), "the pump's step asked for the shelves");
+    rig.assert_started(&["BrowseHubs", "BrowsePage"]);
+    plx_base::task::drain_workers_for_test();
+}

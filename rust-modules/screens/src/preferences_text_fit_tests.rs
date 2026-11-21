@@ -6,8 +6,9 @@
 //! [`field_form`] builds the field list, [`field_options`] a picker level.
 
 use super::*;
+use plx_ui::theme;
 use plx_base::fontcov::advances::ShippedMeasure as M;
-use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
 use plx_plex::plex::account::AudioPreferences;
 use plx_media::route::available_quality_ladder;
 use plx_ui::table::{Section, TableView};
@@ -18,19 +19,18 @@ fn frame_w() -> f32 {
 }
 
 fn playback(quality: Quality, direct_play: DirectPlayMode) -> FieldListInputs<'static> {
-    FieldListInputs { kind: Kind::Playback, quality, direct_play, prefs: None, busy: false, show_retry: false }
+    FieldListInputs { local: crate::registry::empty_fixture(), kind: Kind::Playback, quality, direct_play, prefs: None, busy: false, show_retry: false, marker_prefs: marker_grants(), read_only: false }
 }
 
 fn audio(prefs: Option<&AudioPreferences>) -> FieldListInputs<'_> {
     FieldListInputs {
-        kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
-        prefs, busy: false, show_retry: false,
+        local: crate::registry::empty_fixture(), kind: Kind::AudioSubtitles, quality: Quality::Original, direct_play: DirectPlayMode::Auto,
+        prefs, busy: false, show_retry: false, marker_prefs: Default::default(), read_only: false,
     }
 }
 
 fn table_of(section: Section) -> TableView {
-    let mut table = TableView::new();
-    table.compact = false;
+    let mut table = TableView::page(); // the route page table `preferences.rs` draws
     table.set_sections(vec![section], 0, false);
     table
 }
@@ -39,8 +39,7 @@ fn table_of(section: Section) -> TableView {
 /// with `tag`. A finding already reported for this UI language (the tag's first word) is not
 /// repeated under a later tag: the rows a sweep does not vary repeat unchanged.
 fn check_field_section(tag: &str, inputs: &FieldListInputs<'_>, out: &mut Vec<String>) {
-    let mut form: FormTable<RowId, Action, SettingsPage> = FormTable::new(BAND);
-    form.table.compact = false;
+    let mut form: FormTable<RowId, Action, SettingsPage> = FormTable::page(BAND);
     form.set(field_form(inputs), None);
     let ui_language = tag.split_whitespace().next().unwrap_or(tag);
     for e in form.table.app_fit_failures(frame_w(), tag) {
@@ -54,7 +53,7 @@ fn check_field_section(tag: &str, inputs: &FieldListInputs<'_>, out: &mut Vec<St
 /// Every value readout and detail line each field can show, through [`field_form`] directly.
 #[test]
 fn every_field_readout_and_detail_fits_its_column_in_every_language() {
-    let _serial = plx_base::testlock::serial(); // Subtitle Size/Position read the route globals below
+    let _serial = plx_base::testlock::serial(); // Shared language fixture; preferences below are explicit.
     let mut out = Vec::new();
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
@@ -63,37 +62,48 @@ fn every_field_readout_and_detail_fits_its_column_in_every_language() {
         for &quality in available_quality_ladder() {
             check_field_section(&format!("{tag} quality={quality:?}"), &playback(quality, DirectPlayMode::Auto), &mut out);
         }
-        // Forced adds the "overridden" detail line to the Quality row.
+        // Forced reads the Quality row's value as "Overridden".
         check_field_section(&format!("{tag} quality overridden detail"), &playback(Quality::Original, DirectPlayMode::Forced), &mut out);
         for direct_play in [DirectPlayMode::Auto, DirectPlayMode::Forced, DirectPlayMode::Disabled] {
             check_field_section(&format!("{tag} direct_play={direct_play:?}"), &playback(Quality::Original, direct_play), &mut out);
         }
+        use plx_plex::plex::session::ProfilePrefs;
+        let captured = |preferences| crate::registry::ScreenInputs { preferences: Some(preferences), ..Default::default() };
         for size in plx_media::route::SubtitleSize::LADDER {
-            plx_media::route::restore_subtitle_size(size);
-            check_field_section(&format!("{tag} subtitle_size={size:?}"), &playback(Quality::Original, DirectPlayMode::Auto), &mut out);
+            let local = captured(ProfilePrefs { subtitle_size: Some(size), ..Default::default() });
+            check_field_section(&format!("{tag} subtitle_size={size:?}"), &FieldListInputs { local: &local, ..audio(Some(&AudioPreferences::default())) }, &mut out);
         }
-        plx_media::route::restore_subtitle_size(plx_media::route::SubtitleSize::Medium);
         for position in plx_media::route::SubtitlePosition::LADDER {
-            plx_media::route::restore_subtitle_position(position);
-            check_field_section(&format!("{tag} subtitle_position={position:?}"), &playback(Quality::Original, DirectPlayMode::Auto), &mut out);
+            let local = captured(ProfilePrefs { subtitle_position: Some(position), ..Default::default() });
+            check_field_section(&format!("{tag} subtitle_position={position:?}"), &FieldListInputs { local: &local, ..audio(Some(&AudioPreferences::default())) }, &mut out);
         }
-        plx_media::route::restore_subtitle_position(plx_media::route::SubtitlePosition::Low);
         for mode in plx_media::route::NextEpisodeMode::LADDER {
-            plx_media::route::restore_next_episode_mode(mode);
-            check_field_section(&format!("{tag} next_episode={mode:?}"), &playback(Quality::Original, DirectPlayMode::Auto), &mut out);
+            let local = captured(ProfilePrefs { next_episode_mode: Some(mode), ..Default::default() });
+            check_field_section(&format!("{tag} next_episode={mode:?}"), &FieldListInputs { local: &local, ..playback(Quality::Original, DirectPlayMode::Auto) }, &mut out);
         }
-        plx_media::route::restore_next_episode_mode(plx_media::route::NextEpisodeMode::Countdown);
         for mode in plx_media::route::DeckPress::LADDER {
-            plx_media::route::restore_deck_press(mode);
-            check_field_section(&format!("{tag} deck_press={mode:?}"), &playback(Quality::Original, DirectPlayMode::Auto), &mut out);
+            let local = captured(ProfilePrefs { deck_press: Some(mode), ..Default::default() });
+            check_field_section(&format!("{tag} deck_press={mode:?}"), &FieldListInputs { local: &local, ..playback(Quality::Original, DirectPlayMode::Auto) }, &mut out);
         }
-        plx_media::route::restore_deck_press(plx_media::route::DeckPress::Details);
         for interval in plx_media::route::SkipInterval::LADDER {
-            plx_media::route::restore_skip_interval(interval);
-            check_field_section(&format!("{tag} skip_interval={interval:?}"), &playback(Quality::Original, DirectPlayMode::Auto), &mut out);
+            let local = captured(ProfilePrefs { skip_interval: Some(interval), ..Default::default() });
+            check_field_section(&format!("{tag} skip_interval={interval:?}"), &FieldListInputs { local: &local, ..playback(Quality::Original, DirectPlayMode::Auto) }, &mut out);
         }
-        plx_media::route::restore_skip_interval(plx_media::route::SkipInterval::Seconds10);
+        for mode in plx_plex::plex::session::DolbyVisionMode::LADDER {
+            let local = captured(ProfilePrefs { dolby_vision_mode: Some(mode), ..Default::default() });
+            check_field_section(&format!("{tag} dolby_vision={mode:?}"), &FieldListInputs { local: &local, ..playback(Quality::Original, DirectPlayMode::Auto) }, &mut out);
+        }
 
+        for mode in MarkerSkipMode::LADDER {
+            let mut inputs = playback(Quality::Original, DirectPlayMode::Auto);
+            inputs.marker_prefs.intro = mode; inputs.marker_prefs.credits = mode;
+            check_field_section(&format!("{tag} marker={mode:?}"), &inputs, &mut out);
+        }
+        // Nobody seated: the same rows, read-only (dimmed).
+        check_field_section(&format!("{tag} read-only"), &FieldListInputs { read_only: true, ..playback(Quality::Original, DirectPlayMode::Auto) }, &mut out);
+        check_field_section(&format!("{tag} read-only forced"), &FieldListInputs { read_only: true, ..playback(Quality::Original, DirectPlayMode::Forced) }, &mut out);
+
+        check_field_section(&format!("{tag} read-only look"), &FieldListInputs { read_only: true, ..audio(Some(&AudioPreferences::default())) }, &mut out);
         check_field_section(&format!("{tag} retry row"), &FieldListInputs { show_retry: true, ..audio(None) }, &mut out);
 
         // Every catalog language as the Audio/Subtitle Language read-out (app data, so judged).
@@ -133,12 +143,17 @@ fn every_picker_level_fits_its_column_in_every_language() {
         for kind in [Kind::Playback, Kind::AudioSubtitles] {
             let prefs = AudioPreferences::default();
             let fields: &[PickerKind] = match kind {
-                Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::RatingSource],
+                // Fork Rofocale11: RatingSource is the Nuvio IMDb/Rotten Tomatoes picker and must be
+                // fit-checked alongside upstream's new Playback pickers.
+                Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::SubtitleColor, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::UriEngine, PickerKind::DolbyVision, PickerKind::IntroSkip, PickerKind::CreditsSkip, PickerKind::RatingSource],
                 Kind::AudioSubtitles => &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles],
             };
-            for &field in fields {
-                let current = resolve_value(field, Quality::Original, DirectPlayMode::Auto, Some(&prefs));
-                let section = field_options(field, Quality::Original, DirectPlayMode::Auto, Some(&prefs)).into_iter()
+            // The Interface resolution picker is opened from the Settings root, not a field list.
+            let fields: Vec<PickerKind> = fields.iter().copied()
+                .chain((kind == Kind::Playback).then_some(PickerKind::UiResolution)).collect();
+            for field in fields {
+                let current = resolve_with_marker(field, Quality::Original, DirectPlayMode::Auto, Some(&prefs), marker_grants(), UiResolution::default(), crate::registry::empty_fixture());
+                let section = options_with_marker(field, Quality::Original, DirectPlayMode::Auto, Some(&prefs), marker_grants()).into_iter()
                     .fold(Section::new(""), |section, (label, value)| section.row(Row::new(&label).checked(value == current)));
                 out.extend(table_of(section).app_fit_failures(frame_w(), &format!("{tag} {field:?} picker")));
             }
@@ -160,15 +175,15 @@ fn direct_play_readout_fits_beside_its_label_in_every_language() {
             let value = direct_play_readout(mode);
             let table = table_of(
                 Section::new("")
-                    .row(Row::new(plx_platform::i18n::msg::settings_playback_quality())
-                        .value(plx_platform::i18n::msg::settings_audio_not_set()).chevron(true))
-                    .row(Row::new(plx_platform::i18n::msg::settings_playback_direct_play()).value(value).chevron(true)),
+                    .row(Row::new(plx_os::i18n::msg::settings_playback_quality())
+                        .value(plx_os::i18n::msg::settings_audio_not_set()).chevron(true))
+                    .row(Row::new(plx_os::i18n::msg::settings_playback_direct_play()).value(value).chevron(true)),
             );
             out.extend(table.app_fit_failures(frame_w(), &format!("{} playback ({value})", language.tag())));
             let direct_play_row = &table.sections[0].rows[1];
             let cols = table.row_columns(direct_play_row, frame_w(), &M);
             let value_natural = M.width_str(value, theme::size::LABEL, true);
-            let label_natural = M.width_str(plx_platform::i18n::msg::settings_playback_direct_play(), theme::size::HEADLINE, true);
+            let label_natural = M.width_str(plx_os::i18n::msg::settings_playback_direct_play(), theme::size::HEADLINE, true);
             assert!(cols.value_w + 1.0 >= value_natural,
                 "{} {value:?}: an app-owned Direct Play value must never be elided ({} px column vs {value_natural} px natural)",
                 language.tag(), cols.value_w);
@@ -185,21 +200,37 @@ fn direct_play_readout_fits_beside_its_label_in_every_language() {
 /// picker's own label. Pinned in every shipped language; the fit sweep above covers the width.
 #[test]
 fn the_subtitle_mode_readouts_are_pinned_in_every_language() {
+    // Reviewed wording, one row per language; a language without a row fails instead of borrowing
+    // another language's expectation.
+    const WANT: &[(&str, &str)] = &[
+        ("en", "When audio isn't in the subtitle language"),
+        ("es", "Audio fuera del idioma de subtítulos"),
+        ("fr", "Audio hors langue des sous-titres"),
+        ("it", "Se audio e sottotitoli hanno lingue diverse"),
+        ("pt", "Áudio fora do idioma das legendas"),
+        ("de", "Ton nicht in Untertitelsprache"),
+        ("pl", "Gdy język dźwięku jest inny"),
+        ("hu", "Ha a hang nem a felirat nyelvén szól"),
+        ("be", "Калі гук не на мове субцітраў"),
+        ("ru", "Если аудио не на языке субтитров"),
+        ("nl", "Audio niet in ondertiteltaal"),
+        ("ca", "Àudio en un altre idioma"),
+    ];
+    for (tag, _) in WANT {
+        assert!(SHIPPED.iter().any(|p| p.tag() == *tag), "{tag} is pinned but no longer shipped");
+    }
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let mut prefs = AudioPreferences::default();
         let readouts: Vec<String> = (0..3).map(|mode| {
             prefs.subtitle_mode = mode;
-            field_readout(PickerKind::SubtitleMode, Quality::Original, DirectPlayMode::Auto, Some(&prefs))
+            field_readout(PickerKind::SubtitleMode, Quality::Original, DirectPlayMode::Auto, Some(&prefs), crate::registry::empty_fixture())
         }).collect();
-        assert_eq!(readouts[0], plx_platform::i18n::msg::settings_audio_manual(), "{}", language.tag());
-        assert_eq!(readouts[1], plx_platform::i18n::msg::settings_audio_foreign_short(), "{}", language.tag());
-        assert_eq!(readouts[2], plx_platform::i18n::msg::settings_audio_always(), "{}", language.tag());
-        let want = match language.tag() {
-            "en" => "When audio isn't in the subtitle language",
-            "es" => "Audio fuera del idioma de subtítulos",
-            _ => "Калі гук не на мове субцітраў",
-        };
+        assert_eq!(readouts[0], plx_os::i18n::msg::settings_audio_manual(), "{}", language.tag());
+        assert_eq!(readouts[1], plx_os::i18n::msg::settings_audio_foreign_short(), "{}", language.tag());
+        assert_eq!(readouts[2], plx_os::i18n::msg::settings_audio_always(), "{}", language.tag());
+        let want = WANT.iter().find(|(tag, _)| *tag == language.tag()).map(|(_, want)| *want)
+            .unwrap_or_else(|| panic!("{}: add its reviewed read-out to WANT", language.tag()));
         assert_eq!(readouts[1], want, "{}", language.tag());
     }
 }
@@ -209,6 +240,12 @@ fn copy_view<'a>(copy: &'a str) -> plx_ui::text_view::TextView<'a> {
     let size = theme::size::LABEL;
     plx_ui::text_view::TextView::new(copy, size, theme::TEXT_READING)
         .leading(size as f32 + theme::space::XS).max_lines(12).with_measure(&M)
+}
+
+/// A profile name as long as the Plex profile-name field lets a viewer make one (unbroken, so the
+/// copy cannot wrap at a space inside it): the name is user data, so a short one proves nothing.
+fn long_profile() -> Whose {
+    Whose::Profile("Maximilian-Alexander Hartwell-Pennington".to_string())
 }
 
 /// Every explanation a field list or a picker can show under its title fits the left column
@@ -221,8 +258,10 @@ fn every_explanation_under_a_title_fits_the_column_in_every_language() {
     const MAX_COPY_LINES: usize = 5;
     let _serial = plx_base::testlock::serial();
     let layout = RouteLayout::screen();
-    let all_fields = [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition,
-        PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::AudioLanguage, PickerKind::SubtitleMode,
+    // Fork Rofocale11: RatingSource is the Nuvio IMDb/Rotten Tomatoes picker and must be
+    // explanation-fit-checked alongside upstream's new pickers.
+    let all_fields = [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::SubtitleColor,
+        PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::UriEngine, PickerKind::DolbyVision, PickerKind::IntroSkip, PickerKind::CreditsSkip, PickerKind::UiResolution, PickerKind::AudioLanguage, PickerKind::SubtitleMode,
         PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles, PickerKind::RatingSource];
     let mut out = Vec::new();
     for language in SHIPPED {
@@ -235,23 +274,53 @@ fn every_explanation_under_a_title_fits_the_column_in_every_language() {
                 Subject::Page(kind) => kind.title(),
                 Subject::Picker(field) => field.title(),
             };
-            for direct_play in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
-                for status in ["", plx_platform::i18n::msg::settings_playback_save_failed()] {
-                    let copy = copy_text(subject, status, direct_play);
+            for (direct_play, whose) in [DirectPlayMode::Auto, DirectPlayMode::Forced].into_iter()
+                .flat_map(|mode| [(mode, Whose::Nobody), (mode, long_profile())]) {
+                for status in ["", plx_os::i18n::msg::settings_playback_save_failed()] {
+                    let copy = copy_text(subject, status, direct_play, &whose);
                     let view = copy_view(&copy);
                     let top = layout.narrative_copy_frame(true, title, layout.action.y, &M).y;
                     let room = layout.action.y - theme::space::XL - top;
                     let (lines, h) = (view.line_count(layout.narrative.w), view.measure_h(layout.narrative.w));
-                    let at = format!("{tag} {subject:?} direct_play={direct_play:?} status={status:?}");
+                    let at = format!("{tag} {subject:?} direct_play={direct_play:?} whose={whose:?} status={status:?}");
                     if view.truncates(layout.narrative.w) { out.push(format!("{at}: the copy is cut at the line cap")); }
                     if h > room { out.push(format!("{at}: the copy is {h}px tall, the column has {room}px")); }
                     // A status line is the failure text, not an explanation: only the explanation is held to the note length.
-                    if status.is_empty() && lines > MAX_COPY_LINES { out.push(format!("{at}: {lines} lines, more than {MAX_COPY_LINES}")); }
+                    // The seated Playback page under Force is the profile line plus the Force note: one line more than a note.
+                    let named_under_force = subject == Subject::Page(Kind::Playback) && direct_play == DirectPlayMode::Forced && matches!(whose, Whose::Profile(_));
+                    let allowed = MAX_COPY_LINES + usize::from(named_under_force);
+                    if status.is_empty() && lines > allowed { out.push(format!("{at}: {lines} lines, more than {allowed}")); }
                 }
             }
         }
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// The Playback page's two own explanations, in every shipped language: the profile line carries
+/// the name whole (and no leftover placeholder), the unseated line is a different sentence, and
+/// neither is the retired "for this television" blurb. The fit sweep above judges the widths.
+#[test]
+fn the_playback_page_names_its_profile_or_asks_for_one_in_every_language() {
+    let _serial = plx_base::testlock::serial();
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        let tag = language.tag();
+        let named = copy_text(Subject::Page(Kind::Playback), "", DirectPlayMode::Auto, &Whose::Profile("Maya".into())).into_owned();
+        let unseated = copy_text(Subject::Page(Kind::Playback), "", DirectPlayMode::Auto, &Whose::Nobody).into_owned();
+        assert!(named.contains("Maya") && !named.contains('{'), "{tag}: {named:?}");
+        assert!(!unseated.is_empty() && !unseated.contains("Maya") && !unseated.contains('{') && unseated != named, "{tag}: {unseated:?}");
+        // Force Direct Play does not take the name away: Settings has no other place that names the profile.
+        let named_forced = copy_text(Subject::Page(Kind::Playback), "", DirectPlayMode::Forced, &Whose::Profile("Maya".into())).into_owned();
+        assert!(named_forced.contains("Maya") && named_forced.contains(plx_os::i18n::msg::settings_playback_force_note()), "{tag}: {named_forced:?}");
+        // The text view draws every newline as a space, so the layout must not lean on one: the profile
+        // line is a full sentence, and the Force note follows it in the same paragraph.
+        let force_note = plx_os::i18n::msg::settings_playback_force_note();
+        let profile_line = named_forced.strip_suffix(force_note).unwrap_or(&named_forced).trim_end();
+        assert!(!named_forced.contains('\n') && profile_line.ends_with('.'), "{tag}: {named_forced:?}");
+        let unseated_forced = copy_text(Subject::Page(Kind::Playback), "", DirectPlayMode::Forced, &Whose::Nobody).into_owned();
+        assert_eq!(unseated_forced, unseated, "{tag}");
+    }
 }
 
 /// Each local picker explains ITS setting: no two of the six read the same, none is the page's
@@ -261,36 +330,45 @@ fn every_explanation_under_a_title_fits_the_column_in_every_language() {
 #[test]
 fn each_local_picker_has_its_own_explanation_in_every_language() {
     let _serial = plx_base::testlock::serial();
-    let fields = [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition,
-        PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::RatingSource];
+    // Fork Rofocale11: RatingSource is the Nuvio IMDb/Rotten Tomatoes picker and its own
+    // explanation must stay distinct from upstream's new pickers'.
+    let fields = [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::SubtitleColor,
+        PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::UriEngine, PickerKind::DolbyVision, PickerKind::IntroSkip, PickerKind::CreditsSkip, PickerKind::RatingSource];
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let tag = language.tag();
-        let page = copy_text(Subject::Page(Kind::Playback), "", DirectPlayMode::Auto).into_owned();
-        let copies: Vec<String> = fields.iter().map(|&f| copy_text(Subject::Picker(f), "", DirectPlayMode::Auto).into_owned()).collect();
+        let page = copy_text(Subject::Page(Kind::Playback), "", DirectPlayMode::Auto, &Whose::Nobody).into_owned();
+        let copies: Vec<String> = fields.iter().map(|&f| copy_text(Subject::Picker(f), "", DirectPlayMode::Auto, &Whose::Nobody).into_owned()).collect();
         for (i, copy) in copies.iter().enumerate() {
             assert!(!copy.is_empty(), "{tag} {:?}", fields[i]);
             assert_ne!(*copy, page, "{tag} {:?} must not repeat the page blurb", fields[i]);
             assert!(copies.iter().enumerate().all(|(j, other)| i == j || other != copy), "{tag} {:?} reads like a sibling", fields[i]);
         }
-        assert_eq!(copies[0], plx_platform::i18n::msg::settings_playback_quality_copy(), "{tag}");
+        assert_eq!(copies[0], plx_os::i18n::msg::settings_playback_quality_copy(), "{tag}");
         // Force Direct Play overrides only what it changes: the page list, Quality and Direct Play.
-        let forced = |subject| copy_text(subject, "", DirectPlayMode::Forced).into_owned();
-        for subject in [Subject::Page(Kind::Playback), Subject::Picker(PickerKind::Quality), Subject::Picker(PickerKind::DirectPlay)] {
-            assert_eq!(forced(subject), plx_platform::i18n::msg::settings_playback_force_note(), "{tag} {subject:?}");
+        let forced = |subject| copy_text(subject, "", DirectPlayMode::Forced, &Whose::Nobody).into_owned();
+        for subject in [Subject::Picker(PickerKind::Quality), Subject::Picker(PickerKind::DirectPlay)] {
+            assert_eq!(forced(subject), plx_os::i18n::msg::settings_playback_force_note(), "{tag} {subject:?}");
         }
+        // The page keeps its own line under Force: nobody seated says the rows are read-only (the
+        // Force advice cannot be acted on from them), a seated profile is named above the Force note.
+        assert_eq!(forced(Subject::Page(Kind::Playback)), plx_os::i18n::msg::settings_playback_unseated(), "{tag}");
         for (i, &field) in fields.iter().enumerate().skip(2) {
             assert_eq!(forced(Subject::Picker(field)), copies[i], "{tag} {field:?} is untouched by Force");
         }
         // The account pickers keep the account note under every mode.
         for field in [PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles] {
-            assert_eq!(copy_text(Subject::Picker(field), "", DirectPlayMode::Forced), plx_platform::i18n::msg::settings_audio_account_note(), "{tag} {field:?}");
+            assert_eq!(copy_text(Subject::Picker(field), "", DirectPlayMode::Forced, &Whose::Nobody), plx_os::i18n::msg::settings_audio_account_note(), "{tag} {field:?}");
         }
         // A status wins, with the Force note appended only where Force matters.
-        let status = plx_platform::i18n::msg::settings_playback_save_failed();
-        assert_eq!(copy_text(Subject::Picker(PickerKind::SkipInterval), status, DirectPlayMode::Forced), status, "{tag}");
-        assert_eq!(copy_text(Subject::Picker(PickerKind::DirectPlay), status, DirectPlayMode::Forced),
-            format!("{status}\n\n{}", plx_platform::i18n::msg::settings_playback_force_note()), "{tag}");
-        assert_eq!(copy_text(Subject::Picker(PickerKind::DirectPlay), status, DirectPlayMode::Auto), status, "{tag}");
+        let status = plx_os::i18n::msg::settings_playback_save_failed();
+        assert_eq!(copy_text(Subject::Picker(PickerKind::SkipInterval), status, DirectPlayMode::Forced, &Whose::Nobody), status, "{tag}");
+        assert_eq!(copy_text(Subject::Picker(PickerKind::DirectPlay), status, DirectPlayMode::Forced, &Whose::Nobody),
+            format!("{status}\n\n{}", plx_os::i18n::msg::settings_playback_force_note()), "{tag}");
+        assert_eq!(copy_text(Subject::Picker(PickerKind::DirectPlay), status, DirectPlayMode::Auto, &Whose::Nobody), status, "{tag}");
     }
+}
+
+fn marker_grants() -> MarkerPrefsView {
+    MarkerPrefsView { scope: 1, intro_granted: true, credits_granted: true, ..Default::default() }
 }

@@ -30,7 +30,10 @@ pub const fn rgb8(r: u8, g: u8, b: u8) -> [f32; 4] {
 // written down in exactly one place.
 /// The app ground, Apple TV's shelf gray `#2c2c2e` (`theme::SURFACE_APP`'s stop).
 pub const NEUTRAL_500: [f32; 4] = rgb8(0x2c, 0x2c, 0x2e);
-/// The scrim ink, near-black `#050508` (`theme::scrim`'s stop).
+/// The scrim ink, near-black `#050508` (`theme::scrim`'s stop). It is NOT merged into `NEUTRAL_950`
+/// (`#08080a`, two perceptual units lighter): the hero-text legibility floor
+/// (`widgets::hero_scrim_tests::the_hero_text_reads_over_bright_artwork`) has 0.02:1 of headroom and the
+/// lighter ink measured 2.48:1 against its 2.5:1.
 pub const NEUTRAL_1000: [f32; 4] = rgb8(0x05, 0x05, 0x08);
 
 /// GL clear color — 3-float (`frame_clear` takes r,g,b, no alpha). The app's DEFAULT base, and
@@ -157,3 +160,26 @@ pub mod size {
     /// chrome or prose; `app::diagnostics` is its sole owner.
     pub const DIAGNOSTIC: c_int = 20;
 }
+
+// ---- the popover menu's glass rim (DS6) ---------------------------------------------------------
+//
+// `GlassRim::Menu` — a popover's panel. The same shader and the same rounded-rect SDF the standing
+// container uses; only the numbers differ, and they live here beside the other renderer-side
+// tokens so `gfx.rs` names them rather than restating them. A menu draws them on frozen ground
+// (`draw_glass_frozen`): the host snapshot is its sharp source, so it takes no grab.
+
+/// The menu's chamfer, in authored px — the standing container's own 12, for the same reason: a
+/// shallow ramp keeps the rim a band at the edge and leaves a menu's rows untouched.
+pub const MENU_BEVEL: f32 = 12.0;
+/// The menu's peak rim displacement, in authored px — twice the ramp, as the standing container's,
+/// so the compression lands ON the rim.
+pub const MENU_LENS: f32 = 24.0;
+/// How much of the rim shows the captured host page UNBLURRED (`u_sharpw` in `fs_glass.frag`),
+/// sampled through the displacement the body's source already takes. 0.4 is the middle rung of the
+/// 0.85 / 0.4 / 0 ladder the standing container was laddered over: 0.85 draws a hard sliver of
+/// unblurred page at the edge, 0 leaves the lens nothing to bend. UNVERIFIED on the television —
+/// the TV feel check for the menu glass picks the final rung.
+pub const MENU_SHARP: f32 = 0.4;
+/// How much of the panel face's gradient the chamfer sheds at the very rim, so the refracted band
+/// is not painted out by a .78-.86 face. Same share as the standing container's.
+pub const MENU_RIMCLEAR: f32 = 0.6;

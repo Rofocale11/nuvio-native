@@ -10,15 +10,37 @@
 //!
 //! The claim worker's plumbing (the work/fallback enums, the landing mailbox, the spawn, the drain
 //! and the stale-landing discard rules) is [`super::flight`]; the route DECISIONS that feed it
-//! (the claim table, the enhancement step, the plans and the PMS attempts) stay here.
+//! (the claim table, the enhancement step, the plans and the PMS attempts) stay here. The track
+//! memory's effects (the recall at a resolve, the parked write-back, the track menu's picks) are the
+//! child module `memory` (`decision_memory.rs`); the fields it works on stay on [`PlaybackSession`].
 
+use plx_playback_contract::subtitle::SIDE_READER_CLOCK_ONLY;
 use plx_plex::plex::ServerId;
+use plx_plex::plex::session::QualityPref;
 use plx_data::pms::PmsMovie;
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use super::flight::*;
 use super::plan::*;
+use super::prefs::*;
+use super::track_memory::{SubMode, TrackContext};
+
+// The track memory's effects: the recall at a resolve, the parked write-back and the track menu's
+// picks. A child module so the file that declares `PlaybackSession` is not also the one that
+// says what is remembered about it; every public name keeps its `route::` path.
+#[path = "decision_memory.rs"]
+mod memory;
+pub use memory::{
+    commit_audio_pick, commit_forced_only_and_sidecar, commit_forced_only_pick, commit_subtitle_and_sidecar, commit_subtitle_pick,
+    on_decoded_frame, persist_subtitle_offset, rematch_subtitle_with_names, repoint_parked_subtitle, send_parked_write_back,
+};
+pub use memory::{confirm_uri_audio_pick, confirm_uri_subtitle_pick,
+    remember_accepted_source_audio, remember_accepted_source_subtitle};
+#[cfg(any(test, feature = "test-support"))]
+pub use memory::{park_write_back_for_test, write_back_parked};
+pub(super) use memory::ParkedWriteBack;
+use memory::{follow_audio_with_forced_only, parked_write_back, recalled_track_memory, remembered_subtitle_offset, settle_landing_selection};
 
 // ---- ONE playback session, as ONE value -----------------------------------------------------
 
@@ -41,19 +63,44 @@ struct PlaybackRequest {
     /// Background hero preview. No PlayQueue, no timeline, no scrobble, resume at 0, and the
     /// caller must not push the player route.
     preview: bool,
+    /// The version the viewer picked (Play Version), `None` for the default. Kept on the request,
+    /// so a retry or quality change of this playback resolves the same version.
+    version: Option<plx_plex::plex::MediaId>,
+    /// The show an EPISODE belongs to (`grandparentRatingKey`), empty for a movie, a clip, or an
+    /// item whose caller did not know it. The play queue is built from it
+    /// ([`ResolveEnv::queue_show_rk`]), so a retry or a quality change of this playback builds the
+    /// same queue.
+    show_rk: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeldSelection {
+    part_id: i64,
+    audio_sid: i64,
+    sub_sid: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RetryContext {
     resume_ns: i64,
-    audio_sid: i64,
-    sub_sid: i64,
+    candidate_purpose: CandidatePurpose,
+    /// [`HeldSelection`] the session HELD when this retry was built, `Some` only when that
+    /// selection was KNOWN ([`PlaybackSession::selection_known`]): a playable plan landed, or the
+    /// viewer picked a track. `0` is both "subtitles Off" and "nothing landed yet", so the pair
+    /// cannot be told apart from the cleared defaults by value; `None` says that nothing landed
+    /// (a quality change or contract bump while loading, a retry of a refused plan) and leaves the
+    /// fresh defaults (the account / show / server rules) in charge instead of forcing the
+    /// subtitle Off. Applied by [`apply_retry`].
+    selection: Option<HeldSelection>,
     sub_offset_ms: i64,
     direct_play_mode: DirectPlayMode,
     /// Issue #266: resolve this retry WITHOUT the audio enhancement. Set only by a start-failure
     /// rescue ([`retry_current_play`]) of a playback that was enhanced: an enhanced `start.mkv`
     /// that failed to open is the one failure a plain retry would repeat verbatim.
     suppress_enhancement: bool,
+    /// The subtitle MODE the session held ([`PlaybackSession::sub_mode`]), so a retry of Forced only
+    /// is still Forced only: `selection` carries stream ids, which cannot say so.
+    sub_mode: SubMode,
 }
 
 /// Everything the main thread needs to resolve and render the playback in progress, in one struct.
@@ -81,14 +128,75 @@ struct RetryContext {
 /// asserted: a frame's draw cannot hold one across [`apply_plan`] or [`request_play`], because
 /// those take `&mut`.
 
+/// Why the last native start was refused with no Engine built ([`PlaybackSession::native_start_refused`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartRefusal {
+    /// A timed-out Load is still inside `sf_load` (an `AbandonedLoad` owns the one native object).
+    LoadTimeout,
+    /// The previous object's off-frame `Unload` outlived `player::release::RELEASE_DEADLINE`.
+    ReleaseTimeout,
+}
+
 pub struct PlaybackSession {
+    /// Main-thread observation for the exact physical attempt currently shown by this session.
+    attempt_view: crate::player::attempt_view::AttemptView<RouteStartAttempt>,
+    /// The player's own readout beside it: the members only the player writes and the feed's
+    /// last raw facts, changed through [`PlaybackSession::step_readout`] and nothing else.
+    readout: crate::player::readout::PlayerReadout,
+    /// A recoverable URI failure held through exact native release. It is a readout projection,
+    /// not a second release queue; only the matching current attempt may show Resolving.
+    uri_recovery_pending: Option<RouteStartAttempt>,
+    /// Finite source recipes for this logical request. A plan can refresh qualification but
+    /// cannot reset spent opens or the cross-backend handoff budget.
+    backend_policy: Option<super::backend_policy::BackendPolicy>,
+    /// The exact Feed recipe the latest resolved plan prepared, if it produced a source.
+    planned_feed_offer: Option<super::backend_policy::OfferId>,
+    planned_feed_purpose: CandidatePurpose,
+    /// A seek or foreground reload can reopen the already admitted recipe without buying a
+    /// new recovery rung. A changed recipe still has to pass the finite policy.
+    admitted_feed_offer: Option<super::backend_policy::OfferId>,
+    /// Viewer speed intent for this item. Feed owns the physical PCM/timebase actuator; a URI
+    /// qualification cannot silently reinterpret a non-1× request as native 1× playback.
+    requested_rate_permille: i32,
+    /// Local measurement origin of the next physical open, chosen at the request boundary.
+    attempt_origin: crate::player::attempt_metrics::Origin,
+    /// Canonical accepted request revision. Automatic retries retain this through a new resolve.
+    metric_request: Option<crate::player::backend::LogicalRequestId>,
+    /// Pure addressed facts awaiting the app runner's single monotonic clock and backend owner.
+    pending_metric_lifecycle: Vec<crate::player::backend::RequestLifecycle>,
+    /// Viewer pause goal captured for an explicit same-item reconfiguration. The physical Feed
+    /// hold is executor state and cannot describe a URI attempt's viewer intent.
+    reconfigure_pause_goal: Option<bool>,
     /// Frozen for one logical playback, including its retries and track changes.
     direct_play_mode: DirectPlayMode,
     /// This playback was refused by the cached device sandbox preflight. No Engine exists.
     /// Cleared with the playback verdict on exit/reset, never a process-global error latch.
     pub jail_load_blocked: bool,
+    /// The last FRESH native start was refused because a timed-out Load is still inside
+    /// `sf_load` (an `AbandonedLoad` owns the one native object). No Engine exists, so nothing
+    /// else would publish the failure and the player sat Idle with no read-out. `player::state`
+    /// derives `Error` (cause `load_timeout`) from it. Cleared by the next start attempt and,
+    /// like [`jail_load_blocked`](Self::jail_load_blocked), with the playback verdict.
+    ///
+    /// The cause rides with the refusal ([`StartRefusal`]): the previous object's off-frame `Unload`
+    /// being overdue (`player::release`) is a refusal like the parked Load, with its own cause
+    /// (`release_timeout`). A start QUEUED behind a still-running `Unload` is not stored here: the
+    /// release machine owns that fact and `player::state` reads what the adapter publishes of it.
+    pub native_start_refused: Option<StartRefusal>,
+    /// The cause an Engine ended with when it failed for good and was released while the
+    /// read-out stands (`player::release_failed_engine`). The Engine, its pipeline and the video
+    /// plane are gone, so the worker signals the read-out used to be derived from are gone with
+    /// them; this keeps the cause. `player::state` derives `Error` from it, like the refusals
+    /// above. Cleared with them, and by the next playback request.
+    engine_failure: Option<crate::player::RuntimeFailure>,
+    /// The viewer left this item for the next one from its credits (Up Next, or Skip on a `final`
+    /// credits marker). A stop BELOW the server's own watched threshold (PMS's is about 90 %,
+    /// `docs/pms-api.md` §6; [`plx_data::viewstate::past_watched_threshold`]) then marks it watched
+    /// explicitly, since long credits start before that; a stop past it is the server's to count,
+    /// and a scrobble on top would be a second view. Read and cleared by [`scrobble_stop`].
+    pub finished: bool,
     /// Read-only publication of Player.repair for the HUD. Never authorizes a resource effect.
-    pub repair_status: plx_platform::tv::sandbox::State,
+    pub repair_status: plx_os::tv::native_video::State,
     /// The request which produced this attempt, retained for terminal Retry / Choose quality.
     /// Written synchronously by [`request_play`] rather than by [`apply_plan`], because the
     /// server can refuse before a playable plan exists.
@@ -114,6 +222,7 @@ pub struct PlaybackSession {
     /// [`apply_plan`] installs it and [`request_play`] retires it, so it always describes the item
     /// the player is showing.
     play_verdict: Option<PlayVerdict>,
+    pms_decline: Option<super::uri_preflight::PmsDecline>,
     /// The resolve itself could not produce a plan (no client, worker panic, or worker spawn
     /// refusal).  Unlike `play_verdict`, this is OUR failure rather than a PMS sentence; it makes
     /// an empty plan terminal and retryable instead of falling back to an idle black frame.
@@ -137,6 +246,28 @@ pub struct PlaybackSession {
     /// the pump for a fresh transcode when the answer actually changed). Nothing measures a link
     /// or moves a rung on its own — the adaptive switch is not here.
     cur_contract: plx_plex::plex::EncodeContract,
+    /// **This request's failed-open ladder, which also owns the one capability value the attempt
+    /// plans and profiles from** ([`OpenRecovery`], [`attempt_caps`](Self::attempt_caps)). Created
+    /// by [`begin_attempt`](Self::begin_attempt) with the value the app's play start derived ONCE
+    /// (`devcaps::start_caps`: the write-once boot snapshot less the install's stored refusals) and
+    /// handed to the `request_play*` entry points; a retry keeps it, and a refusal
+    /// of natively fed audio that the install just learned narrows it inside the machine
+    /// (`Caps::without`, for EVERY learned refusal, whichever recovery then wins: the Original
+    /// trial's rollback shadows the conversion, and the rebase it flies, a later retry and a
+    /// quality change must still plan from the narrowed value). Never read again from the
+    /// process-wide `devcaps::caps()`: the route's decisions (the direct-play gates, the audio pick,
+    /// Auto's catalog, the remux predictions) and the profile string PMS reads
+    /// (`plex::TranscodeSpec::caps`) are all derived from this value, so the plan and the profile
+    /// cannot disagree, and "excluded for this attempt" has somewhere to live that is not a global
+    /// written before anything is proved. A new request replaces the whole value: what this one
+    /// narrowed reaches the next only as a stored row, once the learner's write has landed, and the
+    /// next play's start edge derives its value from the record.
+    ///
+    /// `None` only before the first attempt (the const [`IDLE`](Self::IDLE) cannot hold an `Arc`):
+    /// [`attempt_caps`](Self::attempt_caps) then answers [`plx_os::devcaps::Caps::assumed`], the
+    /// answer `devcaps::caps()` itself gives before the probe. Nothing plans from a session that has
+    /// not begun an attempt, so that answer is a placeholder, not a policy.
+    recovery: Option<crate::player::recovery::OpenRecovery>,
     /// What the last successful transcode decision actually did with the Plex Pass audio DSP
     /// (issue #266) — distinct from `cur_contract.audio`, which is what the accepted decision
     /// carried. Installed by `apply_plan` from `Plan::enhancement`; reset to `Off` by a new
@@ -147,7 +278,8 @@ pub struct PlaybackSession {
     /// that decision is made from the same numbers `build_stream` used rather than from a guess.
     cur_src: (i64, i64, i64),
     /// Whole Part transport bitrate, including audio. Auto's progressive watchdog compares the
-    /// live socket against this rather than `cur_src.0` (video only), because the wire has to carry
+    /// live socket against this rather than `cur_src.0` (the video stream's rate where PMS gave one,
+    /// else the whole file's), because the wire has to carry
     /// both lanes. `0` means PMS did not provide one and disables the watchdog fail-safely.
     cur_transport_kbps: i64,
     /// **Can this television decode the SOURCE video stream as it stands** — `video_direct_plays`
@@ -192,6 +324,9 @@ pub struct PlaybackSession {
     /// HLS is active: the HLS worker owns only measurements, while the main thread owns the
     /// codec/session transition back to this exact source declaration.
     auto_original: Option<AutoOriginalCandidate>,
+    /// Why `auto_original` is `None`, when it is known (see [`OriginalDeclined`]): read by the
+    /// audio-enhancement reason and nothing else.
+    original_declined: Option<OriginalDeclined>,
     /// Debug pipeline-tier substitute for PMS's fixed-rendition endpoints. Empty in every
     /// production plan; see [`arm_auto_fixture`].
     auto_fixture_base: String,
@@ -218,6 +353,10 @@ pub struct PlaybackSession {
     /// ratingKey of the currently-playing item (movie or episode), so an audio-track
     /// switch can force a fresh transcode of the same item.
     cur_rk: String,
+    /// The playing version's `mediaIndex` (0 for the default), installed with `cur_rk` from the
+    /// plan, so every later encoder of this playback (seek, quality change, ABR rung, Original
+    /// recovery) asks for the same version.
+    cur_media_index: usize,
     /// The SERVER the currently-playing item came from — the other half of its identity.
     ///
     /// A ratingKey names an item only within one server: `1` is a real item on our own server and a
@@ -241,11 +380,36 @@ pub struct PlaybackSession {
     /// old accessor kept as a projection: `.map_or(0, |a| a.sid)`, so every existing caller that
     /// only ever wanted the wire id keeps compiling unchanged.
     cur_audio: Option<CarriedAudio>,
+    /// The viewer's selected source Part, streams and audio constraint, captured before a
+    /// physical backend chooses a different effective stream. Both backends use this one intent;
+    /// `cur_audio` remains the stream the current Feed route actually carries.
+    source_selection: Option<SourceSelection>,
+    /// The playback backends composed for this session: `BackendSet::FEED` until the composition installs
+    /// the set its drivers form (`install_backends`). Policy asks it which physical backend can be offered,
+    /// never which drivers were compiled in.
+    backends: plx_playback_contract::BackendSet,
+    /// Captured IO composition for source qualification; it owns no route or native session.
+    uri_preflight_port: Option<super::uri_preflight::ResolvePort>,
     /// current subtitle selection (0 = none) — the picked Plex stream id, regardless of how it
     /// renders: burned into any TRANSCODE (our client profile advertises no soft-sub support, so
     /// Plex's decision is burn), or client-rendered from the demuxer on direct play
     /// (`player::request_subtitle`).
     cur_sub_sid: i64,
+    /// Do [`Self::cur_audio`] and [`Self::cur_sub_sid`] name a selection that is KNOWN rather than
+    /// the cleared `0` a play request leaves (`0` is both "Off" and "nothing landed yet")? True
+    /// only after a PLAYABLE plan landed ([`apply_plan`]; a refused plan installs too, with a
+    /// selection nobody made) or after the viewer picked a track ([`commit_audio_selection`],
+    /// [`commit_subtitle_selection`]); cleared with the selection by [`clear_track_selection`].
+    /// [`RetryContext::selection`] is `Some` exactly when this held at capture time.
+    selection_known: bool,
+    /// The [`HeldSelection`] a RETRY carried into the request now loading, kept while no
+    /// playable plan has landed: the request clears the live selection ([`Self::selection_known`]
+    /// goes false), so a second retry built before this one lands (a contract bump in flight, or
+    /// *Switch to Auto and play* after a refusal) would otherwise find nothing to carry and lose
+    /// the viewer's choice, an explicit subtitles Off included. Set by [`begin_track_selection`],
+    /// kept across a refused landing, dropped by a playable one ([`apply_plan`]).
+    /// [`current_retry_context`] reads it only while the selection is unknown.
+    carried_selection: Option<HeldSelection>,
     /// Is [`Self::cur_sub_sid`] an external sidecar (`metadata::Stream::sidecar_renderable`) rather
     /// than an embedded (in-container) track? Meaningless when `cur_sub_sid == 0`. Issue #266 I6:
     /// this is what tells `route::decision::facts`'s [`super::plan::SubtitleEffect::Sidecar`]
@@ -269,6 +433,29 @@ pub struct PlaybackSession {
     /// else the account's — carried straight from [`super::plan::Plan::sub_pref_lang`] so the
     /// Subtitles menu's "yours" grouping (`metadata::sub_layout::sub_sections`) survives a reload.
     cur_sub_pref_lang: Option<String>,
+    /// The show the playing item belongs to (`PlayingItem::show_rk`, empty for anything but an
+    /// episode) and its Plex type (`PlayingItem::kind`), carried from the landing: the key and the
+    /// gate of the track memory, which remembers a pick per SHOW and only for an episode.
+    cur_show_rk: String,
+    cur_kind: String,
+    /// A remembered subtitle was chosen for this play but the route shows none of it
+    /// ([`super::plan::Plan::memory_note`]): the Subtitles menu says why. Set by a landing; cleared
+    /// by the first commit that changes the subtitle shown, because a pick the app draws in place
+    /// runs no landing to clear it.
+    cur_memory_note: bool,
+    /// **A remembered choice this landing applied that the server does not have yet** (W6),
+    /// parked by [`apply_plan`] and sent by [`send_parked_write_back`] on the landing's first
+    /// decoded frame. `take`n by the send, so a play writes at most once; every other landing
+    /// (a retry, a rescue, a seek rebuild) installs a session with nothing parked.
+    write_back: Option<ParkedWriteBack>,
+    /// Which of the three subtitle states the playback is in ([`SubMode`]): `cur_sub_sid` alone
+    /// cannot tell Forced only from a pick of the forced track it drew. Set by a landing from the
+    /// plan (or the retry that led to it), by every ordinary subtitle commit from the stream it
+    /// picked, and back to Forced only by the commits derived from it.
+    sub_mode: SubMode,
+    /// What the audio follow and the first-frame names re-match need of the playing item (neither
+    /// can read the metadata store); NOT published ([`Self::publication`]). `None` without an item.
+    track_ctx: Option<TrackContext>,
     /// the playing item's Part id (from the part key), so an audio switch can PUT the
     /// server-side stream selection — the transcoder encodes the part's SELECTED audio.
     cur_part_id: i64,
@@ -302,22 +489,34 @@ pub struct PlaybackSession {
     /// its output as though it were the source and the whole server-side transform was invisible.
     src_vcodec: String,
     src_acodec: String,
+    /// The file's own video frame rate (0 = unknown), kept beside `src_vcodec` for the same
+    /// reason: `stream_fps` is what the Load declares for the stream now playing, and a route
+    /// rebuilt mid-play needs the file's rate again ([`video_copy_fps`]).
+    src_fps: f64,
     /// The streamed item's Media video/audio codec (h264/hevc, ac3/eac3/aac), so the player picks
     /// the H265 Load payload for a native HEVC direct-play and the matching audio codec.
     stream_vcodec: String,
     stream_acodec: String,
-    /// Direct-play source video frame rate (0 = unknown/transcode → omit from the Load esInfo).
+    /// Source video frame rate of a stream that carries the source video (direct play, and a remux that copies it; 0 = unknown or a re-encode → omit from the Load esInfo).
     stream_fps: f64,
     /// The direct-played file's raw Dolby Vision layering, retained for diagnostics. The Load
     /// payload consumes `stream_dv_decision` below: re-evaluating this record after a late probe
     /// would make a reload describe a different route from the one which passed the gate.
     ///
-    /// `Dovi::NONE` on every transcode and remux: what arrives then is the server's output, and
-    /// the only DV file that reaches those paths is one we refused to declare in the first place.
+    /// `Dovi::NONE` on a re-encode: what arrives then is the server's output, not the file. A
+    /// remux that copies the video keeps it, because the DOVI record travels in the copied stream.
     stream_dovi: plx_data::metadata::Dovi,
     /// Capability and presentation frozen when `stream_dovi` entered this physical route. An
     /// audio switch, reload, Original recovery and rollback all copy this beside the raw record.
+    /// Rewritten only by [`withdraw_dv_presentation`] (#1166), which downgrades the presentation to
+    /// what Dolby Vision Off would have planned and keeps the probed capability.
     stream_dv_decision: plx_data::metadata::DvDecision,
+    /// The FILE's own Dolby Vision record and the declaration it would make as a direct play,
+    /// frozen at the resolve whatever route was taken. `stream_dovi` above is what is being fed;
+    /// a rebuild that copies the video (an audio switch, a seek, Original recovery) hands this on
+    /// again instead of losing it with the first re-encode.
+    src_dovi: plx_data::metadata::Dovi,
+    src_dv_decision: plx_data::metadata::DvDecision,
     /// **Does the audio elementary stream we are feeding carry Dolby Atmos?** The Load payload's
     /// `contents.immersive` node turns on it ([`crate::player::engine`]).
     ///
@@ -330,6 +529,10 @@ pub struct PlaybackSession {
     /// `false` on every transcode and remux; see where it is set for why that is deliberate rather
     /// than an omission.
     stream_immersive: bool,
+    /// The demuxer's probe (a declared codec the file's own bytes disproved) has authorised at
+    /// most ONE reload with the corrected declaration: [`take_codec_probe_retry`] consumes it. A
+    /// second mismatch on the same playback is a different failure and gets the ordinary read-out.
+    codec_probe_retried: bool,
     /// HUD strings as fixed NUL-terminated C buffers, so title_cptr()/ctxline_cptr() hand
     /// draw_text (extern "C", *const c_char) a pointer that stays valid for the whole frame.
     ///
@@ -377,6 +580,599 @@ pub struct PlaybackSession {
     /// machine still owns the engine, this says what the session may write. See
     /// [`preview_request`].
     resolved_as_preview: bool,
+    /// **The HLS worker's last delivery estimate, carried to the next controller** (I8), as the
+    /// player adapter last observed it ([`observe_link_seed`](Self::observe_link_seed), its ONLY
+    /// writer). [`auto_prior`] reads it here; route reads no backend registry for it. A reload keeps
+    /// it (the same item on the same link) and a landing carries it over like [`now_ms`](Self::now_ms);
+    /// the adapter clears it with the playback it measured.
+    carried_link: Option<CarriedLink>,
+    /// **The container's own track names, as the player adapter last delivered them**
+    /// ([`ingest_container_names`](Self::ingest_container_names), its ONLY writer). The demuxer
+    /// publishes them when it opens a part; the track-memory re-match and the Forced-only audio
+    /// follow read them here, never from the demuxer's registry.
+    container_names: ContainerNames,
+}
+
+/// The delivered names and the publication stamp they carry, so the adapter can tell when a newer
+/// publication exists. `Arc`: the session is copied for screens.
+#[derive(Clone)]
+struct ContainerNames {
+    stamp: u32,
+    names: Option<std::sync::Arc<plx_playback_contract::tracks::TrackNames>>,
+}
+
+impl ContainerNames {
+    const NONE: Self = Self { stamp: 0, names: None };
+}
+
+/// A delivery estimate and the frame-tick stamp ([`PlaybackSession::now_ms`] units) it was last
+/// observed at. The age is the difference to the session's own tick, so a pause, a backgrounded app
+/// or a reload gap ages it without any clock read in route.
+#[derive(Clone, Copy, Debug)]
+struct CarriedLink {
+    readout: plx_playback_contract::adaptive::SeedReadout,
+    observed_at_ms: u32,
+}
+
+/// Compatibility name at the URI qualifier boundary; the session keeps one common intent.
+pub use super::plan::SourceSelection as UriSelection;
+
+#[cfg(test)]
+mod source_selection_tests {
+    use super::*;
+
+    #[test]
+    fn a_feed_effective_selection_cannot_retarget_an_original_uri_offer() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        let selected = SourceSelection { server: ServerId::UNSET, part_id: 17,
+            audio_sid: 41, subtitle_sid: 73,
+            audio_contract: plx_plex::plex::AudioEnhancements::NONE };
+        session.bind_source_selection(selected);
+        session.cur_sub_sid = 99; // A backend-specific effective route may carry another stream.
+        assert_eq!(session.uri_selection(), selected);
+
+        clear_track_selection(&mut session); // A new logical request retires that source intent.
+        assert_eq!(session.source_selection(), None);
+        assert_ne!(session.uri_selection(), selected);
+    }
+}
+
+#[cfg(test)]
+mod uri_failure_recovery_tests {
+    use super::*;
+    use super::super::backend_policy::{BackendPolicy, OfferId, Qualification};
+    use plx_playback_contract::BackendKind;
+
+    #[test]
+    fn prospect_requires_the_current_uri_attempt_exact_offer_and_runtime_clock() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        session.request = Some(PlaybackRequest { sid: ServerId::UNSET, rk: "42".into(),
+            part: "/library/parts/7".into(), vcodec: "h264".into(), acodec: "aac".into(),
+            title: "Film".into(), ctx: String::new(), preview: false, version: None,
+            show_rk: String::new() });
+        let mut policy = BackendPolicy::for_request(false);
+        policy.qualify(BackendKind::Uri, OfferId::URI_ORIGINAL, Qualification::Qualified);
+        assert!(policy.admitted(BackendKind::Uri, OfferId::URI_ORIGINAL));
+        session.backend_policy = Some(policy);
+        let attempt = RouteStartAttempt::fixture();
+        session.begin_attempt_view(attempt, crate::player::attempt_view::Backend::Uri);
+        assert!(session.can_retry_uri_after_release(attempt, OfferId::URI_ORIGINAL,
+            UriFailurePhase::Startup, None));
+        assert!(!session.can_retry_uri_after_release(attempt, OfferId::URI_ORIGINAL,
+            UriFailurePhase::Runtime, None), "an unknown runtime playhead cannot become zero");
+        assert!(session.can_retry_uri_after_release(attempt, OfferId::URI_ORIGINAL,
+            UriFailurePhase::Runtime, Some(42_000_000_000)));
+        assert!(!session.can_retry_uri_after_release(attempt, OfferId::URI_PMS_REMUX,
+            UriFailurePhase::Runtime, Some(42_000_000_000)));
+        let successor = RouteStartAttempt { serial: attempt.serial, attempt: attempt.attempt + 1 };
+        assert!(!session.can_retry_uri_after_release(successor, OfferId::URI_ORIGINAL,
+            UriFailurePhase::Runtime, Some(42_000_000_000)));
+        assert!(session.mark_uri_recovery_pending(attempt));
+        assert_eq!(session.uri_recovery_pending(), Some(attempt));
+        session.clear_uri_recovery_pending(successor);
+        assert_eq!(session.uri_recovery_pending(), Some(attempt), "old notices cannot clear it");
+        session.begin_attempt_view(successor, crate::player::attempt_view::Backend::Feed);
+        assert_eq!(session.uri_recovery_pending(), None);
+        assert!(!session.mark_uri_recovery_pending(attempt));
+    }
+}
+
+/// The route decision explicitly distinguishes another recovery candidate from a physical
+/// reopen of its current recipe, even if PMS refreshes the URL during a seek or restore.
+/// `Revisit` is a deliberate quality transition onto a recipe the request already admitted on
+/// this backend (see `BackendPolicy::can_revisit`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidatePurpose { NewCandidate, ReopenCurrent, RollbackExisting, Revisit }
+
+#[cfg(test)]
+mod backend_offer_session_tests {
+    use super::*;
+    use super::super::backend_policy::{OfferId, Qualification, Selection};
+    use plx_playback_contract::BackendKind;
+
+    #[test]
+    fn a_spent_feed_recipe_cannot_reopen_after_handoff_to_uri() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL, CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+        assert!(session.backend_planned_feed_allowed(), "a physical seek may reopen Feed");
+        assert_eq!(session.planned_start_backend(), Some(BackendKind::Feed));
+
+        session.qualify_backend_offer(BackendKind::Uri, OfferId::URI_ORIGINAL,
+            Qualification::Qualified);
+        assert!(matches!(session.backend_offer(), Selection::Open(offer)
+            if offer.backend == BackendKind::Uri));
+        assert_eq!(session.planned_start_backend(), Some(BackendKind::Uri),
+            "qualified URI precedence also governs pre-load viewer transport");
+        assert!(session.backend_offer_admitted(BackendKind::Uri, OfferId::URI_ORIGINAL));
+        assert!(!session.backend_planned_feed_allowed(),
+            "an old Feed admission cannot reverse the one cross-backend handoff");
+        assert!(!session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+    }
+
+    #[test]
+    fn a_new_resolve_cannot_replay_the_same_spent_feed_recipe() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL, CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+        assert!(session.backend_planned_feed_allowed());
+
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL, CandidatePurpose::NewCandidate));
+        assert!(!session.backend_planned_feed_allowed(),
+            "a new source decision is not an ordinary physical reload");
+        assert!(!session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+    }
+
+    #[test]
+    fn an_explicit_same_backend_reopen_keeps_its_recipe_after_a_fresh_url() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/first.mkv");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_HLS,
+            CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        set_url(&mut session, "https://example.invalid/reopened.m3u8");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_HLS,
+            CandidatePurpose::ReopenCurrent));
+        assert!(session.backend_planned_feed_allowed(),
+            "a seek or foreground restore may refresh the URL without buying a recovery retry");
+    }
+
+    #[test]
+    fn recovery_landing_spends_a_new_recipe_and_one_rollback_restores_the_prior_one() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/hls.m3u8");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_HLS,
+            CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL,
+            CandidatePurpose::NewCandidate));
+        assert!(session.backend_planned_feed_allowed());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+
+        set_url(&mut session, "https://example.invalid/rollback.m3u8");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_HLS,
+            CandidatePurpose::RollbackExisting));
+        assert!(session.backend_planned_feed_allowed());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL,
+            CandidatePurpose::RollbackExisting));
+        assert!(!session.backend_planned_feed_allowed(),
+            "rollback does not replenish a prior recovery recipe");
+    }
+
+    /// The Auto worker's fallback to HLS and its return to the Original file are the ABR
+    /// machine's to budget: a recipe the request already admitted on this backend is revisited,
+    /// however often the route moves, and a recipe it never admitted is a candidate spent once.
+    /// A transition never buys a return handoff to Feed from the other backend.
+    #[test]
+    fn a_quality_transition_revisits_an_admitted_recipe_and_spends_a_new_one_once() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        assert!(session.qualify_explicit_feed_source());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+
+        // The first drop to HLS is a new candidate: nothing admitted it before.
+        set_url(&mut session, "https://example.invalid/hls.m3u8");
+        assert!(session.qualify_transition_feed_offer(OfferId::FEED_PMS_HLS));
+        assert!(session.backend_planned_feed_allowed());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        assert!(session.backend_policy.as_ref().expect("catalog")
+            .can_reopen(BackendKind::Feed, OfferId::FEED_PMS_HLS), "a seek reopens the HLS");
+
+        // Every later move between the two is a revisit and moves the last-admitted recipe.
+        for _ in 0..2 {
+            for (id, url) in [(OfferId::FEED_ORIGINAL, "https://example.invalid/original-again.mkv"),
+                (OfferId::FEED_PMS_HLS, "https://example.invalid/hls-again.m3u8")] {
+                set_url(&mut session, url);
+                assert!(session.qualify_transition_feed_offer(id));
+                assert!(session.backend_planned_feed_allowed(), "{id:?} was admitted before");
+                assert!(session.backend_offer_admitted(BackendKind::Feed, id));
+                assert!(session.backend_policy.as_ref().expect("catalog")
+                    .can_reopen(BackendKind::Feed, id));
+            }
+        }
+
+        // A recipe nothing admitted is a candidate: allowed once, and spent after.
+        set_url(&mut session, "https://example.invalid/encode.mkv");
+        assert!(session.qualify_transition_feed_offer(OfferId::FEED_PMS_ENCODE));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_ENCODE));
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_ENCODE,
+            CandidatePurpose::NewCandidate));
+        assert!(!session.backend_planned_feed_allowed(), "a new resolve still cannot replay it");
+
+        // The other backend's handoff is not undone by a transition.
+        session.qualify_backend_offer(BackendKind::Uri, OfferId::URI_PMS_REMUX,
+            Qualification::Qualified);
+        assert!(session.backend_offer_admitted(BackendKind::Uri, OfferId::URI_PMS_REMUX));
+        assert!(session.qualify_transition_feed_offer(OfferId::FEED_ORIGINAL));
+        assert!(!session.backend_planned_feed_allowed(),
+            "a transition cannot buy a return handoff from URI to Feed");
+    }
+
+    #[test]
+    fn abandoned_original_trial_reopens_the_still_current_hls_without_spending_rollback() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/hls.m3u8");
+        session.tsession = "hls-session".into();
+        session.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::FixedHls {
+            seconds_per_segment: 2,
+        };
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        session.tsession.clear();
+        session.cur_contract = Default::default();
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert_eq!(session.planned_feed_offer(), Some(OfferId::FEED_ORIGINAL));
+        // The trial failed before its common Start acquired a new physical owner.
+        set_url(&mut session, "https://example.invalid/reopened.m3u8");
+        session.tsession = "hls-session".into();
+        session.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::FixedHls {
+            seconds_per_segment: 2,
+        };
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::RollbackExisting));
+        assert!(session.backend_planned_feed_allowed());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        // The previous HLS recipe remains spent for a new recovery decision.
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_HLS,
+            CandidatePurpose::NewCandidate));
+        assert!(!session.backend_planned_feed_allowed());
+    }
+
+    /// A source a dev trigger names has no plan, no URL on the route yet (a local sample never has
+    /// one) and no selection: it still qualifies, which `ensure_backend_offers` alone would refuse.
+    #[test]
+    fn an_explicit_source_qualifies_the_original_recipe_over_an_empty_route() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::FEED);
+        assert!(!session.backend_planned_feed_allowed(), "nothing qualified yet");
+        assert!(!session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL, CandidatePurpose::NewCandidate),
+            "a plan's door still wants a resolved source");
+        assert!(session.qualify_explicit_feed_source());
+        assert_eq!(session.planned_feed_offer(), Some(OfferId::FEED_ORIGINAL));
+        assert!(session.backend_planned_feed_allowed());
+        assert_eq!(session.planned_feed_fidelity(),
+            Some((plx_playback_contract::Fidelity::Compatible, plx_playback_contract::Fidelity::Compatible)),
+            "Auto's original Feed is the wire-compatible handoff, as the start sent before offers existed");
+    }
+
+    /// Forced direct play converts nothing on a server, so its original handoff is classed exact for the policy.
+    #[test]
+    fn an_explicit_source_under_forced_direct_play_is_exact() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::FEED);
+        session.direct_play_mode = DirectPlayMode::Forced;
+        assert!(session.qualify_explicit_feed_source());
+        assert_eq!(session.planned_feed_fidelity(),
+            Some((plx_playback_contract::Fidelity::Exact, plx_playback_contract::Fidelity::Exact)));
+    }
+
+    /// Each explicit source is a new request: the first play's admission spent the recipe, and a
+    /// replay (or a dev start after a real item) must not inherit that.
+    #[test]
+    fn an_explicit_source_begins_a_fresh_catalog_each_time() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::FEED);
+        assert!(session.qualify_explicit_feed_source());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+        assert!(session.backend_planned_feed_allowed(), "a reload of the admitted recipe may reopen");
+        // The same session, a replay: the recipe is spent for that request but not for the next.
+        assert!(session.qualify_explicit_feed_source());
+        assert!(session.backend_planned_feed_allowed());
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+    }
+
+    #[test]
+    fn an_explicit_source_needs_a_composed_feed_driver() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::URI);
+        assert!(!session.qualify_explicit_feed_source());
+        assert!(!session.backend_planned_feed_allowed());
+    }
+
+    #[test]
+    fn native_uri_original_can_precede_feed_app_pcm_and_audio_contract_changes_its_binding() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/original.flac");
+        session.src_acodec = "flac".into();
+        session.stream_acodec = "pcm".into();
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert_eq!(session.planned_feed_offer(), Some(OfferId::FEED_APP_AUDIO));
+        let original = session.uri_selection();
+        assert_eq!(original.audio_contract, plx_plex::plex::AudioEnhancements::NONE);
+        session.qualify_backend_offer(BackendKind::Uri, OfferId::URI_ORIGINAL,
+            Qualification::Qualified);
+        assert!(matches!(session.backend_offer(), Selection::Open(offer)
+            if offer.backend == BackendKind::Uri && offer.id == OfferId::URI_ORIGINAL),
+            "Feed's PCM executor does not veto an independently qualified original URI");
+        session.cur_contract.audio = plx_plex::plex::AudioEnhancements {
+            boost_dialog: true, normalize_loudness: false,
+        };
+        assert_ne!(session.uri_selection(), original,
+            "a changed viewer audio contract invalidates the source-specific URI offer");
+    }
+
+    #[test]
+    fn viewer_reconfigure_carries_source_tracks_when_feed_used_a_different_effective_audio() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        session.bind_source_selection(SourceSelection {
+            server: ServerId::UNSET,
+            part_id: 7,
+            audio_sid: 71,
+            subtitle_sid: 81,
+            audio_contract: plx_plex::plex::AudioEnhancements::NONE,
+        });
+        session.selection_known = true;
+        session.cur_audio = Some(CarriedAudio {
+            sid: 72, ordinal: 1, codec: "pcm".into(), channels: 2,
+            can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0,
+        });
+        session.cur_sub_sid = 81;
+        let retry = current_retry_context(&session, 5_000_000_000);
+        assert_eq!(retry.selection, Some(HeldSelection { part_id: 7, audio_sid: 71, sub_sid: 81 }),
+            "the next executor must receive the source-selected track, not Feed's substitution");
+        assert_eq!(retry.resume_ns, 5_000_000_000);
+    }
+
+    #[test]
+    fn uri_original_enhancement_offer_uses_source_facts_without_feed_original_candidate() {
+        let _serial = plx_base::testlock::serial();
+        let (mut session, _) = enhancement_test_session(EnhTestFixture {
+            base_present: false, ..Default::default()
+        });
+        session.begin_attempt_view(RouteStartAttempt::fixture(),
+            crate::player::attempt_view::Backend::Uri);
+        session.cur_source_decodable = true;
+        session.request = Some(PlaybackRequest {
+            sid: session.cur_sid, rk: "42".into(), part: "/library/parts/7".into(),
+            vcodec: "h264".into(), acodec: "ac3".into(), title: "Film".into(),
+            ctx: String::new(), preview: false, version: None, show_rk: String::new(),
+        });
+        assert_eq!(menu_enhancement_availability(&session),
+            EnhancementAvailability::Offered(EnhancementRoute::Remux),
+            "URI eligibility comes from the selected source, not Feed's absent fallback candidate");
+    }
+
+    #[test]
+    fn viewer_reconfigure_refuses_unknown_position_pause_and_same_value_without_spending() {
+        let _serial = plx_base::testlock::serial();
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        session.request = Some(PlaybackRequest {
+            sid: ServerId::UNSET, rk: "42".into(), part: "/library/parts/7".into(),
+            vcodec: "h264".into(), acodec: "ac3".into(), title: "Film".into(),
+            ctx: String::new(), preview: false, version: None, show_rk: String::new(),
+        });
+        let mut meta = plx_data::stores::metadata::MetadataStore::default();
+        let change = ViewerReconfigure::Speed(1500);
+        assert!(!request_viewer_reconfigure(&mut session, &mut meta, change.clone(), None, Some(true)));
+        assert!(!request_viewer_reconfigure(&mut session, &mut meta, change.clone(),
+            Some(42_000_000_000), None));
+        assert!(!request_viewer_reconfigure(&mut session, &mut meta,
+            ViewerReconfigure::Speed(plx_playback_contract::RATE_NORMAL),
+            Some(42_000_000_000), Some(true)));
+        assert_eq!(session.requested_rate_permille(), plx_playback_contract::RATE_NORMAL);
+        assert_eq!(session.reconfigure_pause_goal(), None);
+        assert!(session.backend_policy.is_none(), "a refused edit spends no recipe or episode");
+        session.direct_play_mode = DirectPlayMode::Forced;
+        assert!(!request_viewer_reconfigure(&mut session, &mut meta, change,
+            Some(42_000_000_000), Some(true)), "Force forbids an implicit PCM transform");
+    }
+
+    #[test]
+    fn qualified_original_feed_precedes_uri_conversion_then_uri_precedes_feed_conversion() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL,
+            CandidatePurpose::NewCandidate));
+        session.qualify_backend_offer(BackendKind::Uri, OfferId::URI_PMS_REMUX,
+            Qualification::Qualified);
+        assert!(matches!(session.backend_offer(), Selection::Open(offer)
+            if offer.backend == BackendKind::Feed && offer.id == OfferId::FEED_ORIGINAL));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_REMUX,
+            CandidatePurpose::NewCandidate));
+        assert!(matches!(session.backend_offer(), Selection::Open(offer)
+            if offer.backend == BackendKind::Uri && offer.id == OfferId::URI_PMS_REMUX));
+        assert!(session.backend_offer_admitted(BackendKind::Uri, OfferId::URI_PMS_REMUX));
+        assert!(!session.backend_planned_feed_allowed(),
+            "conversion cannot buy a return handoff to Feed");
+    }
+
+    #[test]
+    fn admitted_original_trial_remux_keeps_its_recipe_for_normal_reopen() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/remux-a.mkv");
+        session.tsession = "pms-a".into();
+        session.cur_contract.remux = true;
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_REMUX,
+            CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_REMUX));
+        set_url(&mut session, "https://example.invalid/original-b.mkv");
+        session.tsession = "pms-b".into();
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL_TRIAL_REMUX,
+            CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed,
+            OfferId::FEED_ORIGINAL_TRIAL_REMUX));
+        assert_eq!(session.installed_feed_recipe(), OfferId::FEED_ORIGINAL_TRIAL_REMUX);
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::ReopenCurrent));
+        assert!(session.backend_planned_feed_allowed(),
+            "seek and foreground reopen the admitted trial without replenishing recovery");
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_ORIGINAL_TRIAL_REMUX,
+            CandidatePurpose::NewCandidate));
+        assert!(!session.backend_planned_feed_allowed(),
+            "another automatic trial of the same source is still spent");
+    }
+
+    #[test]
+    fn refused_audio_and_both_facets_have_distinct_finite_conversion_recipes() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/initial.mkv");
+        session.tsession = "initial".into();
+        session.cur_contract.remux = true;
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_REMUX));
+
+        // The worker's requested transformation, captured before PMS can change the URL,
+        // names each refusal recovery. An ordinary remux cannot spend the audio recovery.
+        for (id, url) in [
+            (OfferId::FEED_REFUSAL_AUDIO, "https://example.invalid/audio.mkv"),
+            (OfferId::FEED_REFUSAL_BOTH, "https://example.invalid/both.mkv"),
+        ] {
+            set_url(&mut session, url);
+            assert!(session.qualify_resolved_feed_offer(id, CandidatePurpose::NewCandidate));
+            assert!(session.backend_planned_feed_allowed());
+            assert!(session.backend_offer_admitted(BackendKind::Feed, id));
+            assert_eq!(session.installed_feed_recipe(), id);
+            assert!(session.qualify_installed_feed_offer(CandidatePurpose::ReopenCurrent));
+            assert!(session.backend_planned_feed_allowed());
+        }
+
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_REFUSAL_AUDIO,
+            CandidatePurpose::NewCandidate));
+        assert!(!session.backend_planned_feed_allowed(),
+            "a new URL or later refusal cannot replenish the spent audio conversion");
+    }
+
+    #[test]
+    fn a_cold_resume_landing_is_the_requests_first_candidate_not_a_reopen() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/resume-remux.mkv");
+        session.tsession = "pms-resume".into();
+        session.cur_contract.remux = true;
+        assert_eq!(session.installed_feed_recipe(), OfferId::FEED_PMS_REMUX);
+
+        // The cold resume's apply_plan staged the recipe as the request's first candidate.
+        assert!(session.qualify_resolved_feed_offer(OfferId::FEED_PMS_REMUX,
+            CandidatePurpose::NewCandidate));
+        // Its landing then asks to reopen a recipe this request never started.
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::ReopenCurrent));
+        assert_eq!(session.planned_feed_purpose, CandidatePurpose::NewCandidate,
+            "nothing was admitted, so there is nothing to reopen");
+        assert!(session.backend_planned_feed_allowed(),
+            "the start door admits the resumed recipe as the request's first candidate");
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_REMUX));
+
+        // Once admitted, the same request is a real reopen and stays one.
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::ReopenCurrent));
+        assert_eq!(session.planned_feed_purpose, CandidatePurpose::ReopenCurrent);
+        assert!(session.backend_planned_feed_allowed());
+    }
+
+    #[test]
+    fn a_landing_over_a_staged_revisit_keeps_its_purpose_and_the_policys_verdict() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        // The request played the Original, then the Auto worker moved it to HLS; both are admitted.
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+        set_url(&mut session, "https://example.invalid/hls.m3u8");
+        session.tsession = "hls-session".into();
+        session.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::FixedHls {
+            seconds_per_segment: 2,
+        };
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        // The worker's return to the Original stages a Revisit, and the app is suspended before
+        // that reload's Start was admitted.
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        session.tsession.clear();
+        session.cur_contract = Default::default();
+        assert!(session.qualify_transition_feed_offer(OfferId::FEED_ORIGINAL));
+        assert_eq!(session.planned_feed_purpose, CandidatePurpose::Revisit);
+        assert_eq!(session.admitted_feed_offer, Some(OfferId::FEED_PMS_HLS));
+
+        // The foreground restore's landing reinstalls the same route and asks to reopen it.
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::ReopenCurrent));
+        assert_eq!(session.planned_feed_purpose, CandidatePurpose::Revisit,
+            "the recipe was staged, never admitted: its staged purpose stays");
+        let policy_allows = session.backend_policy.as_ref().is_some_and(|policy|
+            policy.can_revisit(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+        assert!(policy_allows);
+        assert_eq!(session.backend_planned_feed_allowed(), policy_allows);
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+    }
+
+    #[test]
+    fn a_landing_over_a_staged_rollback_keeps_its_purpose_and_the_policys_verdict() {
+        let mut session = PlaybackSession::IDLE;
+        session.install_backends(plx_playback_contract::BackendSet::BOTH);
+        set_url(&mut session, "https://example.invalid/hls.m3u8");
+        session.tsession = "hls-session".into();
+        session.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::FixedHls {
+            seconds_per_segment: 2,
+        };
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        // An Original trial is admitted, then fails.
+        set_url(&mut session, "https://example.invalid/original.mkv");
+        session.tsession.clear();
+        session.cur_contract = Default::default();
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::NewCandidate));
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_ORIGINAL));
+        // The rollback install stages the previous HLS exactly as `rollback_original_recovery` does (its
+        // admission marker cleared, the policy's one allowance not yet spent), and the app is
+        // suspended before its Start was admitted.
+        set_url(&mut session, "https://example.invalid/hls.m3u8");
+        session.tsession = "hls-session".into();
+        session.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::FixedHls {
+            seconds_per_segment: 2,
+        };
+        session.planned_feed_offer = Some(OfferId::FEED_PMS_HLS);
+        session.planned_feed_purpose = CandidatePurpose::RollbackExisting;
+        session.admitted_feed_offer = None;
+
+        assert!(session.qualify_installed_feed_offer(CandidatePurpose::ReopenCurrent));
+        assert_eq!(session.planned_feed_purpose, CandidatePurpose::RollbackExisting,
+            "the recipe was staged, never admitted: its staged purpose stays");
+        let policy_allows = session.backend_policy.as_ref().is_some_and(|policy|
+            policy.can_rollback_existing(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        assert!(policy_allows);
+        assert_eq!(session.backend_planned_feed_allowed(), policy_allows);
+        assert!(session.backend_offer_admitted(BackendKind::Feed, OfferId::FEED_PMS_HLS));
+        assert_eq!(session.planned_feed_purpose, CandidatePurpose::ReopenCurrent);
+    }
 }
 
 /// What the server actually did with a requested Plex Pass audio enhancement (issue #266) — as
@@ -403,40 +1199,550 @@ pub(super) enum EnhancementOutcome {
     Refused,
 }
 
+/// Whether the failed URI source had reached a running clock. Runtime recovery requires an
+/// observed content position; startup may retain the request's still unpresented resume target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UriFailurePhase { Startup, Runtime }
+
 impl PlaybackSession {
+    pub fn pms_decline(&self) -> Option<super::uri_preflight::PmsDecline> {
+        self.pms_decline
+    }
+
+    /// Start one physical open's readout at Unknown. URI and buffer-feed starts use the same
+    /// address gate; a retry cannot inherit its predecessor's position or failure evidence.
+    pub fn begin_attempt_view(&mut self, attempt: RouteStartAttempt, backend: crate::player::attempt_view::Backend) {
+        self.attempt_view.begin(attempt, backend);
+        { self.uri_recovery_pending = None; }
+    }
+
+    pub fn mark_uri_recovery_pending(&mut self, attempt: RouteStartAttempt) -> bool {
+        if self.attempt_view.backend() != Some(crate::player::attempt_view::Backend::Uri)
+            || self.attempt_view.attempt() != Some(attempt) { return false; }
+        self.uri_recovery_pending = Some(attempt);
+        true
+    }
+
+    pub fn clear_uri_recovery_pending(&mut self, attempt: RouteStartAttempt) {
+        if self.uri_recovery_pending == Some(attempt) {
+            self.uri_recovery_pending = None;
+        }
+    }
+
+    pub fn uri_recovery_pending(&self) -> Option<RouteStartAttempt> {
+        (self.attempt_view.backend() == Some(crate::player::attempt_view::Backend::Uri)
+            && self.attempt_view.attempt() == self.uri_recovery_pending)
+            .then_some(self.uri_recovery_pending).flatten()
+    }
+
+    /// Prospect only. The adapter still owns exact URI Release; this does not start a resolve,
+    /// spend an offer or retire a PMS resource while the native object might be live.
+    pub fn can_retry_uri_after_release(&self, attempt: RouteStartAttempt,
+        offer_id: super::backend_policy::OfferId, phase: UriFailurePhase,
+        known_position_ns: Option<i64>) -> bool {
+        let Some(policy) = self.backend_policy.as_ref() else { return false; };
+        self.attempt_view.backend() == Some(crate::player::attempt_view::Backend::Uri)
+            && self.attempt_view.attempt() == Some(attempt)
+            && self.request.as_ref().is_some_and(|request| !request.preview)
+            && policy.can_reopen(plx_playback_contract::BackendKind::Uri, offer_id)
+            && (policy.has_remaining_backend(plx_playback_contract::BackendKind::Feed)
+                || policy.has_remaining_backend(plx_playback_contract::BackendKind::Uri))
+            && match phase {
+                UriFailurePhase::Startup => self.requested_resume_ns >= 0,
+                UriFailurePhase::Runtime => known_position_ns.is_some_and(|ns| ns >= 0),
+            }
+    }
+
+    /// The player's own readout (D2 v2, 3.1).
+    pub fn readout(&self) -> &crate::player::readout::PlayerReadout { &self.readout }
+
+    /// The one writer of the readout: every change to it is an event.
+    pub fn step_readout(&mut self, event: crate::player::readout::ReadoutEvent) {
+        self.readout.step(event);
+    }
+
+    pub fn attempt_view(&self) -> &crate::player::attempt_view::AttemptView<RouteStartAttempt> {
+        &self.attempt_view
+    }
+
+    /// The route's next qualified physical recipe. Unknown URI evidence never vetoes a
+    /// prepared Feed source, and a native ACK cannot qualify a source recipe.
+    pub fn backend_offer(&self) -> super::backend_policy::Selection {
+        self.backend_policy.as_ref().map_or(
+            super::backend_policy::Selection::Unqualified,
+            super::backend_policy::BackendPolicy::choose,
+        )
+    }
+
+    /// The next start's backend at the same catalog precedence as the physical start door.
+    /// A previously admitted Feed recipe can reopen only when no newly qualified URI offer
+    /// currently wins. Callers retire expired URI authorization through the adapter first.
+    pub fn planned_start_backend(&self) -> Option<plx_playback_contract::BackendKind> {
+        if let super::backend_policy::Selection::Open(offer) = self.backend_offer() {
+            if offer.backend == plx_playback_contract::BackendKind::Uri {
+                return Some(offer.backend);
+            }
+        }
+        self.backend_planned_feed_allowed().then_some(plx_playback_contract::BackendKind::Feed)
+    }
+
+    pub fn planned_feed_offer(&self) -> Option<super::backend_policy::OfferId> {
+        self.planned_feed_offer
+    }
+
+    pub fn requested_rate_permille(&self) -> i32 { self.requested_rate_permille }
+
+    pub fn attempt_origin(&self) -> crate::player::attempt_metrics::Origin { self.attempt_origin }
+
+    pub fn metric_request(&self) -> Option<crate::player::backend::LogicalRequestId> {
+        self.metric_request
+    }
+
+    /// The runner consumes each accepted lifecycle fact once before dispatching a Start.
+    pub fn take_metric_lifecycle(&mut self) -> Vec<crate::player::backend::RequestLifecycle> {
+        std::mem::take(&mut self.pending_metric_lifecycle)
+    }
+
+    /// A common terminal verdict, after recovery is exhausted or the viewer leaves. Physical
+    /// command refusal alone must never call this; its source episode can still recover.
+    pub fn finish_metric_request(&mut self,
+        outcome: crate::player::attempt_metrics::RequestOutcome) {
+        if let Some(request) = self.metric_request.take() {
+            self.pending_metric_lifecycle.push(crate::player::backend::RequestLifecycle::Finish {
+                request, outcome,
+            });
+        }
+    }
+
+    pub fn reconfigure_pause_goal(&self) -> Option<bool> { self.reconfigure_pause_goal }
+
+    pub fn set_reconfigure_pause_goal(&mut self, paused: bool) {
+        self.reconfigure_pause_goal = Some(paused);
+    }
+
+    pub fn clear_reconfigure_pause_goal(&mut self) {
+        self.reconfigure_pause_goal = None;
+    }
+
+    pub fn accept_requested_rate(&mut self, permille: i32) {
+        self.requested_rate_permille = permille;
+    }
+
+    pub fn uri_selection(&self) -> UriSelection {
+        self.source_selection.unwrap_or_else(|| SourceSelection {
+            server: self.cur_sid, part_id: self.cur_part_id,
+            audio_sid: self.cur_audio.as_ref().map_or(0, |audio| audio.sid),
+            subtitle_sid: self.cur_sub_sid,
+            audio_contract: self.cur_contract.audio })
+    }
+
+    /// Install the resolved Part's source-selected streams before backend-specific planning.
+    /// Both physical backends must honor this intent or explicitly refuse it.
+    pub fn bind_source_selection(&mut self, selection: SourceSelection) {
+        self.source_selection = Some(selection);
+    }
+
+    /// Publish the composition's resolver, or its absence: a boot whose URI install was refused (or
+    /// that composed no URI driver) passes `None`, and the planner then answers `UriDecline::NoPort`.
+    /// Takes `Some(port)` or a bare port, so the set of installed drivers and this resolver are
+    /// published by the one call the boot makes (`app::platform::publish_composition`).
+    pub fn install_uri_preflight_port(
+        &mut self,
+        port: impl Into<Option<super::uri_preflight::ResolvePort>>,
+    ) {
+        self.uri_preflight_port = port.into();
+    }
+
+    /// The resolver the composition published, `None` when it published none.
+    pub fn uri_preflight_port(&self) -> Option<&super::uri_preflight::ResolvePort> {
+        self.uri_preflight_port.as_ref()
+    }
+
+    /// The playback backends the composition supplies. Boot installs the set its drivers form
+    /// (`PlayerAdapter::composed_backends`); a session that is never told keeps the Feed-only
+    /// default of [`PlaybackSession::IDLE`].
+    pub fn install_backends(&mut self, backends: plx_playback_contract::BackendSet) {
+        self.backends = backends;
+    }
+
+    pub fn backends(&self) -> plx_playback_contract::BackendSet { self.backends }
+
+    pub fn source_selection(&self) -> Option<SourceSelection> {
+        self.source_selection
+    }
+
+    pub fn planned_feed_fidelity(&self) -> Option<(plx_playback_contract::Fidelity,
+        plx_playback_contract::Fidelity)> {
+        let id = self.planned_feed_offer?;
+        let offer = self.backend_policy.as_ref()?.offer(plx_playback_contract::BackendKind::Feed, id)?;
+        Some((offer.video, offer.audio))
+    }
+
+    /// A resolved source begins the finite catalog once; later capability refreshes and
+    /// recovery landings keep its spent history.
+    pub fn ensure_backend_offers(&mut self) -> bool {
+        if self.url.is_empty() && !self.selection_known { return false; }
+        self.catalog();
+        true
+    }
+
+    /// The request's finite catalog, begun on first use. Whether a source exists to offer is the
+    /// caller's to have established ([`ensure_backend_offers`](Self::ensure_backend_offers) asks
+    /// the route, an explicit source is its own proof).
+    fn catalog(&mut self) -> &mut super::backend_policy::BackendPolicy {
+        let force_original = self.direct_play_mode == DirectPlayMode::Forced;
+        self.backend_policy.get_or_insert_with(||
+            super::backend_policy::BackendPolicy::for_request(force_original))
+    }
+
+    /// Forget the previous request's offers: its catalog and spent history, the recipe planned
+    /// from it and the one admitted. Every request boundary does this (a play request's
+    /// [`begin_attempt`](Self::begin_attempt), an explicit source's
+    /// [`qualify_explicit_feed_source`](Self::qualify_explicit_feed_source)); a reload, a
+    /// recovery landing and a capability refresh never do.
+    fn reset_backend_offers(&mut self) {
+        self.backend_policy = None;
+        self.planned_feed_offer = None;
+        self.planned_feed_purpose = CandidatePurpose::NewCandidate;
+        self.admitted_feed_offer = None;
+    }
+
+    fn publish_feed_offer(&mut self, id: super::backend_policy::OfferId, purpose: CandidatePurpose) {
+        self.catalog().qualify_planned_feed(id);
+        self.planned_feed_offer = Some(id);
+        self.planned_feed_purpose = purpose;
+        if purpose == CandidatePurpose::NewCandidate { self.admitted_feed_offer = None; }
+    }
+
+    /// Publish a Feed recipe only after a route has resolved an exact source for these selected
+    /// streams. Ordinary plans and explicit test sources use this same admission input.
+    pub fn qualify_resolved_feed_offer(&mut self, id: super::backend_policy::OfferId,
+        purpose: CandidatePurpose) -> bool {
+        if !self.backends.feed || !self.ensure_backend_offers() { return false; }
+        self.publish_feed_offer(id, purpose);
+        true
+    }
+
+    /// A source the app was handed directly, with no Plex item and no plan behind it: the
+    /// `plxnative-playurl` and `-url` dev triggers and the local samples, which the player resolves
+    /// itself when the route holds no source. No `apply_plan` ever qualified a recipe for it, and
+    /// the start door refuses a Start without one.
+    ///
+    /// Such a source is its own request, so its catalog begins fresh (a replay after the
+    /// stream's end would otherwise find the first play's recipe spent, and a play after a real
+    /// item would inherit that item's history) and its one recipe is the original handoff: the
+    /// bytes reach the decoder as named, with nothing converted by a server. That is not the
+    /// recipe [`installed_feed_recipe`](Self::installed_feed_recipe) would classify, which reads
+    /// the file's codecs a plan recorded and a synthetic declaration never sets. Call this once,
+    /// when the source is resolved from an empty route, never when a reload reads a source the
+    /// route already holds. False when this composition has no Feed driver.
+    pub fn qualify_explicit_feed_source(&mut self) -> bool {
+        if !self.backends.feed { return false; }
+        self.reset_backend_offers();
+        self.publish_feed_offer(super::backend_policy::OfferId::FEED_ORIGINAL,
+            CandidatePurpose::NewCandidate);
+        true
+    }
+
+    /// A recovery flight installs a resolved route without passing through `apply_plan`.
+    /// Classify that installed source by the same stable recipe identities as a cold plan;
+    /// keep the request's spent catalog and cross-backend history intact.
+    fn installed_feed_recipe(&self) -> super::backend_policy::OfferId {
+        if self.tsession.is_empty() {
+            if stream_pcm_is_lossy(self) || self.stream_acodec != self.src_acodec {
+                super::backend_policy::OfferId::FEED_APP_AUDIO
+            } else {
+                super::backend_policy::OfferId::FEED_ORIGINAL
+            }
+        } else if matches!(self.cur_contract.delivery,
+            plx_plex::plex::TranscodeDelivery::FixedHls { .. }) {
+            super::backend_policy::OfferId::FEED_PMS_HLS
+        } else if matches!(self.planned_feed_offer, Some(
+            super::backend_policy::OfferId::FEED_REFUSAL_AUDIO
+            | super::backend_policy::OfferId::FEED_REFUSAL_VIDEO
+            | super::backend_policy::OfferId::FEED_REFUSAL_BOTH)) {
+            self.planned_feed_offer.expect("checked recovery recipe")
+        } else if self.cur_contract.remux {
+            if self.planned_feed_offer == Some(
+                super::backend_policy::OfferId::FEED_ORIGINAL_TRIAL_REMUX) {
+                super::backend_policy::OfferId::FEED_ORIGINAL_TRIAL_REMUX
+            } else {
+                super::backend_policy::OfferId::FEED_PMS_REMUX
+            }
+        } else {
+            super::backend_policy::OfferId::FEED_PMS_ENCODE
+        }
+    }
+
+    /// Qualify the Feed recipe a deliberate quality transition moves the route onto: the Auto
+    /// worker's fallback to HLS and its return to the Original file. The ABR machine (its probes,
+    /// its dwell, its switch budget) owns how often the route moves, so a recipe the request has
+    /// already admitted on this backend is revisited without charging the catalog's
+    /// failure-recovery budget again; any other recipe is a new candidate and is spent once.
+    fn qualify_transition_feed_offer(&mut self, id: super::backend_policy::OfferId) -> bool {
+        let revisit = self.backend_policy.as_ref().is_some_and(|policy|
+            policy.can_revisit(plx_playback_contract::BackendKind::Feed, id));
+        self.qualify_resolved_feed_offer(id,
+            if revisit { CandidatePurpose::Revisit } else { CandidatePurpose::NewCandidate })
+    }
+
+    pub(crate) fn qualify_installed_feed_offer(&mut self, purpose: CandidatePurpose) -> bool {
+        let id = self.installed_feed_recipe();
+        let still_current = purpose == CandidatePurpose::RollbackExisting
+            && self.backend_policy.as_ref().is_some_and(|policy|
+                policy.can_reopen(plx_playback_contract::BackendKind::Feed, id));
+        let purpose = if still_current {
+            CandidatePurpose::ReopenCurrent
+        } else if purpose == CandidatePurpose::ReopenCurrent
+            && self.admitted_feed_offer != Some(id) && self.planned_feed_offer == Some(id) {
+            // A landing that reopens a recipe the request has not admitted has nothing to reopen:
+            // the recipe is only STAGED, and its staged purpose (the one `apply_plan` or a rollback
+            // install published, which only `backend_offer_admitted` replaces) says how the door
+            // may admit it. A cold resume's apply_plan staged NewCandidate (it is the request's
+            // first candidate); a suspend between an Auto landing or a rollback install and its
+            // Start leaves Revisit or RollbackExisting.
+            self.planned_feed_purpose
+        } else {
+            purpose
+        };
+        if still_current {
+            // A failed Original trial may be abandoned before its Start was admitted. The
+            // previous HLS is still the last physical recipe, even though staging the trial
+            // cleared the pending admission marker. Restore only that exact admitted recipe.
+            self.admitted_feed_offer = Some(id);
+        }
+        self.qualify_resolved_feed_offer(id, purpose)
+    }
+
+    /// A normal seek/foreground reload reuses its admitted source recipe. A changed recovery
+    /// plan must be the next qualified catalog choice before it may acquire another native owner.
+    pub fn backend_planned_feed_allowed(&self) -> bool {
+        let Some(id) = self.planned_feed_offer else { return false };
+        (self.planned_feed_purpose == CandidatePurpose::RollbackExisting
+            && self.backend_policy.as_ref().is_some_and(|policy|
+                policy.can_rollback_existing(plx_playback_contract::BackendKind::Feed, id)))
+            || (self.planned_feed_purpose == CandidatePurpose::ReopenCurrent
+            && self.admitted_feed_offer == Some(id)
+            && self.backend_policy.as_ref().is_some_and(|policy|
+                policy.can_reopen(plx_playback_contract::BackendKind::Feed, id)))
+            || (self.planned_feed_purpose == CandidatePurpose::Revisit
+            && self.backend_policy.as_ref().is_some_and(|policy|
+                policy.can_revisit(plx_playback_contract::BackendKind::Feed, id)))
+            || (self.planned_feed_purpose == CandidatePurpose::NewCandidate
+                && matches!(self.backend_offer(), super::backend_policy::Selection::Open(offer)
+                if offer.backend == plx_playback_contract::BackendKind::Feed && offer.id == id)
+            )
+    }
+
+    /// Admit only the current catalog choice after the common backend owner accepted Start.
+    pub fn backend_offer_admitted(&mut self, backend: plx_playback_contract::BackendKind,
+        id: super::backend_policy::OfferId) -> bool {
+        if backend == plx_playback_contract::BackendKind::Feed {
+            if self.planned_feed_offer != Some(id) { return false; }
+            if self.planned_feed_purpose == CandidatePurpose::RollbackExisting {
+                let admitted = self.backend_policy.as_mut().is_some_and(|policy|
+                    policy.admit_rollback_existing(backend, id));
+                if admitted {
+                    self.admitted_feed_offer = Some(id);
+                    self.planned_feed_purpose = CandidatePurpose::ReopenCurrent;
+                }
+                return admitted;
+            }
+            if self.planned_feed_purpose == CandidatePurpose::Revisit {
+                let admitted = self.backend_policy.as_mut().is_some_and(|policy|
+                    policy.admit_revisit(backend, id));
+                if admitted {
+                    self.admitted_feed_offer = Some(id);
+                    self.planned_feed_purpose = CandidatePurpose::ReopenCurrent;
+                }
+                return admitted;
+            }
+            if self.admitted_feed_offer == Some(id)
+                && self.planned_feed_purpose == CandidatePurpose::ReopenCurrent
+                && self.backend_policy.as_ref().is_some_and(|policy| policy.can_reopen(backend, id)) {
+                return true;
+            }
+        }
+        let admitted = self.backend_policy.as_mut().is_some_and(|policy| policy.admitted(backend, id));
+        if admitted && backend == plx_playback_contract::BackendKind::Feed {
+            self.admitted_feed_offer = Some(id);
+            self.planned_feed_purpose = CandidatePurpose::ReopenCurrent;
+        }
+        admitted
+    }
+
+    /// Source-specific qualification supplied by the IO composition. A server capability
+    /// response or codec table is not evidence for a URI display/transport binding.
+    pub fn qualify_backend_offer(&mut self, backend: plx_playback_contract::BackendKind,
+        id: super::backend_policy::OfferId,
+        evidence: super::backend_policy::Qualification) {
+        if let Some(policy) = self.backend_policy.as_mut() {
+            policy.qualify(backend, id, evidence);
+        }
+    }
+
+    pub fn ingest_attempt_facts(
+        &mut self,
+        attempt: RouteStartAttempt,
+        backend: crate::player::attempt_view::Backend,
+        facts: crate::player::attempt_view::AttemptFacts,
+    ) -> bool {
+        self.attempt_view.ingest(attempt, backend, facts)
+    }
+
+    /// One feed sample for the attempt that is ingesting it: the sparse facts replace the attempt
+    /// view's and the raw ones the readout's, behind ONE address check, so a late worker's sample
+    /// of a previous attempt (or of the other backend) changes neither. The URI backend and the
+    /// terminal stop sample deliver only `AttemptFacts`, through [`Self::ingest_attempt_facts`].
+    pub fn ingest_feed_facts(
+        &mut self,
+        attempt: RouteStartAttempt,
+        facts: plx_playback_contract::feed::FeedFacts,
+    ) -> bool {
+        // The adaptive worker's two members of the sparse facts are the readout's, not the feed's.
+        let mut sparse = facts.attempt;
+        self.readout.fill_abr_facts(&mut sparse);
+        if !self.attempt_view.ingest(attempt, crate::player::attempt_view::Backend::Feed, sparse) {
+            return false;
+        }
+        self.readout.step(crate::player::readout::ReadoutEvent::FactsIngested(facts.raw));
+        true
+    }
+
+    /// The pump presented a frame for `attempt`: take the post-tick `sample`'s raw facts into the
+    /// readout and derive its UI state and end of stream. Refused, changing nothing, for any other
+    /// attempt or backend: the readout holds no attempt, so the address is checked here.
+    /// `nothing_in_flight`: no claim hold is up and no route flight is out (the two inputs of "the
+    /// pump is doing no work for a picture" that are not the readout's).
+    pub fn present(
+        &mut self,
+        attempt: RouteStartAttempt,
+        tick: plx_playback_contract::feed::PresentationTick,
+        sample: plx_playback_contract::feed::FeedFacts,
+        nothing_in_flight: bool,
+    ) -> bool {
+        if !self.attempt_view.addresses(attempt, crate::player::attempt_view::Backend::Feed) {
+            return false;
+        }
+        use crate::player::readout::{Presentation, ReadoutEvent};
+        self.readout.step(ReadoutEvent::FactsIngested(sample.raw));
+        self.readout.step(ReadoutEvent::Presented(Presentation {
+            tick,
+            rebuffering: sample.attempt.rebuffering == Some(true),
+            duration_ns: sample.attempt.duration_ns.unwrap_or(0),
+            nothing_in_flight,
+        }));
+        true
+    }
+
+    /// The adaptive worker's photograph, and its carried link estimate with the milliseconds since
+    /// the worker observed it, for `attempt`: the player adapter takes them from the open's channel.
+    /// Refused, changing nothing, for any other attempt or backend, like [`Self::present`]. The
+    /// estimate is stamped on this session's frame clock, where the route reads it back
+    /// ([`Self::carry_readout_seed`]).
+    pub fn ingest_abr(
+        &mut self,
+        attempt: RouteStartAttempt,
+        readout: plx_playback_contract::adaptive::AbrReadout,
+        seed: Option<plx_playback_contract::adaptive::CarriedSeed>,
+    ) -> bool {
+        if !self.attempt_view.addresses(attempt, crate::player::attempt_view::Backend::Feed) {
+            return false;
+        }
+        use crate::player::readout::ReadoutEvent;
+        let now_ms = self.now_ms;
+        self.readout.step(ReadoutEvent::Abr(readout));
+        self.readout.step(ReadoutEvent::AbrSeed(seed.map(|(seed, unobserved_ms)| {
+            (seed, now_ms.wrapping_sub(u32::try_from(unobserved_ms).unwrap_or(u32::MAX)))
+        })));
+        true
+    }
+
+    /// The adaptive worker's newest Original failure edit for `attempt`, applied once by the player
+    /// adapter when it drains the open's channel. Refused, changing nothing, for any other attempt
+    /// or backend, like [`Self::ingest_abr`].
+    pub fn ingest_original_failure(
+        &mut self,
+        attempt: RouteStartAttempt,
+        edit: plx_playback_contract::adaptive::FailureEdit,
+    ) -> bool {
+        if !self.attempt_view.addresses(attempt, crate::player::attempt_view::Backend::Feed) {
+            return false;
+        }
+        self.readout.step(crate::player::readout::ReadoutEvent::OriginalFailure(edit));
+        true
+    }
+
+    /// Hand the route the link estimate the readout holds ([`Self::observe_link_seed`], again every
+    /// frame, as the route's only input of it).
+    pub fn carry_readout_seed(&mut self) {
+        let seed = self.readout.abr_seed(self.now_ms);
+        self.observe_link_seed(seed);
+    }
+
     /// Nothing playing: what the module holds before the first play, and the value the static is
     /// born as. Every String empty, every id 0 or `UNSET`, both HUD buffers NUL.
     pub const IDLE: PlaybackSession = PlaybackSession {
+        attempt_view: crate::player::attempt_view::AttemptView::EMPTY,
+        readout: crate::player::readout::PlayerReadout::IDLE,
+        uri_recovery_pending: None,
+        backend_policy: None,
+        planned_feed_offer: None,
+        planned_feed_purpose: CandidatePurpose::NewCandidate,
+        admitted_feed_offer: None,
+        requested_rate_permille: plx_playback_contract::RATE_NORMAL,
+        attempt_origin: crate::player::attempt_metrics::Origin::Fresh,
+        metric_request: None,
+        pending_metric_lifecycle: Vec::new(),
+        reconfigure_pause_goal: None,
+        backends: plx_playback_contract::BackendSet::FEED,
+        uri_preflight_port: None,
         direct_play_mode: DirectPlayMode::Auto,
         jail_load_blocked: false,
-        repair_status: plx_platform::tv::sandbox::State::Idle,
+        native_start_refused: None,
+        engine_failure: None,
+        finished: false,
+        repair_status: plx_os::tv::native_video::State::Idle,
         request: None,
         requested_resume_ns: 0,
         url: String::new(),
         tsession: String::new(),
         play_verdict: None,
+        pms_decline: None,
         resolve_failed: false,
         cur_contract: plx_plex::plex::EncodeContract::original(false, plx_plex::plex::AudioEnhancements::NONE),
+        recovery: None,
         cur_enhancement: EnhancementOutcome::Off,
         cur_src: (0, 0, 0),
         cur_transport_kbps: 0,
         cur_source_decodable: true,
         cur_auto_original_watched: false,
         auto_original: None,
+        original_declined: None,
         auto_fixture_base: String::new(),
         auto_switches: 0,
         auto_last_switch: None,
         auto_prior_kbps: 0,
         auto_bootstrap_rung: None,
         cur_rk: String::new(),
+        cur_media_index: 0,
         cur_sid: ServerId::UNSET,
         cur_audio: None,
+        source_selection: None,
         cur_sub_sid: 0,
+        selection_known: false,
+        carried_selection: None,
         cur_sub_sidecar: false,
         cur_sub_client_drawable: false,
         cur_sub_ordinal: -1,
         side_subs_refused: false,
         cur_sub_pref_lang: None,
+        cur_show_rk: String::new(),
+        cur_kind: String::new(),
+        cur_memory_note: false,
+        write_back: None,
+        sub_mode: SubMode::Track,
+        track_ctx: None,
         cur_part_id: 0,
         sess: String::new(),
         machine_id: String::new(),
@@ -445,12 +1751,16 @@ impl PlaybackSession {
         pq_item_id: String::new(),
         src_vcodec: String::new(),
         src_acodec: String::new(),
+        src_fps: 0.0,
         stream_vcodec: String::new(),
         stream_acodec: String::new(),
         stream_fps: 0.0,
         stream_dovi: plx_data::metadata::Dovi::NONE,
         stream_dv_decision: plx_data::metadata::DvDecision::NONE,
+        src_dovi: plx_data::metadata::Dovi::NONE,
+        src_dv_decision: plx_data::metadata::DvDecision::NONE,
         stream_immersive: false,
+        codec_probe_retried: false,
         title: [0; 128],
         ctxline: [0; 96],
         up_next: None,
@@ -458,6 +1768,8 @@ impl PlaybackSession {
         now_ms: 0,
         preview: false,
         resolved_as_preview: false,
+        carried_link: None,
+        container_names: ContainerNames::NONE,
     };
 }
 
@@ -479,36 +1791,67 @@ impl PlaybackSession {
     /// it or silently dropping it.
     pub fn publication(&self) -> PlaybackSession {
         let PlaybackSession {
+            attempt_view,
+            readout,
+            uri_recovery_pending,
+            backend_policy: _,
+            planned_feed_offer,
+            planned_feed_purpose: _,
+            admitted_feed_offer: _,
+            requested_rate_permille,
+            attempt_origin,
+            metric_request: _,
+            pending_metric_lifecycle: _,
+            reconfigure_pause_goal,
+            backends,
+            uri_preflight_port: _,
             direct_play_mode,
             jail_load_blocked,
+            native_start_refused,
+            engine_failure,
+            finished,
             repair_status,
             request,
             requested_resume_ns,
             url,
             tsession,
             play_verdict,
+            pms_decline,
             resolve_failed,
             cur_contract,
+            recovery,
             cur_enhancement,
             cur_src,
             cur_transport_kbps,
             cur_source_decodable,
             cur_auto_original_watched,
             auto_original,
+            original_declined,
             auto_fixture_base,
             auto_switches,
             auto_last_switch,
             auto_prior_kbps,
             auto_bootstrap_rung,
             cur_rk,
+            cur_media_index,
             cur_sid,
             cur_audio,
+            source_selection,
             cur_sub_sid,
+            selection_known,
+            carried_selection,
             cur_sub_sidecar,
             cur_sub_client_drawable,
             cur_sub_ordinal,
             side_subs_refused,
             cur_sub_pref_lang,
+            cur_show_rk,
+            cur_kind,
+            cur_memory_note,
+            // The parked write is the loop's to send, not a screen's to see.
+            write_back: _,
+            sub_mode,
+            track_ctx: _,
             cur_part_id,
             sess,
             machine_id,
@@ -517,12 +1860,16 @@ impl PlaybackSession {
             pq_item_id,
             src_vcodec,
             src_acodec,
+            src_fps,
             stream_vcodec,
             stream_acodec,
             stream_fps,
             stream_dovi,
             stream_dv_decision,
+            src_dovi,
+            src_dv_decision,
             stream_immersive,
+            codec_probe_retried,
             title,
             ctxline,
             up_next,
@@ -530,38 +1877,70 @@ impl PlaybackSession {
             queue: _,
             preview: _,
             resolved_as_preview,
+            carried_link,
+            container_names,
         } = self;
         PlaybackSession {
+            attempt_view: *attempt_view,
+            readout: readout.clone(),
+            uri_recovery_pending: *uri_recovery_pending,
+            backend_policy: None,
+            planned_feed_offer: *planned_feed_offer,
+            planned_feed_purpose: CandidatePurpose::NewCandidate,
+            admitted_feed_offer: None,
+            requested_rate_permille: *requested_rate_permille,
+            attempt_origin: *attempt_origin,
+            metric_request: None,
+            pending_metric_lifecycle: Vec::new(),
+            reconfigure_pause_goal: *reconfigure_pause_goal,
+            backends: *backends,
+            uri_preflight_port: None,
             direct_play_mode: *direct_play_mode,
             jail_load_blocked: *jail_load_blocked,
+            native_start_refused: *native_start_refused,
+            engine_failure: *engine_failure,
+            finished: *finished,
             repair_status: *repair_status,
             request: request.clone(),
             requested_resume_ns: *requested_resume_ns,
             url: url.clone(),
             tsession: tsession.clone(),
             play_verdict: play_verdict.clone(),
+            pms_decline: *pms_decline,
             resolve_failed: *resolve_failed,
             cur_contract: *cur_contract,
+            recovery: recovery.clone(),
             cur_enhancement: *cur_enhancement,
             cur_src: *cur_src,
             cur_transport_kbps: *cur_transport_kbps,
             cur_source_decodable: *cur_source_decodable,
             cur_auto_original_watched: *cur_auto_original_watched,
             auto_original: auto_original.clone(),
+            original_declined: *original_declined,
             auto_fixture_base: auto_fixture_base.clone(),
             auto_switches: *auto_switches,
             auto_last_switch: *auto_last_switch,
             auto_prior_kbps: *auto_prior_kbps,
             auto_bootstrap_rung: *auto_bootstrap_rung,
             cur_rk: cur_rk.clone(),
+            cur_media_index: *cur_media_index,
             cur_sid: *cur_sid,
             cur_audio: cur_audio.clone(),
+            source_selection: *source_selection,
             cur_sub_sid: *cur_sub_sid,
+            selection_known: *selection_known,
+            carried_selection: *carried_selection,
             cur_sub_sidecar: *cur_sub_sidecar,
             cur_sub_client_drawable: *cur_sub_client_drawable,
             cur_sub_ordinal: *cur_sub_ordinal,
             side_subs_refused: *side_subs_refused,
             cur_sub_pref_lang: cur_sub_pref_lang.clone(),
+            cur_show_rk: cur_show_rk.clone(),
+            cur_kind: cur_kind.clone(),
+            cur_memory_note: *cur_memory_note,
+            write_back: None,
+            sub_mode: *sub_mode,
+            track_ctx: None,
             cur_part_id: *cur_part_id,
             sess: sess.clone(),
             machine_id: machine_id.clone(),
@@ -570,12 +1949,16 @@ impl PlaybackSession {
             pq_item_id: pq_item_id.clone(),
             src_vcodec: src_vcodec.clone(),
             src_acodec: src_acodec.clone(),
+            src_fps: *src_fps,
             stream_vcodec: stream_vcodec.clone(),
             stream_acodec: stream_acodec.clone(),
             stream_fps: *stream_fps,
             stream_dovi: *stream_dovi,
             stream_dv_decision: *stream_dv_decision,
+            src_dovi: *src_dovi,
+            src_dv_decision: *src_dv_decision,
             stream_immersive: *stream_immersive,
+            codec_probe_retried: *codec_probe_retried,
             title: *title,
             ctxline: *ctxline,
             up_next: up_next.clone(),
@@ -584,6 +1967,8 @@ impl PlaybackSession {
             // A screen copy is not the live preview. The loop reads the real session.
             preview: false,
             resolved_as_preview: *resolved_as_preview,
+            carried_link: *carried_link,
+            container_names: container_names.clone(),
         }
     }
 }
@@ -595,10 +1980,63 @@ impl Default for PlaybackSession {
 }
 
 impl PlaybackSession {
+    /// The capability value the current attempt plans and profiles from (the
+    /// [`recovery`](Self::recovery) machine's [`attempt`](crate::player::recovery::OpenRecovery::attempt)).
+    /// A cheap `Arc` clone, so a worker or a flight can own it.
+    fn attempt_caps(&self) -> std::sync::Arc<plx_os::devcaps::Caps> {
+        self.recovery.as_ref().map_or_else(plx_os::devcaps::assumed_shared, |r| r.attempt())
+    }
+
+    /// Begin an attempt on `caps`: the value the app's play start derived (`devcaps::start_caps`),
+    /// handed to [`request_play_with_queue`] (the one caller in production). The request's ladder
+    /// starts from it; the previous request's, and whatever it had narrowed, is dropped.
+    pub(super) fn begin_attempt(&mut self, caps: std::sync::Arc<plx_os::devcaps::Caps>) {
+        self.recovery = Some(crate::player::recovery::OpenRecovery::new(caps));
+        self.reset_backend_offers();
+    }
+
+    /// The request's failed-open ladder, for the pump to step. A session that has not begun an
+    /// attempt gets the same placeholder value [`attempt_caps`](Self::attempt_caps) answers, so a
+    /// refusal narrows what it would have planned from.
+    pub(crate) fn open_recovery(&mut self) -> &mut crate::player::recovery::OpenRecovery {
+        self.recovery
+            .get_or_insert_with(|| crate::player::recovery::OpenRecovery::new(plx_os::devcaps::assumed_shared()))
+    }
+
     /// **The frame tick, written once per iteration by [`crate::player::machine::Player::set_now`]
     /// and by nothing else** (spec §4.1). See the [`now_ms`](Self::now_ms) field.
     pub fn set_now(&mut self, now_ms: u32) {
         self.now_ms = now_ms;
+    }
+
+    /// **The player adapter's delivery of the HLS worker's carried estimate** (I8): `Some((readout,
+    /// unobserved_ms))` is the last estimate and the wall time since it was observed, `None` that
+    /// there is none (a new playback, or a stop). It is stamped on this session's frame tick so
+    /// [`auto_prior`] can age it later; the adapter calls it every pump tick and when an engine
+    /// tears down, which keeps the value as fresh as the registry it was read from.
+    /// The stamp of the container names this session holds ([`ingest_container_names`](Self::ingest_container_names)).
+    pub fn container_names_stamp(&self) -> u32 {
+        self.container_names.stamp
+    }
+
+    /// **The player adapter's delivery of the demuxer's container track names**, with the publication
+    /// stamp they were read at. Replaces what was held, so a cleared publication clears them too.
+    pub fn ingest_container_names(&mut self, stamp: u32, names: plx_playback_contract::tracks::TrackNames) {
+        self.container_names = ContainerNames { stamp, names: Some(std::sync::Arc::new(names)) };
+    }
+
+    /// The container's track names as last delivered; empty before the demuxer has opened a part.
+    pub(super) fn container_names(&self) -> &plx_playback_contract::tracks::TrackNames {
+        static NO_NAMES: plx_playback_contract::tracks::TrackNames = plx_playback_contract::tracks::TrackNames::new();
+        self.container_names.names.as_deref().unwrap_or(&NO_NAMES)
+    }
+
+    pub fn observe_link_seed(&mut self, seed: Option<plx_playback_contract::adaptive::CarriedSeed>) {
+        let now_ms = self.now_ms;
+        self.carried_link = seed.map(|(readout, unobserved_ms)| CarriedLink {
+            readout,
+            observed_at_ms: now_ms.wrapping_sub(u32::try_from(unobserved_ms).unwrap_or(u32::MAX)),
+        });
     }
 }
 
@@ -653,6 +2091,16 @@ pub fn set_url(ps: &mut PlaybackSession, s: &str) {
 pub fn clear_url(ps: &mut PlaybackSession) {
     ps.url.clear()
 }
+/// A full stop retires the logical playback after capturing its final report. A late timeline
+/// reply can still name that old playback, but can no longer match the foreground session.
+pub(crate) fn retire_stopped_playback(ps: &mut PlaybackSession) {
+    clear_url(ps);
+    ps.sess.clear();
+    if ps.engine_failure == Some(crate::player::RuntimeFailure::ServerStopped) {
+        ps.engine_failure = None;
+    }
+}
+
 pub fn transcode_session(ps: &PlaybackSession) -> String {
     ps.tsession.clone()
 }
@@ -703,6 +2151,16 @@ pub enum RecoveryCause {
 }
 
 impl RecoveryCause {
+    /// Why the open this recovery makes is made, as a failed open reports it: the viewer asked for
+    /// it (an Original pick, or the enhancement they turned off) or the Auto worker did.
+    pub const fn attempt_origin(self) -> crate::player::report::AttemptOrigin {
+        use crate::player::report::AttemptOrigin as O;
+        match self {
+            Self::Automatic => O::AutoHandoff,
+            Self::ManualOriginal | Self::EnhancementReleased => O::QualityChange,
+        }
+    }
+
     /// The log prefix this cause's recovery lines carry.
     fn log_tag(self) -> &'static str {
         match self {
@@ -814,6 +2272,14 @@ pub struct RouteStartTransaction {
     pub(super) serial: u64,
 }
 
+impl RouteStartTransaction {
+    /// A transaction identity for a pure machine's unit tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn fixture(serial: u64) -> Self {
+        Self { serial }
+    }
+}
+
 /// Synchronous result of the native half of a prepared route transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteStartResult {
@@ -881,6 +2347,9 @@ pub(super) struct AppliedRouteProjection {
     side_subs_refused: bool,
     stream_vcodec: String,
     pub(super) stream_acodec: String,
+    /// The file's own frame rate. Not a route change, so [`install_route_projection`] never writes
+    /// it back; it is here so a projection can answer [`video_copy_fps`] for the contract it lands.
+    src_fps: f64,
     stream_fps: f64,
     stream_dovi: plx_data::metadata::Dovi,
     stream_dv_decision: plx_data::metadata::DvDecision,
@@ -904,6 +2373,7 @@ fn route_projection(ps: &PlaybackSession) -> AppliedRouteProjection {
         side_subs_refused: s.side_subs_refused,
         stream_vcodec: s.stream_vcodec.clone(),
         stream_acodec: s.stream_acodec.clone(),
+        src_fps: s.src_fps,
         stream_fps: s.stream_fps,
         stream_dovi: s.stream_dovi,
         stream_dv_decision: s.stream_dv_decision,
@@ -991,6 +2461,25 @@ struct TimelineProjection {
     subtitle_stream_id: i64,
 }
 
+/// **The session id a playback last sent a periodic report under**, with the item and server it
+/// reported for. PMS keeps a dashboard row for every id that ever reported `playing`, whatever the
+/// encoder stop and `/status/sessions/close` did, so when the reporting identity moves (an ABR
+/// commit, a seek's retranscode, an Original-to-HLS fallback, a rollback's rebase) the id it left
+/// must be told `stopped` ([`retired_report_session`]; issue #1236).
+///
+/// It lives BESIDE [`TimelineProjection`] in [`PlayerControl`], not in it, because the projection
+/// does not outlive the moments that matter: a stop, a failed start, a failed Original trial and a
+/// failed Engine all clear it, and each of them is followed by a reporter or a final `stopped`
+/// that has to name the id the playback had been reporting. The `(sid, rating_key)` key ties it to
+/// one playback: another item's entry is ignored, and the stop worker takes it
+/// ([`ScrobbleWork::run`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReportedTimeline {
+    sid: ServerId,
+    rating_key: String,
+    session: String,
+}
+
 /// One reporter's authority to sample the playback which spawned it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimelineLease {
@@ -1008,10 +2497,37 @@ struct TimelineSnapshot {
     time_ms: i64,
     duration_ms: i64,
     session: String,
+    playback: String,
     play_queue_id: String,
     play_queue_item_id: String,
     audio_stream_id: i64,
     subtitle_stream_id: i64,
+    /// [`PlayerControl::reported_session_of`] as the sample saw it.
+    reported_session: Option<String>,
+}
+
+impl TimelineSnapshot {
+    /// This sample as one wire report under `session`: the sampled item, PlayQueue and tracks,
+    /// whichever id and state the caller sends them as.
+    fn wire<'a>(
+        &'a self,
+        session: &'a str,
+        state: plx_plex::plex::TimelineState,
+        continuing: bool,
+    ) -> plx_plex::plex::TimelineReport<'a> {
+        plx_plex::plex::TimelineReport {
+            rating_key: &self.rating_key,
+            state,
+            time_ms: self.time_ms,
+            duration_ms: self.duration_ms,
+            session,
+            play_queue_id: &self.play_queue_id,
+            play_queue_item_id: &self.play_queue_item_id,
+            audio_stream_id: self.audio_stream_id,
+            subtitle_stream_id: self.subtitle_stream_id,
+            continuing,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1146,9 +2662,34 @@ pub(super) struct PlayerControl {
     start_deferred: Option<(u64, DeferredOriginalEffects)>,
     pending_original: Option<PendingOriginal>,
     timeline: Option<TimelineProjection>,
+    /// The session id the current playback's periodic reports last went out under; survives
+    /// every `timeline = None`. See [`ReportedTimeline`].
+    reported_timeline: Option<ReportedTimeline>,
+    /// **The HLS encoder an automatic Original recovery was refused on** — the reducer's own
+    /// record of a [`RouteApplyResult::Rejected`] settlement of an automatic `HlsToOriginal`
+    /// action ([`finish_route_action`]), or of an Original trial PMS admitted whose Load then
+    /// failed, on the encoder its rollback's rebase installed ([`note_original_rolled_back_onto`]). The Auto worker exits to hand that action over, so the
+    /// pump reopens the retained HLS for a refusal, and the reopened route's worker used to start
+    /// with a fresh source gate: on a server that kept refusing it probed, asked and was refused
+    /// again every ~10 s, a visible reload each time. [`hls_abr_control`] hands a worker on THIS
+    /// encoder the refusal ([`HlsAbrControl::original_refused_on_this_route`]), whose source gate
+    /// then holds it the way `abr::RejectCause::Structural` holds an HLS ceiling PMS refused:
+    /// until the route changes — a new encoder (an HLS rung commit, a transcode seek, a user
+    /// change) is a new admission question, so a matching id is the whole test and a stale one
+    /// simply stops matching. No wall-clock dwell: none exists anywhere in Auto's source gate.
+    /// Cleared by a new playback request.
+    original_refused_on: Option<String>,
 }
 
 impl PlayerControl {
+    /// The id item `rating_key` of server `sid` last reported under, if it has.
+    fn reported_session_of(&self, sid: ServerId, rating_key: &str) -> Option<String> {
+        self.reported_timeline
+            .as_ref()
+            .filter(|r| r.sid == sid && r.rating_key == rating_key)
+            .map(|r| r.session.clone())
+    }
+
     /// Forget the flight a worker was running, of whichever kind.
     fn clear_flight(&mut self) {
         self.flight = None;
@@ -1195,6 +2736,8 @@ static PLAYER_CONTROL: std::sync::Mutex<PlayerControl> = std::sync::Mutex::new(P
     start_deferred: None,
     pending_original: None,
     timeline: None,
+    reported_timeline: None,
+    original_refused_on: None,
 });
 
 fn advance_route(active: &mut ActiveEncoderState) {
@@ -1327,7 +2870,7 @@ fn merge_user_route_intent(
 /// resolve runs, but none of its asynchronous ABR evidence may mutate the route after this point.
 /// A matching landing is the successful exit from `Resolving`; cancellation or spawn failure
 /// restores the captured Idle/Stable/Failed fallback.
-fn begin_playback_request() -> bool {
+fn begin_playback_request() -> Option<u64> {
     // A fresh request always starts a new item/session. Any retranscode-claim landing still in
     // the mailbox belongs to whatever was playing before and must never reach this one — see
     // `discard_retranscode_claim_slot`'s doc for the corruption this prevents.
@@ -1370,7 +2913,7 @@ fn begin_playback_request() -> bool {
         | ControlPhase::StagingUser(_)
         | ControlPhase::Applying(_)
         | ControlPhase::Completing(_)
-        | ControlPhase::OriginalTrial(_) => return false,
+        | ControlPhase::OriginalTrial(_) => return None,
     };
     control.desired_revision = next_generation(control.desired_revision);
     control.desired_quality = quality();
@@ -1378,11 +2921,12 @@ fn begin_playback_request() -> bool {
     control.displaced_pick = false;
     control.pending_auto = None;
     control.pending_seek_ns = None;
+    control.original_refused_on = None;
     if let Some(fallback) = fallback {
         control.resolve_fallback = Some(fallback);
     }
     control.phase = ControlPhase::Resolving;
-    true
+    Some(control.desired_revision)
 }
 
 /// Publish the PMS half of a resolve. A refused plan has no Engine and therefore lands in `Idle`;
@@ -1671,6 +3215,15 @@ pub fn finish_route_action(ps: &mut PlaybackSession, action: &ClaimedRouteAction
         control.applied_projection = Some(projection);
         control.phase = ControlPhase::Prepared(action.serial);
         return true;
+    }
+    // A refused automatic Original recovery is remembered against the HLS encoder it was asked
+    // from, so the worker the pump reopens on that encoder does not ask again (see
+    // `PlayerControl::original_refused_on`). A cancellation (the ticket moved before the claim)
+    // refused nothing.
+    if let RouteIntent::Automatic(AutomaticRouteIntent::HlsToOriginal { ticket, .. }) = &action.intent {
+        if result == RouteApplyResult::Rejected {
+            note_original_refused_on(&mut control, ticket.encoder());
+        }
     }
     let restore = control.applied_projection.clone();
     drop(control);
@@ -2109,7 +3662,7 @@ pub fn fail_current_engine() {
     drop(control);
     if flight_ended {
         // The claim's presentation hold (`player::claim_hold`) has nothing left to give back to.
-        crate::player::claim_hold::clear();
+        crate::player::route_fx::clear_claim_hold();
     }
 }
 
@@ -2203,7 +3756,7 @@ pub fn begin_engine_teardown(for_reload: bool) {
     drop(control);
     if dropped_start_flight || dropped_claim_flight {
         discard_retranscode_claim_slot();
-        crate::player::claim_hold::clear();
+        crate::player::route_fx::clear_claim_hold();
     }
 }
 
@@ -2219,7 +3772,7 @@ pub fn control_phase_label() -> String {
 /// claim's flight holds `Applying`; a seek's holds `Preparing` AND names itself in `flight` (a
 /// `Preparing` an inline caller opened is a preparation one frame completes, not a flight). The
 /// pump's own seek branches (the stuck in-place retry/reload and the plain pending-seek reducer)
-/// must skip while this holds and leave `TX.seek_to_ns` exactly where it is: neither branch checks
+/// must skip while this holds and leave the readout's pending seek exactly where it is: neither branch checks
 /// `ControlPhase`, and either one planning a rebuild or calling `commit_user_seek` against an
 /// action it does not own corrupts or silently rejects that very flight (see the pump's own doc on
 /// the call sites that consult this).
@@ -2367,6 +3920,7 @@ pub fn force_applying_for_test(serial: u64) {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_player_control_for_test(ps: &PlaybackSession) {
+    retire_pending_stops(); // the stop mailbox is process-global, like the control it sits beside
     let projection = route_projection(ps);
     let mut control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
     control.engine_epoch = next_generation(control.engine_epoch);
@@ -2395,6 +3949,8 @@ pub fn reset_player_control_for_test(ps: &PlaybackSession) {
     control.start_deferred = None;
     control.pending_original = None;
     control.timeline = None;
+    control.reported_timeline = None;
+    control.original_refused_on = None;
 }
 
 /// **Candidate encoder names are allocated HERE, process-globally, and that is the whole point.**
@@ -2568,11 +4124,31 @@ fn finish_encoder_cleanup_check(
     }
 }
 
-fn run_encoder_cleanup_check(check: EncoderCleanupCheck) {
+/// The claim `take_unchecked` made on one cleanup record. If the observation unwinds (panics)
+/// before it publishes, dropping this releases the claim without a verdict,
+/// so `checking` cannot stay set for the process and defer every later ABR trial on that server.
+struct EncoderCleanupClaim {
+    check: Option<EncoderCleanupCheck>,
+}
+
+impl Drop for EncoderCleanupClaim {
+    fn drop(&mut self) {
+        if let Some(check) = self.check.take() {
+            // No observation: keep `stop_needed` / `physical_absent` as they were.
+            ENCODER_CLEANUP
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish(check, None, None, None);
+        }
+    }
+}
+
+/// `(present, stop_accepted, resource_reconciled)` of one completed cleanup observation.
+type EncoderCleanupObservation = (Option<bool>, Option<bool>, Option<bool>);
+
+fn observe_encoder_cleanup(check: &EncoderCleanupCheck) -> EncoderCleanupObservation {
     let Some(client) = plx_plex::plex::client_for(check.sid) else {
-        let stop_accepted = check.stop_needed.then_some(false);
-        finish_encoder_cleanup_check(check, None, stop_accepted, None);
-        return;
+        return (None, check.stop_needed.then_some(false), None);
     };
     let stop_accepted = (check.stop_needed && !check.physical_absent)
         .then(|| client.transcode_stop(&check.session));
@@ -2587,6 +4163,20 @@ fn run_encoder_cleanup_check(check: EncoderCleanupCheck) {
     } else {
         None
     };
+    (present, stop_accepted, resource_reconciled)
+}
+
+fn run_encoder_cleanup_check(check: EncoderCleanupCheck) {
+    run_encoder_cleanup_check_with(check, observe_encoder_cleanup);
+}
+
+fn run_encoder_cleanup_check_with(
+    check: EncoderCleanupCheck,
+    observe: impl FnOnce(&EncoderCleanupCheck) -> EncoderCleanupObservation,
+) {
+    let mut claim = EncoderCleanupClaim { check: Some(check.clone()) };
+    let (present, stop_accepted, resource_reconciled) = observe(&check);
+    claim.check = None;
     finish_encoder_cleanup_check(check, present, stop_accepted, resource_reconciled);
 }
 
@@ -2866,6 +4456,32 @@ fn sync_active_hls_to_session(ps: &mut PlaybackSession) -> Option<(WorkerTicket,
     Some(active)
 }
 
+/// The one writer of [`PlayerControl::original_refused_on`]: Original was refused, or admitted and
+/// then failed to load, from the HLS route served by `encoder`.
+fn note_original_refused_on(control: &mut PlayerControl, encoder: &str) {
+    control.original_refused_on = Some(encoder.to_owned());
+}
+
+/// **An Original trial that failed to load was rolled back onto `installed`.** The rollback rebases
+/// the retained HLS at the recovery position, which mints a NEW encoder ([`plan_rebase`]), so the
+/// record goes on the encoder the rebase installed — the one the reloaded worker captures. PMS
+/// admitted the Original and the set still could not play it: the same answer the route would get
+/// by asking again, so it is held the way a refusal is. A rebase that landed INSIDE a trial
+/// rebuilt the candidate rather than restoring the route ([`carry_rebase_into_trial`]), and
+/// records nothing.
+pub(super) fn note_original_rolled_back_onto(installed: &RebaseInstalled) {
+    let mut control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(control.phase, ControlPhase::OriginalTrial(_)) {
+        note_original_refused_on(&mut control, &installed.replacement);
+    }
+}
+
+/// Whether the reducer recorded an automatic Original recovery refused on `encoder`.
+fn original_refused_on(encoder: &str) -> bool {
+    let control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+    control.original_refused_on.as_deref() == Some(encoder)
+}
+
 pub(super) fn is_worker_ticket_current(expected: &WorkerTicket) -> bool {
     let control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
     ticket_is_current(&control, expected)
@@ -2878,10 +4494,14 @@ pub struct HlsAbrControl {
     trace_generation: u32,
     sid: ServerId,
     rating_key: String,
+    media_index: usize,
     logical_session: String,
     audio_stream_id: i64,
     subtitle_stream_id: i64,
     seconds_per_segment: u8,
+    /// The attempt's capability value ([`PlaybackSession::attempt_caps`]), captured with the rest: every
+    /// replacement encoder this worker primes carries the profile built from it.
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     pub initial_rung: crate::abr::Rung,
     /// Response facts carried with the active physical route across seek/reload. They seed the
     /// worker's response state but never alter the request actuator above.
@@ -2904,6 +4524,10 @@ pub struct HlsAbrControl {
     /// The source carries something no transcode can give back (Dolby Vision, Atmos). Makes
     /// Original's utility bonus about this file rather than about Original in general.
     pub original_features: crate::abr::SourceFeatures,
+    /// An automatic Original recovery was already refused on THIS worker's HLS encoder
+    /// ([`PlayerControl::original_refused_on`]): the worker's source gate starts held
+    /// ([`crate::abr::OriginalRecovery::after_route_refusal`]) instead of fresh.
+    original_refused: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2919,7 +4543,7 @@ pub struct PrimedHls {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OriginalProbeResult {
-    Measured(crate::curlio::ThroughputSample),
+    Measured(crate::abr::CapacityObservation),
     /// The request reached no usable body. The client-side HLS route remained selected; PMS-side
     /// cursor continuity is not inferred. The outcome is telemetry, not a zero-capacity sample.
     Failed {
@@ -2999,6 +4623,12 @@ impl HlsAbrControl {
         } else {
             true
         }
+    }
+
+    /// Was an automatic Original recovery already refused on the HLS encoder this worker
+    /// serves? See [`PlayerControl::original_refused_on`].
+    pub fn original_refused_on_this_route(&self) -> bool {
+        self.original_refused
     }
 
     pub fn can_recover_original(&self) -> bool {
@@ -3089,7 +4719,12 @@ impl HlsAbrControl {
                     Phase::SampleSource,
                     source_probe_sample_outcome(sample),
                 );
-                OriginalProbeResult::Measured(sample)
+                OriginalProbeResult::Measured(crate::abr::CapacityObservation {
+                    kbps: u32::try_from(sample.kbps()).unwrap_or(u32::MAX),
+                    bytes: u64::try_from(sample.bytes).unwrap_or(0),
+                    active_us: u64::try_from(sample.elapsed.as_micros()).unwrap_or(u64::MAX),
+                    completed: sample.target_reached,
+                })
             }
             Err(failure) => {
                 let detail = match &failure {
@@ -3190,7 +4825,9 @@ impl HlsAbrControl {
         // cannot prime a replacement while it shares the old X-Plex id: the first encoder dies
         // before the candidate produces segment zero. Couple both wire fields per encoder.
         let spec = transcode_spec(
+            &self.caps,
             &self.rating_key,
+            self.media_index,
             &encoder_session,
             &encoder_session,
             plx_plex::plex::TranscodeOffset::from_micros(offset_micros),
@@ -3315,10 +4952,10 @@ impl HlsAbrControl {
 /// what raster the source actually has. Neither is a preference and neither belongs in a utility
 /// weight — a candidate outside these bounds is removed before anything is scored.
 fn auto_catalog(ps: &PlaybackSession) -> crate::abr::HlsActuatorCatalog {
-    let caps = plx_platform::devcaps::caps();
+    let caps = ps.attempt_caps();
     let device = (
-        u16::try_from(caps.hevc_max.0).unwrap_or(u16::MAX),
-        u16::try_from(caps.hevc_max.1).unwrap_or(u16::MAX),
+        u16::try_from(caps.raster_bound("h264").0).unwrap_or(u16::MAX),
+        u16::try_from(caps.raster_bound("h264").1).unwrap_or(u16::MAX),
     );
     let (_, width, height) = ps.cur_src;
     let source = (
@@ -3375,11 +5012,93 @@ fn note_visible_switch(ps: &mut PlaybackSession, now_ms: u32) {
 /// Only the DELIVERY estimate crosses. The buffer, the risk history and any pending transaction
 /// describe a position that no longer exists and are reset by the new `Controller`'s construction.
 fn auto_prior(ps: &PlaybackSession) -> Option<crate::abr::CapacityEstimate> {
-    let carried = crate::player::SHARED.abr_seed();
+    let carried = ps.carried_link.map(|link| {
+        age_carried_estimate(link.readout, u64::from(ps.now_ms.wrapping_sub(link.observed_at_ms)))
+    });
     carried.or_else(|| {
         let kbps = ps.auto_prior_kbps;
         (kbps > 0).then(|| crate::abr::CapacityEstimate::from_prior(kbps))
     })
+}
+
+fn age_carried_estimate(
+    readout: plx_playback_contract::adaptive::SeedReadout, elapsed_ms: u64,
+) -> crate::abr::CapacityEstimate {
+    let mut estimate = crate::abr::CapacityEstimate {
+        fast_kbps: readout.fast_kbps, slow_kbps: readout.slow_kbps,
+        uncertainty_pm: readout.uncertainty_pm, samples: readout.samples,
+    };
+    estimate.age_ms(elapsed_ms, &crate::abr::AbrPolicy::measured());
+    estimate
+}
+
+#[test]
+fn the_carried_estimate_is_the_sessions_own_and_ages_on_its_frame_tick() {
+    let readout = plx_playback_contract::adaptive::SeedReadout {
+        slow_kbps: 40_000, fast_kbps: 42_000, uncertainty_pm: 100, samples: 19,
+    };
+    let mut ps = PlaybackSession::IDLE;
+    ps.auto_prior_kbps = 3_000;
+    ps.set_now(10_000);
+    assert_eq!(auto_prior(&ps).map(|e| e.samples), Some(1), "nothing carried: the bootstrap seed");
+    ps.observe_link_seed(Some((readout, 0)));
+    let fresh = auto_prior(&ps).expect("the carried estimate wins over the bootstrap seed");
+    assert_eq!((fresh.slow_kbps, fresh.samples), (40_000, 19));
+    let gap = crate::abr::AbrPolicy::measured().stale_half_life_ms * 2;
+    ps.set_now(10_000 + gap);
+    let aged = auto_prior(&ps).expect("still carried");
+    assert!(aged.uncertainty_pm > fresh.uncertainty_pm, "the frame tick between two reads ages it");
+    ps.observe_link_seed(Some((readout, u64::from(gap))));
+    assert!(auto_prior(&ps).expect("reported late").uncertainty_pm >= aged.uncertainty_pm);
+    ps.observe_link_seed(None);
+    assert_eq!(auto_prior(&ps).map(|e| e.samples), Some(1), "cleared: the bootstrap seed again");
+}
+
+/// The link estimate reaches the route as the readout's event and nothing else: it ages on the
+/// session's frame tick, survives the reset a reload runs, and dies only with the playback.
+#[test]
+fn the_carried_estimate_reaches_the_route_through_the_readout_and_only_a_real_stop_clears_it() {
+    use crate::player::attempt_view::Backend;
+    use crate::player::readout::ReadoutEvent;
+    let _serial = plx_base::testlock::serial();
+    let seed = plx_playback_contract::adaptive::SeedReadout {
+        slow_kbps: 40_000, fast_kbps: 42_000, uncertainty_pm: 100, samples: 19,
+    };
+    let (a, stale) = (RouteStartAttempt::fixture(), RouteStartAttempt::fixture_n(2));
+    let mut ps = PlaybackSession::IDLE;
+    ps.auto_prior_kbps = 3_000;
+    ps.set_now(10_000);
+    ps.begin_attempt_view(a, Backend::Feed);
+    ps.carry_readout_seed();
+    assert_eq!(auto_prior(&ps).map(|e| e.samples), Some(1), "nothing observed: the bootstrap seed");
+    assert!(!ps.ingest_abr(stale, plx_playback_contract::adaptive::AbrReadout::IDLE, Some((seed, 0))),
+        "a late worker of another attempt carries nothing");
+    ps.carry_readout_seed();
+    assert_eq!(auto_prior(&ps).map(|e| e.samples), Some(1));
+    assert!(ps.ingest_abr(a, plx_playback_contract::adaptive::AbrReadout::IDLE, Some((seed, 0))));
+    ps.carry_readout_seed();
+    let fresh = auto_prior(&ps).expect("the observed estimate wins over the bootstrap seed");
+    assert_eq!((fresh.slow_kbps, fresh.samples), (40_000, 19));
+    let gap = crate::abr::AbrPolicy::measured().stale_half_life_ms * 2;
+    ps.set_now(10_000 + gap);
+    ps.carry_readout_seed();
+    assert!(auto_prior(&ps).expect("still carried").uncertainty_pm > fresh.uncertainty_pm,
+        "re-observing it every pump does not reset its age");
+    ps.step_readout(ReadoutEvent::SessionReset);
+    ps.carry_readout_seed();
+    assert!(auto_prior(&ps).is_some_and(|e| e.samples == 19), "a reload is the same item on the same link");
+    ps.step_readout(ReadoutEvent::AbrSeed(None));
+    ps.carry_readout_seed();
+    assert_eq!(auto_prior(&ps).map(|e| e.samples), Some(1), "a real stop: the bootstrap seed again");
+}
+
+#[test]
+fn carried_link_estimate_ages_across_unobserved_reload_gap() {
+    let readout = plx_playback_contract::adaptive::SeedReadout {
+        slow_kbps: 40_000, fast_kbps: 42_000, uncertainty_pm: 100, samples: 19,
+    };
+    let elapsed = u64::from(crate::abr::AbrPolicy::measured().stale_half_life_ms) * 2;
+    assert!(age_carried_estimate(readout, elapsed).uncertainty_pm > readout.uncertainty_pm);
 }
 
 /// Does this playback's source carry something a transcode cannot give back? Dolby Vision and
@@ -3415,8 +5134,9 @@ pub fn hls_abr_control(ps: &PlaybackSession) -> Option<(HlsAbrControl, WorkerTic
     }
     // A manual Original open that failed is restored onto HLS while the picker still reflects the
     // user's attempted choice.  That route still needs rung control, but it must not immediately
-    // auto-retry the same failed source. Selecting Auto later adopts this worker in place; a
-    // subsequent seek/reload constructs a fresh controller with Original recovery enabled again.
+    // auto-retry the same failed source. Selecting Auto later adopts this worker in place. The
+    // rollback records its rebased encoder (`note_original_rolled_back_onto`), so a reload on that
+    // encoder starts held; a seek mints a new encoder, whose controller probes Original again.
     let original = (applied_quality() == Quality::Auto)
         .then(|| ps.auto_original.as_ref())
         .flatten();
@@ -3425,10 +5145,12 @@ pub fn hls_abr_control(ps: &PlaybackSession) -> Option<(HlsAbrControl, WorkerTic
             trace_generation: playback_trace_generation(),
             sid: cur_sid(ps),
             rating_key: cur_rk(ps),
+            media_index: cur_media_index(ps),
             logical_session: sess(ps),
             audio_stream_id: cur_audio_sid(ps),
             subtitle_stream_id: cur_sub_sid(ps),
             seconds_per_segment,
+            caps: ps.attempt_caps(),
             initial_rung: live
                 .as_ref()
                 .map(|(_, hls)| hls.rung)
@@ -3460,6 +5182,7 @@ pub fn hls_abr_control(ps: &PlaybackSession) -> Option<(HlsAbrControl, WorkerTic
             prior: auto_prior(ps),
             history: auto_history(ps, ps.now_ms),
             original_features: auto_original_features(ps),
+            original_refused: original_refused_on(ticket.encoder()),
         },
         ticket,
     ))
@@ -3538,7 +5261,7 @@ pub fn auto_original_watch(ps: &PlaybackSession) -> Option<AutoOriginalWatch> {
 /// off only where the transition itself is what is being graded, and give that case a
 /// `network_profile` that starves for real. Removing the candidate is load-bearing: otherwise a
 /// loopback source probe can escape to Original before a request-indexed HLS cliff occurs.
-/// [`crate::player::playurl::PlayUrl::auto_start_hls`] has the history — the alternative was declaring a
+/// `plx_playback_contract::playurl::PlayUrl::auto_start_hls` has the history — the alternative was declaring a
 /// source rate no link could carry and relying on a starvation horizon that did not check whether
 /// the reserve was draining.
 pub fn arm_auto_fixture(
@@ -3561,7 +5284,7 @@ pub fn arm_auto_fixture(
         // `tests/serve_fixtures.py` served no 22000 rung, so such a candidate would 404 and read
         // on the television as a rejected encoder — a fixture gap standing in for a policy, and
         // the thing that kept the plan's I9 blocked. The server answers 22000 now, so the caller
-        // declares it (`player::playurl::PlayUrl::source_raster`) and the default is still 1080p.
+        // declares it (`plx_playback_contract::playurl::PlayUrl::source_raster`) and the default is still 1080p.
         s.cur_src = (
             i64::from(source_kbps),
             i64::from(source_raster.0),
@@ -3602,7 +5325,7 @@ pub fn arm_auto_fixture(
         return None;
     }
     // Install exactly the state `fallback_auto_to_hls` leaves behind, at the bootstrap rung, and
-    // hand the caller the playlist to open. See `player::playurl::PlayUrl::auto_start_hls` for why this exists
+    // hand the caller the playlist to open. See `plx_playback_contract::playurl::PlayUrl::auto_start_hls` for why this exists
     // at all: the alternative was declaring a source rate no link could carry and relying on the
     // starvation horizon to fire on a reserve that was visibly FILLING.
     let rung = crate::abr::Rung::P480;
@@ -3758,8 +5481,9 @@ fn dispatch_rebase_recovery(
     }
 }
 
-/// The frame-thread half of the unopened-source fallback: reuse the exact contingency
-/// [`crate::abr::bootstrap`] chose while it still owned the evidence.
+/// The frame-thread half of the unopened-source fallback: reuse the contingency
+/// [`crate::abr::bootstrap`] chose while it still owned the evidence, held to the attempt's live
+/// catalog ([`crate::abr::original_open_fallback_rung`]).
 ///
 /// An HTTP 4xx/5xx, connect refusal or demux open error before the first body byte is not a
 /// zero-throughput observation. For Remote the rung came from the completed source probe; for
@@ -3816,6 +5540,81 @@ pub fn dispatch_unopened_auto_hls(ps: &mut PlaybackSession, offset_secs: i64) ->
         None,
         ClaimWork::AutoHls(Box::new(plan)),
         RetranscodeFallback::RejectWith(AUTO_HLS_REJECTED),
+    ) {
+        RecoveryDispatch::Flying { serial: ticket.serial }
+    } else {
+        let _ = reject_route_start_preparation(ticket);
+        RecoveryDispatch::Refused
+    }
+}
+
+/// The line a refused conversion settles with (never logged as another recovery's).
+pub(super) const REFUSAL_CONVERSION_REJECTED: &str = "the server could not convert the refused stream";
+
+/// What the refusal-conversion flight asks the server to do with the VIDEO.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoLane {
+    /// Today's route as it is planned ([`retranscode_contract`]): an Original remux keeps copying
+    /// the video and converts only the audio the attempt no longer offers.
+    AsPlanned,
+    /// An encode with no video copy ([`video_encode_contract`]): the facet rung of a refused video,
+    /// whose raster the attempt no longer offers, so the server must produce a smaller one.
+    Encode,
+    /// An encode with no video copy for the manual both-facets rung ([`video_encode_contract`]): the
+    /// audio the attempt no longer offers is converted and the video is encoded. The 1080p clamp
+    /// applies only when the attempt lowered a video raster; a refusal with no raster to lower (a
+    /// frame rate) keeps the route's own ceiling.
+    Both,
+}
+
+/// Start the flight that replaces a route whose audio or video the pipeline refused before its
+/// Engine's first picture (`type=18` of any number, or the stall watchdog; a reload after the
+/// request's first picture starts such an Engine too): the viewer's track plays again with the
+/// server converting that stream ([`VideoLane`] says how the video is asked for: copied as planned
+/// for a refused audio, encoded under the 1080p ceiling for a refused video, encoded for the
+/// both-facets rung). The open-recovery ladder's facet rung and manual both-facets rung
+/// ([`crate::player::recovery::OpenRecovery`], `ConvertFacet`, `ConvertBoth`) have **already narrowed
+/// the playing attempt** to `start` less the suspect stream ([`crate::player::recovery::suspect`], `Caps::without`)
+/// when it entered the rung, so the value the plan and the profile read no longer names that stream:
+/// [`VideoLane::AsPlanned`] rebuilds today's route ([`retranscode_contract`], the contract a track
+/// pick that the TV cannot decode asks for) and the audio comes back converted, [`VideoLane::Encode`]
+/// and [`VideoLane::Both`] ask for [`video_encode_contract`], and every seek and track pick after the landing plans from the
+/// same narrowed value. The install pref's write of a refused native audio (or of a counted proof) is
+/// the machine's separate `ConfirmRefusal`, persistence only. Plan on the frame thread, PMS on a worker
+/// ([`try_retranscode`]), install at the landing ([`install_recovery_landing`]).
+/// [`RecoveryDispatch::Refused`] / [`RecoveryVerdict::Refused`] leave the failure the pump held back
+/// (a forced direct play, which the viewer asked not to convert, is one).
+pub fn dispatch_refusal_conversion(ps: &mut PlaybackSession, offset_secs: i64, video: VideoLane) -> RecoveryDispatch {
+    let expected = worker_ticket();
+    if !rebuild_precheck(ps, &expected) {
+        return RecoveryDispatch::Refused;
+    }
+    let contract = match video {
+        VideoLane::AsPlanned => retranscode_contract(ps),
+        VideoLane::Encode => video_encode_contract(ps, true),
+        // Only `Caps::without(Video)` writes a ceiling, so one in the attempt means a video raster
+        // was lowered for this request (the facet rung's, or this rung's own).
+        VideoLane::Both => video_encode_contract(ps, !ps.attempt_caps().video_ceiling.is_empty()),
+    };
+    let Some(inputs) = prepare_retranscode_inputs(ps, &expected, offset_secs) else {
+        return RecoveryDispatch::Refused;
+    };
+    let Some(ticket) = begin_recovery_flight_start() else {
+        return RecoveryDispatch::Refused;
+    };
+    let offset_ns = offset_secs * 1_000_000_000;
+    begin_recovery_flight(ticket.serial, offset_ns);
+    if spawn_flight(
+        FlightOwner::Recovery(ticket),
+        offset_ns,
+        offset_ns,
+        Some(inputs),
+        ClaimWork::EncodeRecovery(contract, match video {
+            VideoLane::AsPlanned => super::backend_policy::OfferId::FEED_REFUSAL_AUDIO,
+            VideoLane::Encode => super::backend_policy::OfferId::FEED_REFUSAL_VIDEO,
+            VideoLane::Both => super::backend_policy::OfferId::FEED_REFUSAL_BOTH,
+        }),
+        RetranscodeFallback::RejectWith(REFUSAL_CONVERSION_REJECTED),
     ) {
         RecoveryDispatch::Flying { serial: ticket.serial }
     } else {
@@ -3978,8 +5777,10 @@ pub(super) struct AutoHlsInstalled {
 impl AutoHlsInstalled {
     /// The fields the install wrote to the session, on a projection: the reducer's restore point of
     /// a claim must describe the stream the landing installed ([`advance_claim_snapshot`]). HLS is
-    /// a full H.264/AAC encode: source FPS, Dolby Vision and E-AC3 JOC/Atmos belong to the Original
-    /// elementary streams and may not survive this route transition.
+    /// a full H.264/AAC encode that never copies the video (`transcode_query`: `copy_ok = !hls && …`,
+    /// so `directStream=0`): source FPS and E-AC3 JOC/Atmos belong to the Original elementary
+    /// streams and do not survive this route transition, and an HLS rung carries no Dolby Vision
+    /// declaration.
     pub(super) fn apply_to_projection(&self, p: &mut AppliedRouteProjection) {
         p.auto_original_watched = false;
         p.contract.remux = false;
@@ -4068,6 +5869,10 @@ pub(super) fn install_auto_hls_outcome(
         installed.apply_to_projection(&mut projection);
         install_route_projection(ps, &projection);
     }
+    // The route now plays the HLS recipe, not the Original's: a later reload, and a failed
+    // Original trial's rollback, must name the recipe the viewer is actually watching.
+    let recipe = ps.installed_feed_recipe();
+    let _ = ps.qualify_transition_feed_offer(recipe);
     if let LandedAutoHls::Encoded(applied) = &installed.landed {
         log_enhancement_outcome(
             Some((ps.stream_vcodec.as_str(), ps.stream_acodec.as_str())),
@@ -4086,6 +5891,12 @@ pub(super) fn install_auto_hls_outcome(
         crate::player::report::DeliveryClass::Hls,
         crate::player::report::rung_quality_class(rung),
         reason,
+        match reason {
+            // The source that never opened is replaced by HLS: the app's own recovery.
+            crate::player::report::DeliveryReason::OriginalOpenRollback
+            | crate::player::report::DeliveryReason::RefusalRecovery => crate::player::report::AttemptOrigin::Recovery,
+            _ => crate::player::report::AttemptOrigin::AutoHandoff,
+        },
     );
     Some(installed)
 }
@@ -4201,9 +6012,16 @@ pub(super) struct OriginalRecoveryPlan {
     flavour: RecoveryFlavour,
     /// Whether an enhancement this recovery carries is the subtitle-burning flavour.
     burn: bool,
+    /// The selected subtitle is one the candidate cannot show, so the replacement is a burn even
+    /// with no enhancement params and survives a refused enhancement.
+    subtitle_burn: bool,
     pub(super) client: Option<&'static plx_plex::plex::Client>,
+    /// The attempt's capability value ([`PlaybackSession::attempt_caps`]) the replacement remux's profile
+    /// and grading are derived from.
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     sid: ServerId,
     rk: String,
+    media_index: usize,
     part_id: i64,
     subtitle_sid: i64,
     /// The namespace the replacement encoder's session id is minted under.
@@ -4215,11 +6033,15 @@ pub(super) struct OriginalRecoveryPlan {
     /// read that carries the id of a remux that is still running with 503 (`docs/pms-api.md` M8).
     direct_session: String,
     src_acodec: String,
+    /// The file's own Dolby Vision record and declaration ([`PlaybackSession::src_dovi`]): what an
+    /// Original remux that copies the video hands on.
+    src_dovi: plx_data::metadata::Dovi,
+    src_dv_decision: plx_data::metadata::DvDecision,
 }
 
 impl OriginalRecoveryPlan {
     fn force_burn_for(&self, audio: plx_plex::plex::AudioEnhancements) -> bool {
-        audio.any() && self.burn
+        (audio.any() && self.burn) || self.subtitle_burn
     }
 
     /// Whether the PMS half will actually reach the server: a replacement remux's selection PUT and
@@ -4268,7 +6090,15 @@ fn plan_original_recovery(
         || (cause == RecoveryCause::EnhancementReleased && applied_quality() == Quality::Auto);
     let candidate = ps.auto_original.clone()?;
     let route = recovery_route(ps, &candidate);
-    let flavour = recovery_flavour(&candidate, recovery_want(ps, &candidate));
+    // A subtitle only the server's burn can show stays burned: the recovery is the Original
+    // burn (an enhanced one when wanted), never a direct play or plain remux that drops it.
+    let subtitle_burn = !candidate_shows_selected_subtitle(ps, &candidate);
+    let want = recovery_want(ps, &candidate);
+    let flavour = if subtitle_burn {
+        RecoveryFlavour::Remux(want)
+    } else {
+        recovery_flavour(&candidate, want)
+    };
     // The worker may have committed several HLS encoders since the main-thread plan was installed.
     // Mirror the physical route into the session before replacing it, otherwise the rollback pairs
     // the newest encoder id with the bootstrap URL/rung and reopens different media at a different
@@ -4305,14 +6135,19 @@ fn plan_original_recovery(
     Some(OriginalRecoveryPlan {
         flavour,
         burn: matches!(route, Some(EnhancementRoute::Burn)),
+        subtitle_burn,
         client: cur_client(ps),
+        caps: ps.attempt_caps(),
         sid: cur_sid(ps),
         rk: cur_rk(ps),
+        media_index: cur_media_index(ps),
         part_id: cur_part_id(ps),
             subtitle_sid: cur_sub_sid(ps),
         namespace,
         direct_session,
         src_acodec: ps.src_acodec.clone(),
+        src_dovi: ps.src_dovi,
+        src_dv_decision: ps.src_dv_decision,
         candidate,
         expected: expected.clone(),
         cause,
@@ -4338,6 +6173,10 @@ pub(super) struct PreparedOriginalRemux {
     force_burn: bool,
     vcodec: String,
     acodec: String,
+    /// The Dolby Vision the remux feeds: the file's own when the server copies the video, else
+    /// `NONE` ([`copied_video_dv`]).
+    dovi: plx_data::metadata::Dovi,
+    dv_decision: plx_data::metadata::DvDecision,
     enhancement: EnhancementOutcome,
     /// The route's ticket as the PMS half's own commit left it; the install re-checks it, because
     /// when the PMS half ran on a worker the route may have moved again before the landing drained.
@@ -4384,7 +6223,7 @@ pub(super) fn run_original_recovery(
             }
             AdmitOrPlainRemux::PlainRemux => {
                 let none = plx_plex::plex::AudioEnhancements::NONE;
-                match prepare_original_remux(off, plan, none, false, true)? {
+                match prepare_original_remux(off, plan, none, plan.subtitle_burn, true)? {
                     OriginalRemux::Prepared(prepared) => Some(OriginalRecoveryNet::Remux(prepared)),
                     OriginalRemux::RefusedToDirect => None,
                 }
@@ -4428,9 +6267,12 @@ pub(super) fn install_original_recovery(
         return None;
     }
     install_original_remux(ps, &plan.candidate, plan.watched, &prepared);
+    let _ = ps.qualify_resolved_feed_offer(
+        super::backend_policy::OfferId::FEED_ORIGINAL_TRIAL_REMUX,
+        CandidatePurpose::NewCandidate);
     rollback.replacement_encoder = prepared.replacement;
     set_pending_original(ps, rollback, automatic);
-    crate::player::clear_original_failure();
+    crate::player::route_fx::clear_original_failure(ps);
     crate::player::log(match plan.cause {
         RecoveryCause::Automatic => "auto: recovered Original remux; HLS encoder held pending frames",
         RecoveryCause::ManualOriginal => {
@@ -4445,6 +6287,7 @@ pub(super) fn install_original_recovery(
         crate::player::report::DeliveryClass::Remux,
         crate::player::report::QualityClass::Original,
         crate::player::report::DeliveryReason::OriginalRecovery,
+        plan.cause.attempt_origin(),
     );
     Some(AutoOriginalReload::Remux)
 }
@@ -4599,6 +6442,14 @@ fn recover_original_direct(
         s.stream_vcodec = candidate.vcodec.clone();
         // A server-default candidate carries no track facts; the file's own default codec
         // (`src_acodec`, the resolve's source argument) is what that direct play decodes.
+        //
+        // When a track IS picked, the demuxer feeds THAT track's bytes (the ordinal just set
+        // below via `set_audio_track`), so the declaration follows the picked track's codec —
+        // which is why releasing an E-AC3 JOC source to a picked AC3 track declares `ac3`, not
+        // the file's `eac3`. The FileFlows kill is the NO-pick case: PMS's track metadata still
+        // lists the default as `eac3` while the file on disk is the AAC remux, so the default
+        // play fed AAC frames under an `eac3` declaration. `fill_direct_plan` (plan.rs) carries
+        // the file's ground truth for that path; here the picked track's codec is the bytes.
         s.stream_acodec = candidate
             .audio
             .as_ref()
@@ -4606,17 +6457,32 @@ fn recover_original_direct(
         s.stream_fps = candidate.fps;
         s.stream_dovi = candidate.dovi;
         s.stream_dv_decision = candidate.dv_decision;
-        s.stream_immersive = candidate.audio.as_ref().is_some_and(|a| a.immersive);
+        // The immersive node raises the pipeline's Atmos mode for the E-AC3 being fed, so it is
+        // valid only when the FED bytes are E-AC3. When a track is picked, that's the picked
+        // track's codec (the `ac3` release above must NOT carry the node even though the FILE is
+        // an E-AC3 JOC source); with no track picked it's the file's default. A non-E-AC3 feed
+        // never carries the `immersive:ATMOS` node, which would wedge the audio ES the same way.
+        s.stream_immersive = candidate
+            .audio
+            .as_ref()
+            .is_some_and(|a| a.immersive)
+            && candidate
+                .audio
+                .as_ref()
+                .map_or_else(|| s.src_acodec.clone(), |a| a.codec.clone())
+                .eq_ignore_ascii_case("eac3");
     } };
-    crate::player::set_audio_track(
+    crate::player::route_fx::set_audio_track(
+        ps,
         candidate.audio.as_ref().map_or(-1, |a| a.ordinal),
     );
     crate::player::request_subtitle(candidate.subtitle_ordinal.unwrap_or(-1));
     set_pending_original(ps, rollback, automatic);
+    let _ = ps.qualify_transition_feed_offer(super::backend_policy::OfferId::FEED_ORIGINAL);
     // This is a new source attempt. A prior probe's typed failure explains the HLS route we
     // are leaving, not the replacement now being opened; a failure of this open republishes
     // its own exact status from the pump.
-    crate::player::clear_original_failure();
+    crate::player::route_fx::clear_original_failure(ps);
     crate::player::log(match cause {
         RecoveryCause::Automatic => {
             "auto: recovered Original direct play; HLS encoder held pending frames"
@@ -4633,6 +6499,7 @@ fn recover_original_direct(
         crate::player::report::DeliveryClass::Direct,
         crate::player::report::QualityClass::Original,
         crate::player::report::DeliveryReason::OriginalRecovery,
+        cause.attempt_origin(),
     );
     Some(AutoOriginalReload::Direct)
 }
@@ -4679,6 +6546,10 @@ struct PendingOriginal {
     /// `commit_in_place_route_projection`), so the restore site puts those two fields back the
     /// way it found them.
     previous: AppliedRouteProjection,
+    /// The exact previously admitted Feed recipe. The Original trial replaces `planned_feed_offer`
+    /// before its Load, so the route projection alone cannot distinguish two progressive remuxes
+    /// when rollback restores the earlier one.
+    previous_feed_offer: Option<super::backend_policy::OfferId>,
     /// A manual Original pick can adopt an automatic trial without issuing a second Load. The
     /// first decoded frame then transfers the applied contract to Manual and invalidates the
     /// Auto worker ticket which was captured when the trial started.
@@ -4740,6 +6611,7 @@ fn snapshot_route(ps: &PlaybackSession, encoder: String, offset_secs: i64) -> Pe
         replacement_encoder: String::new(),
         offset_secs,
         previous: route_projection(s),
+        previous_feed_offer: s.planned_feed_offer.or(s.admitted_feed_offer),
         adopted_by_user: false,
         charge_visible_switch_on_commit: false,
         deferred_quality: None,
@@ -4907,6 +6779,11 @@ pub fn rollback_original_recovery(ps: &mut PlaybackSession) -> Option<OriginalRo
     let kept_side_refused = ps.side_subs_refused;
     let kept_auto_original = ps.auto_original.clone();
     install_route_projection(ps, &pending.previous);
+    ps.planned_feed_offer = pending.previous_feed_offer;
+    ps.planned_feed_purpose = CandidatePurpose::RollbackExisting;
+    // Rollback has yet to obtain its new physical Start. The policy will spend its one
+    // rollback allowance only at admission, never by inheriting the old admitted marker.
+    ps.admitted_feed_offer = None;
     ps.cur_sub_sid = kept_subtitle_sid;
     ps.cur_sub_sidecar = kept_subtitle_sidecar;
     ps.cur_sub_client_drawable = kept_subtitle_drawable;
@@ -4959,8 +6836,8 @@ pub fn rollback_original_recovery(ps: &mut PlaybackSession) -> Option<OriginalRo
 /// somebody's server.
 pub fn drop_original_recovery(ps: &PlaybackSession) {
     if let Some(pending) = take_pending_original() {
-        // The only caller is real teardown, immediately after `scrobble_stop` took the active
-        // identity. During a direct handoff that identity is the trial's own session: a live
+        // The caller owns the active session's retirement. During a direct handoff that
+        // identity is the trial's own session: a live
         // hls encoder's id (== `pending.encoder`, so scrobble owns its one full stop/resource
         // close) or, from a remux or burn, a fresh id recorded as `replacement_encoder`. During a
         // remux handoff it is the new replacement. Either way, when `replacement_encoder` is set,
@@ -4972,13 +6849,25 @@ pub fn drop_original_recovery(ps: &PlaybackSession) {
     }
 }
 
+/// A termination can name the prior encoder if ABR switched while the report was in flight.
+/// Keep the current identity for the final timeline, but stop its producer now.
+pub(crate) fn retire_server_stopped_resources(ps: &PlaybackSession, wire_session: &str) {
+    let active = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner()).active.id.clone();
+    if active != wire_session && ps.auto_fixture_base.is_empty() {
+        if let Some(client) = cur_client(ps) {
+            stop_encoder_session(client, active);
+        }
+    }
+    drop_original_recovery(ps);
+}
+
 fn retire_replaced_encoder(ps: &PlaybackSession, encoder: String) {
     if encoder.is_empty() || !ps.auto_fixture_base.is_empty() {
         return;
     }
     let Some(client) = cur_client(ps) else { return };
     plx_base::task::spawn_small_or_inline(
-        "abr-original-stop",
+        "abr-orig-stop",
         const { &plx_base::task::BlockingLabel::new("encoder stop (worker thread refused)") },
         move || {
             let ok = client.transcode_stop(&encoder);
@@ -4999,7 +6888,7 @@ fn retire_hls_encoder_keep_source(ps: &PlaybackSession, encoder: String) {
     }
     let Some(client) = cur_client(ps) else { return };
     plx_base::task::spawn_small_or_inline(
-        "abr-original-physical-stop",
+        "abr-orig-pstop",
         const { &plx_base::task::BlockingLabel::new("encoder physical stop (worker thread refused)") },
         move || {
             let ok = client.transcode_stop_physical(&encoder);
@@ -5020,20 +6909,52 @@ pub fn is_transcoding(ps: &PlaybackSession) -> bool {
 pub fn play_refused(ps: &PlaybackSession) -> bool {
     ps.play_verdict.is_some()
 }
+/// Did the resolve refuse this as a PREVIEW that was not a direct play
+/// ([`PlayVerdict::PreviewNeedsDirectPlay`])? Our own refusal, not the server's.
+pub(crate) fn play_refused_as_preview(ps: &PlaybackSession) -> bool {
+    preview_refusal(ps).is_some()
+}
+/// Which condition refused this PREVIEW ([`PlayVerdict::PreviewNeedsDirectPlay`]'s `reason`), or
+/// `None` for any other session. The failure report's `playback.preview_refusal` tag reads it.
+pub(crate) fn preview_refusal(ps: &PlaybackSession) -> Option<plx_telemetry::telemetry::classes::PreviewRefusal> {
+    match ps.play_verdict {
+        Some(PlayVerdict::PreviewNeedsDirectPlay { reason }) => Some(reason),
+        _ => None,
+    }
+}
 /// The app/worker failed to produce a playable plan, as distinct from a PMS `/decision` refusal.
 /// There is no Engine whose pump could publish Error, so `player::state()` derives it beside the
 /// refusal case.
 pub fn play_resolution_failed(ps: &PlaybackSession) -> bool {
     ps.resolve_failed
 }
+/// The cause a failed Engine left behind when it was released under the standing read-out, if one
+/// was ([`PlaybackSession::engine_failure`]).
+pub(crate) fn engine_failure(ps: &PlaybackSession) -> Option<crate::player::RuntimeFailure> {
+    ps.engine_failure
+}
+/// Record that the Engine failed for good and is about to be released: its `cause`, and the
+/// position a retry resumes from (`resume_ns`, kept in the unpresented-resume slot a retry already
+/// reads, since the playhead goes with the Engine).
+pub fn note_engine_failure(ps: &mut PlaybackSession, cause: crate::player::RuntimeFailure, resume_ns: i64) {
+    { let s = &mut *ps; {
+        s.engine_failure = Some(cause);
+        s.requested_resume_ns = if cause == crate::player::RuntimeFailure::ServerStopped {
+            resume_ns.max(0)
+        } else {
+            s.requested_resume_ns.max(resume_ns.max(0))
+        };
+    } }
+}
 /// The refusal's own sentence for the read-out to quote — `None` when the server did not refuse,
 /// `Some("")` when it refused without saying why. MAIN THREAD (see [`PlaybackSession::play_verdict`]).
 ///
-/// Borrowed, not cloned: the read-out asks for this 2–3× on every frame of a failure (the HUD
+/// Borrowed, not cloned, for every sentence but the two Force Direct Play audio ones that name a
+/// codec (formatted on read): the read-out asks for this 2–3× on every frame of a failure (the HUD
 /// caption, the read-out itself, and the diagnostics panel when it is open), and every one of them
 /// only reads it. The borrow lives until the next main-thread write, which is `apply_plan` or
 /// `request_play` — neither of which can run inside a frame's draw.
-pub fn play_verdict(ps: &PlaybackSession) -> Option<&str> {
+pub fn play_verdict(ps: &PlaybackSession) -> Option<std::borrow::Cow<'_, str>> {
     ps.play_verdict.as_ref().map(PlayVerdict::text)
 }
 /// The verdict NUMBERS of a refusal the SERVER made at `/decision` — `None` when nothing was
@@ -5046,6 +6967,16 @@ pub fn server_refusal_codes(ps: &PlaybackSession) -> Option<DecisionCodes> {
         _ => None,
     }
 }
+/// Force Direct Play's read-out after the TV refused the audio the Load was fed (LG error 601 names
+/// no codec): the same verdict the planner's up-front refusal installs
+/// ([`ForcedFailure::Audio`], the codec by [`plx_data::metadata::friendly_codec`]), so both ways of
+/// "not played" name the codec alike (scheme of discussion #695, row 10). `codec` is the track's raw
+/// spelling. MAIN THREAD.
+pub fn name_refused_forced_audio(ps: &mut PlaybackSession, codec: &str) {
+    let friendly = plx_data::metadata::friendly_codec(codec);
+    crate::player::log(&format!("playback_policy: Force Direct Play refused audio codec {codec} ({friendly})"));
+    ps.play_verdict = Some(PlayVerdict::Forced(ForcedFailure::Audio { codec: friendly }));
+}
 /// Retire the refusal — "this playback request is withdrawn", the one thing besides a fresh
 /// resolve that ends a verdict's life. [`request_play`] clears it because a NEW item is being
 /// resolved; this is the other half, for leaving the player entirely.
@@ -5056,7 +6987,11 @@ pub fn server_refusal_codes(ps: &PlaybackSession) -> Option<DecisionCodes> {
 fn clear_play_verdict(ps: &mut PlaybackSession) {
     { let s = &mut *ps; {
         s.play_verdict = None;
+        { s.uri_recovery_pending = None; }
+        { s.pms_decline = None; }
         s.jail_load_blocked = false;
+        s.native_start_refused = None;
+        s.engine_failure = None;
         s.resolve_failed = false;
         s.requested_resume_ns = 0;
     } }
@@ -5100,6 +7035,31 @@ pub fn refuse_by_server_for_test(
     ps.src_vcodec = src_vcodec.to_owned();
     ps.src_acodec = src_acodec.to_owned();
 }
+/// Test-only: leave `ps` as [`apply_plan`] leaves a session RESOLVED for a hero preview, after the
+/// preview machinery has retired it (`preview` cleared, `resolved_as_preview` kept).
+#[cfg(any(test, feature = "test-support"))]
+pub fn resolve_as_preview_for_test(ps: &mut PlaybackSession) {
+    ps.preview = false;
+    ps.resolved_as_preview = true;
+}
+/// Test-only: mark `ps` as the hero preview's session, as `preview::start` does for a trailer.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mark_preview_for_test(ps: &mut PlaybackSession) {
+    ps.preview = true;
+}
+/// Test-only: mark `ps` as a direct-play playback the Auto Original supervisor watches, as
+/// `apply_plan` leaves it when Quality is Auto and the route is Original.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mark_auto_original_watched_for_test(ps: &mut PlaybackSession) {
+    ps.cur_auto_original_watched = true;
+}
+/// Test-only: mark `ps` as carrying a fixed quality ceiling (1080p), as a fixed quality's progressive
+/// re-encode over `start.mkv` leaves it (the delivery stays progressive, the ceiling is what makes
+/// it a re-encode and not Original).
+#[cfg(any(test, feature = "test-support"))]
+pub fn mark_fixed_quality_ceiling_for_test(ps: &mut PlaybackSession) {
+    ps.cur_contract.ceiling = plx_plex::plex::session::PlaybackQuality::P1080.ceiling();
+}
 /// Test-only: install a live transcode route (`encoder` session, optional remux, optional
 /// fixed-HLS delivery) the way a successful [`apply_plan`] leaves it.
 #[cfg(any(test, feature = "test-support"))]
@@ -5111,6 +7071,13 @@ pub fn install_transcode_for_test(ps: &mut PlaybackSession, remux: bool, hls: bo
     } else {
         plx_plex::plex::TranscodeDelivery::ProgressiveMkv
     };
+}
+/// Test-only: register `session` as the live encoder the next [`scrobble_stop`] closes, so a
+/// suite outside this crate can drive the stop worker's server-side `transcode_stop` leg (the one
+/// [`timeline_stop_landed`] must not wait for).
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_active_encoder_for_test(session: &str) {
+    install_active_encoder(session);
 }
 /// select the subtitle to BURN into any transcode of the current item (0 = none). This
 /// is the transcode path; direct-play uses the client renderer (player::request_subtitle).
@@ -5127,9 +7094,28 @@ pub fn cur_sub_sid(ps: &PlaybackSession) -> i64 {
 pub fn cur_sub_pref_lang(ps: &PlaybackSession) -> Option<&str> {
     ps.cur_sub_pref_lang.as_deref()
 }
+/// The show the playing item belongs to (`""` for anything but an episode): the key the track
+/// memory is written under.
+pub fn cur_show_rk(ps: &PlaybackSession) -> &str {
+    &ps.cur_show_rk
+}
+/// The playing item's Plex type (`episode`, `movie`, ...), empty when the server sent none. Track
+/// memory is written for `episode` only.
+pub fn cur_kind(ps: &PlaybackSession) -> &str {
+    &ps.cur_kind
+}
+/// A remembered subtitle was chosen for this play but the route shows none of it, so the
+/// Subtitles menu says why.
+pub fn cur_memory_note(ps: &PlaybackSession) -> bool {
+    ps.cur_memory_note
+}
 /// ratingKey of the currently-playing item (for /:/timeline progress reports).
 pub fn cur_rk(ps: &PlaybackSession) -> String {
     ps.cur_rk.clone()
+}
+/// The playing version's `mediaIndex` — see [`PlaybackSession::cur_media_index`].
+fn cur_media_index(ps: &PlaybackSession) -> usize {
+    ps.cur_media_index
 }
 /// The server the currently-playing item came from — see [`PlaybackSession::cur_sid`]. MAIN THREAD.
 ///
@@ -5151,6 +7137,35 @@ pub fn cur_sid(ps: &PlaybackSession) -> ServerId {
 pub fn swap_cur_sid_for_test(ps: &mut PlaybackSession, sid: ServerId) -> ServerId {
     { let s = &mut *ps; std::mem::replace(&mut s.cur_sid, sid) }
 }
+/// Test-only: install the playing item's ratingKey, the queue it came from and its Up Next directly.
+///
+/// In production the three have one writer, `apply_plan` (the queue and Up Next from the plan's `QueueInfo`), so a suite
+/// elsewhere that needs "this episode is playing, with a neighbour on each side" sets it through here, as it sets the
+/// server through [`swap_cur_sid_for_test`]. The player's accessibility ids read the neighbours and the key it
+/// hands them (`HudCommand::plays_rk`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_queue_for_test(ps: &mut PlaybackSession, cur_rk: &str, rows: Vec<plx_plex::plex::QueueRow>, up_next: Option<UpNext>) {
+    ps.cur_rk = cur_rk.to_owned();
+    ps.queue = rows;
+    ps.up_next = up_next.map(std::sync::Arc::new);
+}
+/// Test-only: record the request a Try again repeats ([`retry_rk`]) without a plan having landed, as a play that is
+/// asked for and fails before `apply_plan` leaves the session. Does not touch `cur_rk`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_request_for_test(ps: &mut PlaybackSession, rk: &str) {
+    ps.request = Some(PlaybackRequest {
+        sid: ServerId::UNSET,
+        rk: rk.to_owned(),
+        part: String::new(),
+        vcodec: String::new(),
+        acodec: String::new(),
+        title: String::new(),
+        ctx: String::new(),
+        preview: false,
+        version: None,
+        show_rk: String::new(),
+    });
+}
 /// The `Client` for the currently-playing item's server, `None` before the first play (or after a
 /// plan that never resolved). The main-thread twin of `client_for(env.sid)` on the resolve worker
 /// — every in-playback PMS call in this file goes through one of the two, and none through
@@ -5167,13 +7182,18 @@ pub fn cur_audio_sid(ps: &PlaybackSession) -> i64 {
 /// The currently-playing item's Part id. Written once per item by `build_stream` from its own
 /// `part` argument. In-playback callers (audio switch, subtitle toggle, retranscode) want this;
 /// `build_stream` must pass its freshly-derived local instead, since this is not yet updated
-/// for the item being started.
-fn cur_part_id(ps: &PlaybackSession) -> i64 {
+/// for the item being started. Also read outside the route: the scrub preview names its BIF
+/// stills by it. 0 with no item.
+pub fn cur_part_id(ps: &PlaybackSession) -> i64 {
     ps.cur_part_id
 }
 /// The stable app-owned playback generation (and the first encoder's PMS session id).
 pub fn sess(ps: &PlaybackSession) -> String {
-    ps.sess.clone()
+    playback_session_id(ps).to_owned()
+}
+
+pub(crate) fn playback_session_id(ps: &PlaybackSession) -> &str {
+    &ps.sess
 }
 pub fn pq_id(ps: &PlaybackSession) -> String {
     ps.pq_id.clone()
@@ -5189,27 +7209,116 @@ pub fn stream_vcodec(ps: &PlaybackSession) -> String {
 pub fn stream_acodec(ps: &PlaybackSession) -> String {
     ps.stream_acodec.clone()
 }
+/// The carried audio track when it is the codec the stream declares, in any spelling of it
+/// (`devcaps::audio_codec_id`: PMS's `dca` is the pipeline's `dts`), else `None`. A native track
+/// switch moves only `stream_acodec`, so a switch between two tracks of one codec and different widths
+/// still reads the first one's facts.
+fn carried_audio_of_stream(ps: &PlaybackSession) -> Option<&CarriedAudio> {
+    let declared = plx_os::devcaps::audio_codec_id(&ps.stream_acodec);
+    ps.cur_audio.as_ref().filter(|a| plx_os::devcaps::audio_codec_id(&a.codec) == declared)
+}
+/// What an Opus Load declares about its audio, and where each fact comes from: the ONE derivation
+/// [`stream_achannels`] and the Load's `opusInfo` log line both read ([`opus_lane`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpusLane {
+    /// The channel count the Load declares (`contents.opusInfo.channels`); 0 is not a layout, and the
+    /// Load is refused.
+    pub width: i64,
+    /// The server converted the audio to the declared codec (a live transcode whose carried track is
+    /// another codec), so the carried width is the SOURCE's and `width` is the one asked for.
+    pub converted: bool,
+    /// The carried track's channel count, whatever its codec (0: no track, or an unstated count).
+    pub source: i64,
+    /// The Opus bound the profile asked the server for ([`plx_os::devcaps::Caps::opus_lane_bound`]).
+    pub bound: u32,
+}
+
+/// The width an Opus Load declares and why ([`OpusLane`]); read only while the stream declares Opus.
+///
+/// * The carried track is Opus (a direct play, or a server remux that kept the codec): its own width.
+/// * A **server conversion** to Opus (`is_transcoding`, and the carried track is another codec): the plan
+///   carries the SOURCE track while the stream declares the `/decision` OUTPUT codec, so the carried
+///   width is not the output's. The Load declares the width the profile asked the server for
+///   ([`plx_os::devcaps::Caps::opus_lane_width`]: the source's, held to the attempt's Opus bound,
+///   stereo when unknown). The PMS output width itself is not measured.
+/// * Anything else with a mismatching track (a native track switch in a direct play or Force Direct Play
+///   moves only the declared codec): 0, never a guessed stereo header over another track's packets
+///   (#917, #918).
+pub fn opus_lane(ps: &PlaybackSession) -> OpusLane {
+    let carried = ps.cur_audio.as_ref();
+    let source = carried.map_or(0, |a| a.channels);
+    let caps = ps.attempt_caps();
+    let bound = caps.opus_lane_bound();
+    let converted = is_transcoding(ps) && carried_audio_of_stream(ps).is_none();
+    let width = if converted {
+        i64::from(caps.opus_lane_width(source))
+    } else {
+        carried_audio_of_stream(ps).map_or(0, |a| a.channels)
+    };
+    OpusLane { width, converted, source, bound }
+}
+/// The channel count the stream's Load declares: the carried audio track's when it is the codec the
+/// stream declares, else 0, except that a server-converted Opus lane declares the width the server was
+/// asked for ([`opus_lane`]). An Opus Load needs it (`opusInfo`), and the no-downmix rule reads it
+/// ([`plx_os::devcaps::app_decode_mixes_down`]: 0 is unknown, which counts as a downmix).
+pub fn stream_achannels(ps: &PlaybackSession) -> i64 {
+    if plx_os::devcaps::audio_codec_id(&ps.stream_acodec) == "opus" {
+        opus_lane(ps).width
+    } else {
+        carried_audio_of_stream(ps).map_or(0, |a| a.channels)
+    }
+}
+/// What the pipeline was fed, for the failed-open ladder ([`crate::player::recovery::OpenFacts`]):
+/// the stream's audio codec and the channel count the Load declares for it ([`stream_achannels`]: the
+/// carried track's, 0 when that track is not the declared codec, except that an Opus lane the server
+/// converted declares the width it was asked for, [`opus_lane`]). `None` while no audio codec is declared. Beside
+/// [`stream_achannels`] so the session keeps its fields private.
+pub fn stream_audio(ps: &PlaybackSession) -> Option<crate::player::recovery::StreamAudio> {
+    let codec = stream_acodec(ps);
+    (!codec.is_empty()).then(|| crate::player::recovery::StreamAudio {
+        codec,
+        channels: u32::try_from(stream_achannels(ps)).unwrap_or(0),
+        app_decoded_lossy: stream_pcm_is_lossy(ps),
+    })
+}
+/// The SOURCE's video, when the pipeline was fed it whole, for the failed-open ladder
+/// ([`crate::player::recovery::OpenFacts`]): a direct play, or a server remux that copies it
+/// (the rule [`video_copy_fps`] states). `None` for an encoded video (a re-encode flavour, even when
+/// PMS actually copied: the session cannot tell, and the ladder is then conservative), while no
+/// video codec is declared, and for a raster the server never measured (the width or height is 0,
+/// which names no facet). Beside [`stream_audio`] so the session keeps its fields private.
+pub fn stream_video(ps: &PlaybackSession) -> Option<crate::player::recovery::StreamVideo> {
+    let fed_whole = !is_transcoding(ps) || (ps.cur_contract.remux && !ps.cur_contract.no_video_copy);
+    let codec = stream_vcodec(ps);
+    let (_, width, height) = ps.cur_src;
+    (fed_whole && !codec.is_empty()).then(|| crate::player::recovery::StreamVideo {
+        codec: codec.to_ascii_lowercase(),
+        width: u32::try_from(width).unwrap_or(0),
+        height: u32::try_from(height).unwrap_or(0),
+    })
+}
 /// direct-play source video fps for the Load esInfo (0 = unknown/transcode → omit)
 pub fn stream_fps(ps: &PlaybackSession) -> f64 {
     ps.stream_fps
 }
-/// The direct-played file's Dolby Vision layering, for the Load payload's `DolbyHdrInfo` node.
-/// `Dovi::NONE` for anything the server is transcoding or remuxing, and for a DV file we refused
-/// to declare — in every one of those cases the payload must say nothing.
+/// The fed file's Dolby Vision layering, for the Load payload's `DolbyHdrInfo` node: a direct
+/// play's, or a server remux's that copies the video. `Dovi::NONE` for a re-encode and for a DV
+/// file we refused to declare — there the payload must say nothing.
 pub fn stream_dovi(ps: &PlaybackSession) -> plx_data::metadata::Dovi {
     let s = &*ps;
-    if s.stream_vcodec.eq_ignore_ascii_case("hevc") {
+    if plx_data::metadata::dv_video_codec(&s.stream_vcodec) {
         s.stream_dovi
     } else {
         // Last-line consistency guard for dev declarations and future route mutations: the LG
-        // payload cannot truthfully describe Dolby Vision on a non-HEVC elementary stream.
+        // payload cannot truthfully describe Dolby Vision on an elementary stream that is neither
+        // HEVC nor AV1.
         plx_data::metadata::Dovi::NONE
     }
 }
 /// The capability and presentation frozen into this installed route. Unlike the raw DOVI metadata,
 /// this is the value the Load payload must consume without consulting the live capability cache.
 pub fn stream_dv_presentation(ps: &PlaybackSession) -> plx_data::metadata::DvPresentation {
-    if ps.stream_vcodec.eq_ignore_ascii_case("hevc") {
+    if plx_data::metadata::dv_video_codec(&ps.stream_vcodec) {
         ps.stream_dv_decision.presentation
     } else {
         plx_data::metadata::DvPresentation::NotDv
@@ -5220,13 +7329,71 @@ pub fn stream_dv_decision(ps: &PlaybackSession) -> plx_data::metadata::DvDecisio
     ps.stream_dv_decision
 }
 
-/// Server output (HLS encode, progressive encode or container remux) carries no client-frozen
-/// source declaration. Centralizing the paired reset prevents a future route mutation from
-/// clearing the raw metadata while leaving a stale `Declare` behind for Load.
-fn clear_output_dv(session: &mut PlaybackSession) {
-    session.stream_dovi = plx_data::metadata::Dovi::NONE;
-    session.stream_dv_decision = plx_data::metadata::DvDecision::NONE;
+/// Which first picture the Dolby Vision splitter of the set this play runs on takes: the current
+/// ATTEMPT's caps value ([`PlaybackSession::attempt_caps`]), never the process-wide
+/// `devcaps::caps()`, so a test plants the row with [`begin_attempt_for_test`] and the route reads no
+/// global (the player's `feed_open::dv_landing_plan` asks this when it arms the Dolby Vision guard).
+pub fn dv_first_picture(ps: &PlaybackSession) -> plx_os::devcaps::DvFirstPicture {
+    ps.attempt_caps().dv_first_picture
 }
+
+/// What Dolby Vision Off would have planned for the stream `dovi`/`vcodec` describes, keeping the
+/// probed `capability`: `NotDv` for a usable base layer, a refusal for a Profile 5 or an unconverted
+/// dual layer.
+fn dv_off_decision_for(
+    capability: plx_os::devcaps::dv::DvCapability,
+    dovi: plx_data::metadata::Dovi,
+    vcodec: &str,
+) -> plx_data::metadata::DvDecision {
+    frozen_dv_decision(plx_plex::plex::session::DolbyVisionMode::Off, capability, dovi, vcodec)
+}
+
+/// [`dv_off_decision_for`] the installed route's stream.
+fn dv_off_decision(ps: &PlaybackSession) -> plx_data::metadata::DvDecision {
+    dv_off_decision_for(ps.stream_dv_decision.capability, ps.stream_dovi, &ps.stream_vcodec)
+}
+
+/// Whether the installed route's Dolby Vision declaration can be withdrawn: it declares a node, and
+/// what Dolby Vision Off would have planned for the same stream is the base layer (a Profile 5, or an
+/// unconverted dual layer, has none, so there is nothing to fall back to).
+pub fn dv_withdrawable(ps: &PlaybackSession) -> bool {
+    stream_dv_presentation(ps).declared().is_some()
+        && dv_off_decision(ps).presentation == plx_data::metadata::DvPresentation::NotDv
+}
+
+/// Withdraw the installed route's Dolby Vision declaration for the rest of this play: rewrite the
+/// stored presentation to exactly what Dolby Vision Off would have planned, keeping the probed
+/// capability, so every later Load of the route (seek, reload, audio switch, recovery, foreground
+/// restore) is a base-layer play. Returns whether anything changed. `why` is the logged reason.
+///
+/// The file's own declaration (`src_dv_decision`) follows, so a rebuild that copies the video and
+/// re-derives the stream's declaration from it ([`copied_video_dv`]) keeps the node off, and so does
+/// the stored Auto Original candidate (`auto_original`): [`recover_original_direct`] installs its
+/// `dv_decision` verbatim, so a play that fell to HLS and came back to Original (Auto's recovery, a
+/// manual Original re-pick, an enhancement release) would otherwise declare the node again and meet
+/// the same landing. The scope is this play request's installed route and what it can return to, not
+/// the next play. The write goes to `ps` directly, the way `set_stream_acodec` does for the audio
+/// switch: it is a mutation of the installed route, not a transaction.
+pub fn withdraw_dv_presentation(ps: &mut PlaybackSession, why: &str) -> bool {
+    if !dv_withdrawable(ps) {
+        return false;
+    }
+    let off = dv_off_decision(ps);
+    ps.stream_dv_decision = off;
+    if ps.src_dv_decision.presentation.declared().is_some() {
+        ps.src_dv_decision = dv_off_decision_for(ps.src_dv_decision.capability, ps.src_dovi, &ps.stream_vcodec);
+    }
+    if let Some(c) = ps.auto_original.as_mut().filter(|c| c.dv_decision.presentation.declared().is_some()) {
+        c.dv_decision = dv_off_decision_for(c.dv_decision.capability, c.dovi, &c.vcodec);
+    }
+    crate::player::log(&format!(
+        "dv: capability={} presentation={} (withdrawn: {why})",
+        off.capability.label(),
+        off.presentation.label(),
+    ));
+    true
+}
+
 /// Is the audio being fed a Dolby Atmos stream? — the Load payload's `contents.immersive` node.
 /// See [`PlaybackSession::stream_immersive`].
 pub fn stream_immersive(ps: &PlaybackSession) -> bool {
@@ -5235,10 +7402,449 @@ pub fn stream_immersive(ps: &PlaybackSession) -> bool {
     // source flag exists, so neither diagnostics nor Load may repeat that source-only claim.
     s.stream_acodec.eq_ignore_ascii_case("eac3") && s.stream_immersive
 }
+
+/// The PCM a Load must declare for audio the app decodes itself
+/// (`devcaps::PCM_AUDIO_CODECS` — FLAC, ALAC, LPCM — and the lossy entries when the attempt's
+/// capability value decodes the track in the app,
+/// [`Caps::app_decodes_lossy_track`](plx_os::devcaps::Caps::app_decodes_lossy_track)).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PcmFormat {
+    /// What the Load declares: always a rate of `devcaps::PCM_SAMPLE_RATES` (the input's table).
+    pub sample_rate: u32,
+    /// 16 or 32: a source of up to 16 bits at a table rate is fed as S16LE, anything deeper (or
+    /// unstated) as S32LE, both bit-exact (the decoder left-justifies 24-bit samples in 32). A stream
+    /// the app resamples (`source_rate != sample_rate`) is always 32: the resampled value is not on
+    /// the 16-bit grid, whatever the source's depth.
+    pub bits: u32,
+    pub channels: u32,
+    /// The track's own rate. Equal to `sample_rate` at a table rate (the bit-exact path); above the
+    /// table's top it is what the app resamples FROM (`devcaps::pcm_load_rate` names the rate it
+    /// resamples TO). `ff_pcm::PcmDecoder::open` refuses a file whose rate is not this one.
+    pub source_rate: u32,
+}
+
+impl PcmFormat {
+    /// What the lossy decode outputs (`ff_pcm::PcmDecoder`): the source downmixed to stereo and
+    /// resampled to 48 kHz, as 16-bit samples — the same shape the speed decoder feeds. Its
+    /// `source_rate` is 48 kHz by convention: the lossy decode accepts any source rate (it is the
+    /// lossless declaration that `source_rate` is checked against).
+    pub const STEREO_48K: PcmFormat = PcmFormat { sample_rate: 48_000, bits: 16, channels: 2, source_rate: 48_000 };
+}
+
+/// [`PcmFormat`] for the stream now being fed, `None` when it is not app-decoded audio.
+/// `Some(Err(why))` when it IS, but the facts the Load needs are missing or outside the PCM path:
+/// the caller refuses the Load rather than declare a rate the decoder would contradict.
+pub fn stream_pcm(ps: &PlaybackSession) -> Option<Result<PcmFormat, String>> {
+    let id = plx_os::devcaps::audio_codec_id(&ps.stream_acodec);
+    if plx_os::devcaps::PCM_AUDIO_CODECS.split(',').any(|c| c == id) {
+        return Some(pcm_format_of(ps.cur_audio.as_ref(), &id));
+    }
+    // A lossy codec the attempt's value lets the app decode: its output has one shape, whatever
+    // the source is, so no track fact is needed (and none can contradict it).
+    stream_pcm_is_lossy(ps).then_some(Ok(PcmFormat::STEREO_48K))
+}
+
+/// Whether the stream now being fed is one the app decodes LOSSILY (a codec the attempt's policy
+/// admits that is in force, or that Force Direct Play has no native path for): what `ff` is told so a
+/// lossless PCM Load never makes it decode a DTS stream in the app. The carried track's channels and
+/// rate are used when it is the declared codec, else unknown (`0`). Under Force Direct Play the decode is
+/// stereo only: a surround track, and one whose width is unknown, is not mixed down
+/// (`Caps::app_may_mix_down`), so this reads false there and the Load stays native.
+pub fn stream_pcm_is_lossy(ps: &PlaybackSession) -> bool {
+    let (channels, rate) = carried_audio_of_stream(ps).map_or((0, 0), |a| (a.channels, a.sample_rate));
+    ps.attempt_caps().app_decodes_lossy_track(&ps.stream_acodec, channels, rate, forced_direct_play(ps))
+}
+
+/// PURE half of [`stream_pcm`]: the carried track must be the same codec, with a stated rate and
+/// one or two channels. The rate is declared as `devcaps::pcm_load_rate` names it: a table rate is
+/// itself (bit-exact, `bits` 16 iff PMS says `bitDepth` is 1..=16, else 32), and every rate above the
+/// table's top is the rate the app RESAMPLES it to, with `source_rate` the track's own and `bits` 32
+/// (the resampled value is not on the 16-bit grid, a 16-bit source included). Only a rate that is not
+/// positive, or below the top and not in the table, is refused.
+pub(crate) fn pcm_format_of(audio: Option<&CarriedAudio>, codec: &str) -> Result<PcmFormat, String> {
+    let Some(a) = audio else {
+        return Err(format!("{codec}: the playing track's facts are unknown"));
+    };
+    if plx_os::devcaps::audio_codec_id(&a.codec) != codec {
+        return Err(format!("{codec}: the carried track is {:?}", a.codec));
+    }
+    let max = i64::from(plx_os::devcaps::PCM_MAX_CHANNELS);
+    if !(1..=max).contains(&a.channels) {
+        return Err(format!("{codec}: {} channels (the PCM path carries 1..={max})", a.channels));
+    }
+    let Some(sample_rate) = plx_os::devcaps::pcm_load_rate(a.sample_rate) else {
+        return Err(format!("{codec}: sampling rate {} cannot be made one the PCM input names", a.sample_rate));
+    };
+    // `pcm_load_rate` accepted it, so the rate is in 1..=i32::MAX
+    let source_rate = a.sample_rate as u32;
+    let bits = if source_rate != sample_rate || !(1..=16).contains(&a.bit_depth) { 32 } else { 16 };
+    Ok(PcmFormat { sample_rate, bits, channels: a.channels as u32, source_rate })
+}
+
+#[cfg(test)]
+mod pcm_format_tests {
+    use super::*;
+
+    fn flac(channels: i64, rate: i64, bits: i64) -> CarriedAudio {
+        CarriedAudio {
+            sid: 7, ordinal: 4, codec: "flac".into(), channels,
+            can_normalize_loudness: false, immersive: false, sample_rate: rate, bit_depth: bits,
+        }
+    }
+
+    #[test]
+    fn a_stereo_flac_declares_its_own_rate_and_a_bit_exact_width() {
+        assert_eq!(pcm_format_of(Some(&flac(2, 48_000, 16)), "flac"),
+            Ok(PcmFormat { sample_rate: 48_000, bits: 16, channels: 2, source_rate: 48_000 }));
+        assert_eq!(pcm_format_of(Some(&flac(1, 44_100, 24)), "flac"),
+            Ok(PcmFormat { sample_rate: 44_100, bits: 32, channels: 1, source_rate: 44_100 }));
+        // an unstated depth is fed wide: never truncate a sample nobody measured
+        assert_eq!(pcm_format_of(Some(&flac(2, 48_000, 0)), "flac").unwrap().bits, 32);
+    }
+
+    /// ALAC and LPCM declare the same PCM shape, from their own track facts; the carried track's
+    /// spelling (`pcm_s24le`) need not equal the codec id (`pcm`), only canonicalise to it.
+    #[test]
+    fn alac_and_lpcm_declare_the_same_shape_as_flac() {
+        let track = |codec: &str, channels, rate, bits| CarriedAudio { codec: codec.into(), ..flac(channels, rate, bits) };
+        assert_eq!(pcm_format_of(Some(&track("alac", 2, 44_100, 16)), "alac"),
+            Ok(PcmFormat { sample_rate: 44_100, bits: 16, channels: 2, source_rate: 44_100 }));
+        assert_eq!(pcm_format_of(Some(&track("alac", 2, 48_000, 24)), "alac"),
+            Ok(PcmFormat { sample_rate: 48_000, bits: 32, channels: 2, source_rate: 48_000 }));
+        assert_eq!(pcm_format_of(Some(&track("pcm_s24le", 2, 48_000, 24)), "pcm"),
+            Ok(PcmFormat { sample_rate: 48_000, bits: 32, channels: 2, source_rate: 48_000 }));
+        assert_eq!(pcm_format_of(Some(&track("pcm_s16be", 2, 44_100, 16)), "pcm"),
+            Ok(PcmFormat { sample_rate: 44_100, bits: 16, channels: 2, source_rate: 44_100 }));
+        assert!(pcm_format_of(Some(&track("alac", 6, 48_000, 16)), "alac").is_err());
+        // above the table: resampled by the app, declared at the table's rate as S32
+        assert_eq!(pcm_format_of(Some(&track("pcm_s24le", 2, 96_000, 24)), "pcm"),
+            Ok(PcmFormat { sample_rate: 48_000, bits: 32, channels: 2, source_rate: 96_000 }));
+        assert_eq!(pcm_format_of(Some(&track("alac", 2, 96_000, 24)), "alac"),
+            Ok(PcmFormat { sample_rate: 48_000, bits: 32, channels: 2, source_rate: 96_000 }));
+        assert!(pcm_format_of(Some(&track("flac", 2, 48_000, 16)), "pcm").is_err(), "a track of another codec");
+    }
+
+    /// **A hi-res lossless stereo track is declared as the PCM input's own top rate, in a 32-bit sample**: the app
+    /// resamples it (`ff_pcm`), so the Load names the rate the decoder emits (`sample_rate`) and the
+    /// track keeps its own (`source_rate`, what the decoder checks the file against). The width is 32 whenever the
+    /// rate differs, from a 16-bit source too: the resampled value is not on the 16-bit grid. A table rate is unchanged.
+    #[test]
+    fn a_hi_res_stereo_track_is_declared_at_the_tables_top_rate_in_32_bits() {
+        let shape = |channels, rate, bits| pcm_format_of(Some(&flac(channels, rate, bits)), "flac");
+        let fmt = |sample_rate, bits, channels, source_rate| Ok(PcmFormat { sample_rate, bits, channels, source_rate });
+        assert_eq!(shape(2, 96_000, 24), fmt(48_000, 32, 2, 96_000));
+        assert_eq!(shape(2, 192_000, 24), fmt(48_000, 32, 2, 192_000));
+        assert_eq!(shape(2, 88_200, 16), fmt(44_100, 32, 2, 88_200), "a 16-bit source resampled is still S32");
+        assert_eq!(shape(2, 176_400, 24), fmt(44_100, 32, 2, 176_400));
+        assert_eq!(shape(2, 96_000, 0), fmt(48_000, 32, 2, 96_000), "an unstated depth");
+        assert_eq!(shape(1, 96_000, 24), fmt(48_000, 32, 1, 96_000), "mono is kept mono");
+        assert_eq!(shape(2, 705_600, 24), fmt(44_100, 32, 2, 705_600), "there is no rate ceiling");
+        assert_eq!(shape(2, i64::from(i32::MAX), 24), fmt(48_000, 32, 2, i32::MAX as u32));
+        // a table rate is itself, bit-exact, and its own source
+        assert_eq!(shape(2, 48_000, 16), fmt(48_000, 16, 2, 48_000));
+        assert_eq!(shape(1, 44_100, 24), fmt(44_100, 32, 1, 44_100));
+        // not made into a table rate: surround (the server converts it), no rate, a rate below the top that the table lacks
+        assert!(shape(6, 96_000, 24).is_err());
+        assert!(shape(2, 0, 24).is_err());
+        assert!(shape(2, 11_025, 16).is_err());
+        // ALAC and LPCM, whatever the spelling of the codec
+        let track = |codec: &str, rate| CarriedAudio { codec: codec.into(), ..flac(2, rate, 24) };
+        for (spelling, id) in [("alac", "alac"), ("pcm_s24le", "pcm"), ("pcm_s32be", "pcm"), ("pcm_s16le", "pcm")] {
+            assert_eq!(pcm_format_of(Some(&track(spelling, 96_000)), id), fmt(48_000, 32, 2, 96_000), "{spelling}");
+        }
+    }
+
+    /// **DTS in force** (S4 PR 2): the Load declares the SHAPE THE DECODER OUTPUTS, stereo
+    /// 48 kHz S16, whatever the source's channels and rate; and only on an attempt whose capability
+    /// value turned the lossy decode on. Off, DTS declares nothing here and stays native.
+    #[test]
+    fn dts_declares_stereo_48k_only_when_the_attempt_has_the_gate_on() {
+        let mut ps = PlaybackSession::IDLE;
+        set_stream_codecs(&mut ps, "h264", "dts");
+        assert_eq!(stream_pcm(&ps), None, "no attempt begun: the assumed value, gate off");
+        ps.begin_attempt(std::sync::Arc::new(plx_os::devcaps::Caps::assumed()));
+        assert_eq!(stream_pcm(&ps), None, "gate off");
+        assert!(!stream_pcm_is_lossy(&ps));
+        assert!(!stream_audio(&ps).unwrap().app_decoded_lossy, "the ladder's fact: native DTS is the pipeline's");
+        ps.begin_attempt(std::sync::Arc::new(plx_os::devcaps::Caps::assumed().with_app_lossy()));
+        for spelling in ["dts", "dca", "DTS"] {
+            set_stream_codecs(&mut ps, "h264", spelling);
+            assert_eq!(stream_pcm(&ps), Some(Ok(PcmFormat::STEREO_48K)), "{spelling}");
+            assert!(stream_pcm_is_lossy(&ps), "{spelling}");
+            assert!(stream_audio(&ps).unwrap().app_decoded_lossy, "{spelling}: the ladder must not name a native facet");
+        }
+        set_stream_codecs(&mut ps, "h264", "flac");
+        assert!(!stream_pcm_is_lossy(&ps), "a lossless PCM Load is never the lossy one");
+        assert_eq!(PcmFormat::STEREO_48K, PcmFormat { sample_rate: 48_000, bits: 16, channels: 2, source_rate: 48_000 });
+        let out = plx_media_codecs::pcm::STEREO_48K;
+        assert_eq!(
+            (PcmFormat::STEREO_48K.sample_rate, PcmFormat::STEREO_48K.bits, PcmFormat::STEREO_48K.channels),
+            (out.rate, out.bits, out.channels),
+            "the shape the Load declares is the one the decoder outputs"
+        );
+        for other in ["ac3", "eac3", "aac", "mlp"] {
+            set_stream_codecs(&mut ps, "h264", other);
+            assert_eq!(stream_pcm(&ps), None, "{other}");
+        }
+    }
+
+    /// **The Load declares PCM where the attempt decodes the track in the app, not where the policy
+    /// merely admits it.** On a table that was read and admits DTS (`Measured`), Auto feeds DTS natively
+    /// and Force Direct Play does too where the set has a DTS row; only Force Direct Play on a set with
+    /// no native path, or a codec the recovery rung put in force, is PCM. The ladder's fact
+    /// (`stream_audio`) and the track menu's mark (`audio_decoded_in_app`) read the same answer. The app
+    /// decodes to stereo, so under Force Direct Play that is a track of at most two channels only (owner
+    /// decision 2026-10-28: the app never mixes a surround source down by default); Auto's rung and the
+    /// `appdecodelossy` debug trigger are not Force and keep the surround decode.
+    #[test]
+    fn dts_declares_stereo_48k_only_where_the_attempt_decodes_it_in_the_app() {
+        use plx_os::devcaps::{AppLossy, Caps};
+        let measured = Caps { app_lossy: AppLossy::Measured, ..Caps::assumed() };
+        let native_row = Caps { audio: "aac,ac3,eac3,dts".into(), audio_channels: [("dts".into(), 6)].into(), ..measured.clone() };
+        let dts = |channels: i64| CarriedAudio { codec: "dca".into(), ..flac(channels, 48_000, 0) };
+        let shape = |caps: &Caps, forced: bool, channels: i64| {
+            let mut ps = PlaybackSession::IDLE;
+            ps.direct_play_mode = if forced { DirectPlayMode::Forced } else { DirectPlayMode::Auto };
+            ps.begin_attempt(std::sync::Arc::new(caps.clone()));
+            set_stream_codecs(&mut ps, "h264", "dca");
+            set_carried_audio_for_test(&mut ps, dts(channels));
+            let fact = stream_audio(&ps).unwrap().app_decoded_lossy;
+            assert_eq!(fact, stream_pcm_is_lossy(&ps));
+            assert_eq!(fact, audio_decoded_in_app(&ps, "dca", channels, 48_000));
+            stream_pcm(&ps)
+        };
+        let stereo = Some(Ok(PcmFormat::STEREO_48K));
+        assert_eq!(shape(&measured, false, 6), None, "Auto: admitted is not in force");
+        assert_eq!(shape(&measured, true, 2), stereo, "Forced, no native path, a stereo track: the app decodes it");
+        assert_eq!(shape(&measured, true, 1), stereo, "and a mono one");
+        for channels in [3, 6, 8, 0] {
+            assert_eq!(shape(&measured, true, channels), None, "Forced, {channels} channels: no downmix, the refusal reads out");
+        }
+        assert_eq!(shape(&Caps::assumed(), true, 2), None, "Forced, no policy: native (and the planner refuses it first)");
+        assert_eq!(shape(&native_row, true, 6), None, "Forced on a set that decodes DTS keeps doing so");
+        assert_eq!(shape(&native_row, false, 6), None);
+        let in_force = native_row.clone().with_app_lossy_for("dts");
+        assert_eq!(shape(&in_force, false, 6), stereo,
+            "the rung's value: the set's decoder was refused, so Auto's attempt declares PCM too, the last rung's surround downmix");
+        assert_eq!(shape(&in_force, true, 6), None, "but Force Direct Play never takes a surround track down, even with the codec in force");
+        assert_eq!(shape(&in_force, true, 2), stereo);
+        assert_eq!(shape(&Caps::assumed().with_app_lossy(), false, 6), stereo, "the debug force-on");
+        assert_eq!(shape(&Caps::assumed().with_app_lossy(), true, 6), stereo, "and its explicit override of Force's rule");
+        // The carried track's own facts decide the rate-bound rows: a 96 kHz Vorbis is not decoded here.
+        let mut ps = PlaybackSession::IDLE;
+        ps.begin_attempt(std::sync::Arc::new(Caps::assumed().with_app_lossy()));
+        set_stream_codecs(&mut ps, "h264", "vorbis");
+        let vorbis = |rate| CarriedAudio {
+            sid: 5, ordinal: 1, codec: "vorbis".into(), channels: 2,
+            can_normalize_loudness: false, immersive: false, sample_rate: rate, bit_depth: 0,
+        };
+        set_carried_audio_for_test(&mut ps, vorbis(44_100));
+        assert!(stream_pcm_is_lossy(&ps));
+        set_carried_audio_for_test(&mut ps, vorbis(96_000));
+        assert!(!stream_pcm_is_lossy(&ps), "above the rate bound the server converts it");
+    }
+
+    /// **The no-downmix rule reads the carried track's width whichever spelling names the codec**: the
+    /// stream declares `dts` while PMS (and so the carried track) says `dca`, and the same track is one
+    /// codec (`devcaps::audio_codec_id`). A width lost to a spelling would read as "unknown", which Force
+    /// Direct Play refuses as a possible downmix, and a stereo DTS would lose its app decode for nothing.
+    #[test]
+    fn the_downmix_rule_reads_the_carried_width_in_either_spelling_of_the_codec() {
+        use plx_os::devcaps::{AppLossy, Caps};
+        let measured = std::sync::Arc::new(Caps { app_lossy: AppLossy::Measured, ..Caps::assumed() });
+        for (declared, carried) in [("dts", "dca"), ("dca", "dts"), ("DTS", "dca"), ("dca", "dca")] {
+            for (channels, decoded) in [(2, true), (1, true), (6, false)] {
+                let mut ps = PlaybackSession::IDLE;
+                ps.direct_play_mode = DirectPlayMode::Forced;
+                ps.begin_attempt(measured.clone());
+                set_stream_codecs(&mut ps, "h264", declared);
+                set_carried_audio_for_test(&mut ps, CarriedAudio { codec: carried.into(), ..flac(channels, 48_000, 0) });
+                let what = format!("{declared}/{carried} {channels}ch");
+                assert_eq!(stream_achannels(&ps), channels, "{what}");
+                assert_eq!(stream_pcm_is_lossy(&ps), decoded, "{what}");
+                assert_eq!(stream_audio(&ps).unwrap().channels, channels as u32, "{what}: the ladder's fact");
+            }
+        }
+    }
+
+    /// A session whose attempt announces Opus at `bound` channels (`None`: no stated bound), declaring
+    /// `opus`, carrying `carried` (`None`: no track), on a server transcode or not.
+    fn opus_session(bound: Option<u32>, carried: Option<(&str, i64)>, transcoding: bool) -> PlaybackSession {
+        use plx_os::devcaps::Caps;
+        let caps = Caps {
+            audio: "aac,ac3,eac3,opus".into(),
+            audio_channels: bound.map(|b| [("opus".to_string(), b)].into()).unwrap_or_default(),
+            ..Caps::assumed()
+        };
+        let mut ps = PlaybackSession::IDLE;
+        ps.begin_attempt(std::sync::Arc::new(caps));
+        set_stream_codecs(&mut ps, "h264", "opus");
+        if let Some((codec, channels)) = carried {
+            set_carried_audio_for_test(&mut ps, CarriedAudio { codec: codec.into(), ..flac(channels, 48_000, 0) });
+        }
+        if transcoding {
+            install_transcode_for_test(&mut ps, true, false);
+        }
+        ps
+    }
+
+    /// **A server-converted Opus lane declares the width the server was asked for.** The plan carries the
+    /// SOURCE track while the stream declares the `/decision` OUTPUT codec, so the declared codec differs
+    /// from the carried one and the carried width is the source's, which the converted stream need not
+    /// have (#1096: a 0 refused the Load with "no Opus layout for 0 channel(s)"). The profile asks the
+    /// server for at most the attempt's Opus bound; the PMS output width itself is not measured.
+    #[test]
+    fn a_server_converted_opus_lane_declares_the_width_the_server_was_asked_for() {
+        // (carried, bound, width)
+        let rows: [(Option<(&str, i64)>, Option<u32>, i64); 10] = [
+            (Some(("aac", 6)), Some(2), 2),
+            (Some(("aac", 1)), Some(2), 1),
+            (Some(("aac", 2)), Some(2), 2),
+            (Some(("aac", 0)), Some(2), 2),
+            (None, Some(2), 2),
+            (Some(("eac3", 8)), Some(2), 2),
+            (Some(("aac", 6)), Some(6), 6),
+            (Some(("aac", 10)), Some(8), 8),
+            (Some(("aac", 6)), None, 2),
+            (Some(("dca", 6)), Some(2), 2),
+        ];
+        for (carried, bound, width) in rows {
+            let ps = opus_session(bound, carried, true);
+            let what = format!("carried {carried:?}, bound {bound:?}");
+            assert_eq!(stream_achannels(&ps), width, "{what}");
+            assert_eq!(i64::from(stream_audio(&ps).unwrap().channels), width, "{what}: the ladder's fact");
+        }
+        // A copy of an Opus track (the carried codec is the declared one) keeps its own width, converted
+        // session or not.
+        for transcoding in [false, true] {
+            let ps = opus_session(Some(2), Some(("opus", 6)), transcoding);
+            assert_eq!(stream_achannels(&ps), 6, "copy, transcoding={transcoding}");
+        }
+    }
+
+    /// The lane the Load logs is the lane it declares from: one derivation, `stream_achannels` reads its width.
+    #[test]
+    fn the_opus_lane_names_where_the_declared_width_came_from() {
+        let converted = opus_session(Some(2), Some(("aac", 6)), true);
+        assert_eq!(opus_lane(&converted), OpusLane { width: 2, converted: true, source: 6, bound: 2 });
+        let copy = opus_session(Some(2), Some(("opus", 6)), true);
+        assert_eq!(opus_lane(&copy), OpusLane { width: 6, converted: false, source: 6, bound: 2 });
+        let nothing = opus_session(None, None, true);
+        assert_eq!(opus_lane(&nothing), OpusLane { width: 2, converted: true, source: 0, bound: 2 });
+        let switched = opus_session(Some(2), Some(("aac", 6)), false);
+        assert_eq!(opus_lane(&switched), OpusLane { width: 0, converted: false, source: 6, bound: 2 });
+        for ps in [&converted, &copy, &nothing, &switched] {
+            assert_eq!(stream_achannels(ps), opus_lane(ps).width);
+        }
+    }
+
+    /// **The converted-lane width is Opus's alone.** Any other declared codec on a server transcode whose
+    /// carried track is another codec keeps today's 0: the Load of AC-3, DTS or AAC declares no channel
+    /// count, and the ladder's facet for them is unchanged.
+    #[test]
+    fn a_converted_lane_of_another_codec_keeps_its_zero_width() {
+        for (declared, carried) in [("ac3", "dca"), ("aac", "eac3"), ("dts", "aac"), ("eac3", "opus")] {
+            let mut ps = opus_session(Some(2), Some((carried, 6)), true);
+            set_stream_codecs(&mut ps, "h264", declared);
+            assert_eq!(stream_achannels(&ps), 0, "{declared} converted from {carried}");
+            assert_eq!(stream_audio(&ps).unwrap().channels, 0, "{declared} from {carried}: the ladder's fact");
+        }
+    }
+
+    /// **Only a server conversion earns the declared stereo.** A direct play (or Force) whose carried
+    /// track is another codec than the declared one is a native track switch, which moves the declared
+    /// codec alone (`flight::stage_native_audio`): the packets are the new track's, so a stereo header over
+    /// 5.1 packets (#917, #918) must not be declared. The width stays 0, and the Load stays refused.
+    #[test]
+    fn a_mismatched_track_in_direct_play_keeps_a_zero_width() {
+        let ps = opus_session(Some(2), Some(("aac", 6)), false);
+        assert_eq!(stream_achannels(&ps), 0, "direct play");
+        let mut forced = opus_session(Some(2), Some(("aac", 2)), false);
+        forced.direct_play_mode = DirectPlayMode::Forced;
+        assert_eq!(stream_achannels(&forced), 0, "Force Direct Play after a native switch to an Opus track");
+        assert_eq!(stream_audio(&forced).unwrap().channels, 0);
+    }
+
+    /// **MP3 and Vorbis in force** (S4-4) declare the same one shape as DTS, only on an attempt
+    /// that turned the lossy decode on, and are the ladder's "app decoded" fact then.
+    #[test]
+    fn mp3_and_vorbis_declare_stereo_48k_only_when_the_attempt_has_the_gate_on() {
+        let mut ps = PlaybackSession::IDLE;
+        ps.begin_attempt(std::sync::Arc::new(plx_os::devcaps::Caps::assumed()));
+        for codec in ["mp3", "vorbis"] {
+            set_stream_codecs(&mut ps, "h264", codec);
+            assert_eq!(stream_pcm(&ps), None, "{codec}: gate off");
+            assert!(!stream_pcm_is_lossy(&ps) && !stream_audio(&ps).unwrap().app_decoded_lossy, "{codec}");
+        }
+        ps.begin_attempt(std::sync::Arc::new(plx_os::devcaps::Caps::assumed().with_app_lossy()));
+        for codec in ["mp3", "vorbis", "MP3"] {
+            set_stream_codecs(&mut ps, "h264", codec);
+            assert_eq!(stream_pcm(&ps), Some(Ok(PcmFormat::STEREO_48K)), "{codec}");
+            assert!(stream_pcm_is_lossy(&ps) && stream_audio(&ps).unwrap().app_decoded_lossy, "{codec}");
+        }
+        for other in ["mp2", "wma", "opus", "mlp"] {
+            set_stream_codecs(&mut ps, "h264", other);
+            assert_eq!(stream_pcm(&ps), None, "{other}");
+        }
+    }
+
+    /// TrueHD in force (S4-5) declares the same one shape as DTS, MP3 and Vorbis.
+    #[test]
+    fn truehd_declares_stereo_48k_only_when_the_attempt_has_the_gate_on() {
+        let mut ps = PlaybackSession::IDLE;
+        ps.begin_attempt(std::sync::Arc::new(plx_os::devcaps::Caps::assumed()));
+        set_stream_codecs(&mut ps, "h264", "truehd");
+        assert_eq!(stream_pcm(&ps), None, "gate off");
+        assert!(!stream_audio(&ps).unwrap().app_decoded_lossy);
+        ps.begin_attempt(std::sync::Arc::new(plx_os::devcaps::Caps::assumed().with_app_lossy()));
+        for spelling in ["truehd", "TrueHD"] {
+            set_stream_codecs(&mut ps, "h264", spelling);
+            assert_eq!(stream_pcm(&ps), Some(Ok(PcmFormat::STEREO_48K)), "{spelling}");
+            assert!(stream_pcm_is_lossy(&ps) && stream_audio(&ps).unwrap().app_decoded_lossy, "{spelling}");
+        }
+        set_stream_codecs(&mut ps, "h264", "mlp");
+        assert_eq!(stream_pcm(&ps), None, "MLP is not claimed");
+    }
+
+    #[test]
+    fn missing_or_out_of_path_facts_refuse_the_load() {
+        assert!(pcm_format_of(None, "flac").is_err());
+        assert!(pcm_format_of(Some(&flac(6, 48_000, 16)), "flac").is_err());
+        assert!(pcm_format_of(Some(&flac(0, 48_000, 16)), "flac").is_err());
+        assert!(pcm_format_of(Some(&flac(2, 0, 16)), "flac").is_err());
+        // a rate the table does not name and the app cannot make one (libpf plays an undeclared one slow, with no error)
+        assert!(pcm_format_of(Some(&flac(2, 11_025, 16)), "flac").is_err());
+        assert!(pcm_format_of(Some(&flac(2, 37_800, 16)), "flac").is_err());
+        assert!(pcm_format_of(Some(&flac(2, -48_000, 16)), "flac").is_err());
+        assert!(pcm_format_of(Some(&flac(2, i64::from(u32::MAX) + 1, 24)), "flac").is_err(), "past what FFmpeg can state");
+        assert!(pcm_format_of(Some(&flac(6, 96_000, 24)), "flac").is_err(), "5.1 at 96 kHz still converts on the server");
+        let mut other = flac(2, 48_000, 16);
+        other.codec = "ac3".into();
+        assert!(pcm_format_of(Some(&other), "flac").is_err());
+    }
+}
 /// Override the audio codec used to build the Load payload — set by a native audio-track
 /// switch to the chosen track's codec before the direct-play reload.
 pub fn set_stream_acodec(ps: &mut PlaybackSession, codec: &str) {
     { let s = &mut *ps; s.stream_acodec = codec.to_owned() }
+}
+/// Override the video codec used to build the Load payload — set by the demuxer's probe retry to
+/// the codec the file's own bytes carry, before the one-shot corrective reload.
+pub fn set_stream_vcodec(ps: &mut PlaybackSession, codec: &str) {
+    { let s = &mut *ps; s.stream_vcodec = codec.to_owned() }
+}
+/// The demuxer's probe (a declared codec the file's own bytes disproved) authorises EXACTLY one
+/// reload with the corrected declaration. Consume it here: a second mismatch on the same playback
+/// is a different failure and gets the ordinary failure read-out, never a loop.
+pub fn take_codec_probe_retry(ps: &mut PlaybackSession) -> bool {
+    { let s = &mut *ps;
+        if s.codec_probe_retried {
+            false
+        } else {
+            s.codec_probe_retried = true;
+            true
+        }
+    }
 }
 /// Record the streamed item's video+audio codec pair in one write (the Load-payload source of
 /// truth) for route-policy tests that install a synthetic live HLS response.
@@ -5251,12 +7857,19 @@ pub fn set_stream_codecs(ps: &mut PlaybackSession, vc: &str, ac: &str) {
 }
 
 /// **The widest raster this session can put through the decoder**, for the Starfish Load's
-/// `adaptiveStreaming` ceiling — `(0, 0)` when nobody said. Three routes, three answers:
+/// `adaptiveStreaming` ceiling — `(0, 0)` when nobody said. The pipeline allocates against the
+/// DECLARED ceiling (issue #665), so it must be what is actually fed. Three routes:
 ///
-/// * direct play / remux (`ProgressiveMkv`): the SOURCE's own coded size (`cur_src`), since the
-///   file's elementary stream is what gets fed;
-/// * a fixed quality's HLS: the source capped by that quality's [`plx_plex::plex::Ceiling`] — PMS
-///   never upscales, so the smaller of the two is the largest picture it can send;
+/// * direct play / remux and the progressive re-encode (`ProgressiveMkv`): the SOURCE's coded
+///   size (`cur_src`), capped by the session's quality ceiling when one is set. Original and
+///   Auto-Original carry no ceiling, so direct play declares the source; a fixed quality's forced
+///   re-encode over `start.mkv` declares `min(source, ceiling)` (PMS never upscales). Direct play
+///   and remux under a fixed quality are safe because the ceiling admits the source there:
+///   `quality_policy` at plan time and `apply_quality_choice`'s `admits && !is_transcoding`
+///   branch mid-play both use `Ceiling::admits` over these same `cur_src` numbers, Forced Direct
+///   Play maps to Original (ceiling `None`), and the Original handoff installs
+///   `EncodeContract::original`;
+/// * a fixed quality's HLS: the same cap;
 /// * Auto: the bounding box of every FEASIBLE actuator (`HlsActuatorCatalog::widest_feasible_raster`),
 ///   because a rung commit never re-issues `Load` and the controller may climb to the 4K point
 ///   inside the one declaration — a ceiling sized to the bootstrap rung (`plan.ceiling`, which is
@@ -5266,25 +7879,29 @@ pub fn set_stream_codecs(ps: &mut PlaybackSession, vc: &str, ac: &str) {
 pub fn sink_max_raster(ps: &PlaybackSession) -> (u16, u16) {
     let s = &*ps;
     let clamp = |v: i64| u16::try_from(v).unwrap_or(u16::MAX);
-    let source = (clamp(s.cur_src.1), clamp(s.cur_src.2));
+    // 0 on either side means "nobody said"; the other side's number wins.
+    let axis = |src: u16, cap: i64| match (src, clamp(cap)) {
+        (0, c) => c,
+        (s, 0) => s,
+        (s, c) => s.min(c),
+    };
+    // The source, held to the ceiling a recovery put on this stream's codec when it took a refused
+    // video out of the attempt ([`plx_os::devcaps::Facet::Video`]): a converted H.264 1080
+    // stream must not declare the 4K60 envelope of the file it came from. Only the ceiling entry,
+    // not `raster_bound`, so a play with no ceiling declares what it always did.
+    let (ceil_w, ceil_h) = ps.attempt_caps().video_ceiling.get(s.stream_vcodec.as_str()).copied().unwrap_or((0, 0));
+    let source = (axis(clamp(s.cur_src.1), i64::from(ceil_w)), axis(clamp(s.cur_src.2), i64::from(ceil_h)));
+    let capped = || match s.cur_contract.ceiling {
+        Some(c) => (axis(source.0, c.max_w), axis(source.1, c.max_h)),
+        None => source,
+    };
     match s.cur_contract.delivery {
-        plx_plex::plex::TranscodeDelivery::ProgressiveMkv => source,
+        plx_plex::plex::TranscodeDelivery::ProgressiveMkv => capped(),
         plx_plex::plex::TranscodeDelivery::FixedHls { .. } => {
             if applied_quality() == Quality::Auto {
                 auto_catalog(ps).widest_feasible_raster()
             } else {
-                match s.cur_contract.ceiling {
-                    Some(c) => {
-                        // 0 on either side means "nobody said"; the other side's number wins.
-                        let axis = |src: u16, cap: i64| match (src, clamp(cap)) {
-                            (0, c) => c,
-                            (s, 0) => s,
-                            (s, c) => s.min(c),
-                        };
-                        (axis(source.0, c.max_w), axis(source.1, c.max_h))
-                    }
-                    None => source,
-                }
+                capped()
             }
         }
     }
@@ -5303,7 +7920,7 @@ pub fn set_stream_source_raster(ps: &mut PlaybackSession, w: u16, h: u16) {
 }
 
 /// The whole Load-payload DECLARATION for a stream the app did not SELECT — the pipeline test
-/// tier's `/tmp/plxnative-playurl` ([`crate::player::playurl::PlayUrl`]), whose entire point is that no PMS
+/// tier's `/tmp/plxnative-playurl` (`plx_playback_contract::playurl::PlayUrl`), whose entire point is that no PMS
 /// chose anything and so `apply_plan` never runs.
 ///
 /// ONE write for the same reason [`set_server_output_declaration`] is one write and [`apply_plan`]
@@ -5324,34 +7941,28 @@ pub fn set_stream_declaration(
     dovi: plx_data::metadata::Dovi,
     immersive: bool,
 ) -> bool {
-    set_stream_declaration_with_capability(
+    install_stream_declaration(
         ps,
         vc,
         ac,
         fps,
         dovi,
         immersive,
-        plx_platform::devcaps::dv::capability(),
+        frozen_dv_decision(dolby_vision_mode(), plx_os::devcaps::dv::capability(), dovi, vc),
     )
 }
 
-fn set_stream_declaration_with_capability(
+/// The write [`set_stream_declaration`] makes once its Dolby Vision decision is frozen, shared with
+/// the test helpers below so they exercise the same refusal and the same single assignment.
+fn install_stream_declaration(
     ps: &mut PlaybackSession,
     vc: &str,
     ac: &str,
     fps: f64,
     dovi: plx_data::metadata::Dovi,
     immersive: bool,
-    capability: plx_platform::devcaps::dv::DvCapability,
+    decision: plx_data::metadata::DvDecision,
 ) -> bool {
-    let decision = plx_data::metadata::DvDecision {
-        capability,
-        presentation: dovi.presentation(
-            !plx_data::metadata::dv_withheld(),
-            capability,
-            vc.eq_ignore_ascii_case("hevc"),
-        ),
-    };
     if decision.presentation.refusal().is_some() {
         crate::player::log(&format!(
             "playurl: refusing Dolby Vision declaration capability={} presentation={}",
@@ -5379,9 +7990,84 @@ pub fn set_stream_declaration_for_test(
     fps: f64,
     dovi: plx_data::metadata::Dovi,
     immersive: bool,
-    capability: plx_platform::devcaps::dv::DvCapability,
+    capability: plx_os::devcaps::dv::DvCapability,
 ) -> bool {
-    set_stream_declaration_with_capability(ps, vc, ac, fps, dovi, immersive, capability)
+    let decision = frozen_dv_decision(plx_plex::plex::session::DolbyVisionMode::Auto, capability, dovi, vc);
+    install_stream_declaration(ps, vc, ac, fps, dovi, immersive, decision)
+}
+
+/// [`set_stream_declaration_for_test`] with the Dolby Vision decision supplied, so a test can plant
+/// what the profile's setting makes of the probe (`frozen_dv_decision(Off, Supported, ..)`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_stream_declaration_decided_for_test(
+    ps: &mut PlaybackSession,
+    vc: &str,
+    ac: &str,
+    fps: f64,
+    dovi: plx_data::metadata::Dovi,
+    immersive: bool,
+    decision: plx_data::metadata::DvDecision,
+) -> bool {
+    install_stream_declaration(ps, vc, ac, fps, dovi, immersive, decision)
+}
+
+/// Plant the FILE's own Dolby Vision record and the declaration it would make as a direct play
+/// (`src_dovi`, `src_dv_decision`), which a rebuild that copies the video hands on again (tests).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_source_declaration_for_test(
+    ps: &mut PlaybackSession,
+    dovi: plx_data::metadata::Dovi,
+    decision: plx_data::metadata::DvDecision,
+) {
+    ps.src_dovi = dovi;
+    ps.src_dv_decision = decision;
+}
+
+/// The file's own frozen Dolby Vision declaration ([`set_source_declaration_for_test`]'s other half).
+#[cfg(any(test, feature = "test-support"))]
+pub fn source_dv_for_test(ps: &PlaybackSession) -> (plx_data::metadata::Dovi, plx_data::metadata::DvDecision) {
+    (ps.src_dovi, ps.src_dv_decision)
+}
+
+/// Plant a stored Auto Original candidate (a direct play of `dovi`, declared as `decision`) on `ps`,
+/// the way back [`recover_original_direct`] installs (tests).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_auto_original_dv_for_test(
+    ps: &mut PlaybackSession,
+    dovi: plx_data::metadata::Dovi,
+    decision: plx_data::metadata::DvDecision,
+) {
+    let mut candidate = test_original_candidate(None);
+    candidate.dovi = dovi;
+    candidate.dv_decision = decision;
+    ps.auto_original = Some(candidate);
+}
+
+/// The stored Auto Original candidate's Dolby Vision record and frozen declaration, if one is stored
+/// ([`set_auto_original_dv_for_test`]'s other half).
+#[cfg(any(test, feature = "test-support"))]
+pub fn auto_original_dv_for_test(
+    ps: &PlaybackSession,
+) -> Option<(plx_data::metadata::Dovi, plx_data::metadata::DvDecision)> {
+    ps.auto_original.as_ref().map(|c| (c.dovi, c.dv_decision))
+}
+
+/// Begin an attempt on `caps`, so [`stream_pcm`] and the planner read that value (tests).
+#[cfg(any(test, feature = "test-support"))]
+pub fn begin_attempt_for_test(ps: &mut PlaybackSession, caps: std::sync::Arc<plx_os::devcaps::Caps>) {
+    ps.begin_attempt(caps);
+}
+
+/// Make `ps` a play requested under `mode`, so [`stream_pcm`] and the planner read that mode (tests).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_direct_play_mode_for_test(ps: &mut PlaybackSession, mode: DirectPlayMode) {
+    ps.direct_play_mode = mode;
+}
+
+/// Carry `audio` as the playing track, so [`stream_pcm`] reads its facts (rate, depth, channels).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_carried_audio_for_test(ps: &mut PlaybackSession, audio: CarriedAudio) {
+    ps.cur_audio = Some(audio);
 }
 
 // (`set_source_codecs` stood here: a two-line setter for `src_vcodec`/`src_acodec` whose one
@@ -5396,6 +8082,12 @@ pub fn set_stream_declaration_for_test(
 /// and only one of them can explain a decode problem.
 pub fn is_remux(ps: &PlaybackSession) -> bool {
     ps.cur_contract.remux
+}
+/// The multiplier the player's overlay and subtitles are drawn with on this route, given the
+/// playing item's HDR flag (`PlayingItem::hdr`): the live HDR overlay brightness pick during an HDR
+/// picture, `1.0` otherwise. Read once per frame by the player branch of the frame loop.
+pub fn overlay_gain(ps: &PlaybackSession, source_hdr: bool) -> f32 {
+    overlay_gain_for(source_hdr, is_transcoding(ps), is_remux(ps), hdr_overlay_brightness())
 }
 /// The Plex Pass DSP the live route was ASKED for (issue #266) — `cur_contract.audio`, gated to
 /// what the server DEMONSTRABLY applied: `NONE` unless `cur_enhancement` is `Applied`
@@ -5478,7 +8170,97 @@ struct ScrobbleWork {
     audio_stream_id: i64,
     subtitle_stream_id: i64,
     transcode_session: String,
+    /// The item whose last reported id [`ScrobbleWork::run`] takes ([`ReportedTimeline`]), and the
+    /// server it was reported to. The take is the worker's, after the reporter is joined: a tick
+    /// in flight when the stop began still writes the record, and a take on the main thread
+    /// before that join would miss it.
+    reported_sid: ServerId,
+    reported_rk: String,
     timeline_stop: Option<TimelineStopCompletion>,
+    /// Mark the item watched once the `stopped` report is in, if it landed below the server's own
+    /// watched threshold (`PlaybackSession::finished`).
+    mark_watched: bool,
+    /// The record the app learns this stop from; posted just before `timeline_stop` completes.
+    stop_mail: Option<PendingStop>,
+}
+
+/// The stops whose `stopped` POST has been attempted or abandoned, waiting for the app to take
+/// them. **A queue, not the plan's one slot.** `scrobble_stop` joins the previous worker
+/// (`drain_scrobble`) on the main thread before it announces the next stop; if that worker was
+/// stalled on a slow server the app has had no frame in between, so the next worker's record would
+/// land on top of the previous one in a single slot and an Up Next chain would lose an episode.
+/// The app drains it every frame ([`take_landed_stops`]); it holds at most the stops that happened
+/// since the last frame.
+static STOP_MAIL: Mutex<Vec<plx_data::viewstate::StopRecord>> = Mutex::new(Vec::new());
+/// Stops with a record built and not yet posted: what a replay's landing gate waits for. A stop
+/// retired by [`retire_pending_stops`] stays owed until its worker posts (and is dropped), so the
+/// count never reaches zero while a worker still holds a record, and never goes negative.
+static STOPS_OWED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The identity epoch a stop record is built under. A record belongs to whoever was signed in when
+/// the stop began; one that lands after [`retire_pending_stops`] bumped this is another identity's
+/// and is dropped on posting.
+static STOP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Posts its record exactly once; dropped unposted (a panicking worker) it posts it as not taken,
+/// so the viewer's position still shows and nothing is owed forever.
+struct PendingStop {
+    rec: Option<plx_data::viewstate::StopRecord>,
+    epoch: u64,
+}
+
+impl PendingStop {
+    /// Owes `rec` under the current identity epoch.
+    fn new(rec: plx_data::viewstate::StopRecord) -> Self {
+        // under the mailbox lock, so `retire_pending_stops` cannot slip between the two reads
+        let mail = STOP_MAIL.lock().unwrap_or_else(|e| e.into_inner());
+        STOPS_OWED.fetch_add(1, Ordering::SeqCst);
+        let epoch = STOP_EPOCH.load(Ordering::SeqCst);
+        drop(mail);
+        Self { rec: Some(rec), epoch }
+    }
+
+    fn post(&mut self, ok: bool) {
+        if let Some(mut rec) = self.rec.take() {
+            rec.ok = ok;
+            {
+                let mut mail = STOP_MAIL.lock().unwrap_or_else(|e| e.into_inner());
+                if STOP_EPOCH.load(Ordering::SeqCst) == self.epoch {
+                    mail.push(rec);
+                } else {
+                    plx_base::eventlog::log("viewstate: a stop from a retired identity was dropped");
+                }
+            }
+            STOPS_OWED.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for PendingStop {
+    fn drop(&mut self) {
+        self.post(false);
+    }
+}
+
+/// **The identity changed: no stop of the old one may reach the new one.** Bumps the epoch (every
+/// record still being posted is now stale and is dropped when its worker posts it) and empties the
+/// mailbox of the ones already posted. A stalled `stopped` POST by one profile would otherwise land
+/// after a switch and patch, read back and fan out on the NEW profile's token. MAIN THREAD, from
+/// the same place every store is reset.
+pub fn retire_pending_stops() {
+    let mut mail = STOP_MAIL.lock().unwrap_or_else(|e| e.into_inner());
+    STOP_EPOCH.fetch_add(1, Ordering::SeqCst);
+    mail.clear();
+}
+
+/// The stops posted since the last call, oldest first. MAIN THREAD, once a frame.
+pub fn take_landed_stops() -> Vec<plx_data::viewstate::StopRecord> {
+    std::mem::take(&mut *STOP_MAIL.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Is a stop's record still being posted? True from `scrobble_stop` to the end of its `stopped`
+/// attempt: what the landing gate waits on in dump mode.
+pub fn stops_owed() -> bool {
+    STOPS_OWED.load(Ordering::SeqCst) > 0
 }
 
 impl ScrobbleWork {
@@ -5490,29 +8272,71 @@ impl ScrobbleWork {
         if let Some(t) = self.report_th.take() {
             plx_base::task::join("timeline", t);
         }
-        if let Some((rk, t_ms, d_ms)) = self.final_report.take() {
-            let ok = {
-                let _effect = TIMELINE_EFFECT.lock().unwrap_or_else(|e| e.into_inner());
-                self.client.is_some_and(|c| {
-                    c.timeline(&plx_plex::plex::TimelineReport {
-                        rating_key: &rk,
-                        state: plx_plex::plex::TimelineState::Stopped,
-                        time_ms: t_ms,
-                        duration_ms: d_ms,
-                        session: &self.session,
-                        play_queue_id: &self.play_queue_id,
-                        play_queue_item_id: &self.play_queue_item_id,
-                        audio_stream_id: self.audio_stream_id,
-                        subtitle_stream_id: self.subtitle_stream_id,
+        let final_report = self.final_report.take();
+        let mut posted = false;
+        {
+            // ONE hold of the effect lane for everything this playback still owes the timeline.
+            // The take of the reported id is ORDERED AFTER every reporter POST of the playback:
+            // this reporter was joined above, and a reporter cut loose by a reload either holds
+            // this lane (its record lands before we get it) or finds the Engine's epoch moved when
+            // it samples (it sends and records nothing). Lock order is the lane, then
+            // `PLAYER_CONTROL`, as in [`report_timeline`]; no POST runs under `PLAYER_CONTROL`.
+            let _effect = TIMELINE_EFFECT.lock().unwrap_or_else(|e| e.into_inner());
+            let reported = take_reported_session(self.reported_sid, &self.reported_rk);
+            if let Some((rk, t_ms, d_ms)) = final_report.as_ref() {
+                let stopped = |session: &str, continuing: bool| {
+                    self.client.is_some_and(|c| {
+                        c.timeline(&plx_plex::plex::TimelineReport {
+                            rating_key: rk,
+                            state: plx_plex::plex::TimelineState::Stopped,
+                            time_ms: *t_ms,
+                            duration_ms: *d_ms,
+                            session,
+                            play_queue_id: &self.play_queue_id,
+                            play_queue_item_id: &self.play_queue_item_id,
+                            audio_stream_id: self.audio_stream_id,
+                            subtitle_stream_id: self.subtitle_stream_id,
+                            continuing,
+                        })
                     })
-                })
-            };
-            plx_base::eventlog::log(&format!(
-                "timeline stopped t={}s/{}s ok={}",
-                t_ms / 1000,
-                d_ms / 1000,
-                ok as i32,
-            ));
+                };
+                if let Some(retired) = retired_report_session(reported.as_deref(), &self.session) {
+                    // The id the last periodic report went out under lost its place after that
+                    // report, so it has had no `stopped` yet. Before the final one, which commits
+                    // the resume point.
+                    let ok = stopped(retired, true);
+                    plx_base::eventlog::log(&format!(
+                        "timeline stopped (retired session) t={}s ok={}",
+                        t_ms / 1000,
+                        ok as i32,
+                    ));
+                }
+                let ok = stopped(&self.session, false);
+                plx_base::eventlog::log(&format!(
+                    "timeline stopped t={}s/{}s ok={}",
+                    t_ms / 1000,
+                    d_ms / 1000,
+                    ok as i32,
+                ));
+                posted = ok;
+            }
+        }
+        if let Some((rk, t_ms, d_ms)) = final_report {
+            // Only a stop BELOW the server's own threshold needs the scrobble: past it the report
+            // just posted already counted the view, and `/:/scrobble` would count a second one.
+            if self.mark_watched && d_ms > 0 && !plx_data::viewstate::past_watched_threshold(t_ms, d_ms) {
+                let marked = self.client.is_some_and(|c| c.scrobble(&rk));
+                plx_base::eventlog::log(&format!("marked watched at the credits ok={}", marked as i32));
+                if marked {
+                    if let Some(rec) = self.stop_mail.as_mut().and_then(|m| m.rec.as_mut()) {
+                        rec.pos_ms = rec.dur_ms; // our word until the read-back says the server's
+                    }
+                }
+            }
+        }
+        // BEFORE the fence completes, so a completed fence implies the record is in the mailbox.
+        if let Some(mut mail) = self.stop_mail.take() {
+            mail.post(posted);
         }
         // This is the semantic publication boundary: old reporter joined, then old stopped was
         // attempted in the common effect lane. Wake replacement reporters before the unrelated
@@ -5530,8 +8354,11 @@ impl ScrobbleWork {
 }
 
 /// The end-of-playback PMS work, moved OFF the main thread: the `state=stopped` timeline report
-/// (which commits the server-side resume point and watched state) and the server-side transcode
-/// stop. Replaces the inline `report_timeline` + `stop_transcode` pair in `engine::teardown`.
+/// (which commits the server-side resume point and watched state, preceded by a `continuing=1`
+/// one for the id the periodic reporter last used when the encoder moved on after that report;
+/// the worker reads that id once the reporter is joined, so a tick in flight at the stop counts)
+/// and the server-side transcode stop. Replaces the inline `report_timeline` + `stop_transcode`
+/// pair in `engine::teardown`.
 ///
 /// Both ran inline on the SDL
 /// thread — two blocking PMS round trips, each bounded by `CONNECT_TIMEOUT_MS` + `SO_RCVTIMEO`
@@ -5551,6 +8378,7 @@ pub fn scrobble_stop(
         return;
     }
     let (logical_session, pq, pqi) = (sess(ps), pq_id(ps), pq_item_id(ps));
+    let mark_watched = std::mem::take(&mut ps.finished);
     let (aud, sub) = (cur_audio_sid(ps), cur_sub_sid(ps)); // the selection this playback reported under
     let tsession = take_active_encoder();
     let session = if tsession.is_empty() {
@@ -5558,6 +8386,11 @@ pub fn scrobble_stop(
     } else {
         tsession.clone()
     };
+    // The id the periodic reporter last reported under is NOT read here: a tick may still be in
+    // flight (`engine::teardown` only signals the reporter and hands its handle on unjoined), and
+    // it records its id when its POSTs return. Only the key is captured; the worker takes the
+    // record after the reporter is joined, inside the effect lane ([`ScrobbleWork::run`]).
+    let (reported_sid, reported_rk) = (cur_sid(ps), cur_rk(ps));
     // The two fields THIS function retires (teardown clears the URL a few lines later, and that is
     // the whole of what a stop resets). A partial write rather than a whole-session reset because
     // the rest is still read after teardown returns — see `reset_session`'s doc for the reader that
@@ -5567,7 +8400,15 @@ pub fn scrobble_stop(
         s.cur_contract.remux = false;
     } };
     if final_report.is_none() && tsession.is_empty() && report_th.is_none() {
-        return; // nothing to post and nobody to wait for
+        // Nothing to post and nobody to wait for, so no worker. The record a reporter left must
+        // still go with its playback, and a take is only ordered after the reporter's last POST
+        // while the effect lane is free: a reporter cut loose by a reload may be mid-POST on it.
+        // The lane is tried, never waited on, here on the main thread; a busy one falls through to
+        // a worker, which waits for it off the frame.
+        if let Some(_effect) = try_timeline_effect() {
+            drop(take_reported_session(reported_sid, &reported_rk));
+            return;
+        }
     }
     // The server this playback came FROM, not whichever one is current — the resume point and the
     // transcode session both live there, and by the time a stop runs the user may well have walked
@@ -5577,6 +8418,22 @@ pub fn scrobble_stop(
     // item, and letting two race would let an older one land last. Normally free — the measured
     // baseline for a finished worker is 0 ms.
     drain_scrobble();
+    let stop_mail = final_report.as_ref().map(|(rk, pos_ms, dur_ms)| {
+        let sid = cur_sid(ps);
+        // The item's row in the play queue, fetched when the play began: its watched state is the
+        // "before" of this stop. A row that cannot be found reads as watched, so an unknown never
+        // fans out a scrobble nobody asked for.
+        let row = plx_plex::plex::queue_index_of(&ps.queue, ps.pq_item_id.parse().unwrap_or(0), sid, rk)
+            .map(|i| &ps.queue[i]);
+        PendingStop::new(plx_data::viewstate::StopRecord {
+            sid,
+            rk: rk.clone(),
+            pos_ms: *pos_ms,
+            dur_ms: *dur_ms,
+            ok: false,
+            was_watched: row.is_none_or(|r| r.watched),
+        })
+    });
     let timeline_stop =
         (final_report.is_some() || report_th.is_some()).then(|| TIMELINE_STOP_FENCE.announce());
     let work = std::sync::Arc::new(std::sync::Mutex::new(Some(ScrobbleWork {
@@ -5589,7 +8446,11 @@ pub fn scrobble_stop(
         audio_stream_id: aud,
         subtitle_stream_id: sub,
         transcode_session: tsession,
+        reported_sid,
+        reported_rk,
         timeline_stop,
+        mark_watched,
+        stop_mail,
     })));
     let worker = work.clone();
     let join_generation = SCROBBLE_JOIN.reserve();
@@ -5674,9 +8535,10 @@ impl ScrobbleJoin {
         self.changed.notify_all();
     }
 
-    /// Whether no stop report is still on its way to the server: no worker was ever reserved, the
-    /// last one has been joined, or its thread has returned. Never blocks, and never joins - the
-    /// frame loop asks this every frame while it waits to re-read what the stop committed.
+    /// Whether the whole stop worker, including the server-side `transcode_stop`, has returned: no
+    /// worker was ever reserved, the last one has been joined, or its thread has returned. Never
+    /// blocks, and never joins. The gate for re-reading what the stop committed is
+    /// [`timeline_stop_landed`], not this.
     fn settled(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.completed >= state.generation
@@ -5722,6 +8584,16 @@ static SCROBBLE_JOIN: ScrobbleJoin = ScrobbleJoin::new();
 /// it can never validate first, stall, and land after the replacement report.
 static TIMELINE_EFFECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The effect lane if nothing holds it right now. For the one caller that must not wait on it, the
+/// main thread's stop with no worker to wait for.
+fn try_timeline_effect() -> Option<std::sync::MutexGuard<'static, ()>> {
+    match TIMELINE_EFFECT.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 struct TimelineStopFenceState {
     announced: u64,
     completed: u64,
@@ -5762,11 +8634,27 @@ impl TimelineStopFence {
             .announced
     }
 
+    /// Every announced stop has completed. Vacuously true before the first announce.
+    fn landed(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.completed >= state.announced
+    }
+
     fn wait(&self, required: u64) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         while state.completed < required {
             state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
         }
+    }
+
+    /// [`Self::wait`] for at most `bound`; whether every stop up to `required` had completed by then.
+    fn wait_for(&self, required: u64, bound: std::time::Duration) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, bound, |s| s.completed < required)
+            .unwrap_or_else(|e| e.into_inner());
+        state.completed >= required
     }
 
     fn complete(&self, generation: u64) {
@@ -5811,11 +8699,44 @@ pub fn drain_scrobble() {
     SCROBBLE_JOIN.drain();
 }
 
-/// Whether the last [`scrobble_stop`] has finished posting (see [`ScrobbleJoin::settled`]): true
-/// once the server holds the resume point the stop reported, so a re-read of the item sees it.
-/// Non-blocking, unlike [`drain_scrobble`].
+/// Whether the last [`scrobble_stop`]'s whole worker has returned (see [`ScrobbleJoin::settled`]),
+/// including the server-side `transcode_stop`. The re-read gate is [`timeline_stop_landed`], which
+/// opens once the `stopped` POST has landed; this one only says the worker is done. Non-blocking,
+/// unlike [`drain_scrobble`].
 pub fn scrobble_settled() -> bool {
     SCROBBLE_JOIN.settled()
+}
+
+/// Whether the last announced `state=stopped` timeline report has been *attempted or abandoned*:
+/// the worker has finished its POST (answered, failed or timed out), or the work was dropped
+/// (panic, thread refusal). It does NOT mean the server accepted it.
+///
+/// Earlier than [`scrobble_settled`], which also waits for the server-side `transcode_stop` round
+/// trip that follows the POST (up to a full PMS timeout, ~17 s, on a slow server). A re-read of
+/// the item only needs the resume point, so the post-playback refreshes gate on this one.
+///
+/// **It reads true when no stop was announced at all** (nothing playing, a reporter-less preview,
+/// or a stop with nothing to post), so it is only meaningful behind an owed flag that
+/// `exit_player` sets *after* [`scrobble_stop`] announced the fence on the same (main) thread
+/// (`App::refresh_hubs`). Non-blocking.
+pub fn timeline_stop_landed() -> bool {
+    TIMELINE_STOP_FENCE.landed()
+}
+
+/// Wait, for at most `bound`, until every `state=stopped` report announced up to generation
+/// `required` (a value of [`timeline_stops_announced`]) has been attempted or abandoned, and say
+/// whether it had. For a read that must see what that stop reported (the queue window's per-episode
+/// resume points, [`queue_navigation::QueueContinuation::refreshed`]); a bound, because it runs on
+/// the start's critical path and a slow server must not hold the start hostage.
+pub(super) fn wait_for_timeline_stop(required: u64, bound: std::time::Duration) -> bool {
+    TIMELINE_STOP_FENCE.wait_for(required, bound)
+}
+
+/// How many `state=stopped` reports have ever been announced. A caller that remembers the value it
+/// last saw can tell whether an exit announced one of its own (the count moved) or ended a play
+/// that never started and reported nothing.
+pub fn timeline_stops_announced() -> u64 {
+    TIMELINE_STOP_FENCE.announced()
 }
 
 /// Seek within a LIVE TRANSCODE by restarting it at a time offset — a transcode has no byte-Cues,
@@ -5891,7 +8812,11 @@ pub enum RebaseRefusal {
 pub(super) struct RebasePlan {
     pub(super) owner: RebaseFor,
     client: &'static plx_plex::plex::Client,
+    /// The attempt's capability value ([`PlaybackSession::attempt_caps`]): the rebuilt transcode query
+    /// carries the profile built from the same value the route was planned on.
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     rk: String,
+    media_index: usize,
     /// The route generation the rebuild was planned against. The commit is gated on it.
     expected: WorkerTicket,
     /// The encoder the route plays now; stopped once the replacement is the route's.
@@ -6068,7 +8993,9 @@ pub(super) fn plan_rebase(
     Ok(RebasePlan {
         owner,
         client,
+        caps: ps.attempt_caps(),
         rk,
+        media_index: cur_media_index(ps),
         expected,
         previous,
         replacement,
@@ -6089,7 +9016,9 @@ pub(super) fn plan_rebase(
 /// published, so only the uncommitted replacement is cleaned up.
 pub(super) fn run_rebase(off: &plx_base::task::OffFrame, plan: &RebasePlan) -> RebaseOutcome {
     let sp = transcode_spec(
+        &plan.caps,
         &plan.rk,
+        plan.media_index,
         &plan.replacement,
         &plan.replacement,
         plx_plex::plex::TranscodeOffset::from_seconds(plan.offset_secs.max(0)),
@@ -6314,261 +9243,35 @@ pub fn available_quality_ladder() -> &'static [Quality] {
     quality_ladder_for(auto_quality_ready())
 }
 
-/// An in-memory index back to a rung — out of range is `Original`, never a neighbouring rung,
-/// for the same reason the more menu resolves a press by row identity rather than position: the ladder can grow or shrink.
-fn quality_from_index(i: u8) -> Quality {
-    QUALITY_LADDER
-        .get(i as usize)
-        .copied()
-        .unwrap_or(Quality::Original)
-}
-
-fn quality_index(q: Quality) -> u8 {
-    QUALITY_LADDER.iter().position(|&r| r == q).unwrap_or(1) as u8
-}
-
-/// Install-wide preference; each resolve captures its own immutable mode.
-static DIRECT_PLAY_MODE: AtomicU8 = AtomicU8::new(0);
-
-pub fn direct_play_mode() -> DirectPlayMode {
-    match DIRECT_PLAY_MODE.load(Ordering::Relaxed) {
-        1 => DirectPlayMode::Forced,
-        2 => DirectPlayMode::Disabled,
-        _ => DirectPlayMode::Auto,
-    }
-}
-
-pub fn restore_direct_play_mode(mode: DirectPlayMode) {
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("direct-play preference");
-    DIRECT_PLAY_MODE.store(match mode {
-        DirectPlayMode::Auto => 0, DirectPlayMode::Forced => 1, DirectPlayMode::Disabled => 2,
-    }, Ordering::Relaxed);
-}
-
-/// Blocking persistence seam; Settings dispatches it on the storage worker.
-pub fn set_direct_play_mode(mode: DirectPlayMode) -> bool {
-    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_direct_play_mode(mode)))
-        .is_some_and(|write| matches!(write.classify(),
-            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-    if saved { restore_direct_play_mode(mode); plx_machine::idle::invalidate(); }
-    saved
-}
-
-/// What the player does at an episode's credits when a successor is queued — install-wide, like
-/// [`DIRECT_PLAY_MODE`]. Read by `appkit::player_hud::slot` every frame and by `finish_playback` at
-/// the end of the stream.
-static NEXT_EPISODE_MODE: AtomicU8 = AtomicU8::new(0); // NextEpisodeMode::Countdown's index
-
-pub fn next_episode_mode() -> NextEpisodeMode {
-    NextEpisodeMode::from_index(NEXT_EPISODE_MODE.load(Ordering::Relaxed))
-}
-
-pub fn restore_next_episode_mode(mode: NextEpisodeMode) {
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("next episode preference");
-    NEXT_EPISODE_MODE.store(mode.index(), Ordering::Relaxed);
-}
-
-/// Blocking persistence seam; Settings dispatches it on the storage worker. The live value changes
-/// only once the write is durable, so a failed save claims nothing.
-pub fn set_next_episode_mode(mode: NextEpisodeMode) -> bool {
-    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_next_episode_mode(mode)))
-        .is_some_and(|write| matches!(write.classify(),
-            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-    if saved {
-        restore_next_episode_mode(mode);
-        plx_machine::idle::invalidate();
-        plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::FeatureUsed {
-            feature: plx_telemetry::diag::schema::Feature::NextEpisode(mode),
-        });
-    }
-    saved
-}
-
-/// How far one Left/Right press jumps in the player and the trailer transport — install-wide,
-/// like [`NEXT_EPISODE_MODE`]. Read per press by `appkit::player_hud::scrub_step_ns`.
-static SKIP_INTERVAL: AtomicU8 = AtomicU8::new(1); // SkipInterval::Seconds10's index
-
-pub fn skip_interval() -> SkipInterval {
-    SkipInterval::from_index(SKIP_INTERVAL.load(Ordering::Relaxed))
-}
-
-pub fn restore_skip_interval(interval: SkipInterval) {
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("skip interval preference");
-    SKIP_INTERVAL.store(interval.index(), Ordering::Relaxed);
-}
-
-/// Blocking persistence seam; Settings dispatches it on the storage worker. The live value changes
-/// only once the write is durable, so a failed save claims nothing.
-pub fn set_skip_interval(interval: SkipInterval) -> bool {
-    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_skip_interval(interval)))
-        .is_some_and(|write| matches!(write.classify(),
-            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-    if saved {
-        restore_skip_interval(interval);
-        plx_machine::idle::invalidate();
-        plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::FeatureUsed {
-            feature: plx_telemetry::diag::schema::Feature::SkipInterval(interval),
-        });
-    }
-    saved
-}
-
-/// What OK does on a Continue Watching card — install-wide, like [`NEXT_EPISODE_MODE`]. Read by
-/// every deck's press and draw (Home's and the Library's) and by the item menu when it builds its
-/// rows; `DeckPress::press_plays` is the one question they all ask of it.
-static DECK_PRESS: AtomicU8 = AtomicU8::new(0); // DeckPress::Details's index
-
-pub fn deck_press() -> DeckPress {
-    DeckPress::from_index(DECK_PRESS.load(Ordering::Relaxed))
-}
-
-pub fn restore_deck_press(mode: DeckPress) {
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("deck press preference");
-    DECK_PRESS.store(mode.index(), Ordering::Relaxed);
-}
-
-/// Blocking persistence seam; Settings dispatches it on the storage worker. The live value changes
-/// only once the write is durable, so a failed save claims nothing.
-pub fn set_deck_press(mode: DeckPress) -> bool {
-    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_deck_press(mode)))
-        .is_some_and(|write| matches!(write.classify(),
-            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-    if saved {
-        restore_deck_press(mode);
-        plx_machine::idle::invalidate();
-    }
-    saved
-}
-
-pub fn set_default_quality(q: Quality) -> bool {
-    let q = supported_quality(q);
-    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_playback_quality(q)))
-        .is_some_and(|write| matches!(write.classify(),
-            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-    if saved { restore_quality(q); plx_machine::idle::invalidate(); }
-    saved
-}
-
-/// The client-rendered subtitle caption's text size — install-wide, like [`DIRECT_PLAY_MODE`].
-static SUBTITLE_SIZE: AtomicU8 = AtomicU8::new(1); // SubtitleSize::Medium's index
-
-pub fn subtitle_size() -> SubtitleSize {
-    SubtitleSize::from_index(SUBTITLE_SIZE.load(Ordering::Relaxed))
-}
-
-pub fn restore_subtitle_size(size: SubtitleSize) {
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("subtitle size preference");
-    SUBTITLE_SIZE.store(size.index(), Ordering::Relaxed);
-}
-
-/// **Pick a caption size: one optimistic operation, on the main thread.** The live atomic is
-/// stored and the frame invalidated FIRST, so the caption changes on the next frame; then a
-/// persist-only closure is retained for the shared storage worker. The closure writes the session
-/// store and NEVER touches the atomic (the pattern of `player::set_subtitle_tone`), so no
-/// completion can overwrite a newer live pick: live = the latest pick, durable writes are FIFO on
-/// the worker, last submitted wins. `reply` (Settings) learns whether the write was durable; a
-/// failure claims nothing about the next boot and republishes nothing.
-pub fn select_subtitle_size(size: SubtitleSize, reply: Option<std::sync::mpsc::Sender<bool>>) {
-    restore_subtitle_size(size);
-    plx_machine::idle::invalidate();
-    let _ = plx_base::storage_worker::submit_retained(move || {
-        let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_subtitle_size(size)))
-            .is_some_and(|write| matches!(write.classify(),
-                plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-        if !saved {
-            plx_base::eventlog::log("subtitle size: durable write failed (live value kept for this session)");
-        }
-        if let Some(reply) = reply {
-            let _ = reply.send(saved);
-        }
-        plx_machine::idle::invalidate();
-    });
-}
-
-/// The client-rendered subtitle caption's vertical placement — install-wide, like
-/// [`DIRECT_PLAY_MODE`]. Only the plain-text caption draw moves with this; image (PGS/VobSub)
-/// captions and native ASS/SSA keep their own placement.
-static SUBTITLE_POSITION: AtomicU8 = AtomicU8::new(0); // SubtitlePosition::Low's index
-
-pub fn subtitle_position() -> SubtitlePosition {
-    SubtitlePosition::from_index(SUBTITLE_POSITION.load(Ordering::Relaxed))
-}
-
-pub fn restore_subtitle_position(position: SubtitlePosition) {
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("subtitle position preference");
-    SUBTITLE_POSITION.store(position.index(), Ordering::Relaxed);
-}
-
-/// [`select_subtitle_size`] for the caption's vertical placement.
-pub fn select_subtitle_position(position: SubtitlePosition, reply: Option<std::sync::mpsc::Sender<bool>>) {
-    restore_subtitle_position(position);
-    plx_machine::idle::invalidate();
-    let _ = plx_base::storage_worker::submit_retained(move || {
-        let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_subtitle_position(position)))
-            .is_some_and(|write| matches!(write.classify(),
-                plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-        if !saved {
-            plx_base::eventlog::log("subtitle position: durable write failed (live value kept for this session)");
-        }
-        if let Some(reply) = reply {
-            let _ = reply.send(saved);
-        }
-        plx_machine::idle::invalidate();
-    });
-}
-
 pub fn forced_direct_play(ps: &PlaybackSession) -> bool {
     ps.direct_play_mode == DirectPlayMode::Forced
 }
 
-pub fn audio_track_direct_plays(ps: &PlaybackSession, codec: &str, channels: i64) -> bool {
-    audio_direct_plays(ps.direct_play_mode, codec, channels)
+pub fn audio_track_direct_plays(ps: &PlaybackSession, codec: &str, channels: i64, sample_rate: i64) -> bool {
+    audio_direct_plays_with(&ps.attempt_caps(), ps.direct_play_mode, codec, channels, sample_rate)
 }
 
 /// **Would the server convert this track's audio if it played?** The track menu's "converted by
-/// your server" mark: a track the TV cannot decode (`audio_direct_plays`, the same capability
-/// answer the planner and the profile use) plays through the server's remux or re-encode with its
-/// audio converted. Not under Forced Direct Play, where an unplayable track is refused instead of
-/// converted, so nothing is converted there. Reads the process-wide mode, like
-/// [`playback_preview`]: the menu's track form is built from the metadata view alone (it keeps no
-/// session), so it cannot read the `direct_play_mode` the session captured and
-/// `commit_audio_selection` uses; the two agree unless the setting changes mid-playback.
-pub fn audio_converted_by_server(codec: &str, channels: i64) -> bool {
-    let mode = direct_play_mode();
-    mode != DirectPlayMode::Forced && !audio_direct_plays(mode, codec, channels)
+/// your server" mark: a track the TV cannot decode or load (`audio_direct_plays_with`: codec,
+/// channel and sample-rate limits, the same capability answer the planner and the profile use)
+/// plays through the server's remux or re-encode with its audio converted. Not under Forced Direct
+/// Play, where an unplayable track is refused instead of converted, so nothing is converted there.
+/// Reads the ATTEMPT (`ps`): the mode and the capability value this playback was requested with,
+/// the ones `commit_audio_selection` uses, so a combination the install has learned the pipeline
+/// refuses reads as converted, as the attempt converts it. A setting changed mid-playback moves the
+/// mark at the next request, not before.
+pub fn audio_converted_by_server(ps: &PlaybackSession, codec: &str, channels: i64, sample_rate: i64) -> bool {
+    ps.direct_play_mode != DirectPlayMode::Forced && !audio_track_direct_plays(ps, codec, channels, sample_rate)
 }
 
-/// The user's current pick. An atomic rather than a field on [`Session`] because it OUTLIVES a
-/// playback — it is a preference, not session state — and because `appkit::more_menu` reads it to draw
-/// the checkmark while [`ResolveEnv::snapshot`] reads it to hand the worker a copy.
-///
-/// Seeded to Original even before the boot gate restores the session: no call path may turn a
-/// missing preference into Auto simply because initialization order changed.
-static QUALITY: AtomicU8 = AtomicU8::new(1);
-
-/// The selected ceiling. Safe from any thread; the resolve worker gets a COPY through
-/// [`ResolveEnv`] rather than reading this, per that struct's own rule.
-pub fn quality() -> Quality {
-    quality_from_index(QUALITY.load(Ordering::Relaxed))
-}
-
-/// Restore the persisted preference without writing it back. The distinction matters for legacy
-/// sessions: their missing field resolves to Original but remains missing until the user makes an
-/// explicit choice, so a future Auto-ready build still cannot reinterpret that old install.
-pub fn restore_quality(q: Quality) {
-    // `QUALITY` is a process global `quality()` reads without taking any lock, so a test that
-    // writes it without `testlock::serial()` lands the write mid some OTHER test's read —
-    // `on_deck_hevc_p5_preview_uses_the_selected_episodes_codec` flaked exactly this way. Same
-    // guard as the plex server registry (`plex::servers::register_with_client_id`).
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("the playback quality ceiling (restore_quality)");
-    QUALITY.store(quality_index(supported_quality(q)), Ordering::Relaxed);
+/// **Does the app decode this track itself, to stereo?** The track menu's "played in stereo" mark: a
+/// lossy track the attempt's capability value decodes in the app
+/// ([`Caps::app_decodes_lossy_track`](plx_os::devcaps::Caps::app_decodes_lossy_track)) is fed as a
+/// stereo mix whatever its layout. A surround track gets that mark only from the recovery's last rung (or
+/// the `appdecodelossy` debug trigger): Force Direct Play never mixes one down. Reads the ATTEMPT, as
+/// [`audio_converted_by_server`] does.
+pub fn audio_decoded_in_app(ps: &PlaybackSession, codec: &str, channels: i64, sample_rate: i64) -> bool {
+    ps.attempt_caps().app_decodes_lossy_track(codec, channels, sample_rate, forced_direct_play(ps))
 }
 
 /// Select a rung. MAIN THREAD (it writes the session).
@@ -6595,22 +9298,11 @@ pub fn restore_quality(q: Quality) {
 fn persist_quality_choice(q: Quality) -> Quality {
     let q = supported_quality(q);
     crate::player::report::note_quality_selected_for(playback_trace_generation(), q);
-    // See `restore_quality`: the same process global, the same lock requirement in tests.
-    #[cfg(any(test, feature = "test-support"))]
-    plx_base::testlock::assert_held("the playback quality ceiling (persist_quality_choice)");
-    QUALITY.store(quality_index(q), Ordering::Relaxed);
-    // A session write is a read-modify-write under the session lock: changing this preference
-    // must not overwrite a roster refresh, a profile switch, or another profile's recents.
-    let _ = plx_plex::plex::session::queue_update(move |s| {
-        if s.playback_quality == Some(q) {
-            None
-        } else {
-            Some(s.with_playback_quality(q))
-        }
-    });
-    // The picker's checkmark moves on this and on nothing else — a settled popover presents no
-    // frames, so without this the row would still read as the old rung until the next keypress.
-    plx_machine::idle::invalidate();
+    // The picker's checkmark moves on the door's own `invalidate`, and on nothing else — a settled
+    // popover presents no frames, so without it the row would still read as the old rung until the
+    // next keypress. The persist is the door's FIFO read-modify-write under the session lock, so it
+    // cannot overwrite a roster refresh, a profile switch, or another profile's recents.
+    choose::<QualityPref>(q, How::Optimistic(None));
     q
 }
 
@@ -6793,6 +9485,23 @@ fn apply_quality_choice(ps: &mut PlaybackSession, q: Quality) {
             .map(|rung| format!(" at {}kbps HLS", rung.kbps()))
             .unwrap_or_default(),
     ));
+    // The pick is a new open of the route it names, whatever the pump makes of the refresh: say so
+    // now, or a failure of that open reads as one of the route the playback had (S5a left this
+    // path with no `DeliveryRequested`, so `attempted_delivery` fell back to the installed route).
+    crate::player::report::note_delivery_requested_for(
+        playback_trace_generation(),
+        if adaptive {
+            crate::player::report::DeliveryClass::Hls
+        } else {
+            crate::player::report::DeliveryClass::Transcode
+        },
+        starting_rung.map_or_else(
+            || crate::player::report::selected_quality_class(q),
+            crate::player::report::rung_quality_class,
+        ),
+        crate::player::report::DeliveryReason::QualityPick,
+        crate::player::report::AttemptOrigin::QualityChange,
+    );
     crate::player::request_transcode_refresh(ps);
 }
 
@@ -6802,14 +9511,14 @@ fn apply_quality_choice(ps: &mut PlaybackSession, q: Quality) {
 /// and proves nothing. What it does NOT do is decide anything — [`crate::abr::bootstrap`] owns the
 /// admission rule, so the policy is stated once and is host-testable without a network.
 ///
-/// `None` means there is nothing to reason from (no source bitrate, or the transfer never
-/// returned), which is deliberately distinct from a completed slow probe.
-pub(super) fn measure_remote_original(url: &str, source_kbps: i64) -> Option<crate::abr::CapacityObservation> {
+/// Anything but [`RemoteProbe::Sample`] means there is nothing to reason from (no source bitrate, or
+/// the transfer never returned), which is deliberately distinct from a completed slow probe.
+pub(super) fn measure_remote_original(url: &str, source_kbps: i64) -> RemoteProbe {
     let Some(plan) = remote_probe_plan(source_kbps) else {
         crate::player::log(
             "auto: remote Original unavailable — source bitrate is unknown; using HLS",
         );
-        return None;
+        return RemoteProbe::Unmeasured;
     };
     // `url` already names the playback's own identity. Direct play samples the Part; a remux
     // Original samples start.mkv. A throwaway `source-N` forces an exact miss and makes PMS run a
@@ -6825,7 +9534,7 @@ pub(super) fn measure_remote_original(url: &str, source_kbps: i64) -> Option<cra
             crate::player::log(&format!(
                 "auto: remote Original preflight produced no capacity sample failure={failure:?}; using HLS"
             ));
-            return None;
+            return RemoteProbe::of_failure(failure);
         }
     };
     let measured = sample.kbps();
@@ -6835,12 +9544,50 @@ pub(super) fn measure_remote_original(url: &str, source_kbps: i64) -> Option<cra
         sample.elapsed.as_millis(),
         sample.target_reached as i32,
     ));
-    Some(crate::abr::CapacityObservation {
+    RemoteProbe::Sample(crate::abr::CapacityObservation {
         kbps: u32::try_from(measured).unwrap_or(u32::MAX),
         bytes: u64::try_from(sample.bytes).unwrap_or(0),
         active_us: u64::try_from(sample.elapsed.as_micros()).unwrap_or(u64::MAX),
         completed: sample.target_reached,
     })
+}
+
+/// **What Auto's remote Original preflight came back with**, typed so the planner can tell a slow
+/// link from a request that never got an answer. Both used to be `None`, and only the first says
+/// anything about capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemoteProbe {
+    /// The server answered and bytes were read, however few ([`crate::abr::CapacityObservation::completed`]
+    /// says whether the target was reached). This is the link's own answer.
+    Sample(crate::abr::CapacityObservation),
+    /// The network never produced a response: DNS, TLS, connect, a timeout or the setup deadline
+    /// before the first header (#1425: `Open(Transport(28))` on a trailer reached through two
+    /// cross-origin redirects; which phase timed out is not known). Nothing was measured, so the
+    /// preflight says nothing about the link's rate.
+    NoResponse,
+    /// Nothing to reason from, for any other reason: no source bitrate, a status or range refusal
+    /// from the server, local machinery failing, or a transfer that failed after it had opened.
+    Unmeasured,
+}
+
+impl RemoteProbe {
+    pub(super) fn sample(self) -> Option<crate::abr::CapacityObservation> {
+        match self {
+            Self::Sample(observation) => Some(observation),
+            Self::NoResponse | Self::Unmeasured => None,
+        }
+    }
+
+    /// Only an open that failed in the network counts as [`Self::NoResponse`]. A server's own
+    /// status (503 after a transcode MDE, a range it ignored) is a statement about the request,
+    /// and a body that stalled or broke after the open is a slow or bad link: neither is "no answer".
+    fn of_failure(failure: crate::curlio::ThroughputFailure) -> Self {
+        use crate::curlio::{OpenErr, ThroughputFailure};
+        match failure {
+            ThroughputFailure::Open(OpenErr::Transport(_) | OpenErr::Deadline) => Self::NoResponse,
+            _ => Self::Unmeasured,
+        }
+    }
 }
 
 /// PMS 1.43 503s a Part GET after a transcode MDE. The Original we would actually play is a
@@ -6859,7 +9606,9 @@ pub(super) fn measure_remote_original(url: &str, source_kbps: i64) -> Option<cra
 pub(super) fn measure_remote_remux(
     off: &plx_base::task::OffFrame,
     client: &plx_plex::plex::Client,
+    caps: &plx_os::devcaps::Caps,
     rk: &str,
+    media_index: usize,
     session: &str,
     audio_stream_id: i64,
     subtitle_stream_id: i64,
@@ -6875,7 +9624,9 @@ pub(super) fn measure_remote_remux(
     // actually forces a re-encode when a subtitle is being burned — see its doc for why.
     let spec_for = |audio| {
         transcode_spec_carrying_burn(
+            caps,
             rk,
+            media_index,
             session,
             session,
             plx_plex::plex::TranscodeOffset::Fresh,
@@ -6904,7 +9655,7 @@ pub(super) fn measure_remote_remux(
         crate::player::log("auto: remote remux preflight refused by /decision; using HLS");
         return RemuxProbe { sample: None, enhancement_refused };
     }
-    let sample = measure_remote_original(&client.transcode_start_url(&spec).to_url(), source_kbps);
+    let sample = measure_remote_original(&client.transcode_start_url(&spec).to_url(), source_kbps).sample();
     if sample.is_none() {
         // Same playback identity the HLS/remux that follows will register. closeResourceSession=1
         // would 503 that next start; physical-stop keeps the Streaming Resource.
@@ -6938,12 +9689,14 @@ pub(super) struct MdeVerdict {
 /// an item on the server the caller resolved from this playback's captured `ServerId`.
 pub(super) fn server_decision(
     c: &plx_plex::plex::Client,
+    caps: &plx_os::devcaps::Caps,
     rk: &str,
+    media_index: usize,
     session: &str,
     audio_stream_id: i64,
     subtitle_stream_id: i64,
 ) -> Option<MdeVerdict> {
-    let mc = match c.mde_decision(rk, session, audio_stream_id, subtitle_stream_id) {
+    let mc = match c.mde_decision(rk, media_index, session, audio_stream_id, subtitle_stream_id, caps) {
         Some(mc) => mc,
         None => {
             // failed fetch OR unparseable (XML/truncated) body — no Original Part
@@ -6961,7 +9714,7 @@ fn mde_verdict(mc: &plx_plex::plex::MediaContainer) -> Option<MdeVerdict> {
     let part = match mc
         .metadata
         .first()
-        .and_then(|m| m.media.first())
+        .and_then(|m| m.decided_media())
         .and_then(|md| md.part.first())
     {
         Some(p) => p,
@@ -7001,9 +9754,10 @@ fn mde_verdict(mc: &plx_plex::plex::MediaContainer) -> Option<MdeVerdict> {
 }
 
 pub(super) fn forced_server_decision(
-    c: &plx_plex::plex::Client, rk: &str, session: &str, audio: i64, sub: i64,
+    c: &plx_plex::plex::Client, caps: &plx_os::devcaps::Caps, rk: &str, media_index: usize, session: &str,
+    audio: i64, sub: i64,
 ) -> Option<MdeVerdict> {
-    mde_verdict(&c.mde_decision_forced(rk, session, audio, sub)?)
+    mde_verdict(&c.mde_decision_forced(rk, media_index, session, audio, sub, caps)?)
 }
 
 /// Select the audio + subtitle streams server-side for the current part before a
@@ -7012,16 +9766,21 @@ pub(super) fn forced_server_decision(
 /// default-selected sub, only the PUT does). The direct-play profile advertises text and
 /// client-rendered bitmap codecs; burn is still the remux/re-encode path when we PUT a
 /// positive subtitle id. We PUT subtitleStreamID=0 to keep subs OFF (no burn), or the chosen
-/// id to burn it; audioStreamID only when the user switched (else keep default).
+/// id to burn it; audioStreamID only when the user switched or the profile remembered a track for
+/// the show (else keep default).
 ///
 /// Never `0` for a subtitle the app draws itself: PMS discards a DOWNLOADED subtitle the moment the
-/// selection moves off it (docs/pms-api.md, 2026-10-06), so `0` means the viewer chose Off or nothing
-/// is selected; "do not burn" is the transcode wire's `subtitles=none` alone.
+/// selection moves off it (docs/pms-api.md, 2026-10-06), so `0` means the viewer chose Off (now
+/// or, for a show, earlier: a remembered Off) or nothing is selected; "do not burn" is the
+/// transcode wire's `subtitles=none` alone.
 ///
 /// `sid` names the server that owns `part` — the resolve worker passes the id it was given, and the
 /// in-playback callers pass [`cur_sid`]. A `Part.id` is server-local, so a PUT sent to the wrong
 /// one either 404s or, worse, re-selects streams on a stranger's part that happens to share the
-/// number.
+/// number. The queued callers ([`queue_put_selection`], the write-back) also carry the slot's
+/// credential stamp, `(instance_gen, grant_epoch)` of `client_for(sid)` at queue time, and a queued
+/// request is dropped, not sent, if the slot's client or grant moved before the worker ran it
+/// ([`QueuedSelection`], W11).
 pub(super) fn put_selection(_off: &plx_base::task::OffFrame, sid: ServerId, part: i64, aud: i64, sub: i64) {
     if part <= 0 {
         return;
@@ -7030,21 +9789,61 @@ pub(super) fn put_selection(_off: &plx_base::task::OffFrame, sid: ServerId, part
         Some(c) => c,
         None => return,
     };
+    send_selection(c, part, aud, Some(sub));
+}
+
+/// The PUT itself, on a client the CALLER chose: [`put_selection`] resolves it per call, the queue
+/// worker checks the credential it was queued under first and sends on that same `&Client`.
+/// `sub == None` omits `subtitleStreamID` (an audio-only write-back with no subtitle to keep), and
+/// the log line says `-` for it.
+fn send_selection(c: &plx_plex::plex::Client, part: i64, aud: i64, sub: Option<i64>) {
     let st = c.select_streams(&plx_plex::plex::StreamSelection {
         part_id: part,
         audio_stream_id: aud,
         subtitle_stream_id: sub,
     });
+    let sub = sub.map_or_else(|| "-".to_string(), |s| s.to_string());
     crate::player::log(&format!(
         "select streams: part={part} audio={aud} sub={sub} -> HTTP {st}"
     ));
 }
 
+/// One queued selection PUT and WHO it was queued for. `(instance_gen, grant_epoch)` is the
+/// identity of `client_for(sid)` at queue time: the slot is stable across a profile switch
+/// (`revoke_for_profile_switch` blanks its token and the next profile's grant re-tokens the SAME
+/// slot), so the server id alone cannot say whose request this is. The worker drops the request
+/// when either value moved (W11). `write_back` marks the request an applied remembered choice made
+/// (WB), so the drop can say so.
 struct QueuedSelection {
     sid: ServerId,
     part: i64,
     aud: i64,
-    sub: i64,
+    sub: Option<i64>,
+    instance_gen: u32,
+    grant_epoch: u32,
+    write_back: bool,
+}
+
+/// `Some` when `queued` may still be sent on `c`: the slot holds the same client incarnation and the
+/// same credential epoch it held when the request was queued. `c` is `client_for(queued.sid)` as the
+/// WORKER resolves it, so a request queued under one profile's token never goes out under the next.
+fn credential_unchanged(queued: &QueuedSelection, c: &plx_plex::plex::Client) -> bool {
+    c.instance_gen() == queued.instance_gen && c.grant_epoch() == queued.grant_epoch
+}
+
+/// Run one dequeued request: the PUT, unless the credential changed since it was queued.
+fn run_queued_selection(_off: &plx_base::task::OffFrame, req: &QueuedSelection) {
+    let Some(c) = plx_plex::plex::client_for(req.sid) else {
+        return;
+    };
+    if !credential_unchanged(req, c) {
+        crate::player::log("select streams: dropped (credential changed since queued)");
+        if req.write_back {
+            crate::player::log("track-memory: write-back dropped (profile changed)");
+        }
+        return;
+    }
+    send_selection(c, req.part, req.aud, req.sub);
 }
 
 /// The pending selection PUTs and whether a worker is draining them. One lock covers both, so the
@@ -7077,13 +9876,37 @@ fn selection_queue_idle() -> bool {
 /// receives last, so two picks made in quick succession (audio, then subtitle) must land on the
 /// server in the order the viewer made them, not in whatever order two independent threads happen
 /// to finish their requests.
+///
+/// Each request is stamped with `client_for(sid)`'s `(instance_gen, grant_epoch)` at queue time and is
+/// dropped, not sent, if either moved before the worker runs it (W11; it logs `select streams:
+/// dropped (credential changed since queued)`), so a request queued behind a slow server never goes
+/// out under the next profile's token.
 pub(super) fn queue_put_selection(sid: ServerId, part: i64, aud: i64, sub: i64) {
+    queue_selection(sid, part, aud, Some(sub), false);
+}
+
+/// [`queue_put_selection`] with the subtitle optional and the request's provenance. The credential
+/// identity is captured HERE, on the thread that knows who is asking, and checked again when the
+/// worker runs the request (W11).
+fn queue_selection(sid: ServerId, part: i64, aud: i64, sub: Option<i64>, write_back: bool) {
     if part <= 0 {
         return;
     }
+    let Some(c) = plx_plex::plex::client_for(sid) else {
+        return;
+    };
+    let request = QueuedSelection {
+        sid,
+        part,
+        aud,
+        sub,
+        instance_gen: c.instance_gen(),
+        grant_epoch: c.grant_epoch(),
+        write_back,
+    };
     let spawn = {
         let mut queue = selection_queue();
-        queue.pending.push_back(QueuedSelection { sid, part, aud, sub });
+        queue.pending.push_back(request);
         !std::mem::replace(&mut queue.worker_running, true)
     };
     if spawn {
@@ -7103,7 +9926,7 @@ fn spawn_selection_worker() {
             };
             req
         };
-        put_selection(off, req.sid, req.part, req.aud, req.sub);
+        run_queued_selection(off, &req);
     });
     if !spawned {
         // The OS refused the thread. Drop the running flag so a later `queue_put_selection` gets a
@@ -7140,11 +9963,10 @@ pub fn up_next(ps: &PlaybackSession) -> Option<&UpNext> {
 ///
 /// MAIN THREAD ONLY. Unlike [`up_next`] this lends the rows to a closure instead of handing out a
 /// `&'static`, and that is deliberate: `request_play` FREES this Vec as its first act, so a
-/// borrowed row used to start playback would be read after free — exactly the aliasing bug
-/// `request_play_up_next`'s by-value signature exists to make unrepresentable. A caller that wants
+/// borrowed row used to start playback would be read after free — the aliasing bug a
+/// [`request_play_queue_item`] caller avoids by owning the row it passes. A caller that wants
 /// to keep a row past the call clones it out (`with_queue(|q| q.get(i).cloned())`); the borrow
 /// checker cannot police a `&'static`, but it does police this.
-#[allow(dead_code)] // nothing reads the rows yet — the queue overlay that draws them is its own batch
 pub fn with_queue<R>(ps: &PlaybackSession, f: impl FnOnce(&[plx_plex::plex::QueueRow]) -> R) -> R {
     f(&ps.queue)
 }
@@ -7168,6 +9990,7 @@ pub fn with_queue<R>(ps: &PlaybackSession, f: impl FnOnce(&[plx_plex::plex::Queu
 pub(super) fn resolve_playqueue(
     c: &plx_plex::plex::Client,
     rk: &str,
+    show_rk: &str,
     session: &str,
     cached: &str,
     continuous: bool,
@@ -7191,7 +10014,7 @@ pub(super) fn resolve_playqueue(
         crate::player::log("playqueue: no machineIdentifier (skip)");
         return QueueInfo::default();
     }
-    match c.create_play_queue(effective, rk, session, continuous) {
+    match c.create_play_queue(effective, rk, show_rk, session, continuous) {
         Some(q) => {
             let up_next = q.next.as_ref().and_then(up_next_of);
             crate::player::log(&format!(
@@ -7266,94 +10089,126 @@ impl ResolveEnv {
                 && (ps.cur_sub_sidecar || side_reader_admitted(ps)))
                 .then_some(ps.cur_sub_ordinal),
             subtitle_override: None,
+            sub_mode: SubMode::Track,
+            forced_lang: forced_only_lang(ps).to_string(),
             cached_item: meta.cached_playing(sid, rk),
+            version: None,
             quality: quality(),
             direct_play_mode: direct_play_mode(),
+            dolby_vision_mode: dolby_vision_mode(),
+            uri_engine: uri_engine(),
+            dv_capability: plx_os::devcaps::dv::capability(),
+            caps: ps.attempt_caps(),
+            backends: ps.backends,
+            uri_preflight_port: ps.uri_preflight_port.clone(),
+            uri_offers: super::uri_preflight::UriOfferEligibility::ALL,
+            feed_original_eligible: ps.backends.feed,
+            requested_rate_permille: ps.requested_rate_permille,
+            resume_ns: ps.requested_resume_ns,
             src_kbps: resolve_src_kbps(meta.current(), sid, rk),
             omit_queue_continuous: false,
+            queue_show_rk: String::new(),
+            queue_continuation: None,
             preview: false,
             audio_enhancements: crate::player::audio_enhancements(),
             pass: plx_plex::plex::serverinfo::subscription_of(sid),
+            memory: recalled_track_memory(sid),
+            // Set in exactly one place, `request_env`: nothing else may default it on.
+            fresh_play: false,
+            selection_before_retry: None,
             #[cfg(any(test, feature = "test-support"))]
-            dv_capability: None,
+            account_subtitles: None,
         }
     }
 }
 
 pub fn playback_preview(d: &plx_data::metadata::Detail) -> Option<Preview> {
+    detail_playback_preview(d).map(|(preview, _)| preview)
+}
+
+/// The route preview and its source facts from the same selection and capability snapshot.
+pub fn detail_playback_preview(d: &plx_data::metadata::Detail) -> Option<(Preview, PlayedVideo<'_>)> {
     playback_preview_with_capability(d, None)
+}
+
+pub fn detail_played_video(d: &plx_data::metadata::Detail) -> Option<PlayedVideo<'_>> {
+    let caps = plx_os::devcaps::start_caps(&plx_plex::plex::session::peek().applied_refusals());
+    played_video(d, direct_play_mode(), &caps, dolby_vision_mode(), plx_os::devcaps::dv::capability())
 }
 
 fn playback_preview_with_capability(
     d: &plx_data::metadata::Detail,
-    capability: Option<plx_platform::devcaps::dv::DvCapability>,
-) -> Option<Preview> {
-    // A SHOW's container carries no file of its own, so the page answers for the episode its Play
-    // button would start — the one the hero is already about. Its frame size and audio list are
-    // the show Detail's, which `fetch_item_streams` backfilled from that same episode.
-    let (part, vcodec) = match d.on_deck.as_ref().filter(|_| d.part.is_empty()) {
-        Some(ep) => (ep.part.as_str(), ep.vcodec.as_str()),
-        None => (d.part.as_str(), d.vcodec.as_str()),
-    };
-    let presentation = match capability {
-        Some(capability) => d.dovi.presentation(
-            !plx_data::metadata::dv_withheld(),
-            capability,
-            vcodec.eq_ignore_ascii_case("hevc"),
-        ),
-        None => d.dovi.presentation_now(vcodec.eq_ignore_ascii_case("hevc")),
-    };
+    capability: Option<plx_os::devcaps::dv::DvCapability>,
+) -> Option<(Preview, PlayedVideo<'_>)> {
     let mode = direct_play_mode();
+    // The facts row is a read-out of what the device would do NOW, with no attempt behind it, so it
+    // is a start edge of its own: the value a play started this moment would begin on (the boot
+    // snapshot less the install's stored refusals), read once here and passed down to every gate it
+    // asks. With no stored row in force it is the boot `Arc` itself: one `peek()`, no clone.
+    let caps = plx_os::devcaps::start_caps(&plx_plex::plex::session::peek().applied_refusals());
+    let dv_mode = dolby_vision_mode();
+    let dv_probed = capability.unwrap_or_else(plx_os::devcaps::dv::capability);
+    let file = played_video(d, mode, &caps, dv_mode, dv_probed)?;
+    let (part, audio, subs) = match file.version {
+        Some(v) => {
+            let streams = d.version_parts.iter().find(|p| p.id == v.id)?;
+            (streams.part.as_str(), &streams.audio, &streams.subs)
+        }
+        None => (file.primary_part, &d.audio, &d.subs),
+    };
+    let presentation = file.dv.presentation;
     if mode == DirectPlayMode::Forced {
-        return (!part.is_empty() && part_is_streamable(part)
-            && video_feed_supported(vcodec, presentation, plx_platform::devcaps::caps())
-            && d.audio.iter().any(|a| audio_direct_plays(mode, &a.codec, a.channels)))
-            .then_some(Preview::DirectPlay);
+        return (part_is_streamable(part)
+            && video_feed_supported(file.vcodec, presentation, &caps)
+            && audio.iter().any(|a| audio_direct_plays_with(&caps, mode, &a.codec, a.channels, a.sampling_rate)))
+            .then_some((Preview::DirectPlay, file));
     }
     let p = playback_preview_with_audio(
+        &caps,
         part,
-        vcodec,
-        d.width,
-        d.height,
+        file.vcodec,
+        file.width,
+        file.height,
         presentation,
-        &d.audio,
+        audio,
         AudioPreviewInputs {
-            default_acodec: &d.acodec,
-            sub_selected: pick_dp_subtitle(&d.subs).is_some(),
+            default_acodec: file.acodec,
+            sub_selected: pick_dp_subtitle(subs).is_some(),
             quality: quality(),
             dv_declared: false, // filled from `presentation` by the preview itself
             local_link: plx_plex::plex::client_for(d.sid)
                 .is_some_and(|c| c.link() == Some(plx_plex::plex::probe::Location::Local)),
-            part_kbps: d.bitrate,
+            part_kbps: file.kbps,
         },
     )?;
     // The user's quality ceiling is the LAST gate `build_stream` applies, so it is the last one
     // here too — and it can only ever downgrade, never promote. Without this the facts row would
     // promise "Direct Play" for a source the rung is about to send to an encoder, which is the
-    // exact mismatch this preview's doc says it exists to avoid. `d.bitrate`/`width`/`height` are
-    // `Media[0]`'s, i.e. the same numbers `ResolveEnv` hands the resolve.
+    // exact mismatch this preview's doc says it exists to avoid. `file.ceiling_kbps`/`width`/`height`
+    // are those of the version Play starts, i.e. the same numbers `ResolveEnv` hands the resolve.
     let location = plx_plex::plex::client_for(d.sid).and_then(|client| client.link());
     // A detail page has not downloaded the file yet, so it reports what can preserve the source,
     // not a fictitious failed bandwidth result. Remote Auto is measured at Play. Relay remains a
     // conversion because its independent link policy refuses both original-rate flavors.
     let policy = direct_play_policy(mode, flavors_allowed(
         plx_plex::plex::link_policy(location),
-        quality_policy(quality(), true, d.bitrate, d.width, d.height),
+        quality_policy(quality(), true, file.ceiling_kbps, file.width, file.height),
     ));
-    Some(match p {
+    let preview = match p {
         Preview::DirectPlay if !policy.direct_play && policy.remux && mode == DirectPlayMode::Disabled => Preview::Remux,
         Preview::DirectPlay if !policy.direct_play => Preview::Converts,
         Preview::Remux | Preview::OriginalAudioConverted if !policy.remux => Preview::Converts,
         _ => p,
-    })
+    };
+    Some((preview, file))
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn playback_preview_with_capability_for_test(
     d: &plx_data::metadata::Detail,
-    capability: plx_platform::devcaps::dv::DvCapability,
+    capability: plx_os::devcaps::dv::DvCapability,
 ) -> Option<Preview> {
-    playback_preview_with_capability(d, Some(capability))
+    playback_preview_with_capability(d, Some(capability)).map(|(preview, _)| preview)
 }
 
 static PLAY_GEN: AtomicU32 = AtomicU32::new(0);
@@ -7408,6 +10263,7 @@ struct PlayLanding {
     trace_generation: u32,
     /// Desired route contract captured before ResolveEnv was projected on the main thread.
     contract_revision: u64,
+    candidate_purpose: CandidatePurpose,
     plan: Plan,
     rk: String,
 }
@@ -7424,7 +10280,7 @@ fn retire_plan_resources(resources: AbandonedPlanResources) {
     // server allocation, so a refused worker stops them inline. The normal path keeps this
     // network work off the main thread.
     plx_base::task::spawn_small_or_inline(
-        "resolve-abandoned-stop",
+        "abandon-stop",
         const { &plx_base::task::BlockingLabel::new("abandoned plan stop (worker thread refused)") },
         move || {
             for identity in resources.identities {
@@ -7466,13 +10322,26 @@ pub fn is_preview(ps: &PlaybackSession) -> bool {
     ps.preview
 }
 
+/// **Is this a progressive stream at Quality=Original?** The Feed holds such a stream's clock and
+/// shows Buffering when its link stops keeping up (`plx_playback_contract::feed::HoldRoute`).
+/// Progressive delivery with no quality ceiling: direct play and remux, where Original and forced
+/// direct play carry no ceiling. Three cases that are progressive are NOT it. Segmented HLS has its
+/// own hold. A fixed quality's progressive re-encode carries a ceiling. And a playback Quality=Auto's
+/// Original supervisor watches (`cur_auto_original_watched`) keeps Auto's own Original -> HLS exit
+/// (`auto_original_watch`) as the answer to a starved link, which a hold would stand in front of.
+/// A trailer preview is the caller's to exclude.
+pub fn is_progressive_original(ps: &PlaybackSession) -> bool {
+    !is_segmented_hls(ps) && cur_ceiling(ps).is_none() && !ps.cur_auto_original_watched
+}
+
 pub fn clear_preview(ps: &mut PlaybackSession) {
     ps.preview = false;
 }
 
 /// Was the installed session resolved for a hero preview? Unlike [`is_preview`], which the
 /// preview machinery clears as it retires the session, this is fixed at landing and only the next
-/// landing replaces it — so no teardown bookkeeping can turn a trailer into a playback.
+/// landing, or the next FILM request (`request_play_inner`), replaces it — so no teardown
+/// bookkeeping can turn a trailer into a playback, and a film that never lands is never told as one.
 ///
 /// **The one gate on every account write a session makes**: the timeline lease
 /// ([`begin_timeline_reporting`]) and the stop scrobble ([`scrobble_stop`]) both ask it, as do the
@@ -7521,6 +10390,7 @@ pub fn surface_sid() -> ServerId {
 pub fn request_play(
     ps: &mut PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     sid: ServerId,
     rk: &str,
     part: &str,
@@ -7528,10 +10398,13 @@ pub fn request_play(
     acodec: &str,
     title: &str,
     ctx: &str,
+    version: Option<plx_plex::plex::MediaId>,
+    show_rk: &str,
 ) -> bool {
     request_play_inner(
         ps,
         meta,
+        caps,
         PlaybackRequest {
             sid,
             rk: rk.to_owned(),
@@ -7541,11 +10414,37 @@ pub fn request_play(
             title: title.to_owned(),
             ctx: ctx.to_owned(),
             preview: false,
+            version,
+            show_rk: show_rk.to_owned(),
         },
         None,
         None,
         false,
+        crate::player::report::AttemptOrigin::Fresh,
     )
+}
+
+/// Start an existing queue item without replacing the queue and losing its preceding rows.
+/// The continuation is captured before the common request transaction retires the outgoing queue.
+/// The HUD title is the row's show title, its own title when it has none (a movie, a clip).
+pub fn request_play_queue_item(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
+    row: &plx_plex::plex::QueueRow,
+    ctx: &str,
+) -> bool {
+    let title = if row.show_title.is_empty() {
+        &row.title
+    } else {
+        &row.show_title
+    };
+    let queue = super::queue_navigation::QueueContinuation::capture(ps, row);
+    request_play_with_queue(ps, meta, caps, PlaybackRequest {
+        sid: row.sid, rk: row.rk.clone(), part: row.part.clone(), vcodec: row.vcodec.clone(),
+        acodec: row.acodec.clone(), title: title.clone(), ctx: ctx.into(), preview: false, version: None,
+        show_rk: row.show_rk.clone(),
+    }, None, None, false, crate::player::report::AttemptOrigin::Fresh, queue, false, None)
 }
 
 /// Same resolve door as [`request_play`], flagged as a preview. Does not push a route. Resume is
@@ -7553,6 +10452,7 @@ pub fn request_play(
 pub fn request_preview(
     ps: &mut PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     sid: ServerId,
     rk: &str,
     part: &str,
@@ -7563,6 +10463,7 @@ pub fn request_preview(
     request_play_inner(
         ps,
         meta,
+        caps,
         PlaybackRequest {
             sid,
             rk: rk.to_owned(),
@@ -7572,11 +10473,61 @@ pub fn request_preview(
             title: title.to_owned(),
             ctx: plx_data::metadata::TRAILER_CONTEXT.to_owned(),
             preview: true,
+            version: None,
+            show_rk: String::new(),
         },
         None,
         None,
         false,
+        // A preview mints no attempt (`requested` is not called), so the ledger never reads this;
+        // it names the cause truthfully for whoever reads the request.
+        crate::player::report::AttemptOrigin::Preview,
     )
+}
+
+/// The resolve environment a play REQUEST hands its worker: the snapshot taken AFTER the request
+/// cleared the live selection, the request's own flags, and the retry (if any) applied over it.
+/// MAIN THREAD.
+///
+/// **`fresh_play` is set here and nowhere else (W4).** A viewer's launch is fresh; a retry is not,
+/// whichever of its callers built it (the Retry press, Play Automatically, the start-failure rescue,
+/// the in-flight contract re-resolve all pass `Some(retry)`), and neither is a preview. Only a fresh
+/// play may write a remembered choice back to the server.
+fn request_env(
+    ps: &PlaybackSession, meta: plx_data::metadata::MetadataView<'_>, request: &PlaybackRequest,
+    retry: Option<RetryContext>,
+) -> ResolveEnv {
+    let mut env = ResolveEnv::snapshot(ps, meta, request.sid, &request.rk);
+    env.omit_queue_continuous = plx_data::metadata::context_omits_queue_continuous(&request.ctx);
+    env.queue_show_rk = request.show_rk.clone();
+    env.set_preview(request.preview);
+    env.fresh_play = retry.is_none() && !request.preview;
+    env.version = request.version;
+    if env.version.is_some() {
+        // Both describe the default version: a picked one is measured from its own fetch.
+        env.cached_item = None;
+        env.src_kbps = 0;
+    }
+    if let Some(retry) = retry {
+        apply_retry(&mut env, retry);
+    }
+    leave_a_cached_default_the_set_cannot_decode(&mut env, meta, request.sid, &request.rk);
+    env
+}
+
+fn leave_a_cached_default_the_set_cannot_decode(
+    env: &mut ResolveEnv, meta: plx_data::metadata::MetadataView<'_>, sid: ServerId, rk: &str,
+) {
+    if env.version.is_some() || env.cached_item.is_none() {
+        return;
+    }
+    let replaced = meta
+        .current()
+        .filter(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, rk)))
+        .is_some_and(|d| automatic_version(&d.versions, env).is_some());
+    if replaced {
+        env.cached_item = None;
+    }
 }
 
 /// Common async request transaction. A retry waits for the real stop's PMS work on THIS worker
@@ -7585,11 +10536,129 @@ pub fn request_preview(
 fn request_play_inner(
     ps: &mut PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     request: PlaybackRequest,
     retry: Option<RetryContext>,
     trace_generation: Option<u32>,
     drain_previous: bool,
+    origin: crate::player::report::AttemptOrigin,
 ) -> bool {
+    request_play_with_queue(ps, meta, caps, request, retry, trace_generation, drain_previous, origin, None, false, None)
+}
+
+/// An explicit viewer edit that needs a new physical executor. Its desired value is installed
+/// only after the common request door accepts the resolve, so Busy leaves the current play intact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewerReconfigure {
+    Speed(i32),
+    Audio(plx_plex::plex::AudioEnhancements),
+    /// The viewer selected a source stream that this URI output cannot switch to natively.
+    SourceAudio(i64),
+    /// Off and Forced only are source intent, not a fabricated URI native index.
+    SourceSubtitle { sid: i64, mode: SubMode, forced_lang: Option<String> },
+    /// Two independently queued native choices were refused in one poll. Resolve the pair once
+    /// rather than letting the first replacement erase the viewer's other selected source track.
+    SourceTracks { audio_sid: i64, subtitle_sid: i64 },
+}
+
+/// Re-resolve the same source and selected tracks at a proven viewer position. This is one new
+/// finite policy episode, whereas automatic failures continue within their existing episode.
+/// The old executor remains owned until the normal resolved-start/release queue replaces it.
+pub fn request_viewer_reconfigure(ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    change: ViewerReconfigure, position_ns: Option<i64>, paused: Option<bool>) -> bool {
+    let (Some(request), Some(position_ns), Some(paused)) =
+        (ps.request.clone(), position_ns, paused) else { return false };
+    if position_ns < 0 || ps.preview { return false; }
+    let mut retry = current_retry_context(ps, position_ns);
+    match &change {
+        ViewerReconfigure::Speed(rate) => {
+            if !crate::player::PLAY_RATES.contains(rate)
+                || *rate == ps.requested_rate_permille
+                || (ps.direct_play_mode == DirectPlayMode::Forced
+                    && *rate != plx_playback_contract::RATE_NORMAL) { return false; }
+        }
+        ViewerReconfigure::Audio(audio) => {
+            if *audio == crate::player::audio_enhancements()
+                || (ps.direct_play_mode == DirectPlayMode::Forced && audio.any()) { return false; }
+        }
+        ViewerReconfigure::SourceAudio(sid) => {
+            let Some(source) = ps.source_selection else { return false };
+            if ps.attempt_view().backend() != Some(crate::player::attempt_view::Backend::Uri)
+                || *sid <= 0 || *sid == source.audio_sid
+                || !meta.view().playing().is_some_and(|item|
+                    item.audio.iter().any(|track| track.id == *sid)) { return false; }
+            retry.selection = Some(HeldSelection {
+                part_id: source.part_id, audio_sid: *sid, sub_sid: source.subtitle_sid });
+        }
+        ViewerReconfigure::SourceSubtitle { sid, mode, forced_lang } => {
+            let Some(source) = ps.source_selection else { return false };
+            if ps.attempt_view().backend() != Some(crate::player::attempt_view::Backend::Uri)
+                || *sid < 0 || (*sid == source.subtitle_sid && *mode == ps.sub_mode) {
+                return false;
+            }
+            if *sid > 0 && !meta.view().playing().is_some_and(|item|
+                item.subs.iter().any(|track| track.id == *sid)) { return false; }
+            if (*mode == SubMode::Off && *sid != 0)
+                || (*mode == SubMode::Track && *sid == 0)
+                || (*mode == SubMode::ForcedOnly) != forced_lang.is_some() { return false; }
+            retry.selection = Some(HeldSelection {
+                part_id: source.part_id, audio_sid: source.audio_sid, sub_sid: *sid });
+            retry.sub_mode = *mode;
+        }
+        ViewerReconfigure::SourceTracks { audio_sid, subtitle_sid } => {
+            let Some(source) = ps.source_selection else { return false };
+            if ps.attempt_view().backend() != Some(crate::player::attempt_view::Backend::Uri)
+                || *audio_sid <= 0 || *subtitle_sid <= 0
+                || (*audio_sid == source.audio_sid && *subtitle_sid == source.subtitle_sid)
+                || !meta.view().playing().is_some_and(|item|
+                    item.audio.iter().any(|track| track.id == *audio_sid)
+                    && item.subs.iter().any(|track| track.id == *subtitle_sid)) {
+                return false;
+            }
+            retry.selection = Some(HeldSelection {
+                part_id: source.part_id, audio_sid: *audio_sid, sub_sid: *subtitle_sid });
+            retry.sub_mode = SubMode::Track;
+        }
+    }
+    retry.candidate_purpose = CandidatePurpose::NewCandidate;
+    let caps = ps.attempt_caps();
+    request_play_with_queue(ps, meta, caps, request, Some(retry), None, false,
+        crate::player::report::AttemptOrigin::ViewerReconfigure, None, false,
+        Some((change, paused)))
+}
+
+fn local_attempt_origin(origin: crate::player::report::AttemptOrigin)
+    -> crate::player::attempt_metrics::Origin {
+    use crate::player::attempt_metrics::Origin as Local;
+    use crate::player::report::AttemptOrigin as Report;
+    match origin {
+        Report::Fresh => Local::Fresh,
+        Report::UserRetry => Local::UserRetry,
+        Report::QualityChange => Local::QualityChange,
+        Report::ViewerReconfigure => Local::ViewerReconfigure,
+        Report::AutoHandoff => Local::AutomaticHandoff,
+        Report::Recovery => Local::Recovery,
+        Report::Resume => Local::ForegroundResume,
+        Report::Preview => Local::Preview,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_play_with_queue(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
+    request: PlaybackRequest,
+    retry: Option<RetryContext>,
+    trace_generation: Option<u32>,
+    drain_previous: bool,
+    origin: crate::player::report::AttemptOrigin,
+    queue: Option<super::queue_navigation::QueueContinuation>,
+    same_episode_feed_retry: bool,
+    viewer_reconfigure: Option<(ViewerReconfigure, bool)>,
+) -> bool {
+    ps.finished = false; // a flag the previous stop never took must not mark THIS item
     let sid = request.sid;
     let rk = &request.rk;
     let part = &request.part;
@@ -7598,11 +10667,42 @@ fn request_play_inner(
     if part.is_empty() && rk.is_empty() {
         return false;
     }
-    if !begin_playback_request() {
+    let Some(accepted_revision) = begin_playback_request() else {
         crate::player::log(
             "playback request: route transition still owns the player; refusing overlapping resolve",
         );
         return false;
+    };
+    let continuing = same_episode_feed_retry
+        || (retry.is_some() && matches!(origin,
+            crate::player::report::AttemptOrigin::AutoHandoff
+            | crate::player::report::AttemptOrigin::Recovery
+            | crate::player::report::AttemptOrigin::Resume));
+    let metric_request = if continuing {
+        ps.metric_request.unwrap_or_else(||
+            crate::player::backend::LogicalRequestId::new(accepted_revision))
+    } else {
+        crate::player::backend::LogicalRequestId::new(accepted_revision)
+    };
+    if ps.metric_request != Some(metric_request) {
+        ps.pending_metric_lifecycle.push(crate::player::backend::RequestLifecycle::Begin {
+            request: metric_request, origin: local_attempt_origin(origin),
+        });
+    }
+    ps.metric_request = Some(metric_request);
+    if let Some((change, paused)) = viewer_reconfigure {
+        ps.set_reconfigure_pause_goal(paused);
+        match change {
+            ViewerReconfigure::Speed(rate) => ps.requested_rate_permille = rate,
+            ViewerReconfigure::Audio(audio) => crate::player::set_audio_enhancements(audio),
+            ViewerReconfigure::SourceAudio(_) => {}
+            ViewerReconfigure::SourceTracks { .. } => {}
+            ViewerReconfigure::SourceSubtitle { mode: SubMode::ForcedOnly,
+                forced_lang: Some(lang), .. } => {
+                ps.track_ctx.get_or_insert_with(TrackContext::default).forced_lang = lang;
+            }
+            ViewerReconfigure::SourceSubtitle { .. } => {}
+        }
     }
     // **The playback funnel's denominator, minted HERE and not where the plan lands.** Every way
     // into playback comes through this one function, including the ones that go on to be refused at
@@ -7611,9 +10711,11 @@ fn request_play_inner(
     // under-counts exactly the failure it exists to measure. It is after the empty-request guard
     // above, so a press that resolves to nothing is not an attempt.
     let trace_generation = if request.preview {
+        // No attempt, but a failure latch of its own, reset here as `requested` resets the film's.
+        crate::player::report::preview_requested();
         0
     } else {
-        trace_generation.unwrap_or_else(|| crate::player::report::requested(ps, sid))
+        trace_generation.unwrap_or_else(|| crate::player::report::requested(ps, sid, origin))
     };
     // The fields a play REQUEST owns, as against the ones only a landing may install: the HUD
     // strings (published now, so the pre-roll has a title through the whole resolve) and the five
@@ -7621,6 +10723,12 @@ fn request_play_inner(
     // until `apply_plan` replaces it, which is what lets a still-running playback keep answering
     // for itself while the next one resolves.
     { let s = &mut *ps; {
+        // **The attempt's capability value arrives as an argument**: the app's play start read it
+        // ONCE ([`request_play`]'s `caps`), and the session carries it from here on. The resolve
+        // below, every seek and track pick during the film, and the transcode profile all plan from
+        // this one value ([`PlaybackSession::attempt_caps`]); route reads no process-wide answer to plan.
+        if !same_episode_feed_retry { s.begin_attempt(caps); }
+        s.attempt_origin = local_attempt_origin(origin);
         s.request = Some(request.clone());
         s.requested_resume_ns = if request.preview {
             0
@@ -7633,12 +10741,7 @@ fn request_play_inner(
             set_c(s.title.as_mut_ptr(), s.title.len(), title);
             set_c(s.ctxline.as_mut_ptr(), s.ctxline.len(), plx_data::metadata::context_label(ctx));
         }
-        s.cur_audio = None;
-        s.cur_sub_sid = 0;
-        s.cur_sub_sidecar = false;
-        s.cur_sub_client_drawable = false;
-        s.cur_sub_ordinal = -1;
-        s.side_subs_refused = false;
+        begin_track_selection(s, retry);
         // The outgoing item's enhancement outcome is not this one's; the landing installs its own.
         s.cur_enhancement = EnhancementOutcome::Off;
         // Retire the OUTGOING item's queue before its successor resolves: this names the episode
@@ -7653,33 +10756,62 @@ fn request_play_inner(
         // the item now being resolved. `play_pending()` outranks it for this frame either way, but
         // a resolve that never lands (a refused spawn) would leave nothing else to clear it.
         s.play_verdict = None;
+        { s.pms_decline = None; }
+        { s.uri_recovery_pending = None; }
         s.jail_load_blocked = false;
+        s.native_start_refused = None;
+        s.engine_failure = None;
         s.resolve_failed = false;
+        // A film request retires the previous trailer's mark: `resolved_as_preview` is otherwise
+        // replaced only by a LANDING, so a film whose resolve never lands (a refused worker spawn)
+        // would report its failure as that trailer's — its origin, fingerprint and flags. The
+        // trailer's engine is already gone: a Play is held until the preview machine releases it
+        // (`content::hold_feature`), so no preview write gate (`scrobble_stop`,
+        // `begin_timeline_reporting`) is still waiting on the mark. A preview request keeps it.
+        if !request.preview {
+            s.resolved_as_preview = false;
+        }
     } };
     // …and the outgoing item's track/marker/chapter store, for exactly the reason above: it stays
     // the PREVIOUS leaf's until this resolve lands. See `metadata::retire_playing_item`.
     if !request.preview {
         meta.run(plx_data::stores::metadata::MetadataCmd::RetirePlayingItem);
-        reset_track_selection(request.sid, &request.rk, retry);
+        if retry.is_none() {
+            // A retry is the same item and keeps its speed; a new one starts at 1x, the viewer's
+            // intent and the readout's offered rate both.
+            ps.requested_rate_permille = plx_playback_contract::RATE_NORMAL;
+            crate::player::route_fx::reset_play_rate(ps);
+        }
+        reset_track_selection(ps, request.sid, &request.rk, retry);
     }
     // Capture the reducer revision BEFORE projecting the environment. Both happen on the main
     // thread, so a later quality/track edit necessarily advances this revision after the snapshot
     // and makes the landing stale instead of installing an old plan beneath a new checkmark.
-    let contract_revision = desired_contract_revision();
+    let contract_revision = accepted_revision;
     // captured HERE, on the main thread, and moved into the worker — see ResolveEnv
-    let mut env = ResolveEnv::snapshot(ps, meta.view(), sid, rk);
-    env.omit_queue_continuous = plx_data::metadata::context_omits_queue_continuous(ctx);
-    env.set_preview(request.preview);
-    if let Some(retry) = retry {
-        apply_retry_enhancement(&mut env, retry);
-        // `request_play` resets the live selection because that is correct for a new item.  A
-        // retry is the SAME item: override the fresh defaults with the selection captured before
-        // that reset so a rescue does not silently turn subtitles/audio back to server default.
-        env.direct_play_mode = retry.direct_play_mode;
-        env.audio_sid = retry.audio_sid;
-        env.sub_sid = retry.sub_sid;
-        env.subtitle_override = Some(retry.sub_sid);
+    let mut env = request_env(ps, meta.view(), &request, retry);
+    let candidate_purpose = retry.map_or(CandidatePurpose::NewCandidate,
+        |context| context.candidate_purpose);
+    if let Some(policy) = ps.backend_policy.as_ref() {
+        use super::backend_policy::OfferId;
+        use plx_playback_contract::BackendKind::Uri;
+        env.uri_offers = super::uri_preflight::UriOfferEligibility {
+            original: policy.may_qualify(Uri, OfferId::URI_ORIGINAL),
+            remux: policy.may_qualify(Uri, OfferId::URI_PMS_REMUX),
+            encode: policy.may_qualify(Uri, OfferId::URI_PMS_ENCODE),
+            hls: policy.may_qualify(Uri, OfferId::URI_PMS_HLS),
+        };
+        env.feed_original_eligible = env.backends.feed
+            && (policy.may_qualify(plx_playback_contract::BackendKind::Feed,
+                    OfferId::FEED_ORIGINAL)
+                || (candidate_purpose == CandidatePurpose::ReopenCurrent
+                    && policy.can_reopen(plx_playback_contract::BackendKind::Feed,
+                        OfferId::FEED_ORIGINAL))
+                || (candidate_purpose == CandidatePurpose::RollbackExisting
+                    && policy.can_rollback_existing(plx_playback_contract::BackendKind::Feed,
+                        OfferId::FEED_ORIGINAL)));
     }
+    env.queue_continuation = queue;
     let gen = PLAY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(resume_ns) = retry.map(|r| r.resume_ns).filter(|ns| *ns > 0) {
         *PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner()) = Some((gen, resume_ns));
@@ -7695,14 +10827,16 @@ fn request_play_inner(
             // the replacement encoder, so pay that wait here, on the resolve worker.
             drain_scrobble();
         }
-        // catch_unwind OUTSIDE the mailbox write, like load_season: a panicking resolve must still
-        // land (as !ok) or PLAY_BUSY latches and the screen wedges on a spinner forever.
+        // catch_unwind OUTSIDE the mailbox write, like `metadata::finish_season_job`: a panicking
+        // resolve must still land (as !ok) or PLAY_BUSY latches and the screen wedges on a spinner
+        // forever.
         let plan = std::panic::catch_unwind(|| build_stream(off, &rk, &part, &vc, &ac, &env))
             .unwrap_or_else(|_| Plan { direct_play_mode: env.direct_play_mode, ..Default::default() });
         let landing = PlayLanding {
             gen,
             trace_generation,
             contract_revision,
+            candidate_purpose,
             plan,
             rk,
         };
@@ -7739,16 +10873,43 @@ fn request_play_inner(
     spawned
 }
 
+/// What a play REQUEST clears of the outgoing item's live track selection (the landing installs
+/// the incoming item's own).
+fn clear_track_selection(s: &mut PlaybackSession) {
+    s.cur_audio = None;
+    s.source_selection = None;
+    s.cur_sub_sid = 0;
+    s.selection_known = false;
+    s.cur_sub_sidecar = false;
+    s.cur_sub_client_drawable = false;
+    s.cur_sub_ordinal = -1;
+    s.side_subs_refused = false;
+}
+
+/// What a play request does to the live track selection: clear it, and keep the pair a RETRY
+/// carried ([`PlaybackSession::carried_selection`]) so a retry built before this one lands still
+/// finds it. A new item (`None`) carries nothing.
+fn begin_track_selection(s: &mut PlaybackSession, retry: Option<RetryContext>) {
+    let source_selection = retry.and(s.source_selection);
+    clear_track_selection(s);
+    s.source_selection = source_selection;
+    s.carried_selection = retry.and_then(|r| r.selection);
+    // The mode rides the retry the same way the pair does: kept while no playable plan has landed,
+    // so a second retry built before this one lands still finds Forced only.
+    s.sub_mode = retry.map_or(SubMode::Track, |r| r.sub_mode);
+}
+
 /// Clear the outgoing item's live track selection for a play request. A retry is the SAME item
-/// resolved again with the subtitle it had (`RetryContext::sub_sid`, applied to the resolve env
-/// below), so the timing offset tuned against that subtitle is carried with it. A genuinely NEW
-/// request (no retry) instead resumes whatever this profile last tuned for THIS item, if anything
-/// (`Session::subtitle_offset_for`, keyed by machine id + ratingKey, never by track — a track
+/// resolved again with the subtitle it had when that was known (`RetryContext::selection`, applied
+/// to the resolve env by [`apply_retry`] while the resolve stays on that Part), so the timing
+/// offset tuned against that subtitle is carried with it.
+/// A genuinely NEW request (no retry) instead resumes whatever this profile last tuned for THIS item, if anything
+/// ([`recall`] of the subtitle-offset memory, keyed by machine id + ratingKey, never by track — a track
 /// CHANGE within one playback already zeros it, `commit_subtitle_selection`'s own doc). Either way
 /// the landing re-clamps it once the subtitle is re-selected (`player::reclamp_subtitle_offset`),
 /// since the reset has just deselected the sidecar whose range allows an advance.
-fn reset_track_selection(sid: ServerId, rk: &str, retry: Option<RetryContext>) {
-    crate::player::reset_audio_track();
+fn reset_track_selection(ps: &mut PlaybackSession, sid: ServerId, rk: &str, retry: Option<RetryContext>) {
+    crate::player::route_fx::reset_audio_track(ps);
     crate::player::reset_subtitle();
     match retry {
         Some(retry) => crate::player::restore_subtitle_offset(retry.sub_offset_ms),
@@ -7760,44 +10921,6 @@ fn reset_track_selection(sid: ServerId, rk: &str, retry: Option<RetryContext>) {
     }
 }
 
-/// This profile's remembered subtitle sync-timing correction for `rk` on `sid`'s server, if this
-/// television has ever tuned one — the read half of [`persist_subtitle_offset`]. `None` when the
-/// server is not (yet) registered, which a resolve about to fail for the same reason would find
-/// out anyway.
-fn remembered_subtitle_offset(sid: ServerId, rk: &str) -> Option<i64> {
-    let machine_id = plx_plex::plex::client_for(sid)?.machine_id();
-    if machine_id.is_empty() {
-        return None;
-    }
-    plx_plex::plex::session::peek().subtitle_offset_for(&plx_plex::plex::session::current_profile_key(), machine_id, rk)
-}
-
-/// Persist the viewer's subtitle sync-timing correction for the CURRENTLY PLAYING item, so the
-/// next resume of this exact file starts from where they left it (`remembered_subtitle_offset`'s
-/// own doc). Fire-and-forget on the storage worker, like every other in-player preference edit
-/// (`player::set_subtitle_tone`) — the live atomic ([`crate::player::set_subtitle_offset`]) is
-/// already applied by the time this queues, so a slow or lost write costs only the NEXT resume,
-/// never this one.
-pub fn persist_subtitle_offset(ps: &PlaybackSession, offset_ms: i64) {
-    let Some(machine_id) = plx_plex::plex::client_for(cur_sid(ps)).map(|c| c.machine_id().to_string()) else {
-        return;
-    };
-    if machine_id.is_empty() {
-        return;
-    }
-    let rk = cur_rk(ps);
-    let user = plx_plex::plex::session::current_profile_key();
-    let wanted = (offset_ms != 0).then_some(offset_ms);
-    plx_plex::plex::session::queue_update(move |current| {
-        if current.subtitle_offset_for(&user, &machine_id, &rk) == wanted {
-            return None;
-        }
-        let mut next = current.clone();
-        next.set_subtitle_offset_for(&user, &machine_id, &rk, wanted);
-        Some(next)
-    });
-}
-
 /// Start a fresh resolve for the item whose terminal error is still on screen.
 ///
 /// The caller owns Engine teardown; this module owns the immutable request descriptor, track
@@ -7805,6 +10928,15 @@ pub fn persist_subtitle_offset(ps: &PlaybackSession, offset_ms: i64) {
 /// playback, which never entered the Plex request funnel and therefore has no item to resolve.
 pub fn can_retry_current_play(ps: &PlaybackSession) -> bool {
     ps.request.is_some()
+}
+
+/// The ratingKey [`retry_current_play`] resolves again: the key of the request this session last made, which a Try
+/// again, a Play automatically and a quality pick on the failure read-out all repeat. It is NOT [`cur_rk`]: the
+/// request is recorded when the play is asked for and `cur_rk` only when its plan lands (`apply_plan`), so a play
+/// that failed before its plan landed has the request's key here and none (or the previous item's) there. `None`
+/// when no request was made (URL and dev-trigger playback), which has nothing to retry.
+pub fn retry_rk(ps: &PlaybackSession) -> Option<String> {
+    ps.request.as_ref().map(|request| request.rk.clone()).filter(|rk| !rk.is_empty())
 }
 
 /// Resume target not yet proven by a presented frame.  A refused retry keeps this so the next
@@ -7824,12 +10956,93 @@ pub fn confirm_resume_presented(ps: &mut PlaybackSession) {
 fn current_retry_context(ps: &PlaybackSession, resume_ns: i64) -> RetryContext {
     RetryContext {
         resume_ns: resume_ns.max(0),
-        audio_sid: cur_audio_sid(ps),
-        sub_sid: cur_sub_sid(ps),
+        candidate_purpose: CandidatePurpose::ReopenCurrent,
+        selection: ps.source_selection.map(|selection| HeldSelection {
+            part_id: selection.part_id, audio_sid: selection.audio_sid, sub_sid: selection.subtitle_sid,
+        }).or_else(|| {
+            if ps.selection_known {
+                Some(HeldSelection { part_id: cur_part_id(ps), audio_sid: cur_audio_sid(ps), sub_sid: cur_sub_sid(ps) })
+            }
+            else { ps.carried_selection }
+        }),
         sub_offset_ms: crate::player::subtitle_offset_ms(),
         direct_play_mode: ps.direct_play_mode,
         suppress_enhancement: false,
+        sub_mode: ps.sub_mode,
     }
+}
+
+/// A qualified URI source expired or was refused before native Start. Re-resolve the next
+/// eligible recipe in the same source episode without replenishing the finite catalog or
+/// recovery budget. The captured eligibility excludes only spent or refused URI recipes.
+pub fn retry_declined_uri_source(ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    ticket: RouteStartTransaction, offer_id: super::backend_policy::OfferId) -> bool {
+    if !abort_route_start(ticket, RouteStartResult::StartFailed) {
+        return false;
+    }
+    // A qualified Part owns the logical Streaming Resource; a qualified PMS output owns its
+    // encoder. Retire the exact current resource before resolving a replacement. The
+    // worker-ticket fence prevents a stale URI offer from clearing a successor's resource.
+    let active = worker_ticket();
+    let owned = if ps.tsession.is_empty() { ps.sess.as_str() } else { ps.tsession.as_str() };
+    if owned.is_empty() || active.encoder() != owned
+        || replace_active_encoder_for(&active, "").is_none() { return false; }
+    let mut identities = vec![owned.to_owned()];
+    if !ps.sess.is_empty() && ps.sess != owned { identities.push(ps.sess.clone()); }
+    retire_plan_resources(AbandonedPlanResources { sid: cur_sid(ps), identities });
+    ps.tsession.clear();
+    ps.qualify_backend_offer(plx_playback_contract::BackendKind::Uri,
+        offer_id,
+        super::backend_policy::Qualification::Refused);
+    if !ps.backend_policy.as_ref().is_some_and(|policy|
+        policy.has_remaining_backend(plx_playback_contract::BackendKind::Feed)
+            || policy.has_remaining_backend(plx_playback_contract::BackendKind::Uri)) {
+        return false;
+    }
+    let Some(request) = ps.request.clone() else { return false };
+    let mut retry = current_retry_context(ps, ps.requested_resume_ns);
+    retry.candidate_purpose = CandidatePurpose::NewCandidate;
+    let caps = ps.attempt_caps();
+    request_play_with_queue(ps, meta, caps, request, Some(retry),
+        Some(playback_trace_generation()), false,
+        crate::player::report::AttemptOrigin::Recovery, None, true, None)
+}
+
+/// Re-resolve one failed URI attempt through an unspent recipe after its native registration
+/// was released and its report worker retired. The adapter supplies the exact admitted recipe,
+/// viewer goal and clock evidence it captured before Closing; this route validates the address
+/// again before taking the old PMS resource. No runtime failure may restart at an invented zero.
+pub fn retry_failed_uri_after_release(ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    attempt: RouteStartAttempt, offer_id: super::backend_policy::OfferId,
+    phase: UriFailurePhase, known_position_ns: Option<i64>, viewer_paused: bool) -> bool {
+    if !ps.can_retry_uri_after_release(attempt, offer_id, phase, known_position_ns) {
+        return false;
+    }
+    let resume_ns = match phase {
+        UriFailurePhase::Startup => ps.requested_resume_ns.max(0),
+        UriFailurePhase::Runtime => known_position_ns.expect("prospect checked runtime position"),
+    };
+    let Some(request) = ps.request.clone() else { return false; };
+    // The callback's route and this current resource must still be the same owner. A later
+    // attempt may reuse the source URL or logical session but cannot borrow its worker ticket.
+    let active = worker_ticket();
+    let owned = if ps.tsession.is_empty() { ps.sess.as_str() } else { ps.tsession.as_str() };
+    if owned.is_empty() || active.encoder() != owned { return false; }
+    // The reporter was retired before the adapter published this notice. Reuse the existing
+    // ordered stop worker: it owns the single active encoder and the next resolve worker waits
+    // for its stop completion before asking PMS for another resource.
+    scrobble_stop(ps, None, None);
+    ps.qualify_backend_offer(plx_playback_contract::BackendKind::Uri, offer_id,
+        super::backend_policy::Qualification::Refused);
+    ps.set_reconfigure_pause_goal(viewer_paused);
+    let mut retry = current_retry_context(ps, resume_ns);
+    retry.candidate_purpose = CandidatePurpose::NewCandidate;
+    let caps = ps.attempt_caps();
+    request_play_with_queue(ps, meta, caps, request, Some(retry),
+        Some(playback_trace_generation()), true,
+        crate::player::report::AttemptOrigin::Recovery, None, true, None)
 }
 
 /// The context a START-FAILURE rescue resolves under: [`current_retry_context`], plus the
@@ -7839,7 +11052,36 @@ fn current_retry_context(ps: &PlaybackSession, resume_ns: i64) -> RetryContext {
 fn rescue_retry_context(ps: &PlaybackSession, resume_ns: i64) -> RetryContext {
     RetryContext {
         suppress_enhancement: ps.cur_contract.audio.any(),
+        candidate_purpose: CandidatePurpose::NewCandidate,
         ..current_retry_context(ps, resume_ns)
+    }
+}
+
+/// Everything a retry overrides in the resolve environment it is about to hand the worker.
+fn apply_retry(env: &mut ResolveEnv, retry: RetryContext) {
+    apply_retry_enhancement(env, retry);
+    env.direct_play_mode = retry.direct_play_mode;
+    // `request_play` resets the live selection because that is correct for a new item.  A
+    // retry is the SAME item: override the fresh defaults with the selection captured before
+    // that reset so a rescue does not silently turn subtitles/audio back to server default.
+    // Only a KNOWN selection is carried: with nothing landed the captured pair is the cleared `0`
+    // sentinel, and applying it would force subtitles Off over the account's own rule.
+    if let Some(held) = retry.selection {
+        env.selection_before_retry = Some(SelectionBeforeRetry {
+            retry_part_id: held.part_id,
+            audio_sid: env.audio_sid,
+            sub_sid: env.sub_sid,
+            subtitle_override: env.subtitle_override,
+            sub_mode: env.sub_mode,
+            memory: env.memory.clone(),
+        });
+        env.audio_sid = held.audio_sid;
+        env.sub_sid = held.sub_sid;
+        env.subtitle_override = Some(held.sub_sid);
+        env.sub_mode = retry.sub_mode;
+        // That selection is the viewer's own pick of THIS playback and outranks anything the
+        // profile remembered for the show.
+        env.memory.clear();
     }
 }
 
@@ -7851,12 +11093,15 @@ fn apply_retry_enhancement(env: &mut ResolveEnv, retry: RetryContext) {
 }
 
 /// `direct_play` replaces the failed attempt's Direct Play mode for this resolve (the failure
-/// read-out's *Switch to Auto and play*); `None` keeps it.
+/// read-out's *Switch to Auto and play*); `None` keeps it. `origin` is why the viewer asked: a
+/// Retry press is `user_retry`, a quality pick on the failure screen is `quality_change`. The new
+/// attempt is the NEXT open of the same session, so its ordinal continues the failed one's.
 pub fn retry_current_play(
     ps: &mut PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
     resume_ns: i64,
     direct_play: Option<DirectPlayMode>,
+    origin: crate::player::report::AttemptOrigin,
 ) -> bool {
     let Some(request) = ps.request.clone() else {
         crate::player::log("playback retry: no Plex request descriptor");
@@ -7867,7 +11112,9 @@ pub fn retry_current_play(
         quality(),
     ));
     let retry = retry_context_with(ps, resume_ns, direct_play);
-    request_play_inner(ps, meta, request, Some(retry), None, true)
+    // A retry repeats the attempt: it plans from the value that attempt began on.
+    let caps = ps.attempt_caps();
+    request_play_inner(ps, meta, caps, request, Some(retry), None, true, origin)
 }
 
 /// [`rescue_retry_context`] with the failed attempt's Direct Play mode optionally replaced — the
@@ -7888,7 +11135,14 @@ fn retry_context_with(ps: &PlaybackSession, resume_ns: i64, direct_play: Option<
 /// `ctx` is the HUD's context line (`year · rating · runtime`). The caller formats it
 /// (`app::playback::movie_ctx`) because the runtime string is `ui::fmt`'s and `route` sits below
 /// `ui`.
-pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore, m: &PmsMovie, ctx: &str) -> bool {
+pub fn request_play_movie(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
+    m: &PmsMovie,
+    ctx: &str,
+    version: Option<plx_plex::plex::MediaId>,
+) -> bool {
     if m.part.is_empty() {
         return false;
     }
@@ -7905,6 +11159,7 @@ pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores:
     request_play(
         ps,
         meta,
+        caps,
         item_sid(m.sid),
         &m.rk,
         &m.part,
@@ -7912,7 +11167,15 @@ pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores:
         &m.acodec,
         &m.title,
         ctx,
+        version,
+        episode_show_rk(m),
     )
+}
+
+/// The show a played row belongs to, for the queue built from it: only an EPISODE has one
+/// (`PmsMovie::show_rk` also names a season's parent show, and a movie has none).
+fn episode_show_rk(m: &PmsMovie) -> &str {
+    if m.kind == plx_data::pms::KIND_EPISODE { &m.show_rk } else { "" }
 }
 
 /// The server an item's ids belong to: its own when it has one, else the browsed surface.
@@ -7926,33 +11189,6 @@ pub fn item_sid(sid: ServerId) -> ServerId {
     } else {
         surface_sid()
     }
-}
-
-/// Start the queued next episode. Takes the descriptor BY VALUE, and that is load-bearing rather
-/// than stylistic: [`up_next`] hands out a `&'static`, `request_play` clears `up_next` as its
-/// first act, and a `&UpNext` argument would therefore be pointing at a dropped `String` by the
-/// time this reads it — an aliasing bug the borrow checker cannot see through a `'static`. Callers
-/// clone (`route::up_next().cloned()`); the signature is what forces them to.
-///
-/// The HUD strings mirror the episode layout `draw_hud` uses once `now_playing` lands, so the
-/// pre-roll doesn't change shape underneath the user when it does. `ctx` is the context line, the
-/// episode kicker (`ui::fmt::episode_kicker(u.season, u.index, &u.ep_title)`): the caller formats it
-/// before handing `u` over, because `route` sits below `ui`.
-pub fn request_play_up_next(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore, u: UpNext, ctx: &str) -> bool {
-    let title = if u.show_title.is_empty() {
-        &u.ep_title
-    } else {
-        &u.show_title
-    };
-    // The successor comes out of the PlayQueue of the item now playing, so its server is that
-    // item's — [`cur_sid`], not whatever surface is behind the player. Falls back to the browsing
-    // surface only if nothing is playing, which the Up Next control cannot actually reach.
-    let sid = if cur_sid(ps).is_set() {
-        cur_sid(ps)
-    } else {
-        surface_sid()
-    };
-    request_play(ps, meta, sid, &u.rk, &u.part, &u.vcodec, &u.acodec, title, ctx)
 }
 
 /// Supersede an in-flight resolve (BACK during a load). The landing is dropped by generation.
@@ -7984,21 +11220,28 @@ pub fn install_up_next_still_warm(warm: fn(ServerId, &str)) {
     let _ = UP_NEXT_STILL_WARM.set(warm);
 }
 
-/// MAIN THREAD, once a frame. Returns the generation-owned resume point when a playable fresh plan
-/// was installed. `Some(0)` means start from the beginning; `None` means no playable landing. A
-/// stale landing (and its resume) is dropped.
-pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore) -> Option<i64> {
+/// One addressed resolved start. The URI URL is an owned IO effect, never session state.
+pub struct ResolvedStart {
+    pub resume_ns: i64,
+    pub route_start: Option<RouteStartTransaction>,
+    pub uri_offer: Option<super::uri_offer::QualifiedUriOffer>,
+}
+
+/// MAIN THREAD, once a frame. A stale landing and its source authorization are dropped together.
+pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore) -> Option<ResolvedStart> {
     let taken = PLAY_SLOT.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(PlayLanding {
         gen,
         trace_generation,
         contract_revision,
+        candidate_purpose,
         plan,
         rk,
     }) = taken
     else {
         return None;
     };
+    let mut plan = plan;
     if gen != PLAY_GEN.load(Ordering::SeqCst) {
         let mut resume = PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner());
         if resume.as_ref().is_some_and(|(owner, _)| *owner == gen) {
@@ -8020,18 +11263,50 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
             crate::player::log(
                 "playback resolve: desired contract changed in flight; discarding and resolving the latest contract",
             );
-            let _ = request_play_inner(ps, meta, request, Some(retry), Some(trace_generation), false);
+            let caps = ps.attempt_caps();
+            let _ = request_play_inner(
+                ps,
+                meta,
+                caps,
+                request,
+                Some(retry),
+                Some(trace_generation),
+                false,
+                // Unused: the attempt is already minted and this resolve continues it.
+                crate::player::report::AttemptOrigin::Fresh,
+            );
         } else {
             cancel_playback_request(ps, has_url(ps));
         }
         return None;
     }
     PLAY_BUSY.store(false, Ordering::SeqCst);
-    let ok = !plan.url.is_empty();
+    let uri_known = plan.uri_original.take();
+    let uri_pms_known = plan.uri_pms.take();
+    let prepared_uri_offer_id = if uri_known.is_some() {
+        Some(super::backend_policy::OfferId::URI_ORIGINAL)
+    } else {
+        uri_pms_known.as_ref().map(|known| match known.recipe {
+            super::uri_preflight::PmsRecipe::Remux => super::backend_policy::OfferId::URI_PMS_REMUX,
+            super::uri_preflight::PmsRecipe::Encode => super::backend_policy::OfferId::URI_PMS_ENCODE,
+            super::uri_preflight::PmsRecipe::Hls => super::backend_policy::OfferId::URI_PMS_HLS,
+        })
+    };
+    let pms_offer_prepared = uri_pms_known.is_some();
+    let uri_selection = plan.source_selection;
+    let uri_duration_ms = plan.playing.as_ref().and_then(|item| item.duration_ms);
+    let uri_source_ready = plan.uri_source_ready;
+    let ok = plan.uri_source_ready || !plan.url.is_empty();
     // A refusing `/decision` is a real landing (its verdict must still be installed for the error
-    // read-out), but it has no Engine and therefore no ACTIVE_ENCODER/scrobble owner. The cold
+    // read-out; `apply_plan` leaves the selection UNKNOWN for it), but it has no Engine and therefore no ACTIVE_ENCODER/scrobble owner. The cold
     // source probe or the decision itself may already have registered the logical resource.
     let refused_resources = (!ok).then(|| abandoned_plan_resources(&plan)).flatten();
+    if !ps.backends.feed && !ok
+        && matches!(plan.verdict, Some(PlayVerdict::NoQualifiedBackend)) {
+        // The resource identities above have moved to the abandonment worker. A refusing
+        // session must not also install the encoder as an active stop owner.
+        plan.tsession.clear();
+    }
     let resume_ns = {
         let mut resume = PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner());
         take_resume_for(&mut resume, gen)
@@ -8043,7 +11318,64 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
     if !is_preview(ps) {
         ACTIVE_TRACE_GENERATION.store(trace_generation, Ordering::SeqCst);
     }
-    let _start = apply_plan(ps, meta, plan, &rk);
+    let route_start = apply_plan(ps, meta, plan, &rk, candidate_purpose);
+    let uri_offer = match (uri_known, uri_pms_known, uri_selection, uri_duration_ms, route_start) {
+        (Some(known), _, Some(selection), Some(duration_ms), Some(ticket))
+            if known.expires_at > std::time::Instant::now() => {
+            let position = u64::try_from(resume_ns / 1_000_000).ok()
+                .filter(|ms| *ms > 0).map(plx_playback_contract::ContentTime::from_millis);
+            super::uri_offer::QualifiedUriOffer::new(
+                super::backend_policy::OfferId::URI_ORIGINAL,
+                super::uri_offer::UriSourceRecipe::OriginalPart,
+                ticket, selection, known.source, known.requirements,
+                plx_playback_contract::InitialPlayback {
+                    position, paused: ps.reconfigure_pause_goal().unwrap_or(false) },
+                duration_ms, known.expires_at,
+            ).ok()
+        }
+        (None, Some(known), Some(selection), Some(duration_ms), Some(ticket))
+            if known.expires_at > std::time::Instant::now()
+                && known.selection == selection
+                && known.resource_session == ps.tsession => {
+            let position = u64::try_from(resume_ns / 1_000_000).ok()
+                .filter(|ms| *ms > 0).map(plx_playback_contract::ContentTime::from_millis);
+            let recipe = match known.recipe {
+                super::uri_preflight::PmsRecipe::Remux =>
+                    super::uri_offer::UriSourceRecipe::PmsRemux {
+                        applied_audio: known.applied_audio },
+                super::uri_preflight::PmsRecipe::Encode =>
+                    super::uri_offer::UriSourceRecipe::PmsEncode {
+                        applied_audio: known.applied_audio },
+                super::uri_preflight::PmsRecipe::Hls =>
+                    super::uri_offer::UriSourceRecipe::PmsHls {
+                        applied_audio: known.applied_audio },
+            };
+            let id = match known.recipe {
+                super::uri_preflight::PmsRecipe::Remux => super::backend_policy::OfferId::URI_PMS_REMUX,
+                super::uri_preflight::PmsRecipe::Encode => super::backend_policy::OfferId::URI_PMS_ENCODE,
+                super::uri_preflight::PmsRecipe::Hls => super::backend_policy::OfferId::URI_PMS_HLS,
+            };
+            super::uri_offer::QualifiedUriOffer::new(
+                id, recipe, ticket, selection, known.source, known.requirements,
+                plx_playback_contract::InitialPlayback {
+                    position, paused: ps.reconfigure_pause_goal().unwrap_or(false) },
+                duration_ms, known.expires_at,
+            ).ok()
+        }
+        _ => None,
+    };
+    if (uri_source_ready || (pms_offer_prepared && !ps.backends.feed))
+        && uri_offer.is_none() {
+        let retried = route_start.zip(prepared_uri_offer_id)
+            .is_some_and(|(ticket, id)| retry_declined_uri_source(ps, meta, ticket, id));
+        if !retried && !ps.backends.feed {
+            ps.play_verdict = Some(PlayVerdict::NoQualifiedBackend);
+            if pms_offer_prepared {
+                ps.pms_decline = Some(super::uri_preflight::PmsDecline::StaleOrMismatched);
+            }
+        }
+        return None;
+    }
     if let Some(resources) = refused_resources {
         retire_plan_resources(resources);
     }
@@ -8066,7 +11398,8 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
             warm(item_sid(cur_sid(ps)), &u.thumb);
         }
     }
-    ok.then_some(resume_ns)
+    ok.then_some(ResolvedStart { resume_ns, route_start,
+        uri_offer })
 }
 
 /// MAIN THREAD ONLY: the one place a resolved [`Session`] is installed, + the player's audio-track
@@ -8078,7 +11411,25 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
 /// to set and are carried across it explicitly — the HUD strings, the `/identity` cache when this
 /// plan learned no id, and the codec quartet when the plan resolved no video codec — and each says
 /// below why it stays.
-fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore, plan: Plan, rk: &str) -> Option<RouteStartTransaction> {
+fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::MetadataStore,
+    plan: Plan, rk: &str, candidate_purpose: CandidatePurpose) -> Option<RouteStartTransaction> {
+    // These IDs name the route transformation class for this request's selected streams.
+    // A later recovery plan can qualify another fixed recipe; a seek/reload keeps its spent
+    // history. URI remains Unknown until the IO composition qualifies the exact source.
+    let planned_feed_offer = if plan.url.is_empty() || !ps.backends.feed { None }
+        else if plan.tsession.is_empty() {
+            Some(if plan.acodec != plan.src_acodec {
+                super::backend_policy::OfferId::FEED_APP_AUDIO
+            } else {
+                super::backend_policy::OfferId::FEED_ORIGINAL
+            })
+        } else if matches!(plan.contract.delivery, plx_plex::plex::TranscodeDelivery::FixedHls { .. }) {
+            Some(super::backend_policy::OfferId::FEED_PMS_HLS)
+        } else if plan.contract.remux {
+            Some(super::backend_policy::OfferId::FEED_PMS_REMUX)
+        } else {
+            Some(super::backend_policy::OfferId::FEED_PMS_ENCODE)
+        };
     // ACTIVE_ENCODER is the final server-resource owner, even when there is no encoder. A raw
     // Part URL opens/adopts its Streaming Resource under the logical playback id; retaining that
     // id lets scrobble_stop exact-close it while PlaybackSession::tsession stays empty and Direct remains
@@ -8086,12 +11437,26 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
     // its cleanup to pump_play's abandoned-resource owner instead.
     let active_encoder = if !plan.tsession.is_empty() {
         plan.tsession.clone()
-    } else if !plan.url.is_empty() {
+    } else if plan.uri_source_ready || !plan.url.is_empty() {
         plan.sess.clone()
     } else {
         String::new()
     };
-    let resolve_failed = plan.url.is_empty() && plan.verdict.is_none();
+    let source_ready = plan.uri_source_ready || !plan.url.is_empty();
+    let resolve_failed = !source_ready && plan.verdict.is_none();
+    // A REFUSED plan installs too (its verdict feeds the error read-out) but selected nothing, so
+    // only a playable one makes the selection below known.
+    let selection_known = source_ready;
+    // The playing item moves into the store below; the session keeps the two facts the track
+    // memory is keyed and gated on.
+    let (cur_show_rk, cur_kind) = plan
+        .playing
+        .as_ref()
+        .map(|p| (p.show_rk.clone(), p.kind.clone()))
+        .unwrap_or_default();
+    // The remembered choice this landing applied and the server may not have (W6). Computed here
+    // because the playing item moves into the store just below, and only for a playable landing.
+    let write_back = parked_write_back(&plan);
     meta.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(
         plan.playing,
     ));
@@ -8106,6 +11471,24 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         // refusing plan needs it most, and has no URL from which it could be reconstructed.
         let request = std::mem::take(&mut s.request);
         let requested_resume_ns = s.requested_resume_ns;
+        let same_selection = match (s.source_selection, plan.source_selection) {
+            (Some(current), Some(next)) => current == next,
+            // A same-episode retry can fail before fetching its Part. It has no new source
+            // selection to compare; begin_track_selection retained the prior one only for a
+            // retry, so this refusal must not replenish spent backend candidates.
+            (Some(_), None) => true,
+            _ => s.cur_sid == plan.sid && s.cur_part_id == plan.part_id
+                && s.cur_audio.as_ref().map(|audio| audio.sid)
+                    == plan.audio.as_ref().map(|audio| audio.sid)
+                && s.cur_sub_sid == plan.sub_sid,
+        };
+        let backend_policy = if same_selection { s.backend_policy.take() } else { None }
+            .unwrap_or_else(|| super::backend_policy::BackendPolicy::for_request(
+                plan.direct_play_mode == DirectPlayMode::Forced));
+        let admitted_feed_offer = if same_selection
+            && candidate_purpose == CandidatePurpose::ReopenCurrent {
+            s.admitted_feed_offer
+        } else { None };
         // "" = this plan fetched no id — either one was already known, or it never got as far as
         // asking — so leave the cache alone (`Plan::machine_id` says the same). What IS cached is
         // cached AGAINST its server: the next playback only reuses it when it is playing from the
@@ -8124,6 +11507,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         // truer to put in the stream pair, which is the Load payload's source of truth. The four
         // move together because `stream_*` is what arrives and `src_*` is what the file is, and the
         // diagnostics read-out needs both.
+        let src_fps = if plan.vcodec.is_empty() { s.src_fps } else { plan.src_fps };
         let (stream_vcodec, stream_acodec, src_vcodec, src_acodec) = if plan.vcodec.is_empty() {
             (
                 std::mem::take(&mut s.stream_vcodec),
@@ -8134,12 +11518,41 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         } else {
             (plan.vcodec, plan.acodec, plan.src_vcodec, plan.src_acodec)
         };
+        // A refused landing selected nothing, so it keeps what the retry that led here carried; a
+        // playable one has a known selection of its own.
+        let carried_selection = if selection_known { None } else { s.carried_selection };
+        // …and the subtitle mode with it: a refused landing keeps the retry's.
+        let sub_mode = if selection_known { plan.sub_mode } else { s.sub_mode };
         let now_ms = s.now_ms;
+        let carried_link = s.carried_link;
+        let requested_rate_permille = s.requested_rate_permille;
+        let attempt_origin = s.attempt_origin;
+        let metric_request = s.metric_request;
+        let pending_metric_lifecycle = std::mem::take(&mut s.pending_metric_lifecycle);
+        let reconfigure_pause_goal = s.reconfigure_pause_goal;
         let preview = request.as_ref().is_some_and(|r| r.preview);
         *s = PlaybackSession {
+            attempt_view: crate::player::attempt_view::AttemptView::EMPTY,
+            // A new plan is not a new item or a torn-down engine: the readout's members live
+            // exactly as long as the mailbox statics they replace, which nothing here resets.
+            readout: s.readout.clone(),
+            backend_policy: Some(backend_policy),
+            planned_feed_offer,
+            planned_feed_purpose: candidate_purpose,
+            admitted_feed_offer,
+            requested_rate_permille,
+            attempt_origin,
+            metric_request,
+            pending_metric_lifecycle,
+            reconfigure_pause_goal,
+            backends: s.backends,
+            uri_preflight_port: s.uri_preflight_port.clone(),
             direct_play_mode: plan.direct_play_mode,
             jail_load_blocked: false,
-            repair_status: plx_platform::tv::sandbox::State::Idle,
+            native_start_refused: None,
+            engine_failure: None,
+            finished: false,
+            repair_status: plx_os::tv::native_video::State::Idle,
             request,
             requested_resume_ns,
             url: plan.url,
@@ -8148,16 +11561,22 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             // the statement that the last refusal is over, and assigning unconditionally is what
             // makes that true without a second clear anyone can forget.
             play_verdict: plan.verdict,
+            uri_recovery_pending: None,
+            pms_decline: plan.pms_decline,
             resolve_failed,
             // The APPLIED enhancement (I9): `contract.audio` is what the server's decision accepted
             // (a refused ask was rebuilt with `NONE`), and `enhancement` grades it.
             cur_contract: plan.contract,
+            // The landing keeps the value the request began the attempt on (`begin_attempt`, in
+            // `request_play_with_queue`): the resolve that produced `plan` planned from exactly it.
+            recovery: s.recovery.take(),
             cur_enhancement: plan.enhancement,
             cur_src: plan.src_measure,
             cur_transport_kbps: plan.transport_kbps,
             cur_source_decodable: plan.source_decodable,
             cur_auto_original_watched: plan.auto_original_watched,
             auto_original: plan.auto_original,
+            original_declined: plan.original_declined,
             auto_fixture_base: String::new(),
             // A NEW playback starts a new switch history: the count exists to stop this film
             // flapping, and inheriting the last one's would price a first decision as a fourth.
@@ -8170,13 +11589,19 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             // after this point (the track PUT, a transcode seek, the retranscode, the stop, and
             // the 10 s progress reporter engine.rs is about to spawn) resolves its server from it.
             cur_rk: rk.to_string(),
+            cur_media_index: plan.media_index,
             cur_sid: plan.sid,
             // The carried track, as `build_stream` froze it from the fetched stream. `None` = the
             // plan names the server default, or its track list was never fetched.
             cur_audio: plan.audio,
+            // The pre-plan source intent is retained across physical route reconstruction.
+            // A resolved Plan with its own source selection installs that exact value here.
+            source_selection: plan.source_selection.or(s.source_selection),
             // the part/show-selected subtitle (0 = none), so the menu checkmark, the timeline report
             // and any later transcode of this item all agree with what the renderer is told below
             cur_sub_sid: plan.sub_sid,
+            selection_known,
+            carried_selection,
             // Negative = an external sidecar the client draws itself (`sub_render_ordinal`'s own
             // convention); `None` (Off) never sets `sub_sid` either, so this reads `false` for it.
             cur_sub_sidecar: plan.sub_render_ordinal.is_some_and(|ord| ord < 0),
@@ -8185,6 +11610,12 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             cur_sub_ordinal: plan.sub_render_ordinal.unwrap_or(-1),
             side_subs_refused: false,
             cur_sub_pref_lang: plan.sub_pref_lang,
+            cur_show_rk,
+            cur_kind,
+            cur_memory_note: plan.memory_note,
+            write_back,
+            sub_mode,
+            track_ctx: plan.track_ctx,
             cur_part_id: plan.part_id,
             sess: plan.sess,
             machine_id,
@@ -8193,12 +11624,17 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             pq_item_id: plan.pq_item_id,
             src_vcodec,
             src_acodec,
+            src_fps,
             stream_vcodec,
             stream_acodec,
             stream_fps: plan.fps,
             stream_dovi: plan.dovi,
             stream_dv_decision: plan.dv_decision,
+            src_dovi: plan.src_dovi,
+            src_dv_decision: plan.src_dv_decision,
             stream_immersive: plan.immersive,
+            // A landing is a fresh playback: the one-shot probe-retry budget starts unspent.
+            codec_probe_retried: false,
             title,
             ctxline,
             up_next: plan.up_next.map(std::sync::Arc::new),
@@ -8208,8 +11644,15 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             now_ms,
             preview,
             resolved_as_preview: preview,
+            carried_link,
+            // The container's names belong to the part the demuxer has open; the adapter delivers
+            // them again once a landing's reload publishes them.
+            container_names: ContainerNames::NONE,
         };
     } };
+    if let Some(id) = planned_feed_offer {
+        let _ = ps.qualify_resolved_feed_offer(id, candidate_purpose);
+    }
     if let (plx_plex::plex::TranscodeDelivery::FixedHls { .. }, Some(rung)) = (
         ps.cur_contract.delivery,
         ps
@@ -8223,21 +11666,27 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
     }
     // Restore the external renderer AND the route's stream identity before publishing the
     // start contract, so timeline reports and later audio/quality transcodes keep this pick.
-    // Also over a plain remux: the server carries no subtitle there, so the app draws the sidecar
-    // (`side_subs_allowed`). Every other transcode keeps the server's burn and no client sidecar.
-    if plan.sub_render_ordinal.is_none()
+    // The sidecar is the server's own selection, else the one the profile's memory chose for this
+    // episode (`plan.memory_sidecar`, its key and codec read from the playing item: one restore, one
+    // selection list). Also over a plain remux: the server carries no subtitle there, so the app
+    // draws the sidecar (`side_subs_allowed`). Every other transcode keeps the server's burn and no
+    // client sidecar.
+    if !plan.uri_source_ready && plan.sub_render_ordinal.is_none()
         && (!is_transcoding(ps) || (ps.cur_contract.remux && original_remux_shape(ps)))
     {
-        if let Some(id) = crate::player::sidecar::restore_server_selection(cur_sid(ps), meta.view()) {
+        if let Some(id) =
+            crate::player::sidecar::restore_selection(cur_sid(ps), meta.view(), plan.memory_sidecar)
+        {
             set_subtitle(ps, id);
             ps.cur_sub_sidecar = true;
             ps.cur_sub_client_drawable = true;
         }
     }
-    let start = prepare_playback_landing(ps, !ps.url.is_empty());
-    // SHARED.desired_audio_idx is read by the DEMUX THREAD on every reopen — main thread only.
+    settle_landing_selection(ps);
+    let start = prepare_playback_landing(ps, source_ready);
+    // The session's audio choice reaches the Feed's demuxer copy at the start (`SelectAudio`) — main thread only.
     if let Some(ord) = plan.feed_audio_ordinal {
-        crate::player::set_audio_track(ord);
+        crate::player::route_fx::set_audio_track(ps, ord);
     }
     // `request_play` turned subtitles off; apply the resolved part/show selection
     // AFTER that reset (this lands a frame or more later, on the main thread, before the engine
@@ -8253,13 +11702,9 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
     // (`reset_track_selection`); hold it to the range of the subtitle that actually landed, so an
     // advance never outlives its sidecar.
     crate::player::reclamp_subtitle_offset();
-    // A landing is a DISCRETE change to what is on screen, so it owes the present gate a poke —
-    // `plx_machine::idle::invalidate`'s call-site list is that module's correctness argument. The caller
-    // (`app.rs`'s pump) invalidates only when `pump_play` returns TRUE, and a REFUSING plan returns
-    // false by construction (empty url) while flipping the player from Resolving to Error. That it
-    // still repainted was an accident of the player route bypassing the gate entirely; here it is
-    // the rule instead.
-    plx_machine::idle::invalidate();
+    // pump_play returns Some(ResolvedStart) for accepted AND refusing plans. The main-thread
+    // runner owns the landing damage, even when this start contract is None (the Error page).
+
     start
 }
 
@@ -8304,7 +11749,9 @@ fn prepare_original_remux(
     put_selection(off, plan.sid, plan.part_id, candidate_audio_sid, subtitle);
     let spec_for = |audio, force_burn| {
         transcode_spec(
+            &plan.caps,
             rk,
+            plan.media_index,
             &replacement,
             &replacement,
             plx_plex::plex::TranscodeOffset::from_seconds(plan.offset_secs.max(0)),
@@ -8325,13 +11772,13 @@ fn prepare_original_remux(
     // session replaces its registration; a direct candidate needs no remux at all.
     if enhancement_fallback(decision.as_ref(), audio) == Fallback::Retry {
         note_enhancement_refused(" in Original recovery; fell back", audio);
-        if candidate.feeds_part() {
+        if candidate.feeds_part() && !plan.subtitle_burn {
             let _ = c.transcode_stop(&replacement);
             return Some(OriginalRemux::RefusedToDirect);
         }
         enhancement_refused = true;
         audio = plx_plex::plex::AudioEnhancements::NONE;
-        force_burn = false;
+        force_burn = plan.subtitle_burn;
         spec = spec_for(audio, force_burn);
         decision = c.transcode_decision(off, &spec);
     }
@@ -8347,16 +11794,23 @@ fn prepare_original_remux(
         let _ = c.transcode_stop(&replacement);
         return None;
     }
+    // A server that did not answer follows the contract: a remux copies, a forced burn re-encodes.
+    let (dovi, dv_decision) = copied_video_dv(
+        decision.as_ref(),
+        &enhanced_remux_contract(audio, force_burn),
+        plan.src_dovi,
+        plan.src_dv_decision,
+    );
     let (vcodec, acodec) = decision.as_ref().and_then(decision_codecs).unwrap_or_else(|| {
         (
             candidate.vcodec.clone(),
-            remux_output_acodec(audio.any(), candidate.audio.as_ref(), &plan.src_acodec),
+            remux_output_acodec(&plan.caps, audio.any(), candidate.audio.as_ref(), &plan.src_acodec),
         )
     });
     let enhancement = if enhancement_refused || known_refused {
         EnhancementOutcome::Refused
     } else {
-        classify_outcome(decision.as_ref(), candidate.audio.as_ref(), audio)
+        classify_outcome(&plan.caps, decision.as_ref(), candidate.audio.as_ref(), audio)
     };
     let url = c.transcode_start_url(&spec).to_url();
     let Some(ticket) = replace_active_encoder_for(expected, &replacement) else {
@@ -8370,6 +11824,8 @@ fn prepare_original_remux(
         force_burn,
         vcodec,
         acodec,
+        dovi,
+        dv_decision,
         enhancement,
         ticket,
     }))
@@ -8392,8 +11848,9 @@ fn install_original_remux(
         s.cur_audio = candidate.audio.clone();
         s.stream_vcodec = prepared.vcodec.clone();
         s.stream_acodec = prepared.acodec.clone();
-        s.stream_fps = 0.0;
-        clear_output_dv(s);
+        s.stream_fps = video_copy_fps(&s.cur_contract, s.src_fps);
+        s.stream_dovi = prepared.dovi;
+        s.stream_dv_decision = prepared.dv_decision;
         s.stream_immersive = false;
     } };
     crate::player::log(&format!("decision output: v={} a={}", prepared.vcodec, prepared.acodec));
@@ -8430,8 +11887,14 @@ fn retranscode_for(ps: &mut PlaybackSession, expected: &WorkerTicket, offset_sec
 /// it on the main thread once, up front, and hand the resulting [`plx_plex::plex::EncodeContract`]
 /// into whichever attempt (primary or Legacy fallback) actually needs it.
 fn plain_rebuild_precheck(ps: &mut PlaybackSession, expected: &WorkerTicket) -> Option<plx_plex::plex::EncodeContract> {
+    rebuild_precheck(ps, expected).then(|| retranscode_contract(ps))
+}
+
+/// The ticket and HLS-sync half of [`plain_rebuild_precheck`]: whether a rebuild of the current
+/// route may still be claimed (the contract itself is the caller's).
+fn rebuild_precheck(ps: &mut PlaybackSession, expected: &WorkerTicket) -> bool {
     if !is_worker_ticket_current(expected) {
-        return None;
+        return false;
     }
     if matches!(
         cur_delivery(ps),
@@ -8439,10 +11902,10 @@ fn plain_rebuild_precheck(ps: &mut PlaybackSession, expected: &WorkerTicket) -> 
     ) {
         let live = sync_active_hls_to_session(ps);
         if live.as_ref().is_some_and(|(ticket, _)| ticket != expected) {
-            return None;
+            return false;
         }
     }
-    Some(retranscode_contract(ps))
+    true
 }
 
 /// The contract a plain rebuild of the current route asks for: today's delivery, ceiling and
@@ -8477,6 +11940,30 @@ fn retranscode_contract(ps: &PlaybackSession) -> plx_plex::plex::EncodeContract 
         return enhanced_remux_contract(plx_plex::plex::AudioEnhancements::NONE, false);
     }
     re_encode_contract(ps, cur_delivery(ps), cur_ceiling(ps))
+}
+
+/// The contract of a video conversion ([`VideoLane::Encode`], [`VideoLane::Both`]): a re-encode of
+/// today's delivery with the server forbidden to copy the video (`directStream=0`; the audio is
+/// still copied), and, when `lower` (a video raster was taken out of the attempt), under the lower of
+/// the route's ceiling and the 1080p rung's. The ceiling is what makes the encode independent of how
+/// PMS combines the profile's per-codec limitation with its `*` one (that limitation stays, for MDE):
+/// `videoResolution` itself asks for at most 1080p. Without `lower` the route keeps its own ceiling.
+fn video_encode_contract(ps: &PlaybackSession, lower: bool) -> plx_plex::plex::EncodeContract {
+    let ceiling = if lower {
+        let cap = crate::abr::Rung::P1080High.ceiling();
+        let cur = cur_ceiling(ps).unwrap_or(plx_plex::plex::Ceiling::NATIVE_4K);
+        Some(plx_plex::plex::Ceiling {
+            max_kbps: cur.max_kbps.min(cap.max_kbps),
+            max_w: cur.max_w.min(cap.max_w),
+            max_h: cur.max_h.min(cap.max_h),
+        })
+    } else {
+        cur_ceiling(ps)
+    };
+    plx_plex::plex::EncodeContract {
+        no_video_copy: true,
+        ..re_encode_contract(ps, cur_delivery(ps), ceiling)
+    }
 }
 
 /// A re-encode of the current item at `delivery`/`ceiling`: never a remux, the video-copy rule
@@ -8536,10 +12023,11 @@ fn original_remux_shape(ps: &PlaybackSession) -> bool {
 const SIDE_MAX_PART_KBPS: i64 = 30_000;
 
 /// **May the app read an EMBEDDED track itself** — from a second, subtitle-only demux of the film's
-/// original Part (`player::subside`) — so the server need not burn it? Only on a LOCAL link (a
+/// original Part (`plx_play_feed::side_reader`) — so the server need not burn it? Only on a LOCAL link (a
 /// relay or remote link would carry two reads of the film), with a real server Part to read (not
 /// a fixture or a pinned URL), and a known, moderate Part bitrate: `0` means nobody measured it
-/// and burns by design. A sidecar needs none of this (the app fetches it on its own).
+/// and burns by design. A sidecar needs none of this to be DRAWN (the app fetches it on its own);
+/// this gate decides only whether the reader also runs clock-only to place it on the remux's clock.
 fn side_reader_admitted(ps: &PlaybackSession) -> bool {
     side_reader_inputs_admit(
         cur_client(ps).is_some_and(|c| c.link() == Some(plx_plex::plex::probe::Location::Local)),
@@ -8603,8 +12091,13 @@ pub(super) fn log_enhancement_outcome(
 #[derive(Clone)]
 pub(super) struct RetranscodeClaimInputs {
     client: &'static plx_plex::plex::Client,
+    /// The attempt's capability value ([`PlaybackSession::attempt_caps`]), carried beside the contract the
+    /// claim builds: the profile PMS reads is derived from it, so a recovery flight that began a new
+    /// attempt (`dispatch_refusal_conversion`) asks for exactly the conversion it narrowed to.
+    caps: std::sync::Arc<plx_os::devcaps::Caps>,
     sid: ServerId,
     rk: String,
+    media_index: usize,
     part_id: i64,
     audio_sid: i64,
     subtitle_sid: i64,
@@ -8613,18 +12106,28 @@ pub(super) struct RetranscodeClaimInputs {
     expected: WorkerTicket,
     src_vcodec: String,
     src_acodec: String,
+    src_dovi: plx_data::metadata::Dovi,
+    src_dv_decision: plx_data::metadata::DvDecision,
     carried_audio: Option<CarriedAudio>,
 }
 
 /// What one accepted `/decision` attempt produced: the session the worker started and committed
 /// as the route's encoder, and everything the main thread needs to install, retire or discard it.
 pub(super) struct AppliedRetranscode {
+    /// Stable source/transformation recipe captured when a recovery flight was dispatched.
+    /// Ordinary track/seek rebuilds leave this absent and reuse their installed route recipe.
+    pub(super) recovery_offer: Option<super::backend_policy::OfferId>,
     pub(super) qsess: String,
     url: String,
     vcodec: String,
     acodec: String,
+    dovi: plx_data::metadata::Dovi,
+    dv_decision: plx_data::metadata::DvDecision,
     contract: plx_plex::plex::EncodeContract,
     enhancement: EnhancementOutcome,
+    /// The lane verdicts PMS's `/decision` stated for this build (`plan::decision_lanes`): what the
+    /// failed-open ladder's proof rule reads when this is a facet flight's landing.
+    pub(super) lanes: crate::player::recovery::Lanes,
     /// Returned by `replace_active_encoder_for`/`replace_active_hls_for` at the moment this
     /// worker actually committed the route. `take_ready_flight` re-checks it against
     /// the CURRENT route before applying: the worker's own ticket check ran before this commit,
@@ -8654,10 +12157,10 @@ pub(super) enum RetranscodeWorkerOutcome {
 /// (silent audio). A plain remux of an admissible track copies it; with no carried track (the
 /// server default) it falls back to the file's own default codec.
 fn remux_output_acodec(
-    enhanced: bool, carried: Option<&CarriedAudio>, src_acodec: &str,
+    caps: &plx_os::devcaps::Caps, enhanced: bool, carried: Option<&CarriedAudio>, src_acodec: &str,
 ) -> String {
     let carried = carried.filter(|a| !a.codec.is_empty());
-    if enhanced || carried.is_some_and(|a| !plx_plex::plex::is_dp_audio_track(&a.codec, a.channels)) {
+    if enhanced || carried.is_some_and(|a| !plx_plex::plex::is_dp_audio_track_with(caps, &a.codec, a.channels, a.sample_rate)) {
         "ac3".to_owned()
     } else {
         carried.map_or_else(|| src_acodec.to_owned(), |a| a.codec.clone())
@@ -8675,13 +12178,13 @@ fn retranscode_fallback_codecs(
     if contract.remux {
         (
             inputs.src_vcodec.clone(),
-            remux_output_acodec(contract.audio.any(), inputs.carried_audio.as_ref(), &inputs.src_acodec),
+            remux_output_acodec(&inputs.caps, contract.audio.any(), inputs.carried_audio.as_ref(), &inputs.src_acodec),
         )
     } else if matches!(contract.delivery, plx_plex::plex::TranscodeDelivery::FixedHls { .. }) {
         ("h264".to_owned(), "aac".to_owned())
     } else {
         (
-            plx_platform::devcaps::caps().encode_vcodec().to_owned(),
+            inputs.caps.encode_vcodec().to_owned(),
             "ac3".to_owned(),
         )
     }
@@ -8706,8 +12209,11 @@ pub(super) struct PreparedEncode {
     url: String,
     vcodec: String,
     acodec: String,
+    dovi: plx_data::metadata::Dovi,
+    dv_decision: plx_data::metadata::DvDecision,
     contract: plx_plex::plex::EncodeContract,
     enhancement: EnhancementOutcome,
+    lanes: crate::player::recovery::Lanes,
 }
 
 /// One `/decision` attempt, gated on `inputs.expected` throughout — the network body of a
@@ -8729,7 +12235,9 @@ pub(super) fn request_retranscode(
     let (fallback_vcodec, fallback_acodec) = retranscode_fallback_codecs(inputs, &contract);
     let qsess = next_encoder_session(&inputs.namespace);
     let sp = transcode_spec(
+        &inputs.caps,
         &inputs.rk,
+        inputs.media_index,
         &qsess,
         &qsess,
         plx_plex::plex::TranscodeOffset::from_seconds(inputs.offset_secs.max(0)),
@@ -8761,12 +12269,21 @@ pub(super) fn request_retranscode(
         return None;
     }
     let output_codecs = decision_codecs(&decision).unwrap_or((fallback_vcodec, fallback_acodec));
+    let (dovi, dv_decision) = copied_video_dv(
+        Some(&decision),
+        &contract,
+        inputs.src_dovi,
+        inputs.src_dv_decision,
+    );
     Some(PreparedEncode {
         url: inputs.client.transcode_start_url(&sp).to_url(),
         vcodec: output_codecs.0,
         acodec: output_codecs.1,
+        dovi,
+        dv_decision,
         contract,
-        enhancement: classify_outcome(Some(&decision), inputs.carried_audio.as_ref(), audio),
+        enhancement: classify_outcome(&inputs.caps, Some(&decision), inputs.carried_audio.as_ref(), audio),
+        lanes: decision_lanes(&decision),
         qsess,
     })
 }
@@ -8809,14 +12326,18 @@ pub(super) fn commit_retranscode(
         "retranscode rk={} audio={} sub={} offset={} -> transcode start",
         inputs.rk, inputs.audio_sid, inputs.subtitle_sid, inputs.offset_secs,
     ));
-    let PreparedEncode { qsess, url, vcodec, acodec, contract, enhancement } = prepared;
+    let PreparedEncode { qsess, url, vcodec, acodec, dovi, dv_decision, contract, enhancement, lanes } = prepared;
     Ok(AppliedRetranscode {
+        recovery_offer: None,
         qsess,
         url,
         vcodec,
         acodec,
+        dovi,
+        dv_decision,
         contract,
         enhancement,
+        lanes,
         ticket,
         client: inputs.client,
         superseded,
@@ -8865,6 +12386,7 @@ fn prepare_retranscode_inputs(
     };
     Some(RetranscodeClaimInputs {
         client,
+        caps: ps.attempt_caps(),
         sid: cur_sid(ps),
         part_id: cur_part_id(ps),
         audio_sid: cur_audio_sid(ps),
@@ -8874,8 +12396,11 @@ fn prepare_retranscode_inputs(
         expected: expected.clone(),
         src_vcodec: ps.src_vcodec.clone(),
         src_acodec: ps.src_acodec.clone(),
+        src_dovi: ps.src_dovi,
+        src_dv_decision: ps.src_dv_decision,
         carried_audio: ps.cur_audio.clone(),
         rk,
+        media_index: cur_media_index(ps),
     })
 }
 
@@ -8890,9 +12415,9 @@ pub(super) fn apply_retranscode_outcome_to_projection(p: &mut AppliedRouteProjec
     p.url = applied.url.clone();
     p.stream_vcodec = applied.vcodec.clone();
     p.stream_acodec = applied.acodec.clone();
-    p.stream_fps = 0.0;
-    p.stream_dovi = plx_data::metadata::Dovi::NONE;
-    p.stream_dv_decision = plx_data::metadata::DvDecision::NONE;
+    p.stream_fps = video_copy_fps(&applied.contract, p.src_fps);
+    p.stream_dovi = applied.dovi;
+    p.stream_dv_decision = applied.dv_decision;
     p.stream_immersive = false;
 }
 
@@ -8913,6 +12438,44 @@ pub(super) fn install_retranscode_outcome(ps: &mut PlaybackSession, applied: &Ap
         applied.enhancement,
         applied.contract.audio,
     );
+}
+
+/// **Re-check the stored Original candidate against the attempt's caps**, after a recovery narrowed
+/// them. The refusal-recovery landings ([`install_recovery_landing`]'s `Retranscode` and `AutoHls`
+/// arms) leave the request's attempt without the stream the pipeline refused; a stored candidate (the
+/// way back the ABR climb and the manual Original re-pick propose) was graded against the caps
+/// BEFORE that, so one that carried the refused DTS would still `feeds_part()`, and one that is a
+/// 4K H.264 would still be offered at the raster that was refused.
+///
+/// The audio half is the body of the audio-pick site ([`commit_audio_selection`]):
+/// `retarget_audio` with the answer of [`audio_track_direct_plays`], which reads the narrowed
+/// attempt. A candidate whose audio now needs conversion is kept, `audio_converted`, so returning to
+/// Original means the remux naming that track; one that no legal copy can serve is dropped
+/// (`TrackPickDropped`).
+///
+/// The video half: a candidate whose source video the attempt no longer direct plays
+/// ([`video_direct_plays`], the gate that built it) is dropped (`VideoNeedsConverting`). Dropping is
+/// the only shape that never re-offers the raster: a remux candidate COPIES the video too, and no
+/// candidate can avoid the source's raster.
+pub(super) fn regrade_original(ps: &mut PlaybackSession) {
+    if let Some(carried) = ps.auto_original.as_ref().and_then(|candidate| candidate.audio.clone()) {
+        let direct_plays = audio_track_direct_plays(ps, &carried.codec, carried.channels, carried.sample_rate);
+        if let Some(candidate) = ps.auto_original.as_mut() {
+            if !candidate.retarget_audio(&carried, direct_plays) {
+                ps.auto_original = None;
+                ps.original_declined = Some(OriginalDeclined::TrackPickDropped);
+            }
+        }
+    }
+    let (_, width, height) = ps.cur_src;
+    let caps = ps.attempt_caps();
+    let video_converts = ps.auto_original.as_ref().is_some_and(|c| {
+        !video_direct_plays(&c.vcodec, width, height, c.dv_decision.presentation, &caps)
+    });
+    if video_converts {
+        ps.auto_original = None;
+        ps.original_declined = Some(OriginalDeclined::VideoNeedsConverting);
+    }
 }
 
 // ---- issue #266: the live audio-enhancement state machine ------------------------------------
@@ -8949,7 +12512,80 @@ pub(super) fn facts(ps: &PlaybackSession) -> EnhancementFacts<'_> {
         carried: ps.cur_audio.as_ref(),
         subtitle_effect: subtitle_effect_of(ps),
         refused: ps.cur_enhancement == EnhancementOutcome::Refused,
+        quality: quality(),
+        declined: ps.original_declined,
     }
+}
+
+/// **Is "Original" picked while the video on screen is NOT the original?** The quality in force
+/// (the picker, which the HUD's Quality row reads) says Original, but the route playing is neither
+/// a direct play nor a codec-preserving remux: a fixed rung or HLS is still on screen, or the
+/// server is re-encoding the video (a burned subtitle, a forced fallback). A burn route is
+/// converted: its picture IS re-encoded, so the Quality row keeps "Original · Converted" there even
+/// though the Audio tab treats a burn as its own Original-family state (`enhancement_family`) and
+/// explains it with the burn note. The honest rule is that the row states the picture fact and the
+/// Audio tab explains its own state; the two read the same `quality()` but not always the same route
+/// family.
+pub fn original_is_converted(ps: &PlaybackSession) -> bool {
+    quality() == Quality::Original && live_family(ps) == RouteFamily::Other
+}
+
+/// What the Quality row reads after the picked choice ("Auto · 720p", "Original · Converted").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlayingQuality {
+    /// The stream has not resolved, or a switch is pending: the row shows the choice alone.
+    Unsettled,
+    /// The original picture plays (a direct play, or a remux that keeps the video).
+    Original,
+    /// The server is converting the picture and no rung names it ([`original_is_converted`] under
+    /// Original; under Auto a re-encode with no ceiling).
+    Converted,
+    /// Auto (or a fixed rung) is on a converted stream at this picture height, in lines.
+    Rung(i64),
+}
+
+/// **What is actually playing, for the Quality row.** Read when the popover opens or rebuilds,
+/// never while it is on screen. Settled means no start, switch or user edit is in flight.
+pub fn playing_quality(ps: &PlaybackSession) -> PlayingQuality {
+    let settled = {
+        let c = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(c.phase, ControlPhase::Idle | ControlPhase::Stable)
+            && c.pending_user.is_none()
+            && c.pending_auto.is_none()
+    };
+    if !settled {
+        return PlayingQuality::Unsettled;
+    }
+    if live_family(ps) != RouteFamily::Other {
+        return PlayingQuality::Original;
+    }
+    if original_is_converted(ps) {
+        return PlayingQuality::Converted;
+    }
+    match ps.cur_contract.ceiling {
+        Some(c) if c.max_h > 0 => PlayingQuality::Rung(c.max_h),
+        // Converted with no rung to name: a burn under Auto, or a picture this television cannot
+        // decode and the server therefore converts.
+        _ => PlayingQuality::Converted,
+    }
+}
+
+/// **Is the selected subtitle an external sidecar the app can draw itself?** `cur_sub_sidecar`
+/// alone only says the pick has no demuxer ordinal; an image sidecar the client cannot draw has
+/// none either and needs the server's burn.
+fn sidecar_drawn_by_client(ps: &PlaybackSession) -> bool {
+    ps.cur_sub_sidecar && ps.cur_sub_client_drawable
+}
+
+/// **Will the Original candidate SHOW the selected subtitle** when the route returns to it? No
+/// subtitle: trivially. Otherwise the candidate's own render ordinal (the demuxer draws it on a
+/// direct play, the side reader over a remux), or a sidecar the app fetches itself. Anything else
+/// (an image sidecar, a pick with no ordinal and no sidecar key) is shown only by the server's
+/// burn, so a route that returns to the candidate must keep the burn. This reads the candidate,
+/// not `cur_sub_client_drawable`: a cold start that lands on a Burn records that as `false` for a
+/// track the app can draw, and the candidate still names its ordinal.
+fn candidate_shows_selected_subtitle(ps: &PlaybackSession, candidate: &AutoOriginalCandidate) -> bool {
+    ps.cur_sub_sid == 0 || candidate.subtitle_ordinal.is_some() || sidecar_drawn_by_client(ps)
 }
 
 /// What the picked subtitle does to the route: nothing, a sidecar the client draws itself, or an
@@ -8957,7 +12593,8 @@ pub(super) fn facts(ps: &PlaybackSession) -> EnhancementFacts<'_> {
 fn subtitle_effect_of(ps: &PlaybackSession) -> SubtitleEffect {
     match ps.cur_sub_sid {
         0 => SubtitleEffect::None,
-        _ if ps.cur_sub_sidecar || side_subs_allowed(ps) => SubtitleEffect::Sidecar,
+        // A sidecar the app cannot draw (an image .sup/.idx) is a burn, never "unaffected".
+        _ if sidecar_drawn_by_client(ps) || side_subs_allowed(ps) => SubtitleEffect::Sidecar,
         _ => SubtitleEffect::Embedded,
     }
 }
@@ -9004,7 +12641,7 @@ pub enum BurnReason {
 
 /// **The live [`SubtitlePresenter`]**, from the committed selection (`cur_sub_sid`, written for
 /// every route by `commit_subtitle_selection`) and the live route. A transcode burns whatever is
-/// selected and the client then draws nothing (`player_hud::draw_subtitles` is silenced by
+/// selected and the client then draws nothing (the libass source is silenced by
 /// [`subtitles_burned`] the same way) — except a sidecar, or an admitted embedded track, over a remux, which the app draws
 /// ([`SubtitlePresenter::ClientOverRemux`]); direct play draws it in the app. The reason is the
 /// audio conversion when the live family is a remux or the burn is the enhancement's own or the
@@ -9026,25 +12663,33 @@ pub fn subtitle_presenter(ps: &PlaybackSession) -> SubtitlePresenter {
     }
 }
 
+/// **Does the app draw an external SIDECAR over the live remux?** The one case whose cues are in the
+/// Part's file time while the playhead is the remux's own: the draw adds the clock delta the side
+/// reader measured (`player::sidecar_clock_ns`), and the reader runs clock-only for it
+/// ([`side_reader_target`]).
+pub fn sidecar_over_remux(ps: &PlaybackSession) -> bool {
+    ps.cur_sub_sidecar && subtitle_presenter(ps) == SubtitlePresenter::ClientOverRemux
+}
+
 /// **Does the server burn the selected subtitle into the picture?** The gate every client-side
 /// draw is silenced by: a transcode burns whatever is selected, except a remux the app draws the
 /// subtitle over ([`SubtitlePresenter::ClientOverRemux`]).
 pub fn subtitles_burned(ps: &PlaybackSession) -> bool {
+    let side_reader_override = ps.cur_sub_sid == 0 && crate::player::route_fx::side_reader_active(ps);
     is_transcoding(ps)
         && subtitle_presenter(ps) != SubtitlePresenter::ClientOverRemux
         // Dev trigger `plxnative-subside` only: the reader draws an embedded track over a plain
         // remux while the route has NO subtitle selected (so the presenter says `None`, not
         // `ClientOverRemux`). A selected subtitle is the presenter's alone to answer, so a refused
         // or failed reader (`ServerBurn`) is never silenced by a reader that is still shutting down.
-        && !(ps.cur_sub_sid == 0 && crate::player::subside::active())
+        && !side_reader_override
 }
 
 /// Make the side reader match the live route: start it for an admitted embedded pick, switch its
-/// track, or stop it for Off and a sidecar. Never blocks (see `player::subside::sync`).
-fn sync_side_reader(ps: &PlaybackSession) {
-    crate::player::subside::sync(
-        side_reader_target(ps).and_then(|t| crate::player::subside::spec_for(&t)),
-    );
+/// track, run it clock-only for a sidecar, or stop it for Off. Never blocks (see
+/// `player::route_fx::sync_side_reader`, which only states the want; the pump hands it to the feed).
+fn sync_side_reader(ps: &mut PlaybackSession) {
+    crate::player::route_fx::sync_side_reader(ps, side_reader_target(ps));
 }
 
 /// **The side reader gave up** (every reopen failed, the Part has no such track, or it could not
@@ -9080,25 +12725,43 @@ pub struct SideReaderTarget {
     pub session: String,
     /// The Part's whole-file bitrate, for the log line.
     pub part_kbps: u32,
-    /// The 0-based position of the track to draw among the Part's subtitle streams.
+    /// The 0-based position of the track to draw among the Part's subtitle streams, or
+    /// [`SIDE_READER_CLOCK_ONLY`] for a sidecar: the reader then reads no subtitle at all
+    /// (the app fetches that itself) and only measures the remux's clock against the Part's.
     pub ordinal: i32,
+}
+
+impl SideReaderTarget {
+    /// Does the reader only measure the clock (a sidecar is drawn), reading no subtitle?
+    pub fn clock_only(&self) -> bool {
+        self.ordinal == SIDE_READER_CLOCK_ONLY
+    }
 }
 
 /// The side reader's inputs for this playback, or `None` unless the live route is a plain remux of
 /// a real (non-preview) playback on which the app draws an embedded track
-/// ([`SubtitlePresenter::ClientOverRemux`], not a sidecar — the app fetches that itself), or the
-/// dev trigger is armed with no subtitle selected in the route.
+/// ([`SubtitlePresenter::ClientOverRemux`]), or the dev trigger is armed with no subtitle selected
+/// in the route.
+///
+/// A SIDECAR the app draws over the remux gets a CLOCK-ONLY target, but only where an embedded
+/// track would be admitted too (a local link and a moderate Part bitrate, [`side_reader_admitted`]):
+/// the reader reads no cue, it finds the keyframe the remux started on so the sidecar, which is in
+/// file time, is drawn where the picture is (`player::sidecar_clock_ns`) once that scan matches —
+/// a moment after each remux start, and not at all off this gate, where the sidecar is drawn on
+/// the remux's own clock as it always was.
 pub fn side_reader_target(ps: &PlaybackSession) -> Option<SideReaderTarget> {
     if ps.preview || live_family(ps) != RouteFamily::Remux {
         return None;
     }
     let ordinal = if ps.cur_sub_sid == 0 {
-        crate::player::subside::dev_armed_ordinal()?
+        crate::player::route_fx::side_reader_dev_armed_ordinal(ps)?
     } else if !ps.cur_sub_sidecar
         && ps.cur_sub_ordinal >= 0
         && subtitle_presenter(ps) == SubtitlePresenter::ClientOverRemux
     {
         ps.cur_sub_ordinal
+    } else if sidecar_over_remux(ps) && side_reader_admitted(ps) {
+        SIDE_READER_CLOCK_ONLY
     } else {
         return None;
     };
@@ -9145,7 +12808,7 @@ fn live_is_original_burn(ps: &PlaybackSession) -> bool {
         && ps.cur_contract.ceiling.is_none()
         && !ps.cur_contract.no_video_copy
         && ps.cur_sub_sid != 0
-        && !ps.cur_sub_sidecar
+        && !sidecar_drawn_by_client(ps)
 }
 
 /// **The family the enhancement's own bookkeeping should read the live route as.** Identical to
@@ -9247,7 +12910,9 @@ pub fn enhancement_step(ps: &PlaybackSession) -> EnhancementStep {
     }
     if applied.any() && !want.any() {
         return match ps.auto_original.as_ref() {
-            Some(candidate) if candidate.feeds_part() => EnhancementStep::ReleaseToDirect,
+            Some(candidate) if candidate.feeds_part() && candidate_shows_selected_subtitle(ps, candidate) => {
+                EnhancementStep::ReleaseToDirect
+            }
             // An embedded subtitle still on screen is kept by the plain burn, never dropped by a
             // plain remux (which cannot carry it, M4/M7).
             Some(_) => EnhancementStep::Remux(enhanced_remux_contract(
@@ -9290,7 +12955,7 @@ pub enum LegacyAction {
 
 pub fn legacy_action(ps: &PlaybackSession) -> LegacyAction {
     match (live_family(ps), ps.cur_audio.as_ref()) {
-        (RouteFamily::Direct, Some(a)) if audio_track_direct_plays(ps, &a.codec, a.channels) => {
+        (RouteFamily::Direct, Some(a)) if audio_track_direct_plays(ps, &a.codec, a.channels, a.sample_rate) => {
             LegacyAction::Native {
                 ordinal: a.ordinal,
                 codec: a.codec.clone(),
@@ -9392,7 +13057,8 @@ pub enum ClaimTail {
 fn run_legacy(ps: &mut PlaybackSession) -> Option<ClaimTail> {
     match legacy_action(ps) {
         LegacyAction::Native { ordinal, codec } => {
-            crate::player::stage_native_audio(ps, ordinal, &codec);
+            if !ps.backends.feed { return None; }
+            crate::player::route_fx::stage_native_audio(ps, ordinal, &codec);
             Some(ClaimTail::NativeAudio)
         }
         // The rebuild needs the very inputs the plan has just failed to capture (this is only
@@ -9532,7 +13198,10 @@ fn plan_claim_flight(
         },
         ClaimPrimary::Legacy => match legacy_action(ps) {
             LegacyAction::Native { ordinal, codec } => {
-                crate::player::stage_native_audio(ps, ordinal, &codec);
+                if !ps.backends.feed {
+                    return RetranscodeClaimDispatch::Sync(ClaimTail::Rejected(LEGACY_REJECTED));
+                }
+                crate::player::route_fx::stage_native_audio(ps, ordinal, &codec);
                 return RetranscodeClaimDispatch::Sync(ClaimTail::NativeAudio);
             }
             LegacyAction::Retranscode => match plain_rebuild_precheck(ps, &expected) {
@@ -9567,11 +13236,19 @@ fn plan_claim_flight(
             },
         },
     };
-    let Some(inputs) = prepare_retranscode_inputs(ps, &expected, offset_secs) else {
+    // The retranscode inputs serve an encode: the primary's, or the rebuild a refused recovery
+    // owes. An Original recovery's plan already holds what its own PMS half reads, and a direct
+    // automatic one reads nothing at all, so a recovery owing no rebuild does not need them —
+    // requiring them refused every automatic recovery on the no-Plex fixture, which has no client
+    // (`pipe_auto_original_slow_recover` reloaded the retained HLS every ~10 s instead).
+    let needs_inputs = !matches!(work, ClaimWork::RecoverOriginal(_))
+        || matches!(fallback, RetranscodeFallback::Retranscode(_));
+    let inputs = prepare_retranscode_inputs(ps, &expected, offset_secs);
+    if needs_inputs && inputs.is_none() {
         return RetranscodeClaimDispatch::Sync(claim_fallback(ps, dispatch.on_failure, primary_reject));
-    };
+    }
     let owner = begin_claim_flight(ps, action);
-    if spawn_flight(owner, pending_seek, user_target, Some(inputs), work, fallback) {
+    if spawn_flight(owner, pending_seek, user_target, inputs, work, fallback) {
         if holds_presentation {
             RetranscodeClaimDispatch::Pending
         } else {
@@ -9719,9 +13396,13 @@ pub fn execute_recover_original_claim(
 
 /// C38: a `NativeAudioReload`/`AdaptiveReload` claim that took a displaced pick's marker (the
 /// merge table let it replace the Retranscode that carried it). On a direct route the reload
-/// feeds `desired_audio_idx`, which a displaced pick never wrote — store the picked track before
-/// reloading. Every other case already rebuilds from `cur_audio`/`cur_sub_sid`.
-pub fn honour_displaced_pick(ps: &mut PlaybackSession, displaced_pick: bool, arm: &str) {
+/// feeds the demuxer's desired audio index, which a displaced pick never wrote — store the picked
+/// track before reloading. Every other case already rebuilds from `cur_audio`/`cur_sub_sid`.
+///
+/// `desired_audio_idx` is the index the demuxer is currently told to feed (`-1`: the default). It is
+/// the Feed executor's input, so the pump that owns the executor reads it and hands it in; route
+/// reads no backend state.
+pub fn honour_displaced_pick(ps: &mut PlaybackSession, displaced_pick: bool, desired_audio_idx: i32, arm: &str) {
     if !displaced_pick {
         return;
     }
@@ -9729,19 +13410,11 @@ pub fn honour_displaced_pick(ps: &mut PlaybackSession, displaced_pick: bool, arm
     if is_transcoding(ps) {
         return;
     }
-    let desired = crate::player::SHARED
-        .desired_audio_idx
-        .load(std::sync::atomic::Ordering::Relaxed);
     if let Some(a) = ps.cur_audio.clone() {
-        if a.ordinal != desired {
-            crate::player::stage_native_audio(ps, a.ordinal, &a.codec);
+        if a.ordinal != desired_audio_idx {
+            crate::player::route_fx::stage_native_audio(ps, a.ordinal, &a.codec);
         }
     }
-    debug_assert!(
-        ps.cur_audio.as_ref().is_none_or(|a| a.ordinal
-            == crate::player::SHARED.desired_audio_idx.load(std::sync::atomic::Ordering::Relaxed)),
-        "the displaced pick is honoured before a direct reload",
-    );
 }
 
 /// **Menu display truth.** While a user action is queued or in flight the rows show what the
@@ -9767,6 +13440,26 @@ pub fn displayed_audio_enhancements(ps: &PlaybackSession) -> plx_plex::plex::Aud
 /// [`enhancement_family`], not `live_family`, so an already-applied Burn reads as its own route
 /// rather than as an unrelated `Other`-family re-encode.
 pub fn menu_enhancement_availability(ps: &PlaybackSession) -> EnhancementAvailability {
+    if ps.attempt_view().backend() == Some(crate::player::attempt_view::Backend::Uri) {
+        use plx_plex::plex::serverinfo::Subscription;
+        if plx_plex::plex::serverinfo::subscription_of(cur_sid(ps)) != Subscription::Yes {
+            return EnhancementAvailability::Hidden;
+        }
+        if ps.cur_enhancement == EnhancementOutcome::Refused {
+            return EnhancementAvailability::Disabled(DisabledReason::ServerRefused);
+        }
+        if forced_direct_play(ps) {
+            return EnhancementAvailability::Disabled(DisabledReason::ForcedDirectPlay);
+        }
+        if !ps.backends.feed || !enhancement_quality() || !source_decodable(ps)
+            || ps.request.as_ref().is_none_or(|request| request.part.is_empty()) {
+            return EnhancementAvailability::Disabled(if !enhancement_quality() {
+                DisabledReason::NotOriginalQuality
+            } else { DisabledReason::NotCopyable });
+        }
+        return super::plan::enhancement_source_offer(ps.src_dovi, ps.src_dovi.present,
+            ps.cur_audio.as_ref(), subtitle_effect_of(ps));
+    }
     enhancement_availability(&facts(ps), enhancement_family(ps))
 }
 
@@ -9799,9 +13492,9 @@ pub struct EnhTestFixture {
     pub base_present: bool,
     /// The base route's own Dolby Vision declaration (I7).
     pub dv_declared: bool,
-    /// The base route's own [`plx_data::metadata::Dovi::base_layer_unusable`] (Profile 5 / P7 with an
-    /// enhancement layer) — a source the offer must refuse regardless of `dv_declared`, since a
-    /// declaration only ever accompanies a USABLE base layer.
+    /// The base route's own [`plx_data::metadata::Dovi::base_layer_unusable`] (Profile 5, or a dual
+    /// layer the feed path does not convert to 8.1) — a source the offer must refuse regardless of
+    /// `dv_declared`, since a declaration only ever accompanies a USABLE base layer.
     pub dv_base_unusable: bool,
     /// `None` = server default audio, facts unknown (fails closed). `Some(capable)` = a known
     /// carried track with or without `canNormalizeLoudness`.
@@ -9828,6 +13521,16 @@ pub struct EnhTestFixture {
     /// Part bitrate, with the client able to draw it. Only meaningful with
     /// `subtitle_effect: Embedded` on a remux.
     pub side_reader: bool,
+    /// A remembered subtitle was chosen for this play but the route shows none of it
+    /// ([`cur_memory_note`]): the Subtitles tab says why.
+    pub memory_note: bool,
+    /// The quality the HUD's Quality row reads (the picker). Defaults to Original: the shape
+    /// whose "only at Original quality" note contradicted the row.
+    pub quality: Quality,
+    /// Why `base_present: false` is so (see [`OriginalDeclined`]); `None` = a fixed rung.
+    pub declined: Option<OriginalDeclined>,
+    /// The ladder rung an Auto stream is converting to (`cur_contract.ceiling`).
+    pub rung: Option<crate::abr::Rung>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -9847,6 +13550,10 @@ impl Default for EnhTestFixture {
             applied_burn: false,
             in_flight: false,
             side_reader: false,
+            memory_note: false,
+            quality: Quality::Original,
+            declined: None,
+            rung: None,
         }
     }
 }
@@ -9868,6 +13575,8 @@ fn test_original_candidate(subtitle_ordinal: Option<i32>) -> AutoOriginalCandida
             channels: 6,
             can_normalize_loudness: false,
             immersive: true,
+            sample_rate: 0,
+            bit_depth: 0,
         }),
         audio_converted: false,
         subtitle_ordinal,
@@ -9880,10 +13589,13 @@ pub fn enhancement_test_session(route: EnhTestFixture) -> (PlaybackSession, Serv
     plx_plex::plex::serverinfo::store_for_test(sid, route.pass, "1.43.4");
 
     let mut ps = PlaybackSession::IDLE;
+    restore_quality(route.quality);
+    ps.original_declined = route.declined;
     ps.cur_sid = sid;
     ps.cur_sub_sid = if route.subtitle_effect == SubtitleEffect::None { 0 } else { 999 };
     ps.cur_sub_sidecar = route.subtitle_effect == SubtitleEffect::Sidecar;
     ps.cur_sub_client_drawable = ps.cur_sub_sidecar;
+    ps.cur_memory_note = route.memory_note;
     ps.cur_enhancement = if route.refused {
         EnhancementOutcome::Refused
     } else if route.unverified {
@@ -9897,7 +13609,7 @@ pub fn enhancement_test_session(route: EnhTestFixture) -> (PlaybackSession, Serv
         remux: matches!(route.remux, Some(true)) && !(route.applied_burn && route.applied.any()),
         delivery: plx_plex::plex::TranscodeDelivery::ProgressiveMkv,
         no_video_copy: false,
-        ceiling: None,
+        ceiling: route.rung.map(|r| r.ceiling()),
         audio: route.applied,
     };
     ps.tsession = if route.remux.is_some() { "enh-menu-test-session".to_owned() } else { String::new() };
@@ -9908,6 +13620,8 @@ pub fn enhancement_test_session(route: EnhTestFixture) -> (PlaybackSession, Serv
         channels: 2,
         can_normalize_loudness: capable,
         immersive: false,
+        sample_rate: 0,
+        bit_depth: 0,
     });
     ps.auto_original = route.base_present.then(|| AutoOriginalCandidate {
         direct: route.remux.is_none(),
@@ -9918,7 +13632,7 @@ pub fn enhancement_test_session(route: EnhTestFixture) -> (PlaybackSession, Serv
         },
         dv_decision: if route.dv_declared {
             plx_data::metadata::DvDecision {
-                capability: plx_platform::devcaps::dv::DvCapability::Supported,
+                capability: plx_os::devcaps::dv::DvCapability::Supported,
                 presentation: plx_data::metadata::DvPresentation::Declare(plx_data::metadata::DolbyHdrInfo {
                     profile_id: 8,
                     track_type: "single",
@@ -9962,10 +13676,42 @@ pub fn enhancement_test_session(route: EnhTestFixture) -> (PlaybackSession, Serv
 /// direct-playable; else a server re-transcode with that stream selected. `audio.ordinal` is the
 /// CONTAINER audio ordinal (the menu converts its row via metadata::audio_ordinal); `audio` itself
 /// is the frozen `CarriedAudio` snapshot (issue #266) the menu built via `CarriedAudio::from_stream`.
-pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
-    if forced_direct_play(ps) && !audio_track_direct_plays(ps, &audio.codec, audio.channels) {
-        ps.play_verdict = Some(PlayVerdict::Forced(ForcedFailure::AudioNeedsConversion));
-        return;
+///
+/// **Returns whether the route accepted the pick**, which is what the track memory is written on: it
+/// is `false` only for the Forced refusal (the pick is not played and the verdict says so). A pick
+/// deferred behind a pending Original handoff, or one the enhancement reconcile re-routes, is
+/// accepted.
+///
+/// **While the subtitle mode is Forced only the pick also re-points it** (FO): the forced
+/// track in the language of the audio just chosen is committed as a derived selection
+/// ([`follow_audio_with_forced_only`]), which PUTs like any in-playback subtitle change and writes
+/// NO memory: the memo stays Forced only.
+pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) -> bool {
+    if !ps.backends.feed { return false; }
+    let sid = audio.sid;
+    let accepted = commit_audio_route(ps, audio);
+    if accepted {
+        follow_audio_with_forced_only(ps, sid);
+        if let Some(source) = ps.source_selection.as_mut() {
+            source.audio_sid = sid;
+            source.subtitle_sid = ps.cur_sub_sid;
+            source.audio_contract = ps.cur_contract.audio;
+        }
+    }
+    accepted
+}
+
+/// The route half of [`commit_audio_selection`]: which way the pick reloads, and what it displaces.
+fn commit_audio_route(ps: &mut PlaybackSession, audio: CarriedAudio) -> bool {
+    if forced_direct_play(ps) && !audio_track_direct_plays(ps, &audio.codec, audio.channels, audio.sample_rate) {
+        let friendly = plx_data::metadata::friendly_codec(&audio.codec);
+        crate::player::log(&format!(
+            "playback_policy: Force Direct Play refused audio codec {} ({friendly})", audio.codec
+        ));
+        ps.play_verdict = Some(PlayVerdict::Forced(ForcedFailure::AudioNeedsConversion {
+            codec: friendly,
+        }));
+        return false;
     }
     if original_recovery_pending() {
         if let Some(pending) = PLAYER_CONTROL
@@ -9977,7 +13723,7 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
             pending.deferred_audio = Some(audio);
         }
         crate::player::log("audio: deferred until pending Original handoff commits or rolls back");
-        return;
+        return true;
     }
     // Audio always changes the decoder/server route contract, even when the eventual route stays
     // direct. Fence the old worker before publishing the selected stream or invalidating its
@@ -9986,7 +13732,7 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
     // A standing Burn is wire-shaped `Other`, but it is an Original-family route: the pick must
     // retarget the candidate the release returns to, exactly as on a remux.
     let family = enhancement_family(ps);
-    let direct_plays = audio_track_direct_plays(ps, &audio.codec, audio.channels);
+    let direct_plays = audio_track_direct_plays(ps, &audio.codec, audio.channels, audio.sample_rate);
     match family {
         // The recovery declaration captures one exact source/audio pairing. Once the user changes
         // that pairing while HLS is live, do not later resurrect the old track behind their back.
@@ -9997,6 +13743,7 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
                 plx_plex::plex::TranscodeDelivery::FixedHls { .. }
             ) {
                 ps.auto_original = None;
+                ps.original_declined = Some(OriginalDeclined::TrackPickDropped);
             }
         }
         // Issue #266: on the Original family the candidate is also the way back from an enhanced
@@ -10005,6 +13752,7 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
             if let Some(candidate) = ps.auto_original.as_mut() {
                 if !candidate.retarget_audio(&audio, direct_plays) {
                     ps.auto_original = None;
+                    ps.original_declined = Some(OriginalDeclined::TrackPickDropped);
                 }
             }
         }
@@ -10012,13 +13760,14 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
     let stream_id = audio.sid;
     let native = family == RouteFamily::Direct && direct_plays;
     let (ordinal, codec) = (audio.ordinal, audio.codec.clone());
-    { let s = &mut *ps; s.cur_audio = Some(audio) };
+    { let s = &mut *ps; s.cur_audio = Some(audio); s.selection_known = true };
     if native {
         // record the pick: the timeline then reports the stream that actually plays, and a
         // later transcode event (subtitle burn refresh / transcode seek) keeps this track.
         // persist the USER's pick server-side (official-client behavior): /status/sessions'
-        // selected-stream display keys on the part selection, not the timeline report. Only
-        // user picks persist — the start-of-play auto-pick (eng preference) reports only. Reached
+        // selected-stream display keys on the part selection, not the timeline report. User picks
+        // persist here; an applied remembered pick is written once, on its first decoded frame
+        // (`send_parked_write_back`); a fall-through auto-pick still only reports. Reached
         // from `app/playback.rs::commit_track` inside the run-loop's `FrameScope`, so this PUT runs
         // on the serial selection worker instead of blocking the frame thread.
         queue_put_selection(cur_sid(ps), cur_part_id(ps), cur_audio_sid(ps), cur_sub_sid(ps));
@@ -10029,15 +13778,17 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) {
     if reconcile_enhancement(ps, true) {
         // the reconcile's Retranscode owes this pick its reload
         crate::player::note_audio_pick();
-        return;
+        return true;
     }
     if native {
-        crate::player::request_audio_track(ps, ordinal, &codec);
+        if !ps.backends.feed { return false; }
+        crate::player::route_fx::request_audio_track(ps, ordinal, &codec);
     } else {
         crate::player::request_audio_switch(ps, stream_id);
     }
     // the rebuild now loading is this pick's: the read-out says "Switching audio…"
     crate::player::note_audio_pick();
+    true
 }
 
 /// Apply commands which were attached to one exact Original trial, after either the candidate or
@@ -10068,6 +13819,29 @@ pub fn commit_subtitle_selection(
     stream_id: i64,
     client_renderable: bool,
 ) {
+    commit_subtitle_selection_inner(ps, sub_idx, stream_id, client_renderable, true);
+}
+
+/// [`commit_subtitle_selection`] with the direct-play selection PUT optional. `put == false` is for
+/// the commit whose server write is accounted for or must not happen: the first frame's
+/// container-name re-match while a live write-back is parked, which carries the re-matched subtitle
+/// itself ([`repoint_parked_subtitle`]), and that re-match over a Part that carries an external
+/// stream, where W5 forbids any subtitle write. Everything else a commit does (the burn refresh, the
+/// side reader, the route projection) is unchanged.
+fn commit_subtitle_selection_inner(
+    ps: &mut PlaybackSession,
+    sub_idx: i32,
+    stream_id: i64,
+    client_renderable: bool,
+    put: bool,
+) {
+    // An ORDINARY commit settles the mode from the stream it picks (Forced only is put back by the
+    // commits derived from it), and a viewer's pick ends any owed container-name re-match: the
+    // viewer has decided what is on screen.
+    ps.sub_mode = SubMode::of_stream(stream_id);
+    if let Some(ctx) = ps.track_ctx.as_mut() {
+        ctx.rematch = None;
+    }
     let transcoding = is_transcoding(ps);
     // A live plain remux whose new pick is Off or a subtitle the app draws over it (a sidecar, or
     // an embedded track the side reader is admitted for) keeps its stream: the server never carried
@@ -10100,6 +13874,7 @@ pub fn commit_subtitle_selection(
                     }
                 } else {
                     s.auto_original = None;
+                    s.original_declined = Some(OriginalDeclined::TrackPickDropped);
                 }
             }
         }
@@ -10108,9 +13883,7 @@ pub fn commit_subtitle_selection(
         RouteFamily::Direct | RouteFamily::Remux => {
             let pick = (stream_id != 0).then_some(sub_idx);
             if let Some(candidate) = ps.auto_original.as_mut() {
-                if !candidate.retarget_subtitle(pick, client_renderable) {
-                    ps.auto_original = None;
-                }
+                candidate.retarget_subtitle(pick);
             }
         }
     }
@@ -10119,9 +13892,21 @@ pub fn commit_subtitle_selection(
     // always republishes — keeps what the viewer found.
     if stream_id != ps.cur_sub_sid {
         crate::player::set_subtitle_offset(0);
+        // What the track-memory note explained (the remembered subtitle is not what is shown) ends
+        // with the first commit that changes what is shown. A landing sets the flag afresh from its
+        // plan, but a pick the app draws in place (a sidecar, a track the side reader draws) runs
+        // none, and the note would go on denying a subtitle the viewer can see. Pressing OK on what
+        // is already shown (Off, while the note is up) is not such a commit: the memory still holds
+        // a track the route still cannot show.
+        ps.cur_memory_note = false;
     }
     crate::player::request_subtitle(sub_idx);
     set_subtitle(ps, stream_id);
+    if let Some(source) = ps.source_selection.as_mut() {
+        source.subtitle_sid = stream_id;
+        source.audio_contract = ps.cur_contract.audio;
+    }
+    ps.selection_known = true;
     // `sub_idx` is `metadata::sub_render_ordinal`'s own convention: negative for an external
     // sidecar (and for Off, where `stream_id == 0` disambiguates), non-negative for an embedded
     // track. Issue #266 I6 reads this back through `facts` to tell a sidecar (unaffected by the
@@ -10138,7 +13923,9 @@ pub fn commit_subtitle_selection(
         // stale server-side selection that would otherwise burn on the next transcode). Reached
         // from `app/playback.rs::commit_track` inside the run-loop's `FrameScope`, so this PUT runs
         // on the serial selection worker instead of blocking the frame thread.
-        queue_put_selection(cur_sid(ps), cur_part_id(ps), cur_audio_sid(ps), cur_sub_sid(ps));
+        if put {
+            queue_put_selection(cur_sid(ps), cur_part_id(ps), cur_audio_sid(ps), cur_sub_sid(ps));
+        }
     }
     if in_place {
         // The stream stays; what the app reads beside it follows the pick (start, switch or stop
@@ -10155,10 +13942,39 @@ pub fn commit_subtitle_selection(
     }
 }
 
+/// Which of the three subtitle states the playback is in ([`SubMode`]).
+pub fn cur_sub_mode(ps: &PlaybackSession) -> SubMode {
+    ps.sub_mode
+}
+
+/// Put `ps` in `mode` as a Forced only pick would, for a menu test that cannot reach the field.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_sub_mode_for_test(ps: &mut PlaybackSession, mode: SubMode) {
+    ps.sub_mode = mode;
+}
+
+/// **The language Forced only falls back to** when the audio that plays names none: the one the
+/// remembered Forced only (or the row's last choice) recorded, kept on the landing's
+/// [`TrackContext`]. Empty when nothing recorded one or no item has landed. The resolve and the
+/// audio follow already match with it; the Subtitles menu reads it too, so the row and the next
+/// episode choose by one rule.
+pub fn forced_only_lang(ps: &PlaybackSession) -> &str {
+    ps.track_ctx.as_ref().map_or("", |c| c.forced_lang.as_str())
+}
+
+/// Give `ps` the Forced only fallback language `lang`, for a menu test that cannot reach the field.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_forced_only_lang_for_test(ps: &mut PlaybackSession, lang: &str) {
+    ps.track_ctx.get_or_insert_with(TrackContext::default).forced_lang = lang.to_string();
+}
+
 /// Atomically publish the main-thread session fields a newly spawned timeline reporter may read.
 /// Called at the reporter spawn site, before ownership crosses to its worker. The active encoder
 /// remains in `PlayerControl`, so a later in-place ABR commit changes the wire session and this
-/// projection under one lock without touching main-thread-only `Session`.
+/// projection under one lock without touching main-thread-only `Session`. The id the previous
+/// Engine's reporter last reported under ([`ReportedTimeline`]) is not part of the projection and
+/// is not reset here: the new reporter's first report still stops it when the reload (or a
+/// rollback's rebase) retired it.
 pub fn begin_timeline_reporting(ps: &PlaybackSession) -> Option<TimelineLease> {
     // A trailer never writes watch state, whatever became of its preview flag.
     if preview_request(ps) {
@@ -10188,6 +14004,8 @@ pub fn begin_timeline_reporting(ps: &PlaybackSession) -> Option<TimelineLease> {
 /// Linearize one worker sample against route replacement and engine teardown. No network work is
 /// done while the mutex is held. `None` permanently invalidates this reporter after its Engine is
 /// retired; transient Applying/Resolving phases skip a hybrid report without borrowing Session.
+/// The sample also carries the id the previous report went out under, so [`report_timeline`] can
+/// tell whether the reporting identity moved since.
 fn timeline_snapshot(
     lease: &TimelineLease,
     state: plx_plex::plex::TimelineState,
@@ -10217,11 +14035,49 @@ fn timeline_snapshot(
         time_ms,
         duration_ms,
         session,
+        playback: projection.logical_session.clone(),
         play_queue_id: projection.play_queue_id.clone(),
         play_queue_item_id: projection.play_queue_item_id.clone(),
         audio_stream_id: projection.audio_stream_id,
         subtitle_stream_id: projection.subtitle_stream_id,
+        reported_session: control.reported_session_of(projection.sid, &projection.rating_key),
     })
+}
+
+/// **Which session id must be told `stopped` before a report goes out under `current`.** Every id
+/// a playback reported to `/:/timeline` gets exactly one `stopped` when it stops being the
+/// reporting identity (issue #1236): PMS holds a dashboard row for each id that ever reported
+/// `playing`, for minutes after its last report, however its encoder was stopped. So the answer is
+/// the id the playback last reported under when that is not `current`; nothing for a first report
+/// (`reported` is `None`), for the same id again, or for an id that never reported, which is what
+/// keeps an abandoned candidate encoder (minted, primed, never made active) from ever being named.
+fn retired_report_session<'a>(reported: Option<&'a str>, current: &str) -> Option<&'a str> {
+    reported.filter(|id| !id.is_empty() && *id != current)
+}
+
+/// Record that item `rating_key` of server `sid` has now reported under `session`. Called under
+/// `TIMELINE_EFFECT` right after the POST, so the record follows the order the reports reached
+/// the wire in, whichever Engine's reporter sent them.
+fn note_reported_session(sid: ServerId, rating_key: &str, session: &str) {
+    let mut control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+    control.reported_timeline = Some(ReportedTimeline {
+        sid,
+        rating_key: rating_key.to_owned(),
+        session: session.to_owned(),
+    });
+}
+
+/// Take the id item `rating_key` of server `sid` last reported under, to compare with the id the
+/// final `stopped` goes out under. Called with the effect lane held and after the reporter's last
+/// POST ([`ScrobbleWork::run`], or [`scrobble_stop`] when it has no worker). A reporter that
+/// has successfully retired its server-stopped session also consumes the record here.
+fn take_reported_session(sid: ServerId, rating_key: &str) -> Option<String> {
+    let mut control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+    control
+        .reported_timeline
+        .take()
+        .filter(|r| r.sid == sid && r.rating_key == rating_key)
+        .map(|r| r.session)
 }
 
 /// POST one periodic timeline update for an exact [`TimelineLease`]. After waiting for the stop
@@ -10229,6 +14085,13 @@ fn timeline_snapshot(
 /// server, item, PlayQueue and selected tracks together from [`PlayerControl`]; a stale Engine lease
 /// sends nothing. Final `Stopped` is emitted separately by [`ScrobbleWork`] from its owned teardown
 /// snapshot.
+///
+/// When the snapshot's session id is not the one the previous report went out under (an ABR
+/// commit, a seek's retranscode, a fallback replaced the encoder in between), the previous id is
+/// first sent a `stopped` with `continuing=1` at this report's position
+/// ([`retired_report_session`]), then this report goes out and its id is recorded
+/// ([`ReportedTimeline`]). On termination the reporter publishes the stop, retires its row,
+/// and exits. All POSTs and their record updates are ordered inside one `TIMELINE_EFFECT` hold.
 pub fn report_timeline(
     lease: &TimelineLease,
     state: plx_plex::plex::TimelineState,
@@ -10243,21 +14106,41 @@ pub fn report_timeline(
     let Some(report) = timeline_snapshot(lease, state, t_ms, d_ms) else {
         return false;
     };
+    if crate::player::server_stop_for(&report.playback) {
+        return false;
+    }
     let c = match plx_plex::plex::client_for(report.sid) {
         Some(c) => c,
         None => return true,
     };
-    let ok = c.timeline(&plx_plex::plex::TimelineReport {
-        rating_key: &report.rating_key,
-        state: report.state,
-        time_ms: report.time_ms,
-        duration_ms: report.duration_ms,
-        session: &report.session,
-        play_queue_id: &report.play_queue_id,
-        play_queue_item_id: &report.play_queue_item_id,
-        audio_stream_id: report.audio_stream_id,
-        subtitle_stream_id: report.subtitle_stream_id,
-    });
+    if let Some(retired) = retired_report_session(report.reported_session.as_deref(), &report.session) {
+        // One attempt, like every report here: a failure is logged below and the next tick does
+        // not repeat it (the id is no longer the one on record), the row simply ages out.
+        let stopped = c.timeline(&report.wire(retired, plx_plex::plex::TimelineState::Stopped, true));
+        if !stopped {
+            plx_base::eventlog::log(&format!(
+                "timeline post failed rk={} state=stopped (retired session) t={}s",
+                report.rating_key,
+                report.time_ms / 1000,
+            ));
+        }
+    }
+    let answer = c.timeline_answer(&report.wire(&report.session, report.state, false));
+    let ok = answer.taken;
+    note_reported_session(report.sid, &report.rating_key, &report.session);
+    if let Some(stop) = answer.stop {
+        // Playback ends as soon as we know. Dashboard cleanup can wait on the network.
+        crate::player::note_server_stop(&report.playback, &report.session, &stop.reason, report.time_ms);
+        plx_base::eventlog::log(&format!(
+            "timeline: the server ended this session rk={} code={}",
+            report.rating_key, stop.code,
+        ));
+        if c.timeline(&report.wire(&report.session, plx_plex::plex::TimelineState::Stopped, true)) {
+            // The effect lane orders this retirement with a reload's reporter and the final stop.
+            drop(take_reported_session(report.sid, &report.rating_key));
+        }
+        return false;
+    }
     // FAILURES ONLY. The reporter thread logs `timeline <state> t=…s/…s` for every tick whichever
     // way the POST went (`player::threads`), so a report the server never took looks exactly like
     // one it did — for the whole length of a film, ten seconds at a time. The success half is
@@ -10277,6 +14160,42 @@ pub fn report_timeline(
 #[cfg(test)]
 #[path = "decision_test_support.rs"]
 mod test_support;
+
+/// Test-only: leave `ps` as a REAL hero-preview resolve leaves it when the route is not a direct
+/// play. The resolve runs against a loopback PMS through `build_stream` with the preview env and
+/// an item with no Part, which `preview::accepts_direct_play` rejects, and the plan it returns is
+/// installed by `apply_plan`. Nothing here sets a flag the production path would not. The caller
+/// holds `plx_base::testlock::serial()`.
+#[cfg(test)]
+pub(crate) fn resolve_refused_preview_for_test(ps: &mut PlaybackSession) {
+    assert!(plx_net::net::global_init() && crate::curlio::available());
+    let (port, done, server) = test_support::enhancement_pms(
+        test_support::MDE_DIRECTPLAY, test_support::EnhMode::Honor("ac3"), 0);
+    let sid = plx_plex::plex::register_for_test("preview-pms", "127.0.0.1", port, "token", "preview-client");
+    plx_plex::plex::client_for(sid).unwrap().set_link(plx_plex::plex::probe::Location::Local);
+    let mut env = ResolveEnv::snapshot(ps, plx_data::stores::metadata::MetadataStore::default().view(), sid, "trailer");
+    env.quality = Quality::Original;
+    env.set_preview(true);
+    env.cached_item = Some(test_support::fourk_item(sid, vec![plx_data::metadata::Stream::default()]));
+    let plan = build_stream(&plx_base::task::OffFrame::for_test(), "trailer", "", "h264", "aac", &env);
+    done.send(()).unwrap();
+    let _ = server.join().unwrap();
+    ps.request = Some(PlaybackRequest {
+        sid,
+        rk: "trailer".into(),
+        part: String::new(),
+        vcodec: "h264".into(),
+        acodec: "aac".into(),
+        title: "Trailer".into(),
+        ctx: plx_data::metadata::TRAILER_CONTEXT.into(),
+        preview: true,
+        version: None,
+        show_rk: String::new(),
+    });
+    test_support::apply_plan(ps, plan, "trailer");
+    crate::route::resolve_as_preview_for_test(ps);
+    plx_plex::plex::reset_servers_for_test();
+}
 
 #[cfg(all(test, feature = "hostsim"))]
 #[path = "decision_flight_rig.rs"]
@@ -10307,6 +14226,10 @@ mod resolve_route_tests;
 mod plan_tests;
 
 #[cfg(test)]
+#[path = "decision_version_tests.rs"]
+mod version_tests;
+
+#[cfg(test)]
 #[path = "decision_quality_recovery_tests.rs"]
 mod quality_recovery_tests;
 
@@ -10323,6 +14246,10 @@ mod direct_play_mode_tests;
 mod subtitle_style_tests;
 
 #[cfg(test)]
+#[path = "decision_selection_known_tests.rs"]
+mod selection_known_tests;
+
+#[cfg(test)]
 #[path = "carried_audio_tests.rs"]
 mod carried_audio_tests;
 
@@ -10333,3 +14260,31 @@ mod plan_audio_enhancement_tests;
 #[cfg(test)]
 #[path = "decision_audio_enhancement_tests.rs"]
 mod audio_enhancement_tests;
+
+#[cfg(test)]
+#[path = "decision_prefs_characterisation_tests.rs"]
+mod prefs_characterisation_tests;
+
+#[cfg(test)]
+#[path = "decision_prefs_door_tests.rs"]
+mod prefs_door_tests;
+
+#[cfg(test)]
+#[path = "decision_memory_tests.rs"]
+mod memory_tests;
+
+#[cfg(test)]
+#[path = "decision_queue_beside_tests.rs"]
+mod queue_beside_tests;
+
+#[cfg(test)]
+#[path = "decision_queue_predecessor_tests.rs"]
+mod queue_predecessor_tests;
+
+#[cfg(test)]
+#[path = "decision_track_memory_tests.rs"]
+mod track_memory_tests;
+
+#[cfg(test)]
+#[path = "decision_write_back_tests.rs"]
+mod write_back_tests;

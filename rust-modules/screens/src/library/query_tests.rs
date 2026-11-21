@@ -45,14 +45,14 @@ fn accepted_queries_reset_engine_grid_memory_but_keep_the_toolbar_during_loading
             plx_base::storage_worker::drain_for_test();
             plx_plex::plex::session::update(|current| {
                 let mut next = current.clone();
-                next.library_views.clear();
+                next.prefs.library_views.clear();
                 Some(next)
             });
             let mut fixture = Fixture::new();
             let stores = plx_data::stores::Stores::default();
             stores.browse.borrow_mut().seed_two_source_table_for_test();
-            stores.capture_browse(&mut fixture.directory);
-            stores.browse_run(BrowseCmd::SetCur(0));
+            stores.capture_seeded_browse_for_test(&mut fixture.directory, plx_plex::plex::current_server());
+            stores.browse_run_for_test(BrowseCmd::SetCur(0));
             {
                 let mut browse = stores.browse.borrow_mut();
                 browse.seed_items_for_test(120);
@@ -74,21 +74,18 @@ fn accepted_queries_reset_engine_grid_memory_but_keep_the_toolbar_during_loading
                     title: "Drama".into(),
                 }]);
             }
-            let publication = stores.capture_browse(&mut fixture.directory);
+            let publication = stores.capture_seeded_browse_for_test(&mut fixture.directory, plx_plex::plex::current_server());
             fixture.listing = publication.listing;
             fixture.hubs = publication.section_hubs;
             let id = fixture.listing.view().id().unwrap();
             let mut page = fixture.screen();
             page.initial = false; // The fixture premise is an already-entered, settled page.
             let mut engine = FocusEngine::new();
-            let grid = page.key(page.pair.detail.elems[52]);
+            let elem = page.pair.detail.elem_for(&fixture.cx(None), &mut page.keys, 52, COLS).unwrap();
+            let grid = page.key(elem);
             let group = page.pair.groups_config().detail;
             engine.set(OWNER, grid, Some(group), By::Restore);
-            let toolbar = page.key(if matches!(edit, QueryEdit::Sort { .. }) {
-                SORT
-            } else {
-                FILTER
-            });
+            let toolbar = page.key(SORTFILTER);
             engine.set(OWNER, toolbar, Some(page.toolbar_group()), By::Restore);
             page.scroll.jump(page.target_layout.row_reveal(8));
             page.scroll_target = page.scroll.pos;
@@ -141,7 +138,7 @@ fn accepted_queries_reset_engine_grid_memory_but_keep_the_toolbar_during_loading
                             }
                         ) {
                             assert!(
-                                stores.browse_run(command),
+                                stores.browse_run_for_test(command),
                                 "{edit:?} must be accepted by the real store"
                             );
                             committed = true;
@@ -154,7 +151,7 @@ fn accepted_queries_reset_engine_grid_memory_but_keep_the_toolbar_during_loading
                 }
             }
             assert!(committed);
-            fixture.listing = stores.capture_browse(&mut fixture.directory).listing;
+            fixture.listing = stores.capture_seeded_browse_for_test(&mut fixture.directory, plx_plex::plex::current_server()).listing;
             assert_ne!(fixture.listing.view().id().unwrap().query, id.query);
             assert_eq!(fixture.listing.view().fetch(), SecFetch::Loading);
             let mut cx = fixture.cx(Some(toolbar));
@@ -249,7 +246,7 @@ fn accepted_queries_reset_engine_grid_memory_but_keep_the_toolbar_during_loading
             // entry from the heading projects under the chip instead (`focus::projects_across`).
             assert_eq!(
                 engine.read(OWNER).remembered(group),
-                Some(page.pair.detail.elems[0]),
+                Some(page.pair.detail.elem_at(0).unwrap()),
                 "accepted query must reset the engine's remembered grid target: {edit:?}"
             );
             let mut links = Vec::new();

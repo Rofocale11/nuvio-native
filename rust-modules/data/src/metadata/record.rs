@@ -182,7 +182,11 @@ fn matches_landed(reply: &Reply, landed: &plx_machine::landing::Landed<DetailKey
 
 pub fn validate(value: &serde_json::Value) -> Result<(), &'static str> {
     let replies: Vec<Reply> = serde_json::from_value(value.clone()).map_err(|_| "invalid detail replies")?;
-    if replies.is_empty() || replies.len() > 4 || serde_json::to_value(&replies).ok().as_ref() != Some(value) {
+    // The round trip is compared as the segment reader parses it: without `float_roundtrip` an
+    // f32 widened to f64 (9.600000381469727) reads back one ulp off, so a literal `to_value`
+    // comparison would refuse a recording of perfectly ordinary mock ratings.
+    let reread = serde_json::to_value(&replies).ok().map(|v| v.to_string()).and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    if replies.is_empty() || replies.len() > 4 || (serde_json::to_value(&replies).ok().as_ref() != Some(value) && reread.as_ref() != Some(value)) {
         return Err("noncanonical detail replies");
     }
     let mut seen = BTreeSet::new();
@@ -415,7 +419,7 @@ mod tests {
         use crate::stores::tape;
         controlled(false);
         request("refused", false, false);
-        assert!(!pump_detail(test_state(), test_adapter()));
+        assert!(!pump_detail(test_state(), test_adapter(), &plx_plex::plex::ClientKeys::default(), true));
         assert!(!detail_loading(test_adapter()));
         let results = tape::take_results();
         let (admissions, failure) = tape::finish();
@@ -425,7 +429,7 @@ mod tests {
         controlled(true);
         tape::begin(admissions.clone().into(), results.clone().into());
         let req = request("refused", false, true);
-        let changed = pump_detail(test_state(), test_adapter());
+        let changed = pump_detail(test_state(), test_adapter(), &plx_plex::plex::ClientKeys::default(), true);
         let loading = detail_loading(test_adapter());
         let observed = tape::take_results();
         let outcome = tape::finish();
@@ -453,7 +457,7 @@ mod tests {
             // The old worker finishes after the synchronous refusal but before the observation.
             land_detail(test_adapter(), plx_plex::plex::ServerId::from_raw(0), "old", old, None);
             if cancelled { super::super::clear(test_state(), test_adapter()); }
-            pump_detail(test_state(), test_adapter());
+            pump_detail(test_state(), test_adapter(), &plx_plex::plex::ClientKeys::default(), true);
             let results = tape::take_results();
             let (admissions, failure) = tape::finish();
             assert_eq!(failure, None);
@@ -465,7 +469,7 @@ mod tests {
             request("old", true, true);
             request("refused", false, true);
             if cancelled { super::super::clear(test_state(), test_adapter()); }
-            pump_detail(test_state(), test_adapter());
+            pump_detail(test_state(), test_adapter(), &plx_plex::plex::ClientKeys::default(), true);
             let outcome = tape::finish();
             assert_eq!(outcome, (admissions, None));
             assert_eq!(tape::take_results(), results);
@@ -483,7 +487,7 @@ mod tests {
         controlled(false);
         let first = request("first", true, false);
         land_detail(test_adapter(), plx_plex::plex::ServerId::from_raw(0), "first", first, None);
-        pump_detail(test_state(), test_adapter());
+        pump_detail(test_state(), test_adapter(), &plx_plex::plex::ClientKeys::default(), true);
         let second = request("second", true, false);
         land_detail(test_adapter(), plx_plex::plex::ServerId::from_raw(0), "second", second, None);
         super::super::clear(test_state(), test_adapter());
@@ -516,7 +520,7 @@ mod tests {
         for &req in workers.iter().take(3).chain(std::iter::once(&fifth)) {
             land_detail(test_adapter(), plx_plex::plex::ServerId::from_raw(0), "unused", req, None);
         }
-        pump_detail(test_state(), test_adapter());
+        pump_detail(test_state(), test_adapter(), &plx_plex::plex::ClientKeys::default(), true);
         controlled(true);
         let before = test_adapter().detail_landing.dropped_count();
         tape::begin(admissions.clone().into(), Default::default());

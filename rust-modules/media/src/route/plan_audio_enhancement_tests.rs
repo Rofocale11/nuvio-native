@@ -50,8 +50,25 @@ fn resolve(
     item: impl FnOnce(ServerId) -> plx_data::metadata::PlayingItem,
     setup: impl FnOnce(&mut ResolveEnv, &plx_plex::plex::Client),
 ) -> Resolve {
+    resolve_with_parts(ps, mde, mode, media_bytes, PartAnswer::Serve, part, acodec, item, setup)
+}
+
+/// [`resolve`] with the raw Part's answer chosen (`PartAnswer`), for the cases where what the
+/// server does to Auto's Part preflight is the point.
+#[allow(clippy::too_many_arguments)]
+fn resolve_with_parts(
+    ps: &mut PlaybackSession,
+    mde: &'static [u8],
+    mode: EnhMode,
+    media_bytes: usize,
+    parts: PartAnswer,
+    part: &str,
+    acodec: &str,
+    item: impl FnOnce(ServerId) -> plx_data::metadata::PlayingItem,
+    setup: impl FnOnce(&mut ResolveEnv, &plx_plex::plex::Client),
+) -> Resolve {
     assert!(plx_net::net::global_init() && crate::curlio::available());
-    let (port, done, server) = enhancement_pms(mde, mode, media_bytes);
+    let (port, done, server) = enhancement_pms_parts(mde, mode, media_bytes, parts);
     let sid = plx_plex::plex::register_for_test("enh-pms", "127.0.0.1", port, "token", "enh-client");
     let client = plx_plex::plex::client_for(sid).unwrap();
     client.set_link(plx_plex::plex::probe::Location::Local);
@@ -138,6 +155,29 @@ fn pass_capable_ac3_local_original_is_enhanced_remux() {
     plx_plex::plex::reset_servers_for_test();
 }
 
+/// The enhanced remux COPIES the source's video stream, so the plan must carry the file's own rate
+/// (23.976 in `fourk_item`) for the Load to declare: a 4K H.264 24p stream declared at the 60 an
+/// unknown rate keeps is presented at ~13 fps on webOS 4. The re-encoding burn below it claims none.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn enhanced_remux_plan_carries_the_source_rate_and_a_burn_does_not() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3", ac3_item, |_, _| {});
+    assert_enhanced(&r);
+    assert_eq!(r.plan.fps, 23.976, "a video copy keeps the source's rate");
+    assert_eq!(r.plan.src_fps, 23.976);
+    plx_plex::plex::reset_servers_for_test();
+
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
+        |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
+        |_, _| {});
+    assert!(!r.plan.contract.remux, "a burn is a real re-encode");
+    assert_eq!(r.plan.fps, 0.0, "a re-encode owns its rate");
+    assert_eq!(r.plan.src_fps, 23.976, "the file's rate is still the file's");
+    plx_plex::plex::reset_servers_for_test();
+}
+
 #[test]
 #[cfg(feature = "devtriggers")]
 fn no_pass_is_direct_no_params() {
@@ -209,13 +249,14 @@ fn named_unfetched_audio_keeps_its_id_and_fails_closed() {
     plx_plex::plex::reset_servers_for_test();
 }
 
-/// Owner decision: a declared Dolby Vision source whose base layer IS self-displayable (P7/P8)
-/// gets the enhancement too — the remux plays the HDR10 base layer and simply never re-declares
-/// Dolby Vision (a remux was never able to carry `DolbyHdrInfo` at all — see `fill_direct_plan`'s
-/// own doc — so this drops nothing a remux could have kept).
+/// A declared Dolby Vision source whose base layer IS self-displayable (P7/P8) gets the
+/// enhancement too, and the remux keeps the declaration: the server copies the video, so the
+/// elementary stream still carries the DOVI configuration record the Load payload describes.
+/// (Measured on the dev PMS, `docs/pms-api.md` M9: the copied output keeps the DOVI record; a
+/// Jellyfin DirectStream, `-codec:v copy`, showed the same.)
 #[test]
 #[cfg(feature = "devtriggers")]
-fn dv_declared_p8_usable_base_is_enhanced_remux_without_dv() {
+fn dv_declared_p8_usable_base_is_enhanced_remux_that_keeps_dv() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
     let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
@@ -224,15 +265,18 @@ fn dv_declared_p8_usable_base_is_enhanced_remux_without_dv() {
             item.dovi = p8();
             item
         },
-        |env, _| env.dv_capability = Some(plx_platform::devcaps::dv::DvCapability::Supported));
+        |env, _| env.dv_capability = plx_os::devcaps::dv::DvCapability::Supported);
+    let direct = r.plan.auto_original.as_ref().map(|c| c.dv_decision);
     assert!(
-        r.plan.auto_original.as_ref().is_some_and(|c| c.dv_decision.presentation.declared().is_some()),
+        direct.is_some_and(|d| d.presentation.declared().is_some()),
         "precondition: the P8 direct play would have declared DolbyHdrInfo",
     );
     assert_enhanced(&r);
-    assert!(
-        r.plan.dv_decision.presentation.declared().is_none(),
-        "the remux never carries DolbyHdrInfo — Dolby Vision turns off while the enhancement is on",
+    assert_eq!(r.plan.dovi, p8(), "the copied video keeps its raw record");
+    assert_eq!(
+        Some(r.plan.dv_decision),
+        direct,
+        "the remux declares what the direct play would have: the video is copied, not re-encoded",
     );
     plx_plex::plex::reset_servers_for_test();
 }
@@ -246,7 +290,7 @@ fn dv_unusable_base_is_disabled_not_offered() {
     let carried = CarriedAudio::from_stream(&track(1, "ac3", 2, true), 0);
     let mut base = test_original_candidate(None);
     base.audio = Some(carried.clone());
-    let facts = |b| EnhancementFacts { pass: Subscription::Yes, base: Some(b), carried: Some(&carried), subtitle_effect: SubtitleEffect::None, refused: false };
+    let facts = |b| EnhancementFacts { pass: Subscription::Yes, base: Some(b), carried: Some(&carried), subtitle_effect: SubtitleEffect::None, refused: false, quality: Quality::Original, declined: None };
     assert!(enhancements_offered(&facts(&base), RouteFamily::Direct), "control: the clean base is offered");
     let mut unusable = base.clone();
     unusable.dovi = p5();
@@ -293,14 +337,17 @@ fn embedded_default_subtitle_with_enhancement_is_burned() {
 fn embedded_default_subtitle_with_enhancement_logs_applied_on_cold_start() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
-    let log_path = plx_base::paths::in_runtime_dir(plx_base::paths::runtime_file::EVENTS);
-    let before = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
-        |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
-        |_, _| {});
+    // A PRIVATE log: the shared one is a single machine-wide file every other test binary (and any
+    // other `make check` beside this one) appends to and the simulator truncates, so slicing "what it
+    // gained" off it by offset can read another run's lines or panic on a file that shrank. The
+    // resolve logs on this thread (`eventlog::with_private_log`).
+    let (r, appended) = plx_base::eventlog::with_private_log(|| {
+        let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
+            |sid| fourk_item_with_subs(sid, vec![track(1, "ac3", 2, true)], vec![selected_sub(9, "srt")]),
+            |_, _| {});
+        (r, std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default())
+    });
     assert_eq!(r.plan.enhancement, EnhancementOutcome::Applied, "precondition: cold start is a Burn");
-    let written = std::fs::read(&log_path).unwrap();
-    let appended = String::from_utf8_lossy(&written[before as usize..]);
     assert!(
         appended.contains("enhancement: applied boost=0 loudness=1"),
         "no `enhancement: applied` line from the cold-start branch :: {appended:?}"
@@ -571,6 +618,8 @@ fn cold_start_plan_lands_as_client_over_remux_with_a_reader_target() {
         title: String::new(),
         ctx: String::new(),
         preview: false,
+        version: None,
+        show_rk: String::new(),
     });
     assert_eq!(subtitle_presenter(&ps), SubtitlePresenter::ClientOverRemux);
     assert!(!subtitles_burned(&ps));
@@ -858,8 +907,321 @@ fn aac51_source_outcome_unverified() {
     ).unwrap();
     let copyable = CarriedAudio::from_stream(&track(1, "ac3", 2, true), 0);
     let not_copyable = CarriedAudio::from_stream(&track(1, "truehd", 8, true), 0);
-    assert_eq!(classify_outcome(Some(&mc), Some(&copyable), PREF), EnhancementOutcome::Applied);
-    assert_eq!(classify_outcome(Some(&mc), Some(&not_copyable), PREF), EnhancementOutcome::Unverified);
-    assert_eq!(classify_outcome(None, Some(&copyable), PREF), EnhancementOutcome::Unverified);
-    assert_eq!(classify_outcome(Some(&mc), Some(&copyable), plx_plex::plex::AudioEnhancements::NONE), EnhancementOutcome::Off);
+    assert_eq!(classify_outcome(&plx_os::devcaps::caps(), Some(&mc), Some(&copyable), PREF), EnhancementOutcome::Applied);
+    assert_eq!(classify_outcome(&plx_os::devcaps::caps(), Some(&mc), Some(&not_copyable), PREF), EnhancementOutcome::Unverified);
+    assert_eq!(classify_outcome(&plx_os::devcaps::caps(), None, Some(&copyable), PREF), EnhancementOutcome::Unverified);
+    assert_eq!(classify_outcome(&plx_os::devcaps::caps(), Some(&mc), Some(&copyable), plx_plex::plex::AudioEnhancements::NONE), EnhancementOutcome::Off);
+}
+
+// ---- Q-TOP (b) beside the enhancement: a remembered subtitle on the forced burn ------------------
+
+/// What the profile remembered for show 4242: the English text track.
+fn remembers_english_subtitle() -> Vec<plx_plex::plex::session::prefs::TrackMemoryEntry> {
+    use plx_plex::plex::session::prefs::{SubtitleMemo, SubtitleTrackMemo, TrackMemoryEntry};
+    let english = SubtitleTrackMemo { lang: "eng".into(), kind: "text".into(), ..Default::default() };
+    vec![TrackMemoryEntry::new("enh-pms", "4242", None, Some(SubtitleMemo::Track(english)))]
+}
+
+/// An episode of show 4242 with one embedded English subtitle the server has NOT selected.
+fn episode_with_an_unselected_subtitle(
+    sid: ServerId, audio: Vec<plx_data::metadata::Stream>,
+) -> plx_data::metadata::PlayingItem {
+    let sub = plx_data::metadata::Stream { selected: false, ..selected_sub(9, "srt") };
+    plx_data::metadata::PlayingItem {
+        kind: "episode".into(),
+        show_rk: "4242".into(),
+        ..fourk_item_with_subs(sid, audio, vec![sub])
+    }
+}
+
+/// M7's forced burn is a route that already re-encodes (it denies the remux), so the remembered pick
+/// rides it: the same wire an embedded server selection gets.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn q_top_b_the_forced_burn_carries_the_remembered_subtitle() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3",
+        |sid| episode_with_an_unselected_subtitle(sid, vec![track(1, "ac3", 2, true)]),
+        |env, _| env.memory = remembers_english_subtitle());
+    assert!(r.plan.url.contains("start.mkv") && !r.plan.contract.remux, "a burn is a re-encode: {}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitleStreamID"), Some("9"), "{}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitles"), Some("burn"), "{}", r.plan.url);
+    assert_eq!(selection_subtitles(&r.requests), vec!["9"], "{:?}", r.requests);
+    assert_eq!((r.plan.sub_sid, r.plan.memory_note), (9, false));
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// The edge: the server refuses the enhancement and the route falls back to the direct play it
+/// decorated. The burn existed only for the enhancement, so the fallback wire carries none (its MDE
+/// is the direct play's own), the plan draws the remembered track itself, and the menu has no note.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn q_top_b_a_refused_enhancement_falls_back_to_a_direct_play_with_no_burn() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Refuse, 0, MKV, "ac3",
+        |sid| episode_with_an_unselected_subtitle(sid, vec![track(1, "ac3", 2, true)]),
+        |env, _| env.memory = remembers_english_subtitle());
+    assert!(r.plan.url.contains("/library/parts/") && !r.plan.url.contains("start.mkv"), "direct play: {}", r.plan.url);
+    assert_eq!(r.plan.enhancement, EnhancementOutcome::Refused);
+    let after_refusal = r.requests.iter().rposition(|l| l.contains("/decision?") && !l.contains("hasMDE=1"))
+        .expect("the refused transcode decision");
+    assert!(
+        r.requests[after_refusal + 1..].iter().all(|l| !l.contains("subtitles=burn")),
+        "nothing after the refusal burns: {:?}", r.requests,
+    );
+    // The parallel PlayQueue request may arrive after the route's last decision.
+    let fallback_mde = r.requests[after_refusal + 1..].iter().rfind(|l| l.contains("/decision?"))
+        .expect("the fallback makes its own decision request");
+    assert!(fallback_mde.contains("hasMDE=1"), "the last decision must be for direct play: {fallback_mde}");
+    assert_eq!(query_param(fallback_mde, "subtitles"), Some("none"), "{fallback_mde}");
+    assert_eq!((r.plan.sub_sid, r.plan.sub_render_ordinal, r.plan.memory_note), (9, Some(0), false));
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A refused enhancement on an enhanced remux that was a forced burn (no direct play behind it) is
+/// still a re-encode: the rebuilt request keeps the remembered subtitle the plan reports, instead of
+/// dropping to the session's (empty) selection.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn q_top_b_a_refused_forced_burn_keeps_the_remembered_subtitle() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Refuse, 0, MKV, "truehd",
+        |sid| episode_with_an_unselected_subtitle(sid, vec![track(1, "truehd", 8, true)]),
+        |env, _| env.memory = remembers_english_subtitle());
+    assert!(r.plan.url.contains("start.mkv"), "setup: the server still encodes: {}", r.plan.url);
+    assert_eq!(r.plan.enhancement, EnhancementOutcome::Refused);
+    assert!(!r.plan.contract.remux, "setup: the forced burn was a re-encode");
+    assert_eq!(r.plan.sub_sid, 9);
+    assert_eq!(query_param(&r.plan.url, "subtitleStreamID"), Some("9"), "{}", r.plan.url);
+    assert_eq!(query_param(&r.plan.url, "subtitles"), Some("burn"), "{}", r.plan.url);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// **Both enhancement toggles off, the route is not forced into a burn.** `enhancement_route` says
+/// what the enhancement WOULD take where it is offered (Plex Pass, an analysed track, an embedded
+/// subtitle on screen: `Burn`), and says it whether or not the viewer turned anything on. The forced
+/// re-encode is that route spent, so with no param to send it has nothing to carry: the plan stays
+/// the codec-preserving remux the server's own decision named, with the video copied and nothing
+/// burned.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn burn_route_offered_but_no_enhancement_wanted_is_not_forced_into_a_re_encode() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_TRANSCODE_COPY, EnhMode::Honor("ac3"), 0, MKV, "truehd",
+        |sid| fourk_item_with_subs(sid, vec![track(1, "truehd", 8, true)], vec![selected_sub(9, "srt")]),
+        |env, _| env.audio_enhancements = plx_plex::plex::AudioEnhancements::NONE);
+    assert!(r.plan.url.contains("start.mkv"), "setup: the TrueHD is converted by the server: {}", r.plan.url);
+    assert_eq!(r.plan.contract.audio, plx_plex::plex::AudioEnhancements::NONE, "setup: nothing is asked for");
+    assert!(!any_param(&r.requests), "no enhancement param rides: {:?}", r.requests);
+    assert!(r.plan.contract.remux, "the video is copied: nothing was asked that needs a re-encode");
+    for d in transcode_decisions(&r.requests) {
+        assert!(!d.contains("subtitles=burn"), "nothing burns: {d}");
+    }
+    plx_plex::plex::reset_servers_for_test();
+}
+
+// ---------------------------------------------------------------------------------------------
+// The preview gate's REASON (Sentry PLX-NATIVE-23). The gate refuses everything but a plain direct
+// play; which condition refused is typed data on the verdict, graded here on real resolves against
+// the loopback PMS because the interesting cases are wire facts (what the server's decision said,
+// whether Auto's Remote probe came back).
+
+/// The reason a resolve's refusal carries, or `None` for a plan that was not refused as a preview.
+fn preview_refusal_of(r: &Resolve) -> Option<plx_telemetry::telemetry::classes::PreviewRefusal> {
+    match &r.plan.verdict {
+        Some(PlayVerdict::PreviewNeedsDirectPlay { reason }) => Some(*reason),
+        _ => None,
+    }
+}
+
+/// An item with no media part has nothing to play, whatever the server says about direct play.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_preview_with_no_part_is_refused_as_no_part() {
+    use plx_telemetry::telemetry::classes::PreviewRefusal;
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, "", "ac3", ac3_item, |env, _| {
+        env.set_preview(true);
+    });
+    assert!(r.plan.url.is_empty());
+    assert_eq!(preview_refusal_of(&r), Some(PreviewRefusal::NoPart), "{:?}", r.plan.verdict);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// The server's decision is a transcode: a direct play was never on offer.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_preview_the_server_would_transcode_is_refused_as_not_direct() {
+    use plx_telemetry::telemetry::classes::PreviewRefusal;
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_TRANSCODE, EnhMode::Honor("ac3"), 0, MKV, "ac3", ac3_item, |env, _| {
+        env.set_preview(true);
+    });
+    assert!(r.plan.url.is_empty());
+    assert_eq!(preview_refusal_of(&r), Some(PreviewRefusal::NotDirect), "{:?}", r.plan.verdict);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// **The hypothesis this tag exists to test.** The server would direct-play the item, but Auto
+/// quality's Remote bandwidth probe came back empty (the loopback PMS serves no media bytes), so
+/// Auto chose HLS: a direct play was on offer and the bandwidth decision refused it.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_direct_playable_preview_that_auto_sends_to_hls_is_refused_as_adaptive() {
+    use plx_telemetry::telemetry::classes::PreviewRefusal;
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), 0, MKV, "ac3", ac3_item, |env, client| {
+        client.set_link(plx_plex::plex::probe::Location::Remote);
+        env.quality = Quality::Auto;
+        env.set_preview(true);
+    });
+    assert!(r.plan.url.is_empty());
+    assert_eq!(preview_refusal_of(&r), Some(PreviewRefusal::Adaptive), "{:?}", r.plan.verdict);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// **The order is part of the contract.** Auto's override sets `directplay` false whenever it picks
+/// HLS, so a preview the server would transcode ALSO ends on an adaptive plan under Auto. The first
+/// failing condition is the one that was true BEFORE Auto chose: no direct play was on offer, so
+/// `not_direct`, not `adaptive`. (Reading the refusal off the values the gate sees would report
+/// every Auto-quality refusal as `adaptive` and make the hypothesis above unfalsifiable.)
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_transcoded_preview_under_auto_is_not_direct_even_though_auto_also_chose_hls() {
+    use plx_telemetry::telemetry::classes::PreviewRefusal;
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let r = resolve(&mut ps, MDE_TRANSCODE, EnhMode::Honor("ac3"), 0, MKV, "ac3", ac3_item, |env, client| {
+        client.set_link(plx_plex::plex::probe::Location::Remote);
+        env.quality = Quality::Auto;
+        env.set_preview(true);
+    });
+    assert!(r.plan.url.is_empty());
+    assert_eq!(preview_refusal_of(&r), Some(PreviewRefusal::NotDirect), "{:?}", r.plan.verdict);
+    plx_plex::plex::reset_servers_for_test();
+}
+
+/// A resolve of the 4K item the server would direct play, on a Remote link, at `quality`, with the
+/// raw Part answering `parts` (and serving `media_bytes` when it serves), as a preview or a full
+/// play. Returns the resolve and the event log it wrote.
+#[cfg(feature = "devtriggers")]
+fn remote_resolve(quality: Quality, preview: bool, media_bytes: usize, parts: PartAnswer) -> (Resolve, String) {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let out = plx_base::eventlog::with_private_log(|| {
+        let r = resolve_with_parts(&mut ps, MDE_DIRECTPLAY, EnhMode::Honor("ac3"), media_bytes, parts, MKV, "ac3", ac3_item,
+            |env, client| {
+                client.set_link(plx_plex::plex::probe::Location::Remote);
+                env.quality = quality;
+                env.set_preview(preview);
+            });
+        (r, std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default())
+    });
+    plx_plex::plex::reset_servers_for_test();
+    out
+}
+
+/// The raw Part GETs a resolve made: Auto's remote Original preflight is one.
+fn part_gets(requests: &[String]) -> usize {
+    requests.iter().filter(|r| r.starts_with("GET /library/parts/")).count()
+}
+
+/// **#1425.** A preview is direct play or nothing, so when Auto's remote Original preflight gets no
+/// response at all (its open fails in the network: the trailer behind two cross-origin redirects)
+/// there is no evidence the link is slow, and the refusal that followed was the preview's only
+/// outcome. It plans the Original instead, as quality Original does, and says why in the event log.
+/// The preflight itself still runs: only its empty answer is read differently.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_preview_on_auto_whose_preflight_gets_no_response_direct_plays_the_original() {
+    let (r, log) = remote_resolve(Quality::Auto, true, 0, PartAnswer::Hangup);
+    assert!(r.plan.verdict.is_none(), "not refused: {:?}", r.plan.verdict);
+    assert!(r.plan.url.contains("/library/parts/") && !r.plan.url.contains("start."), "direct play: {}", r.plan.url);
+    assert!(part_gets(&r.requests) >= 1, "the preflight still ran: {:?}", r.requests);
+    assert!(log.contains("auto: remote Original preflight produced no capacity sample failure=Open(Transport("), "{log}");
+    assert_eq!(
+        log.matches("route: Auto preview — the remote Original preflight got no response").count(), 1,
+        "one line says why: {log}",
+    );
+    assert!(!log.contains("route: Auto adaptive"), "Auto did not choose HLS: {log}");
+    assert!(
+        !matches!(r.plan.contract.delivery, plx_plex::plex::TranscodeDelivery::FixedHls { .. }),
+        "not an adaptive HLS plan: {:?}", r.plan.contract,
+    );
+    assert!(!r.plan.auto_original_watched, "a preview's Original is never watched");
+    // It is the plan quality Original makes: the same Part and the same contract.
+    let (original, _) = remote_resolve(Quality::Original, true, 0, PartAnswer::Hangup);
+    assert_eq!(part_gets(&original.requests), 0, "Original never preflights: {:?}", original.requests);
+    assert_eq!(r.plan.contract, original.plan.contract);
+    // (Each resolve has its own loopback server, so only the Part's path can agree.)
+    let part_of = |url: &str| url.split('?').next().and_then(|u| u.split_once("/library/parts/")).map(|(_, part)| part.to_owned());
+    assert_eq!(part_of(&r.plan.url), part_of(&original.plan.url), "the same Part");
+    assert!(part_of(&r.plan.url).is_some(), "a Part url: {}", r.plan.url);
+}
+
+/// **The other half of the contract: a measured link still decides.** The preflight's open succeeded
+/// and read bytes, but fewer than the source needs inside its budget (an `Ok` sample whose target
+/// was not reached): a slow link, not a missing answer. The preview is refused as it is on `main`,
+/// because nothing rescues a direct play that stalls. (Passes before and after the fix.)
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_preview_on_auto_whose_preflight_measures_a_slow_link_is_still_refused() {
+    use plx_telemetry::telemetry::classes::PreviewRefusal;
+    let (r, log) = remote_resolve(Quality::Auto, true, 100_000, PartAnswer::Serve);
+    assert!(r.plan.url.is_empty(), "refused: {}", r.plan.url);
+    assert_eq!(preview_refusal_of(&r), Some(PreviewRefusal::Adaptive), "{:?}", r.plan.verdict);
+    assert!(part_gets(&r.requests) >= 1, "the preflight ran: {:?}", r.requests);
+    assert!(log.contains("route: Auto adaptive"), "{log}");
+    assert!(!log.contains("route: Auto preview"), "{log}");
+}
+
+/// A server's own refusal of the Part (the 503 PMS answers a session that may not direct play) is
+/// a statement about the request, not a missing answer: the preview stays refused too. (Passes
+/// before and after the fix.)
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_preview_on_auto_whose_part_the_server_refuses_is_still_refused() {
+    use plx_telemetry::telemetry::classes::PreviewRefusal;
+    let (r, log) = remote_resolve(Quality::Auto, true, 0, PartAnswer::Refuse);
+    assert!(r.plan.url.is_empty(), "refused: {}", r.plan.url);
+    assert_eq!(preview_refusal_of(&r), Some(PreviewRefusal::Adaptive), "{:?}", r.plan.verdict);
+    assert!(!log.contains("route: Auto preview"), "{log}");
+}
+
+/// **The control: only a preview reads an empty answer this way.** The same item, link and failing
+/// open, played in full on Auto, still takes the preflight and still starts HLS. (Passes before and
+/// after the fix.)
+#[test]
+#[cfg(feature = "devtriggers")]
+fn the_same_item_played_in_full_on_auto_still_starts_hls_when_the_preflight_gets_no_response() {
+    let (r, log) = remote_resolve(Quality::Auto, false, 0, PartAnswer::Hangup);
+    assert!(part_gets(&r.requests) >= 1, "the preflight samples the Part: {:?}", r.requests);
+    assert!(log.contains("auto: remote Original preflight produced no capacity sample"), "{log}");
+    assert!(log.contains("route: Auto adaptive"), "{log}");
+    assert!(!log.contains("route: Auto preview"), "{log}");
+    assert!(
+        matches!(r.plan.contract.delivery, plx_plex::plex::TranscodeDelivery::FixedHls { .. }),
+        "no sample starts HLS: {:?}", r.plan.contract,
+    );
+}
+
+/// A preview under quality Original is unchanged: a direct play of the Part, no Part GET, a
+/// progressive contract and no `Auto` line of any kind. (Passes before and after the fix.)
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_preview_under_original_is_unchanged() {
+    let (r, log) = remote_resolve(Quality::Original, true, 0, PartAnswer::Serve);
+    assert!(r.plan.verdict.is_none(), "{:?}", r.plan.verdict);
+    assert!(r.plan.url.contains("/library/parts/") && !r.plan.url.contains("start."), "{}", r.plan.url);
+    assert_eq!(part_gets(&r.requests), 0, "{:?}", r.requests);
+    assert_eq!(r.plan.contract.delivery, plx_plex::plex::TranscodeDelivery::ProgressiveMkv);
+    assert_eq!(r.plan.contract.ceiling, None);
+    assert!(!log.contains("route: Auto"), "Original names no Auto route: {log}");
 }

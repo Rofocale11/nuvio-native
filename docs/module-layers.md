@@ -8,25 +8,37 @@ L14, which a split hides from them, and the gate does not check impl coherence. 
 off behind a port, so that another TV OS can be a second port. L15 is **gate-complete**: its 44
 entries are gone, and the gate fails on any reference from outside the port to a member of it. It
 is not done in the sense of its own goal. L15b, the OS-neutral port, is open (below). Neither holds
-up the split. **Thirteen of the fourteen layers, `base`, `machine`, `platform`, `gfx`, `net`, `ui`,
+up the split. **Thirteen of the fourteen layers, `base`, `machine`, `os`, `gfx`, `net`, `ui`,
 `plex`, `telemetry`, `data`, `session`, `media`, `appkit` and `screens`, are their own crates,
-`plx_base`, `plx_machine`, `plx_platform`, `plx_gfx`, `plx_net`, `plx_ui`, `plx_plex`, `plx_telemetry`,
+`plx_base`, `plx_machine`, `plx_os`, `plx_gfx`, `plx_net`, `plx_ui`, `plx_plex`, `plx_telemetry`,
 `plx_data`, `plx_session`, `plx_media`, `plx_appkit` and `plx_screens`** (`rust-modules/base/`,
-`machine/`, `platform/`, `gfx/`, `net/`, `ui/`, `plex/`, `telemetry/`, `data/`, `session/`, `media/`,
+`machine/`, `os/`, `gfx/`, `net/`, `ui/`, `plex/`, `telemetry/`, `data/`, `session/`, `media/`,
 `appkit/` and `screens/`; "Split 1: base" to "Split 13 (screens)" below, and "Splits 9 and 10
 together" for how those two were combined). **The split is finished.** What is left in
-`rust-modules/src/` is the last layer, `app`, and it stays the top crate `plxnative-modules`: the
-loop, its adapters, every dev and diagnostic surface, and the application's side of the port
-(`port`, `system`, and the other `[port webos]` members that are not in a layer crate). They are
-the one `staticlib` the Makefile links and the one place that may name every other layer, so there
-is nothing below it to split off. **Decision: the `[port webos]` members stay where they are**
-(`webos`, `keymanager` and `system` are modules of `plx_platform`, `player::ffi` of `plx_media`, and
-`port` of the top crate) **until a second TV OS exists.** A port crate now would have one
-customer and a boundary drawn from guesses about the second; the fence in `ci/check-module-layers.py`
-(a reference from outside `[port webos]` to a member of it fails) already holds the line a crate
-would, and L15b is where the port's OS-neutral shape is worked out.
+`rust-modules/src/` is the last layer, `app`, the crate `plxnative-modules`: the loop, its adapters, every dev and
+diagnostic surface, and `host`, its one published face (the types a platform builds, the ready media boots and `run`).
+It is a plain `rlib`: no archive is built from this crate. **The `[platform webos]` and `[platform desktop]` members left
+for crates of their own on top of it (L15f, W7b, landed; `docs/platform-ports.md`):** `plx_platform_webos`
+(`rust-modules/platform-webos/`: `port`, `system`, `webos` with the Starfish sink `webos::video_sink`, and `keymanager`) is
+the crate the one `staticlib` the Makefile links is built from, and `plx_platform_desktop` (`rust-modules/platform-desktop/`: the
+simulator's tables and entry, and the `plxnative-sim` binary) is the simulator's and the macOS app's. Each names `app`
+through `host` and `plx_os` for the `tv` interfaces it fills; the application names neither, and `plx_os` kept `tv`, those interfaces,
+with `storage`, `devcaps`, `imgcache`, `i18n` and `labcfg`: only `webos` and `keymanager` left it. **Decision, revised 2026-11-20: the `[platform webos]` members stayed where they were until the
+simulator was its own platform, and then left for crates of their own on top.** The earlier decision was to wait
+**until a second TV OS exists**:
+a port crate would have had one customer and a boundary drawn from guesses about the second. The desktop platform, the
+simulator and `PlxNative.app` as a platform of their own (L15d), is a second implementation of the same interfaces,
+which is what the wait was for, so the crates were extracted (L15f) after it and no second TV OS had to exist first
+(`docs/platform-ports.md`, Decision 3; "L15c to L15h" below maps its workstreams to steps). Before the extraction the fence
+in `ci/check-module-layers.py` (a reference from outside `[platform webos]` to a member of it fails) held
+the line a crate would, and it still does; L15b is where the port's OS-neutral shape is worked out.
 
 The gate is `ci/check-module-layers.py` and its config is `ci/module-layers.ini`.
+The gate also checks each extracted crate's local Cargo declarations, including build, dev,
+optional and target-specific dependencies, against those same `uses` edges. A declared edge is
+checked even before Rust code names the dependency, so an unused upward dependency cannot bypass
+the module graph. A crate's `[package.metadata.plx] mount` selects its layer; ordinary `plx_` crate
+names fall back to their package suffix. External crates are outside this graph.
 `ci/allow/layers.txt` holds the migration list. L1 to L14 emptied it, L15 declared 44 entries of
 its own and then removed them, so it is empty again and only shrinks. Run
 `ci/check-module-layers.py --report` for current numbers. The graph findings and the migration
@@ -59,8 +71,8 @@ formed one strongly connected component** from production references alone. Only
 outside it. `ci/check-module-layers.py --cycles` prints the current components, with the config's
 members (`ui::machine`, `diag::zlib`, …) as separate nodes. After L14 every production component
 sat inside one layer: media's `abr curlio ff hls player route`, data's eight modules, app's `app
-dev textinput`, platform's `i18n storage webos`, gfx's `gfx gpu_timer overdraw`, plex's `http
-plex`, telemetry's `diag telemetry` and machine's `ui::machine ui::present`. L15 took the platform
+dev textinput`, os's `i18n storage webos`, gfx's `gfx gpu_timer overdraw`, plex's `http
+plex`, telemetry's `diag telemetry` and machine's `ui::machine ui::present`. L15 took the os
 one apart (`webos` is behind the port, and `tv` names neither `i18n` nor `storage`: the release
 line is `i18n::webos_release_line`, and the port installs the storage helper's activator through
 `storage::client::install_activator`), so seven components remain, the others unchanged. A cycle
@@ -89,37 +101,43 @@ in `screens` above it; `media` also draws through `gfx`.
 
 ```
 app        everything below
-screens    appkit  ui  media  session  data  telemetry  plex  net  gfx    + platform machine base
-appkit         ui  media  session  data  telemetry  plex  net  gfx        + platform machine base
-media          data  telemetry  plex  net  gfx                            + platform machine base
-session        telemetry  plex  net                                       + platform machine base
-data           telemetry  plex  net                                       + platform machine base
-ui             gfx                                                        + platform machine base
-telemetry      plex  net                                                  + platform machine base
-plex           net                                                        + platform machine base
-net                                                                       + platform base
-gfx                                                                       + platform machine base
-platform                                                                             machine base
+screens    appkit  ui  media  session  data  telemetry  plex  net  gfx    + os machine base
+appkit         ui  media  session  data  telemetry  plex  net  gfx        + os machine base
+media          data  telemetry  plex  net  gfx  playback_contract  media_codecs  + os machine base
+session        telemetry  plex  net                                       + os machine base
+data           telemetry  plex  net  playback_contract                    + os machine base
+ui             gfx                                                        + os machine base
+telemetry      plex  net                                                  + os machine base
+plex           net                                                        + os machine base
+net                                                                       + os base
+gfx                                                                       + os machine base
+shell_sdl                                                                 + os machine base
+play_feed      net  playback_contract  media_codecs                       + os base
+play_uri       playback_contract                                          + os base
+media_codecs   playback_contract                                          + base
+playback_contract                                                         + base
+owp
+os                                                                                   machine base
 machine                                                                                      base
 base
 ```
 
 | layer | members | prod lines | an edit there recompiles |
 |---|---|---:|---:|
-| base | `eventlog paths task cbuf sha256 b64 spki dynlib checkpoint storage_worker fontcov surface tile devtrig diag::{zlib,spans,heartbeat} testlock testnet testscratch` | 9k | everything |
+| base | `eventlog paths task cbuf sha256 sha1 b64 spki dynlib checkpoint storage_worker fontcov surface tile hold detail_parts devtrig diag::{zlib,spans,heartbeat} testlock testnet testscratch testrace` | 9k | everything |
 | machine | `ui::{machine,present,idle,landgate,landing,motion}` | 4k | 97% |
-| platform | `webos storage keymanager devcaps imgcache i18n labcfg tv` | 11k | 96% |
-| gfx | `gfx egl text img svg gpu_timer hwcnt overdraw dump` | 15k | 68% |
-| net | `net stream` | 6k | 74% |
+| os | `webos storage keymanager devcaps imgcache i18n labcfg tv` | 11k | 96% |
+| gfx | `gfx egl text rtl img svg gpu_timer hwcnt overdraw dump` | 15k | 68% |
+| net | `net stream ws` | 6k | 74% |
 | plex | `plex http` | 26k | 72% |
 | telemetry | `telemetry diag` (the event schema) | 16k | 64% |
 | ui | `ui` (the library) | 51k | 47% |
-| data | `stores browse metadata person collection search viewstate pms` | 27k | 56% |
+| data | `stores browse metadata person collection search subsearch viewstate viewledger pms watchlist catalog hudpacks` | 27k | 56% |
 | session | `auth` | 11k | 35% |
-| media | `ff aq abr hls curlio player route` | 56k | 49% |
+| media | `ff` (a facade over `play_feed`'s demuxer) `abr curlio player route speed_audio`; `aq` and `hls` moved to `play_feed` | 56k | 49% |
 | appkit | `appkit` (the player panels and the Sources row several screens draw) | 13k | 32% |
 | screens | `screens` | 54k | 28% |
-| app | `crate app dev lab capture remote focusprobe shot coldstart textinput system release_line port` | 42k | 12% |
+| app | `crate app dev lab capture remote focusprobe shot coldstart textinput system release_line port host` | 42k | 12% |
 
 "Prod lines" counts files that are not wholly `cfg(test)`, measured after L14. The last column is
 the share of all production lines in that layer plus every layer above it. Line counts stand in
@@ -128,13 +146,92 @@ the split has not happened. Of the last 33 commits that touched `rust-modules/sr
 touched `screens/` or `ui/`, so a screens-only edit dropping from 100% to about 28% is where most
 of the payoff is. L10 took the player widgets out of `ui` (66k lines at baseline, 51k now).
 
+`playback_contract` is a fifteenth layer, declared after the split and not in the table above. Its
+crate is `plx_playback_contract` (`rust-modules/playback-contract/`) and it names only `base`: the
+backend-neutral playback vocabulary (commands and readouts, the time, track and subtitle types, the
+`BackendState` machine, the Feed port traits `FeedSeek`, `FeedLoad`, `FeedOpen`, `FeedStop` and `FeedControl`
+over them, and the adaptive `FeedPort`, with their test fakes), which a backend can implement without naming `media`, `route` or Plex. `data` and
+`media` may name it (`data`'s `TrackNames` and `media`'s `abr::units::MediaTimeMs` are re-exports of
+its types, and the `BackendRunner` and attempt-metrics reducers in `media::player` are written
+against it). `BackendState` is a machine in `ci/machines.ini`, and `ci/check-deps.sh` reads the
+whole crate as machine code.
+
+`media_codecs` is a sixteenth layer, declared the same way. Its crate is `plx_media_codecs`
+(`rust-modules/media-codecs/`) and it names `base` and `playback_contract`: the bundled FFmpeg's
+ABI (`ffi`, the dlopen'd libraries and the layout asserts), the decoders and encoder built on it (the
+PCM decode and conversion, `speed_audio`, `SpeedDecoder`, `Venc`) and the subtitle extraction
+(`subtitle`, `subtitle_extract`), all with owned, neutral output. `media` names it (`plx_media::ff`
+re-exports its bindings; the demux is `plx_play_feed`'s) and so does the application crate (`capture`
+drives `Venc`); it names neither `media` nor Plex. `ci/check-deps.sh`
+reads the whole crate for the same IO and clock gates as every other layer.
+
+`play_feed` is a seventeenth layer, declared the same way. Its crate is `plx_play_feed`
+(`rust-modules/play-feed/`) and it names `base`, `os`, `net`, `playback_contract` and `media_codecs`: the
+buffer-feed backend (the guarded transport, the physical FFmpeg demuxer and HLS parser, the native payload
+construction and executor, which implement the Feed port traits) and the simulator's `VideoSink` stand-in
+(`ffi_host`, behind that crate's `hostsim` feature). It was `plx_media::player`'s own until the player stopped
+depending on a backend: `plx_media` is the neutral orchestration (routes, the engine, the `BackendRunner`) and
+does not name it in production code, while the application composes it
+(`app/adapters/backends.rs`, behind the application crate's `play-feed` feature, which the release build
+passes explicitly). `media` and `screens` list it in `ci/module-layers.ini` for their TESTS, which drive the real
+Feed through a dev-dependency edge; `ci/check-deps.sh` reads the whole crate for the same IO and clock gates as
+every other layer.
+
+`play_uri` is an eighteenth layer, declared the same way. Its crate is `plx_play_uri`
+(`rust-modules/play-uri/`) and it names `base`, `os` and `playback_contract`: the URI backend (the
+`com.webos.media` protocol and request lifecycle, the ACB bind machine and its envelope map, the picture gate,
+and the product driver `UriBackend`, which implements the contract's `UriDriver`) and the developer probe's machine
+and driver (`uriprobe`, `uriprobe_drive`, `devtriggers` builds only). `plx_media` does not name it: the route planner and the player adapter see
+only the contract's traits and the `UriProbe` port, and the application composes the driver
+(`app/adapters/backends.rs`, behind the application crate's `play-uri` feature, which the release build passes
+explicitly) and the probe (`dev/uriprobe.rs`). The driver tells the route which display it can show a source on as
+the contract's `DisplayEvidence` (`UriDriver::display`), so the route never names the driver's window, plane or
+binding. The driver is compiled into every build that has the feature.
+Production offers it a source only for a viewer who turned on Settings > Video & playback > Playback engine >
+Experimental: the application's `ProductQualifier` (`app/adapters/backends.rs`) answers `Unknown` for everyone else, for an original
+Standard would not direct-play (the plan's own `StandardDirectPlay` verdicts for the video, Dolby Vision, audio and
+container, not the server's decision, which the offer precedes), and for a converted PMS output. `ci/check-deps.sh` reads the whole crate for the same IO and clock gates as every other layer.
+
+`owp` is a nineteenth layer, declared the same way. Its crate is `plx_owp` (`rust-modules/owp/`); it
+names no other layer and no `plx_*` crate, so it can be used on its own: the Open Watch Party client protocol, sans-IO. It holds the JSON reader that keeps
+unpaired surrogate escapes visible to the checks, the message codec, the checks on names, room codes, the
+relay list, descriptors and room snapshots, the clock sync and the room timeline, each run against the
+vendored conformance vectors in `rust-modules/owp/fixtures/`. The WebSocket under it is `plx_net::ws`; the
+application does not name the crate yet. `ci/check-deps.sh` reads the whole crate for the same IO and clock
+gates as every other layer, and as machine code.
+
+`shell_sdl` is a twentieth layer, declared the same way. Its crate is `plx_shell_sdl` (`rust-modules/shell-sdl/`);
+its layer may use `base`, `machine` and `os` and the crate names `plx_base` alone. It is the SDL half of the shell that the
+television and the simulator share: `SDL_Init` and the GL request, the window (the panel's size and its smaller
+fallback, and under `hostsim` the desktop fit), the swap and its interval, the event poll and decode (LG's fork layout
+on the device, stock SDL2 under `hostsim`), the synthetic key, pointer, wheel and lifecycle events the remote FIFO, Lab Control, replay and the cursor-swap OK push back
+into the queue (a text event is built as bytes and handed to the decode, never pushed: pushing one crashes the Mac's SDL), and the text-input calls. The LG half does not move: the `SDL_SysWMinfo` buffer, the `wl_proxy_marshal`
+opaque region and the LS2 pump stay in `system.rs` (now `platform-webos/src/system.rs`), a member of `[platform webos]`, and a pin in the crate's `lib.rs` fails
+if the crate names the query that overruns it. The application reaches it through `app/platform.rs`, whose `Shell` opens a
+`Surface` over the crate's `Window`; `HostEvent` stays application-private, and `Shell` and `Surface` are reachable only through the application crate's `host` module (W7a).
+`ci/check-deps.sh` reads the whole crate for the same clock, statics and thread gates as every other layer, and not as one of the
+sans-IO areas: the shell is an IO crate by definition.
+
+The Watchlist adds two data modules and no new edge. `watchlist` (rows, match table, `TileState`,
+intent ledger, comparator; with `stores::watchlist`) and `catalog` (the Discover-only item page; with
+`stores::catalog`) name only layers below data, chiefly `plx_plex`: `plex::watchlist`, `Client::find_by_guids`, `plex::session`
+for the plex.tv credential, and `plex::servers` for the roster, reachability and `facts_gen`
+epochs. Neither names `net` or `media`; the screens (`watchlist`, `catalog`) and the tab pulse sit
+above them, and the application alone routes between them (`docs/watchlist.md`).
+
+`hudpacks` (the player-HUD package store, `docs/hud-plugins.md`) adds a data module and no edge. It is a
+pure machine that names only `base` (`sha256`) and `machine` (`Handled`): the HUD format lives in
+`appkit`, above data, so the store never parses a package and asks its caller for the verdict
+(`HudEffect::Validate`), and its directories, which `paths::hud_candidates()` supplies in `base`, arrive
+on an event.
+
 Four choices that were not obvious:
 
 - **media sits above data**, not below it. Route selection and the player name the data layer's
   types (`metadata::Stream`, `Dovi`, the metadata store) 84 times in production code and 191
   times in tests. The data layer names `media` 11 times. With this order the baseline is 231
   entries and 783 production references; the reverse order gives 254 and 856.
-- **machine sits below platform.** The runtime names nothing above `base`. `webos` already wakes
+- **machine sits below os.** The runtime names nothing above `base`. `webos` already wakes
   the frame through `ui::idle::invalidate`, and `auth`, `stores` and `plex` are written against
   `ui::machine`.
 - **appkit sits between media and screens.** It was added by L10, which planned to move the player
@@ -143,10 +240,15 @@ Four choices that were not obvious:
   library, and `ci/check-deps.sh`'s `sibling` gate forbids one screen family naming another. They
   name `route`, `player`, `metadata`, `plex` and `stores`, so they cannot stay in `ui` either.
   `appkit` may name everything below `screens`; `screens` and `app` may name it.
-- **The webOS port is a fence, not a layer.** `[port webos]` lists `webos`, `keymanager`,
-  `system`, `player::ffi` and `port`, which stay in `platform`, `app` and `media` above, and
-  nothing outside the port may name them. A layer on top would say the same thing, but then the
-  modules in `platform`, `plex` and `telemetry` that named webOS before L15 would have held up
+- **`screens` names `play_feed` in its tests only.** The player pins drive the Feed's process-lifetime transport
+  flags (`plx_play_feed::shared::FEED_TX`), which `plx_media` stopped re-exporting when it stopped depending
+  on a backend (W3h): a dev-dependency edge, so `[screens] uses` lists `play_feed` and no production code of
+  `screens` may name it.
+- **The webOS port is a fence, not a layer, until its crate exists; since W7b it is a crate above `app` and still a port.**
+  `[platform webos]` listed `webos` (which holds `webos::video_sink`), `keymanager`, `system` and `port`, which were in `os` and `app`
+  above, and nothing outside the port may name them. Now it carries `uses` and lists one member, the crate's mount (`platform_webos`),
+  which holds those four as ordinary modules (a section with no `uses` is the only kind that is a fence; `ci/check-module-layers.py`). A layer on top would say the same thing, but then the
+  modules in `os`, `plex` and `telemetry` that named webOS before L15 would have held up
   those layers' extraction until it was finished, video sink and all. As a fence it held the line
   without blocking the split. The gate no longer sees a reference into the port from outside, so
   it can become a crate on top. L15b is the open step that makes it a port another OS could fill.
@@ -167,7 +269,7 @@ tables say so, but `check-deps.sh`'s `layer` gate scans only `screens/`.
 - a reference, production **or** `cfg(test)`, names a layer its own layer does not `use`, and
   `ci/allow/layers.txt` has no entry for that (file, member) pair;
 - a reference from outside a port names one of the port's members, with no entry either, and the
-  list is empty. A port (`[port webos]`, step L15) is not a layer, and a port reference never held
+  list is empty. A port (`[platform webos]`, step L15; a crate above `app` since W7b) is not a layer of the application, and a port reference never held
   up the split;
 - an allowlist entry has gone stale. `--prune` drops fixed entries, and `tests/test_harness.py`
   pins the count;
@@ -205,15 +307,18 @@ integration test and belongs to the layer that owns all of its parts (step L13).
    `ci/module-layers.ini` and this document in the same diff and say why. If the change
    re-layers a module, or declares a port, that other code already names, record those
    references as a new step's entries in the same diff, raise the pin, and add the step to the
-   migration table. L15 was added this way.
+   migration table. L15 was added this way. `ci/check-ledger-ratchet.py` then fails the PR against
+   its base branch, so a design change that re-layers is merged by the owner past that check.
 
 Adding a line to `ci/allow/layers.txt` is not a fix. Lines are added only by a design change under
 item 5, and moved when a file that already has entries is **renamed or split**: entries are keyed by
 path, so the gate reports the old key as stale and the new path as unlisted. Move the entry to the
 new path in the same diff, and do not run `--prune` first (it would delete the old key and leave the
 new one failing). A split that keeps the upward name on both sides needs one line per new file, and
-raises the pin in `tests/test_harness.py` by the same number. Since L15 the list is empty (the pin
-is 0), so a new upward reference is always a fix, and there are no entries to carry.
+raises the pin in `tests/test_harness.py` by the same number; `ci/check-ledger-ratchet.py` then
+fails the PR against its base branch, so the owner merges that split past the check. Since L15 the
+list is empty (the pin is 0), so a new upward reference is always a fix, and there are no entries
+to carry.
 
 ## The migration
 
@@ -227,95 +332,119 @@ proves the references are gone and nothing more; L15b is open.
 | step | entries / refs | what moved |
 |---|---:|---|
 | **L1** log core to base — **done** | 72 / 325 | `log`, `redact_tokens`, `events_log`, `open_log_append`, `write_log_line` and their tests moved from `lib.rs` to `eventlog.rs` in `base`. `log` calls `eventlog::ring::record` directly (`lab::record` was a one-line wrapper of it and is gone), and all 473 references in 95 files name `crate::eventlog::log`. The log's own guards moved under it too (`diag::scrub` and `diag::ring`, which named nothing but `redact_tokens`, are `eventlog::{scrub, ring}`), and `paths::app_dir` no longer logs: the boot preamble writes the same `appdir:` line from `paths::app_dir_line()`. So `eventlog` names nothing but `paths`, `paths` names nothing, and both sit outside every cycle. |
-| **L2** dev trigger primitives to base — **done** | 28 / 68 | The primitives (`read`, `flag`, `latched_flag!`, `read_sample`, `controlled_trigger`, `listed`, `guard_log_only`, `no_wan`, `holdload_delay_ms`) are the base module `devtrig`, which every caller names; the typed triggers moved beside their one consumer (`abr_pin` to `abr::ladder`, `PlayUrl`/`PlayDovi` to `player::playurl`), and the scenario reads lower layers made moved down rather than becoming hooks (`auth::scripted`, `telemetry::consent::state_override`, `screens::login`'s `harness_driven`, `player::failure_fixture`). |
-| **L3** lab config to platform — **done** | 5 / 7 | `lab::{config, is_trigger_key, menu_row_enabled}` are the platform module `labcfg`, and `ui/lab_toast.rs` went to `lab/toast.rs`, since only `lab` draws it. |
+| **L2** dev trigger primitives to base — **done** | 28 / 68 | The primitives (`read`, `flag`, `latched_flag!`, `read_sample`, `controlled_trigger`, `listed`, `guard_log_only`, `no_wan`, `holdload_delay_ms`) are the base module `devtrig`, which every caller names; the typed triggers moved beside their one consumer (`abr_pin` to `abr::ladder`, `PlayUrl`/`PlayDovi` to `player::playurl`, now `plx_playback_contract::playurl` with the parse in `plx_play_feed::playurl`), and the scenario reads lower layers made moved down rather than becoming hooks (`auth::scripted`, `telemetry::consent::state_override`, `screens::login`'s `harness_driven`, `player::failure_fixture`). |
+| **L3** lab config to os — **done** | 5 / 7 | `lab::{config, is_trigger_key, menu_row_enabled}` are the os module `labcfg`, and `ui/lab_toast.rs` went to `lab/toast.rs`, since only `lab` draws it. |
 | **L4** machine runtime leaves ui — **done** | 4 / 6 | The six upward names are cut: `page_frozen` lives in `ui::idle` (`gfx` re-exports it), `ScreenArg`/`ScreenEvent` and `fit_line_by`/`elide_by` moved into `ui::machine` (`ui::screen` and `text` re-export them), the loop calls `card_motion_metrics::presented` itself, and idle's plane-bit test moved to `app::run`. |
 | **L5** gfx stops naming ui — **done** | 2 / 61 | `Rect`, `Crop` and `Zoom` are `gfx/geom.rs`, the colour and size tokens `gfx` and `text` draw with are `gfx/tokens.rs`, and the backdrop walk and the profilers moved whole to `gfx/backdrop.rs` and `gfx/profile.rs`; `ui` re-exports all of them at the old paths. |
 | **L6** transport takes Plex values — **done** | 5 / 13 | `Origin`, `Scheme`, `url_host`, `ResolvePin` and `dial_port` are `net/origin.rs` (`plex::origin` re-exports them and keeps `CredentialPolicy`), the user agent is installed once at boot through `net::set_user_agent`, and `stream::redirect::Request` takes the credential-transport check as a function pointer. |
-| **L7** platform owns its types — **done** | 2 / 5 | `DP_AUDIO_CODECS` lives in `devcaps` (`plex` re-exports it), and the Dolby Vision half of `webos/caps.rs`'s frame-safety test moved to `metadata`'s tests. |
+| **L7** os owns its types — **done** | 2 / 5 | `DP_AUDIO_CODECS` lives in `devcaps` (`plex` re-exports it), and the Dolby Vision half of `webos/caps.rs`'s frame-safety test moved to `metadata`'s tests. |
 | **L8** plex stops naming upward — **done** | 7 / 10 | `urlenc_str` is `plex::client`'s, `backoff_secs` and `EndpointRefresh(Set)` are `plex::retry` (`pms` and `stores` re-export them), `LinkClass`/`classify` are `plex::probe`'s, `route::auto_quality_ready` and `telemetry::cleanup_after_account_clear` are hooks `app::boot::install_plex_seams` installs, and `plex::session`'s whole-app tests moved to `app/plex_session_app_tests.rs`. |
 | **L9** telemetry owns its wire schema — **done** | 5 / 69 | The `*Class`/`Trace*` vocabulary and a new `FailureClass` are `telemetry::classes` (`player::report` re-exports them and converts through `FailureKind::class()`), clearing the error trace is a hook (`player::report::install_trace_eraser`, run at boot by `app::enter_application`, not by the first attempt: a failed preview traces without one), an incident hands over a telemetry-owned `ReadoutGlyph` that `screens::login` maps to an icon, and the consent adapter's live half is `telemetry::transition`. |
 | **L10** player and Plex-aware widgets out of ui — **done** | 38 / 511 | Part a moved `ui/{player_hud,track_menu,more_menu,info_panel,up_next,chapters_panel,timing_capsule,source_list}.rs` and `screens/player/skip_pill.rs` to the new `appkit` layer rather than `screens/` (the third choice above); part b gave `widgets`, `card_row`, `hero_logo`, `collection_tile` and `fmt` plain values (`ui::tile::TileFacts`, a raw `u16` server id, `fmt::RatingScale`), with `screens::registry::tile_facts::of` the one `PmsMovie` converter. |
-| **L11** data owns its seams — **done** | 13 / 74 | `app::bootstrap::stores` is `stores::tape`, `metadata` takes a `Playhead` value and owns `track_names`, `ContentArg` is `stores::content_arg`, `person` and `search` cap shelves at `pms::MAX_SHELF_ITEMS`, and the `Tile` trait is the base module `tile`. |
-| **L12** media owns its lifecycle seams — **done** | 7 / 28 | The foreground-resume reducer and the transport-pause contract are `player::lifecycle` (`app::lifecycle` re-exports them), the stats switch is `player::DIAG_READOUT_ON`, `Venc::open` takes the capture socket writer as an argument, and `route` takes the HUD context line as a parameter, with the up-next still prefetch a hook the app installs. |
+| **L11** data owns its seams — **done** | 13 / 74 | `app::bootstrap::stores` is `stores::tape`, `metadata` takes a `Playhead` value and owns `track_names`, `ContentArg` is `stores::content_arg`, `search` sizes its row window from `pms::MAX_SHELF_ITEMS`, and the `Tile` trait is the base module `tile`. |
+| **L12** media owns its lifecycle seams — **done** | 7 / 28 | The foreground-resume machine is `player::lifecycle`, its drivers `player::foreground` and the transport-pause contract `player::transport` (`app::lifecycle` re-exports them), the stats switch is `player::DIAG_READOUT_ON`, `Venc::open` takes the capture socket writer as an argument, and `route` takes the HUD context line as a parameter, with the up-next still prefetch a hook the app installs. |
 | **L13** tests move up to the layer that owns their parts — **done** | 41 / 96 | Part a moved the auth, plex, i18n, task and fontcov tests that named upper layers to `app/` (`session_*_tests.rs`), `screens/login_text_fit_tests.rs`, `plex`, `auth::owner` and `storage::client`, and moved `fontcov`'s `Measure` impl beside the trait, with `ui::machine`'s new `BareArg`/`BareMeasure` fixtures for the rest; part b moved the data, media and ui ones to `app/` (`dispatch_return_tests.rs`, `overscan_audit_tests.rs`) and `screens/` (`plaintext_question`, `library/labels_tests.rs`, `search/tests.rs`, `player`), and rewrote two against their own layer. |
 | **L14** session-layer presentation to screens — **done** | 2 / 4 | `auth::signed_in_reason` is a private fn of `screens::login`, its only caller, with its two tests; `auth` already handed over the plain account name. |
-| **L15** the webOS port — **gate-complete** | 44 / 205 | Everything outside `[port webos]` reaches the television through the `tv` interfaces in `platform` that the port fills at boot: `tv::{device, sandbox, secure, home, toast, window}`, `devcaps::dv`, and `tv::sink::VideoSink`, a Starfish-shaped verb trait that `player::ffi::StarfishSink` and `player::ffi_host::HostSink` implement. `plex_run` is `port::plex_run`. The allowlist is empty. Not "done": the sink is not OS-neutral and the simulator is not its own port (L15b). |
-| **L15b** the OS-neutral port — **open** | — | An OS-neutral video sink with the ACB bind sequence behind it, the simulator as its own port, and the webOS facts the gate cannot see. See below. |
+| **L15** the webOS port — **gate-complete** | 44 / 205 | Everything outside `[platform webos]` reaches the television through the `tv` interfaces in `os` that the port fills at boot: `tv::{device, native_video, secure, home, toast}` (the window, the bus pump and the frame probe are `app::platform`'s `Shell` and `FrameProbe` since W2), `devcaps::dv`, and `tv::sink::VideoSink`, a Starfish-shaped verb trait that `plx_platform_webos::webos::video_sink::StarfishSink` and `plx_play_feed::ffi_host::HostSink` implement. `plex_run` is `plx_platform_webos`'s `port::plex_run`. The allowlist is empty. Not "done": the sink is not OS-neutral (L15b). |
+| **L15b** the OS-neutral port — **open** | — | An OS-neutral video sink with the ACB bind sequence behind it and the webOS facts the gate cannot see; the simulator became its own platform in W4. See below. |
+| **L15c** the platform value and the three contracts — **done** | — | Wave R (the rename that gave this page `os` and `[platform webos]`) landed as #1474; W2 landed (`tv::Port` became `tv::Services`, with four groups of hooks; the shell and the frame probes moved to `app::Platform`), and so did the three contracts, W3a to W3c: who may persist credentials (#1477), what evidence admits a URI player (#1478), who ends the process (#1479). See "L15c to L15h" below. |
+| **L15d** neutral types and the simulator as its own platform (L15b item 2) — **W3d and W4 landed** | — | W3d landed (the opaque `Backend` tag, `sandbox` to `native_video`, identity publishes a platform name and version, `device::Info` keeps its webOS fields in `WebosDetail`, and `devcaps` reads its files through the platform), and so did W4: `platform_desktop` (then `rust-modules/src/platform_desktop.rs`, a second fence section, `[platform desktop]`; `rust-modules/platform-desktop/src/lib.rs` since W7b) is the simulator's and the macOS app's own platform value, which the `plxnative-sim` binary enters through; the `hostsim` terms of the television's fence are gone, so the television's code was compiled into every build and the linker dropped it from a desktop executable (`simulators.yml` linked the macapp feature set to guard that until W7; since W7b the desktop crate does not link the television's crate), and the stand-ins in `webos` and `keymanager` were test seams, compiled for tests and `test-support` (`docs/platform-ports.md`, W4). The desktop platform is the second implementation. |
+| **L15e** events, the shell and composition — **W5a to W5c, W6, W6b, W6c and W7a landed** | — | W5 (`HostEvent` with `Option<Action>`) landed in three PRs, lifecycle and quit (W5a, #1484), keys and text (W5b, #1487) and the pointer and wheel (W5c, #1492), and so did W6b (platform-supplied composition in two boot phases, #1489) and W6 (`plx_shell_sdl`, a `[shell_sdl]` layer: SDL's bring-up, the window, the swap, the event decode and the text-input calls moved out of the application behind its private `Shell` and `Surface`, and the LG half stays in `system.rs`). W6c (a URI-only and a two-driver composition play an ordinary title) landed (#1494), and W7a published the construction interface through `plxnative_modules::host` alone (`rust-modules/src/host.rs`, tested from outside the crate by `rust-modules/tests/host_interface.rs`, `make test-host-interface`). |
+| **L15f** extract the platform crates — **W7b landed** | — | `rust-modules/platform-webos` (`plx_platform_webos`, the crate the ARM staticlib is built from) and `rust-modules/platform-desktop` (`plx_platform_desktop`, which also holds the `plxnative-sim` binary) are crates above `app`, over the narrow public `host` module W7a published (the row above); `port`, `system`, `webos` and `keymanager` left `plx_os` and the application, and the gate learned "a platform is a crate above `app`" (`[platform X]` carries `uses`, its member is the crate's `mount`, nothing names it, no platform names another). After L15d, before L15g and L15h (the storage-authority part of W8a, #1488, #1490 and #1491, landed ahead of W7; the rest of W8 still follows W7). |
+| **L15g** the webOS facts and the remaining `hostsim` (L15b item 3) — **W8a started** | — | W8a has begun: the platform states where the account's records live (`tv::Services.storage`, #1488), and telemetry's consent store (#1490) and plex's session persistence (#1491) follow it instead of the `target_arch = "arm"` fence. Still planned: the rest of W8a, one PR per directory (`os`, `src`, `base`, `storage` and `play-feed`; telemetry's nine `target_arch = "arm"` lines in `telemetry/src/telemetry/native.rs`, the Sentry Native crash capture, are not among them and no step owns them yet, the follow-up for Tizen ARM retail builds that #1490 names), sorting the `target_arch = "arm"` and `target_os = "linux"` sites into "is webOS" (a platform value or runner) and "is 32-bit ARM" or "is Linux" (stays); then W8b, the library name lists, `paths` and the packaging, and W8c, the `feature = "hostsim"` lines left in the tree (none of them in the fence now; `git grep -h 'feature = "hostsim"' -- '*.rs' | wc -l` counts them). |
+| **L15h** the OS-neutral Feed sink (L15b item 1) — **planned** | — | W11: `plx_acb` (an `[acb]` layer) takes the ACB plane owner and the URI media verbs out of `os`, the Feed-side ACB results become neutral, and the bind sequence moves behind a neutral sink. Needs the television. |
 
 ### L15: the webOS port
 
 L1 to L14 gave the crate a direction, but webOS was still spread through it. The modules that exist
 only because the target is webOS (`webos`, `keymanager`, `system` and `player::ffi`) were named
-from 29 production files in 8 layers, from `platform` up to `app`, so supporting another
-television OS would have meant edits in all of them. `[port webos]` fences them off: the gate fails
+from 29 production files in 8 layers, from `os` up to `app`, so supporting another
+television OS would have meant edits in all of them. `[platform webos]` fences them off: the gate fails
 on a new reference from outside, and the ones that were there when the port was declared were
 L15's 44 entries, 205 references of which 95 were in production code. The port's members stay in
 their layers, so none of this held up the split.
 
-L15 moved every one of those references behind an interface in `platform`'s new `tv` module that
-the port fills at boot. `tv::Port` is a table of function pointers, installed once as the first
-statement of `port::plex_run`, before anything that reads it. With no port installed (host unit
-tests, where nothing calls `plex_run`) `tv::ABSENT` answers what the host arms answered before; a
+L15 moved every one of those references behind an interface in `os`'s new `tv` module that
+the port fills at boot. `tv::Services` is a table of function pointers and stated values in five groups (`identity`, `secure`, `system`, `storage` and `legacy_webos_media`), installed once by `app::run_application` (from the `Platform` its entry hands it) before anything
+that reads it. With nothing installed (host unit
+tests, where nothing calls `plex_run`) `tv::Services::HOST_TEST` answers what the host arms answered before; a
 shipping build that reaches it logs `tv: port not installed - using the no-port defaults` once.
-Only `tv`'s own modules read the table. The one thing that leaves it is the sink, through
-`tv::sink::installed()`, and `ci/check-deps.sh` (rule `sink`) fails on that name or `VideoSink`
-outside `player/`, `tv/`, `tv.rs` and `port.rs`.
+Only `tv`'s own modules read the table. Two things leave it: the sink, through
+`tv::sink::installed()` (rule `sink` of `ci/check-deps.sh` fences naming `VideoSink` or `installed` to `media`'s
+`player/`, `os`'s `tv/` and `tv.rs`, `platform-webos`'s `webos/` and `port.rs`, `platform-desktop`'s `lib.rs` (each platform's table names its own
+sink) and `app/adapters/backends.rs`; those are three paths, not the platform crates, so `system.rs`, `keymanager.rs`, `webos.rs` and the `lib.rs` of
+`platform-webos` and the `bin/sim.rs` of `platform-desktop` fail `sink` on naming either; `play-feed/` and `play-uri/` may name the sink traits but never resolve `installed`), and the URI media pipe through
+`tv::uri::installed()`, resolved once by the webOS platform's composition (`app/adapters/backends.rs::compose_native`, which calls
+`install_uri_product`, in a build with the `play-uri` feature; the desktop platform composes the Feed only and never resolves it) and, in a `devtriggers` build, again by the media wrapper `player::uriprobe_drive` for the developer probe. The independent
+`play-uri` driver receives that transport and a shared `DisplaySink` as injected ports; it
+does not read the webOS port registry or the feed-only `VideoSink` itself.
 Lazily computed facts (device identity, the sandbox verdict, the Dolby Vision capability) are
-published values rather than hooks: the webOS code writes them into `tv::device`, `tv::sandbox` and
+published values rather than hooks: the webOS code writes them into `tv::device`, `tv::native_video` and
 `devcaps::dv` at the same boot moment as before, so readers keep their `OnceLock` semantics.
 
 | interface | where it went | named from |
 |---|---|---|
-| device identity | `tv::device::{info, device, Info, Hardware}`, published by `webos::probe` | `telemetry`, `diag::schema`, `plex::identity`, `plex::session`'s tests, `screens::login`, `lab::snapshot`, `app`, `player` |
+| device identity | `tv::device::{info, device, platform, files, Info, WebosDetail, Hardware, Platform, Files}`, published by `webos::probe` (`Info` is the release, build and major every platform states; `WebosDetail` is the codename, API version and name only a webOS firmware file has; `Platform` is the name and version the Plex headers report, which `plex::identity` defaults to `webOS` until one is published; `Files` is the reader `devcaps::probe` parses through, a field of `Services.identity`) | `telemetry`, `diag::schema`, `plex::identity`, `plex::session`'s tests, `screens::login`, `lab::snapshot`, `app`, `player` |
 | playback capability | `devcaps::dv::{capability, probe, DvCapability}`, published by `webos::caps`; `tv::start_capability_probe` starts the probe | `metadata`, `route`, `player::engine`, `app` |
-| native-video availability and repair | `tv::sandbox::{blocks_native_video, context, repair, Verdict, State, Failure, FORCE_BLOCKED}`; the verdict is published by `webos::probe` and the repair is a port hook | `player`, `route`, `appkit::player_hud`, `screens::player`, `app::playback` |
-| video sink | `tv::sink::VideoSink`, implemented by `player::ffi::StarfishSink` and `player::ffi_host::HostSink`, installed in `Port.sink` and read through `tv::sink::installed` | `player::{engine, pump, threads}`, `player::claim_hold`'s tests |
-| secure store | `tv::secure::{seal, open, remove, Sealed, Backend}` | `plex::session` |
-| storage backend | `storage::client::install_activator`, which the port calls with `webos::activate_storage_helper` | `port::plex_run` |
+| native-video availability and repair | `tv::native_video::{blocked, context, repair, Verdict, State, Failure, FORCE_BLOCKED}`, `Verdict` being `Available`, `Blocked(reason)` or `NotApplicable`; the verdict is published by `webos::probe` and the repair is an optional port hook (`Services.identity.repair_native_video`) | `player`, `route`, `appkit::player_hud`, `screens::player`, `app::playback` |
+| video sink | `tv::sink::VideoSink`, implemented by `plx_platform_webos::webos::video_sink::StarfishSink` and `HostSink` (`plx_play_feed::ffi_host`), installed in `Services.legacy_webos_media.sink` and read through `tv::sink::installed` | `player::{adapter, test_physical}`, `plx_play_feed::{native_executor, native_load, physical, seek}` (which receive it injected), `app::adapters::backends` (which resolves `installed` and `display_installed`) |
+| secure store | `tv::secure::{seal, open, remove, Sealed, Backend}`; `Backend` is an opaque tag (a string on the wire, with constants for the two webOS spellings) | `plex::session` |
+| storage backend | `storage::client::install_activator`, which `port::plex_main` calls with `webos::activate_storage_helper`; it stays a `storage`-owned install point (not a `tv::StorageHooks` member) because its type is the helper's wire diagnostics and `tv` names no `storage` (L15); its Linux gate is the socket transport's own, not "is webOS" | `storage::client` (the Linux `transact`) |
 | locale | `tv::system_locale` and `tv::LocaleReply`; `i18n` still owns the parse and the log lines | `i18n` |
-| window, surface, video plane, bus pump and frame probe | `tv::window` | `app::boot`, `app::run`, `app/mod.rs` |
+| sound output | `tv::sound::{output, parse_output, Reply}`, filled by `Services.identity.sound_output` (`webos::sound_output`); a blocking read, so never on the frame thread, and asked only on a stack whose lead follows the output (`liblxa` and 2018's `audiosink_new`; `devcaps::audio_stack`; the `lgaudiosink` stack's lead does not depend on the output, and the others have none, so they never ask) | `player::threads` (through `player::engine`, which owns the lead table) |
+| window, surface, video plane, bus pump and frame probe | `app::platform::{Shell, FrameProbe}`, in the application crate beside the loop that is their one consumer; the webOS crate's `port.rs` implements them over its own `system`, and `run_application` takes the `Platform` that holds them (kept as `App::platform`, and as the shell `BridgeRetained` holds for the dispatcher's two opaque-region hooks and lends, through `Bridge::shell`, to playback's pointer hide); `Shell` also carries the Magic Remote's pointer hide (`hide_pointer`, `show_pointer_after_motion`, `hide_is_cursor_swap`), which `port::WebosShell` forwards to `system` | `app::boot`, `app::run`, `app::bridge`, `app::input`, `app::playback` |
 | home key | `tv::home::{go_home, poll, take_root_press, release_root_press}` | `app::input`, `app::run`, `app::adapters::session`, `app::lifecycle`'s tests |
 | system toast | `tv::toast::{toast, send, Identity, Outcome, Sent}` | `app::clock_notice`, `dev::scenarios::toast_probe` |
 
-`tv` may name only `base`, `machine` and `platform`. `port.rs` holds `plex_run` and the `PORT` table
-that points each hook at the `webos`, `keymanager` and `system` function behind it. The C shim and
-the simulator both enter through `port::plex_run`; `app::run_application` is the two-line body it
-hands over to. `lib.rs` declares the port but re-exports nothing from it, because a re-export would
-be a reference from the crate root into the port, which the gate refuses.
+`tv` may name only `base`, `machine` and `os`. The webOS platform crate's `port.rs` holds `plex_run` and the `SERVICES` and `PLATFORM` tables
+that point each hook at the `webos`, `keymanager` and `system` function behind it. The C shim
+enters through `port::plex_run`: it hands the platform to `host::run`, which calls `app::run_application`, which returns
+how the session ended as an `Exit` (a status and whether the teardown released everything), and then
+ends the process with that status. The simulator enters through `plx_platform_desktop::run`, which hands the desktop
+platform to `host::run` and returns that status; the simulator's `main` ends the process. The application's `lib.rs` declares neither platform and
+names none: what a platform builds is `host`'s.
 
 The video sink landed as a verb-level cut. `tv::sink::VideoSink` has one method per verb of the
 Starfish seam, 29 of them, with the C return values and the `&MainThread` token on every method but
-`load`, `window_mode` and `window_id`. It is **Starfish-shaped**: a load payload, `feed`, and the
-ACB bind verbs that `pump` walks. Another TV OS cannot implement it as it stands. `player::ffi`
-keeps its `extern "C"` block unchanged and implements the trait as `StarfishSink`; `engine`, `pump`
-and `threads` call it through `player::sink()`. `player/ffi_host.rs` is no longer swapped in under
-`player::ffi`. It is `player::ffi_host`, the simulator's own `VideoSink` (`HostSink`), outside the
-fence. Call order, arguments and log text did not change. The deeper cut is L15b.
+`load`, `window_mode` and `window_id` (since 2026-10-15 `unload` takes an `UnloadTicket` instead, so
+a real stop's Unload can run on a worker; the trait's own doc is the current list). It is **Starfish-shaped**: a load payload, `feed`, and the
+ACB bind verbs that the Feed pump walks. Another TV OS cannot implement it as it stands.
+`webos::video_sink` (now `plx_platform_webos::webos::video_sink`) keeps its `extern "C"` block unchanged and implements the trait as
+`StarfishSink`; the player adapter and the Feed backend's pump, executor and Load worker call it
+through the sink the composition hands them (`PlayerAdapter::display_sink`; `app/adapters/backends.rs`).
+`ffi_host` is no longer swapped in under `webos::video_sink`. It is the simulator's own `VideoSink`
+(`HostSink`), outside the fence. It is the Feed backend's stand-in, so it lives in `plx_play_feed` behind that crate's
+`hostsim` feature and names only the layers below it; what its sink is built with arrives as
+`ffi_host::Hooks`: the pipeline-event entry and the inverse of its position rebase, both that
+crate's own (`Hooks::over`), and a `ffi_host::FrameSink` that the application's
+`app::adapters::hostsim::sim_video` implements (the one place that draws, so `plx_gfx` stays on the
+application side), as `app::adapters::hostsim::HOST_SINK`; the media tests build their own beside it
+with `ffi_host::NoFrames`. Call order, arguments and log text did not change. The deeper cut is L15b.
 
 The verb cut was taken first because the bind sequence cannot be moved safely from here. It lives in
-`pump`'s `Stage` machine, is gated on state the firmware callback writes (`SHARED`) and interleaves
+`pump`'s `Stage` machine, is gated on state the firmware callback writes (`FEED_SHARED`) and interleaves
 with seek re-anchoring, the auto-rebuffer pause and the claim hold. `ffi_host` deliberately never
 models ACB (it reports `VP_EXPORTED`, which skips the bind stages), so no host test covers the bind
 order or its interleaving, and its log lines are graded on the television. A verb-for-verb move
 can be graded by comparing the television's log before and after; a redesign that changes where
 those stages run, and when, is its own step's scope and risk.
 
-The simulator runs the same table. Under `hostsim` `port.rs` installs a `PORT` whose fields point
-at the same `webos`, `keymanager` and `system` functions, whose `hostsim` arms answer on the host,
-and whose sink is `HostSink`. So the simulator behaves as it did, but it is not yet a second
-implementation of the interfaces.
+The simulator does not run the television's tables. The desktop crate's `src/lib.rs` states its own `SERVICES` and `PLATFORM`: the
+shared `NONE` groups where a host has nothing to say, its own bodies for the capability probe, the root press and the
+toast, `HostSink` as the sink, and a `Shell` and a `FrameProbe` that do nothing. `port.rs` is the webOS port only. Since the platform
+crates split (W7b) the desktop build compiles none of the television's code: it does not link `plx_platform_webos`, and `simulators.yml`'s
+link step now guards the simulator's own binary.
 
 L15 is gate-complete: no entry carries its tag, `plex_run`, which the C shim calls, lives in the
 port, and the gate fails on a new reference into it. That is all the gate can see. L15 also set out
-to put an OS-neutral sink with the bind sequence behind it and the simulator's stand-ins in their
-own port. Neither landed, so L15 is not called done. They are L15b.
+to put an OS-neutral sink with the bind sequence behind it and the simulator in its own port. The
+sink did not land, so L15 is not called done; it is L15b. The simulator did, in W4.
 
 ### L15b: the OS-neutral port
 
 Open. L15 made every reference to the webOS code visible and one-directional. It did not make the
 interfaces something another OS could implement, because the verbs and several types in them are
-still webOS's. Three things are left:
+still webOS's. Three things were left, and item 2 is done:
 
 1. **An OS-neutral video sink.** A sink another OS can implement takes codec configuration and
    timestamped access units, and it seeks, flushes, pauses and reports events. The ACB bind
@@ -323,54 +452,92 @@ still webOS's. Three things are left:
    `sf_on_event`/`acb_on_event` and `sink_counter_kind(ty, major)` in `player/mod.rs` move behind
    it, into the port. This changes where the stages and the callback decode live and when they
    run, so it needs the television: see the reasons above.
-2. **The simulator as its own port.** `ffi_host` and the `hostsim` arms of `webos`, `system` and
-   `keymanager` become a second `Port` table, a second implementation of the same interfaces,
-   instead of the webOS table running its host arms. That keeps both honest. The webOS-shaped types
-   in `tv` also need neutral shapes then: `tv::secure::Backend` names the two webOS key managers
-   and is part of the on-disk envelope, and `tv::sandbox`'s verdict and repair describe webOS's
-   own device jail.
+2. **The simulator as its own platform (done, W4; its own crate since W7b).** `plx_platform_desktop` is a second implementation of the
+   same interfaces: it states every hook of `tv::Services` (the shared `NONE` groups where a host has
+   nothing to say, its own capability probe, root press, toast and sink) with a no-op `Shell` and
+   `FrameProbe`, and `platform-desktop/src/bin/sim.rs` enters through it, so the webOS table no longer runs host arms. The
+   `hostsim` terms are gone from `system`, `port`, `webos` and `keymanager`. The stand-ins in `webos` and
+   `keymanager` are test seams only, `cfg(test)` of the webOS platform crate (it has no `test-support` feature,
+   so nothing outside its own tests can see them): a simulator never links that crate at all (`docs/platform-ports.md`, W4, W7b). `hostsim` no longer selects a platform: it selects the
+   host build of what is not one (the media seam's host sink, the GL context request, the window flags
+   and the keyboard event decode), while the television's wayland and glib calls are `plx_platform_webos`'s, a crate no desktop
+   crate names, so a simulator never contains them and no dead-strip is relied on.
+   The comment on the feature in `rust-modules/Cargo.toml` says the same since W6, which re-sealed the
+   certificate with it. The
+   webOS-shaped types in `tv` needed neutral shapes then, and have them since W3d: `tv::secure::Backend`
+   is an opaque tag that stays a string on the wire (the two webOS spellings are constants, and a tag no
+   installed platform knows is refused on open), `tv::sandbox` is `tv::native_video` with a verdict that is
+   `Available`, `Blocked(reason)` or `NotApplicable` and an optional repair hook, and `tv::device::Info`
+   keeps the release, build and major while the codename, API version and name sit in a `WebosDetail`.
 3. **The webOS facts the gate cannot see.** The gate sees names, not literals, and not modules
    that stay where they are. The port takes these too:
 
    - `devcaps` reads webOS's own table, `/etc/umediaserver/device_codec_capability_config.json`.
-     The parsed model stays and the reader moves.
+     The parsed model stays and the reader moved in W3d: `devcaps::probe` reads its files through
+     `tv::device::files()`, the `Files` that `Services.identity` states.
    - The libraries the app loads at run time are the television's: `libcurl` (`net`, `curlio`) and
      `libEGLfk` (`egl`). The bundled FFmpeg in `ff` is loaded by absolute path and is not one of
      them.
-   - `plex::identity`'s platform constant and client headers.
+   - `plex::identity`'s platform constant and client headers (W3d: the platform publishes its name and
+     version to `tv::device`, and `PLATFORM` is the default until it does).
    - The Magic Remote's key codes and pointer in `app::{input, boot, events}`.
    - `paths`'s fallback install prefix.
    - Outside `rust-modules/src`: `src/starfish.c`, `src/main.c`'s boot shim, the storage helper
      crate (`rust-modules/storage`, an LS2 service over DB8), and the Makefile's NDK cross-build
      and `.ipk` packaging.
 
-L15b is done when the sink is OS-neutral, the simulator is its own port, and these facts are the
-port's. The port can then leave its layers for a crate of its own on top: it names `app` to start
-it, and nothing names it. `plxnative-modules` stays the staticlib the Makefile links, now holding
-the port. Another TV OS is another port in that position. The simulator binary, `src/bin/sim.rs`,
-is already a separate crate there, and enters through `port::plex_run`.
+L15b is done when the sink is OS-neutral and these facts are the
+port's (the simulator became its own platform in W4). The port does not wait for both before it leaves its layers. The
+order, amended 2026-11-20, is item 2 (the simulator as its own platform, done), then the extraction, then item 3 and item 1 ("L15c to L15h" below). Extracted (W7b, landed), the
+port is a crate of its own on top: it names `app` to start it, and nothing names it. `plx_platform_webos`
+produces the staticlib the Makefile links, and `plxnative-modules` stays the application crate beneath it. Another TV
+OS is another platform in that position. The simulator binary, `platform-desktop/src/bin/sim.rs`, is a binary of the
+`plx_platform_desktop` crate, and enters through `plx_platform_desktop::run`.
+
+### L15c to L15h: the platform plan
+
+`docs/platform-ports.md` plans making the application run and plug in on several platforms: webOS, the desktop
+simulator and `PlxNative.app`, and Samsung Tizen. It carries the design, the facts behind it and the workstreams W0 to
+W13; the six steps below are its layer-graph side, and the lettering L15c to L15h is introduced by this amendment so
+the migration table can carry them (L15b's three items keep their meaning and are L15d for item 2, L15g for item 3
+and L15h for item 1). Prose on this page written before Wave R says "port" where the plan says platform; the fence
+section is `[platform X]`, and the plan calls its crates `plx_platform_webos`, `plx_platform_desktop` and
+`plx_platform_tizen`. Where L15b above speaks of a second `Port` table, the plan's shape is `tv::Services` plus
+`app::Platform` (W2, landed).
+
+The order is L15c; then L15d and L15e, which overlap (W3d then W4 runs beside W5, and W6b, W6 and W6c wait for both);
+then L15f; then L15g and L15h. So the extraction (L15f, W7) follows item 2 (L15d, W4), and item 3 (L15g, W8) and
+item 1 (L15h, W11) come afterwards. The earlier order put the extraction after all of L15b, which would have made W7
+wait for the neutral sink: item 1 needs the television and gates nothing the other platforms need, and W8 follows W7 (but the storage-authority part of W8a, #1488, #1490 and #1491, landed ahead of it).
+The steps are L15b's three items and the moves that serve them: the contracts they rest on (L15c), the events and
+composition (L15e) and the extraction (L15f). The other workstreams are not steps of this table: W0 (the record of the
+plan, this amendment), W1 (the `PLATFORM` build axis), W9 (the Tizen platform, which adds `plx_platform_tizen` and a
+`[platform tizen]` section to the arrangement L15f creates, as a user of the neutral port and not a step toward it),
+and W10, W12 and W13 (its URI and Feed drivers and the desktop products), which add code to the `plx_platform_tizen`
+and `plx_platform_desktop` crates.
 
 ### Then the split
 
 `--report` ends with an "extractable as a crate" list. A layer is ready when neither it nor anything
 it uses has entries left, **and** no other layer's tests name a `cfg(test)` item of it or of a
 layer below it. Since L14 the first half holds for every layer and the second for none: `--report`
-listed 134 such items after L14 (8 in `base`, 11 `machine`, 13 `platform`, 8 `gfx`, 10 `net`, 21
+listed 134 such items after L14 (8 in `base`, 11 `machine`, 13 `os`, 8 `gfx`, 10 `net`, 21
 `plex`, 8 `telemetry`, 12 `ui`, 25 `data`, 4 `session`, 6 `media`, 4 `appkit`, 4 `screens`). L15
 replaced `webos::FORCE_JAIL_BLOCKED`, `webos::home_requests` and `keymanager::RPC_FOR_TEST` with
-`cfg(test)` seams of `tv` (`sandbox::FORCE_BLOCKED`, `home::home_requests`,
+`cfg(test)` seams of `tv` (`native_video::FORCE_BLOCKED`, `home::home_requests`,
 `secure::{STORE_FOR_TEST, TestStore}`) that other layers' tests still name, so `--report` listed
-136 (15 in `platform`, the rest as above) before Split 3 took the 15 with it; run it for the current
+136 (15 in `os`, the rest as above) before Split 3 took the 15 with it; run it for the current
 count. The
 gate cannot see either remaining hazard on its own, because it checks names, not `cfg(test)`-ness
-of the item named or impl coherence. Extract bottom-up: `base`, then `machine`, `platform`, and so
+of the item named or impl coherence. Extract bottom-up: `base`, then `machine`, `os`, and so
 on. Each extraction:
 
 - creates `rust-modules/<layer>/` as a workspace member (the storage helper in `storage/` is the
   existing example), moves the files, and turns `crate::x::` into `plx_<layer>::x::` in the layers
   above. `pub(crate)` items named from another layer become `pub`;
-- keeps `plxnative-modules` as the top crate and the one `staticlib` the Makefile links. The layer
-  crates are `rlib`s it depends on. `ci/test_no_host_staticlib.py` and the `$(RUST_LIB)` rule
+- keeps `plxnative-modules` as the top crate of the layers, with the layer crates as `rlib`s it depends on
+  (while the split ran it was also the one `staticlib` the Makefile links; since W7b that archive is built from
+  `plx_platform_webos`, which depends on it). `ci/test_no_host_staticlib.py` and the `$(RUST_LIB)` rule
   stay valid;
 - forwards the features. `devtools`, `devtriggers`, `threadcheck`, `lab-diagnostics` and `hostsim`
   become features of each layer that has a `cfg` on them, enabled from the top crate;
@@ -412,8 +579,8 @@ on. Each extraction:
 ### Split 1: base
 
 `base` was extracted first: `rust-modules/base/` is the workspace member `plx_base` (an `rlib`, in
-the workspace beside the storage helper), `plxnative-modules` depends on it by path and is still
-the one crate the Makefile links as a `staticlib`. Its members are the `[base]` list in
+the workspace beside the storage helper), `plxnative-modules` depends on it by path and was then still
+the one crate the Makefile linked as a `staticlib` (W7b moved that to `plx_platform_webos`). Its members are the `[base]` list in
 `ci/module-layers.ini`; `diag::{heartbeat, spans, zlib}` left `diag` and are `plx_base::diag::*`
 (`base/src/diag.rs` holds only those three, and the application's own `diag` is a different module
 of the same name). Every `crate::<member>::` in the application became `plx_base::<member>::`,
@@ -437,10 +604,11 @@ What the extraction taught, beyond what the recipe above predicted:
 - **Tests that read the source tree or the repository** moved with their crate and needed a root:
   `eventlog::scrub`'s "no log call interpolates viewing content" scan walks `base/src` *and*
   `../src` (it would otherwise have stopped reading the application, silently, and still passed:
-  every later layer must be added to its root list); `paths` and `fontcov` climb one more `..`.
+  every later layer must be added to its root list; since W7b the scan lists `rust-modules/` with
+  `read_dir` and walks every `<crate>/src`, as `player/report.rs`'s `fetch_update` walk does, so there
+  is no list to add to); `paths` and `fontcov` climb one more `..`.
 - **No orphan-rule hazard appeared**: no `impl` in the application has both its trait and its type
-  in `plx_base` (`ShippedMeasure`'s impl is `machine`'s trait on a `plx_base` type, which is
-  legal in the application crate and is legal in the `plx_machine` crate; Split 2 below).
+  in `plx_base` (`ShippedMeasure`'s and `WholePixelMeasure`'s impls are `machine`'s trait on a `plx_base` type, which only the trait's crate, `plx_machine`, may write, and does; Split 2 below).
 - **The tooling that knew the tree's shape**: `ci/module_graph.py` reads every sibling
   `rust-modules/<layer>/` package named `plx_*` as part of the same module tree (so the layer gate
   and `check-module-cycle` keep one graph and `base uses nothing` is still enforced; the cycle
@@ -491,12 +659,17 @@ is new. What it taught beyond the recipe:
   `idle::{take_local_damage, reset_for_test}`, `BareArg`, `BareMeasure`). The private
   `landgate::phase` wrapper and `Present::global` stay `cfg(test)`: only this crate's tests call
   them, and under `test-support` alone they would be dead code.
-- **The `Measure` impl for `fontcov::advances::ShippedMeasure` lives in `plx_machine`.** The trait
-  is the machine crate's and the type is `plx_base`'s, so the impl may sit in either crate; it
+- **The `Measure` impls for `fontcov::advances::ShippedMeasure` and `WholePixelMeasure` live in `plx_machine`.**
+  The trait is the machine crate's and the types are `plx_base`'s, so the impl sits in `plx_machine`, the trait's crate, the only crate that can write it; it
   cannot sit in a third (E0117), which is why it could not stay in `ui` for the layers above.
-  The machine crate is the lowest one that names both. It is `test-support` only, and
-  `plx_machine/test-support` enables `plx_base/test-support`, because `fontcov::advances` is
-  itself behind that feature. No other orphan-rule hazard appeared (the compiler is the checker:
+  The machine crate is the lowest one that names both. `ShippedMeasure`'s is `test-support` only, and
+  `plx_machine/test-support` enables `plx_base/test-support`, because `fontcov::advances::ShippedMeasure`
+  is itself behind that feature (it reads the repository's `pkg/`). `WholePixelMeasure`'s is not behind
+  anything: it is the HUD cost model (two `Face`s parsed from the bytes of `appfont.ttf` and `appfont-bold.ttf`,
+  no IO, no global), the one price every side puts on a HUD state, so the whole `fontcov::advances` module
+  except `shipped` and `ShippedMeasure` is built in every configuration and `plx_gfx::text::read_price_model` (the
+  one code that reads the two files; `hud_cli` and the player-HUD driver's storage-worker job both call it) builds the
+  model from it. No other orphan-rule hazard appeared (the compiler is the checker:
   an `impl` of a `plx_machine` trait for a `plx_base` type in the application would be the next
   one, and there is none).
 - **Moving a trait to another crate changes dead-code analysis.** `app/recorder.rs`'s
@@ -532,34 +705,34 @@ couple of seconds that crate cost per edit to everything above it. The gain is i
 application edit is 5.7 s faster), not in the noisy medians; the crates that carry the line count
 (`gfx`, `plex`, `ui`, `screens`) were still inside the application crate at that point.
 
-### Split 3: platform
+### Split 3: os
 
-`platform` was extracted third: `rust-modules/platform/` is the workspace member `plx_platform` (an
+`os` was extracted third: `rust-modules/os/` is the workspace member `plx_os` (an
 `rlib`, `uses = base machine`), holding `webos storage keymanager devcaps imgcache i18n labcfg tv`
 and the `storage_service/` files that `storage` and the storage helper both include by `#[path]`
-(they are not a module of their own). `webos` and `keymanager` are still `[port webos]` members, and
-the port fence reads `plx_platform::webos::` exactly as it read `crate::webos::`: a probe naming
+(they are not a module of their own). `webos` and `keymanager` were `[platform webos]` members then (W7b moved them out of `plx_os`, into `plx_platform_webos`), and
+the port fence read `plx_os::webos::` exactly as it had read `crate::webos::`: a probe naming
 either from `coldstart.rs` still fails the gate for both. The 1828 `crate::<member>::` references in
-150 application files were rewritten by a script to `plx_platform::<member>::`; `pub(crate)` became
+150 application files were rewritten by a script to `plx_os::<member>::`; `pub(crate)` became
 `pub` across the moved files and in what the two generators emit (`Flavor`, the `i18n::msg`
 accessors). Features: `devtriggers`, `hostsim` and `lab-diagnostics` are forwarded, `test-support`
 is new and enables the two lower layers'. The 218 tests of the layer run in their own binary: the
 suite is 5603 tests before and after (157 + 66 + 218 + 5162). What it taught beyond the recipe:
 
 - **The generated code is the layer's, and so is the build script that generates it.**
-  `platform/build.rs` runs the catalog generator (`platform/build_support/catalog.rs`, reading
-  `locales/`) and the install-identity generator (`rust-modules/build_support/install_identities.rs`,
+  `os/build.rs` runs the catalog generator (`os/build_support/catalog.rs`, reading
+  `locales/` and the language registry `locales/languages.json`) and the install-identity generator (`rust-modules/build_support/install_identities.rs`,
   which stays where it is because the storage helper's build script calls it too). It reads no
   `PLX_*` variable and emits no `rustc-link-*`, so it is never dirty on a second run:
-  `ci/test_build_not_always_dirty.py` now fails on `plx_platform` as well as on the application
+  `ci/test_build_not_always_dirty.py` now fails on `plx_os` as well as on the application
   crate. The application's `build.rs` kept the version, the build SHA, the host link configuration
   and the nanosvg object, lost its `serde`/`serde_json` build-dependencies, and the application
   manifest lost the `icu_*` crates, which only `i18n` used.
 - **A `cargo:rustc-env` reaches one crate.** `storage::diagnostics` read `env!("PLX_VERSION")`,
-  which the application's build script publishes; the platform crate cannot see it, and
+  which the application's build script publishes; the os crate cannot see it, and
   re-deriving the version rule in a second build script would have been a third copy of it (it is
   already in `build.rs` and `ci/version_rule.py`). The application hands it in instead:
-  `storage::diagnostics::start(env!("PLX_VERSION"))`. The platform layer does not know what
+  `storage::diagnostics::start(env!("PLX_VERSION"))`. The os layer does not know what
   version the application is.
 - **A test that reads another layer's source moves up.** `storage::diagnostics`'s boot-order test
   `include_str!`ed `app/mod.rs`; it now sits beside its sibling in `app/boot.rs`'s
@@ -569,9 +742,11 @@ suite is 5603 tests before and after (157 + 66 + 218 + 5162). What it taught bey
   their real LS2 arms (`extern "C"` blocks a host test binary cannot link), `i18n::current()` with
   its "initialized before any screen" panic instead of the English default, and `storage` without
   the commit-failure hook. Each is `cfg(any(test, feature = "test-support"))` now, and
-  `cfg(not(any(...)))` for the shipping arm. Items that only the layer's own tests use
-  (`webos::storage_activation_reply`, `webos::caps::{ProbeFailure, parse_dv_reply}`) stay
-  `cfg(test)`: under `test-support` alone they would be dead code.
+  `cfg(not(any(...)))` for the shipping arm. In `plx_platform_webos`, which no other crate's
+  tests build, the pair is plain: `webos::caps::run_transport` is `cfg(not(test))` for the real
+  arm and `cfg(test)` for the host stub, and the items beside it (`ProbeFailure`, `parse_dv_reply`,
+  `platform_gate`) are ungated because the real arm calls them. Gating an item `cfg(test)` alone
+  is right only when nothing outside tests calls it; under `test-support` alone it would be dead code.
 - **`test-support` may add or switch behaviour; it may not remove an item the application names.**
   `cargo check --lib --tests` (the lab line of `make check`) builds the application's non-test
   library with the dev-dependency features unified in, so `i18n::initialize` and
@@ -584,51 +759,51 @@ suite is 5603 tests before and after (157 + 66 + 218 + 5162). What it taught bey
   binary of 218 it failed every run. `imgcache`'s `TestDir` takes the lock now. A layer that is
   split off may expose a race that the big suite averaged away: run the new crate's tests a few
   times alone before trusting them.
-- **No orphan-rule hazard, and nothing was dead because of a trait.** `platform` defines traits
+- **No orphan-rule hazard, and nothing was dead because of a trait.** `os` defines traits
   (`tv::sink::VideoSink`) and the application implements them for its own types, which is legal; the
-  compiler is the checker, as in Split 2. `tv::sandbox::Failure::Timeout` had a
+  compiler is the checker, as in Split 2. `tv::native_video::Failure::Timeout` (then `tv::sandbox`) had a
   `cfg_attr(..., expect(dead_code))` that became an unfulfilled expectation once the enum was `pub`;
   it is gone.
 - **FFI moved byte for byte.** `webos.rs`'s `extern "C"` blocks and `storage_service/{auxv,bus}.rs`
   (the only files with C declarations in the layer; there is no `#[link]` and no `dynlib!` in it)
   differ from their old text in `pub(crate)` alone, and the new build script links nothing, so
   `LIBS_REAL` and `ci/expected-dt-needed.txt` are untouched. The host never compiles the ARM arms:
-  `cargo check --target arm-unknown-linux-gnueabi --lib -p plxnative-modules` (`.cargo/config.toml`'s
-  `build-std`, no NDK, no link step) does, and passes with and without default features; use it for
+  `cargo +$(make -s print-rust-toolchain) check --target armv7-unknown-linux-gnueabi --lib -p plxnative-modules` (the target's
+  prebuilt std since the move to stable; it was `.cargo/config.toml`'s `build-std` on nightly; no NDK, no link step) does, and passes with and without default features; use it for
   any split that moves FFI when no NDK is at hand.
 - **Gates scoped by the path of a moved file stopped seeing it, and some by its spelling.**
-  `ci/check-deps.sh` reads `SRC_PLATFORM` where it read `SRC_MACHINE`; the `frame` and `uistorage`
-  rules name a moved module as `crate::tv::window::` and `crate::storage::`, which would have kept
-  passing while matching nothing, so they accept `plx_platform::` too; the `sink` gate exempts
-  `$SRC_PLATFORM/tv*`; the `fpflags` rule and the harness's private tree copy include the new
+  `ci/check-deps.sh` reads `SRC_OS` where it read `SRC_MACHINE`; the `frame` and `uistorage`
+  rules named a moved module as `crate::tv::window::` and `crate::storage::`, which would have kept
+  passing while matching nothing, so they accepted `plx_os::` too (the `frame` rule now pins the shell's call text instead); the `sink` gate exempts
+  `$SRC_OS/tv*`; the `fpflags` rule and the harness's private tree copy include the new
   `Cargo.toml` and `build.rs`. `ci/check-localization.py` named `webos.rs`, `tv/device.rs` and
   `devcaps/dv.rs` under `rust-modules/src` and skips a missing path without a word: it reads
-  `platform/src` for them and for the constants table now. Grep the gate scripts for
+  `os/src` for them and for the constants table now. Grep the gate scripts for
   `crate::<member>` as well as for directory names.
 - **Tooling that knows the tree's shape**: the `-p` lists (`-p plxnative-modules -p plx_base -p
-  plx_machine -p plx_platform`) in the Makefile, the workflow, `tools/build-bench.py` and the tests
-  that pin them; `--src rust-modules/platform/src` for the line budget; `RUST_INPUTS` and
-  `STORAGE_INPUTS` (the helper's `#[path]` files are under `platform/`); `tools/cargo-seed.py` keys
-  on the new manifest; the eventlog scrub test's root list gained `../platform/src`;
+  plx_machine -p plx_os`) in the Makefile, the workflow, `tools/build-bench.py` and the tests
+  that pin them; `--src rust-modules/os/src` for the line budget; `RUST_INPUTS` and
+  `STORAGE_INPUTS` (the helper's `#[path]` files are under `os/`); `tools/cargo-seed.py` keys
+  on the new manifest; the eventlog scrub test's root list gained `../os/src`;
   `ci/test_no_host_staticlib.py` holds the crate to `rlib`; the release-configuration hook treats an
-  edit in `platform/src` as a shipping-feature risk; and `make build-bench` has a `platform`
-  scenario ("Edit leaf (plx_platform devcaps.rs)").
+  edit in `os/src` as a shipping-feature risk; and `make build-bench` has a `os`
+  scenario ("Edit leaf (plx_os devcaps.rs)").
 
 Measured effect (`make build-bench`, same machine, 3 interleaved runs; the host was quiet for
 both sets, and the figures are non-incremental). Before, on `b131c181`: an edit in `plx_base` 31.3 s
 (min 31.2), in `plx_machine` 31.4 s (min 31.3), of the application crate 32.0 s (min 31.0), the hub
 edit 32.3 s (min 31.4), the unit suite 60.5 s. After: an edit in `plx_base` 30.6 s (min 30.5), in
-`plx_machine` 30.9 s (min 30.5), in `plx_platform` 31.2 s (min 30.1, it rebuilds the platform crate
+`plx_machine` 30.9 s (min 30.5), in `plx_os` 31.2 s (min 30.1, it rebuilds the os crate
 and the application behind it), of the application crate 30.8 s (min 28.4, the three layer crates
 fresh), the hub edit 30.8 s (min 28.2), and the unit suite 61.1 s with the same 5603 tests. The gain
-is the 1 to 3 s that `platform` (11k of 450k lines) cost every application edit, and no more: the
+is the 1 to 3 s that `os` (11k of 450k lines) cost every application edit, and no more: the
 application crate is still about 30 s of every row. The leverage is in `gfx`, `net` and `plex`
 and above, which carry the line count.
 
 ### Split 4 (gfx)
 
 `gfx` was extracted fourth: `rust-modules/gfx/` is the workspace member `plx_gfx` (an `rlib`,
-`uses = base machine platform`; the manifest depends on `plx_base` and `plx_machine` only), holding `gfx` (with `backdrop`, `geom`, `profile`, `tokens`), `egl`, `text`,
+`uses = base machine os`; the manifest depends on `plx_base` and `plx_machine` only), holding `gfx` (with `backdrop`, `geom`, `profile`, `tokens`), `egl`, `text`,
 `img`, `svg`, `gpu_timer`, `hwcnt` and `overdraw` (which was `ui::overdraw`), and the `shaders/`
 directory the renderer embeds. The module paths are `plx_gfx::<member>::` (a path
 `plx_gfx::gfx::draw_rect` names module `gfx`), so `ci/module-layers.ini` lists `overdraw` where it
@@ -687,13 +862,13 @@ layer run in their own binary. What it taught beyond the recipe:
   it was the one thing `gfx.rs`'s header said the renderer named of `ui`, so it moves down with
   the renderer. The rules scoped to `$SRC/ui` stopped reading the file; it holds no clock, store
   or session call, and the whole-tree rules read `$SRC_GFX`.
-- **The crate does not depend on `plx_platform`.** The layer's `uses` ceiling includes `platform`
+- **The crate does not depend on `plx_os`.** The layer's `uses` ceiling includes `os`
   and nothing in the moved files names it, so the manifest depends on `plx_base` and `plx_machine`
-  only. An edit in `plx_platform` therefore does not rebuild `plx_gfx`, which a declared-but-unused
+  only. An edit in `plx_os` therefore does not rebuild `plx_gfx`, which a declared-but-unused
   dependency would have caused.
 - **No orphan-rule hazard and no dead code appeared.** No `impl` in the application has both its
   trait and its type in `plx_gfx`; the compiler is the checker.
-- **Tooling that knows the tree's shape**: the `-p` lists (`... -p plx_platform -p plx_gfx -p plx_net`, with Split 5) in the
+- **Tooling that knows the tree's shape**: the `-p` lists (`... -p plx_os -p plx_gfx -p plx_net`, with Split 5) in the
   Makefile, the workflow, `tools/build-bench.py` and the tests that pin them;
   `--src rust-modules/gfx/src` for the line budget; `RUST_INPUTS`; `tools/cargo-seed.py` keys on the
   new manifest; the eventlog scrub test's root list gained `../gfx/src` (a log call in `gfx` would
@@ -713,7 +888,7 @@ layer run in their own binary. What it taught beyond the recipe:
 `net` (`net.rs`, `net/origin.rs`, the HTTP/2 reset fixture script `net/h2_reset_fixture.py`) and
 `stream` (`stream.rs`, `stream_redirect.rs` and the six `stream_*_tests.rs` files plus
 `stream_test_support.rs`, all declared by `#[path]` from `stream.rs`). It depends on `plx_base` and
-nothing else: `[net] uses = base platform` still allows `platform`, but no line of the layer names
+nothing else: `[net] uses = base os` still allows `os`, but no line of the layer names
 it, so the crate does not depend on it. It has no build script and links nothing (libcurl is
 `dlopen`ed through `plx_base::dynlib!`; the final link line stays the application crate's and the
 Makefile's `LIBS_REAL`; `ci/expected-dt-needed.txt` did not change). The references were rewritten
@@ -725,7 +900,7 @@ own binary: the suite is 5603 before and after (with Split 4 landed in the same 
 the recipe and Splits 1 to 3:
 
 - **A `dynlib!` table is `pub(crate)` in the crate that expands it, and a layer's callers are in
-  another crate.** `curlio` (in `media`) drives libcurl's easy API through `net`'s own table:
+  another crate.** `curlio` (then in `media`; it has since moved into `net` as `range_io`) drove libcurl's easy API through `net`'s own table:
   `curl_easy_init`, `curl_easy_cleanup`, `curl_easy_setopt_{ptr,long}`, `curl_slist_{append,free_all}`
   and the `curl` module's `curl_easy_init` cell. They cannot be re-exported (E0364: a `pub(crate)`
   item cannot be `pub use`d), and wrapping them would add a second layer of calls to the variadic
@@ -770,13 +945,13 @@ the recipe and Splits 1 to 3:
 - **Scrub, budgets and the private tree copy.** The eventlog scrub test's root list gained
   `../net/src` (these are the files that handle URLs and tokens, so the privacy scan matters most
   here), `tests/test_harness.py`'s `TREE_INPUTS` gained the crate's source and manifest, and
-  `ci/check-deps.sh` reads `SRC_NET` wherever it reads `SRC_PLATFORM` except the video-sink rule.
+  `ci/check-deps.sh` reads `SRC_NET` wherever it reads `SRC_OS` except the video-sink rule.
   The module-cycle baseline moved from 43 modules outside the cycle to 26 with Splits 4 and 5
   together, and the cycle itself is the same 8 modules (no moved module was on it; the smaller
   `gfx`/`text`/`ui` component the baseline also listed is gone with `gfx`);
   `ci/check-module-cycle.py --update-baseline` records it.
 - **Tooling that knows the tree's shape**: the `-p` lists (`-p plxnative-modules -p plx_base -p
-  plx_machine -p plx_platform -p plx_gfx -p plx_net`) in the Makefile, the workflow, `tools/build-bench.py` and
+  plx_machine -p plx_os -p plx_gfx -p plx_net`) in the Makefile, the workflow, `tools/build-bench.py` and
   the tests that pin them; `--src rust-modules/net/src` for the line budget; `RUST_INPUTS`;
   `tools/cargo-seed.py` keys on the new manifest; `ci/test_no_host_staticlib.py` holds the crate to
   `rlib`; the release-configuration hook treats an edit in `net/src` as a shipping-feature risk; the
@@ -811,16 +986,16 @@ The two splits were made in parallel from the same commit and landed as one chan
   staticlib. The non-`pub` form expands to the same tokens as before (the `@emit` arm's body
   differs from the old single arm only in `$vis` for `pub(crate)`), the variadic arm of
   `dynlib_wrapper!` is unchanged, and an existing table cannot select the `pub` arm.
-- **`uses` is a ceiling.** `ci/module-layers.ini` keeps `gfx uses base machine platform` and `net
-  uses base platform`; neither crate names `platform`, so neither manifest depends on
-  `plx_platform`, and an edit there rebuilds neither (the bench rows below show it).
+- **`uses` is a ceiling.** `ci/module-layers.ini` keeps `gfx uses base machine os` and `net
+  uses base os`; neither crate names `os`, so neither manifest depends on
+  `plx_os`, and an edit there rebuilds neither (the bench rows below show it).
 
 Measured effect (`make build-bench`, same machine, 3 interleaved runs, no load warning in either
 set; non-incremental). Before, on `464ceb33` (the commit before `main`'s current tip, which
 differs from it by a Home change only): an edit in `plx_base` 30.7 s (min 30.4), in `plx_machine`
-30.4 s (min 30.1), in `plx_platform` 30.3 s (min 30.1), of the application crate 28.4 s (min 28.1),
+30.4 s (min 30.1), in `plx_os` 30.3 s (min 30.1), of the application crate 28.4 s (min 28.1),
 the hub edit 29.2 s (min 28.1), the unit suite 62.3 s (min 61.7) with 5603 tests. After: an edit in
-`plx_base` 29.3 s (min 29.3), in `plx_machine` 29.2 s (min 29.2), in `plx_platform` 28.9 s (min
+`plx_base` 29.3 s (min 29.3), in `plx_machine` 29.2 s (min 29.2), in `plx_os` 28.9 s (min
 28.6), in `plx_gfx` 27.7 s (min 27.6), in `plx_net` 27.3 s (min 27.1), of the application crate
 26.7 s (min 26.6), the hub edit 26.8 s (min 26.6), and the unit suite 67.7 s (min 67.5) with 5606
 tests (the base moved: 3 new Home tests). Every edit is 1.4 to 2.4 s faster, which is what 25k of
@@ -831,7 +1006,7 @@ the two new ones link SDL/GL (`plx_gfx`) and build the TLS fixtures (`plx_net`).
 ### Split 6 (ui)
 
 `ui` was extracted sixth: `rust-modules/ui/` is the workspace member `plx_ui` (an `rlib`,
-`uses = base machine platform gfx`; the manifest depends on all four), holding everything that was
+`uses = base machine os gfx`; the manifest depends on all four), holding everything that was
 `rust-modules/src/ui/`: 59k lines, about sixty modules, the widgets, containers, frame, focus engine,
 recorder and the fixtures they are tested against. Nothing under `ui/` belongs to a layer above it
 (`appkit` and `screens` are top-level modules), so nothing stayed behind and the application has no
@@ -902,7 +1077,7 @@ What it taught beyond the recipe and Splits 1 to 5:
   spelling is `plx_ui::nav::` now) and `mutators` masks a screen's own `crate::ui::x::y(` call
   before matching. Both accept either spelling. Proven by planting a violation in a copy of the
   file and reading the gate go red, then restoring it byte for byte: `wall` (an `Instant::now()` in
-  `ui/src/dwell.rs`), `uistorage` (`plx_platform::storage::` in `fmt.rs`), `nav`
+  `ui/src/dwell.rs`), `uistorage` (`plx_os::storage::` in `fmt.rs`), `nav`
   (`plx_ui::nav::` in `screens/about_panel.rs`), `textmeasure` (`plx_gfx::text::text_width(` in
   `fmt.rs`), `sessionwrite` and `ticks`. `ci/check-statics.sh` named `$SRC/ui` for its gated paths
   and fails loudly on a missing one (it did not need the fix to be noticed, which is the better way
@@ -928,13 +1103,13 @@ What it taught beyond the recipe and Splits 1 to 5:
 ### Split 7 (plex)
 
 `plex` was extracted seventh (Split 6 is `ui`, above; the two were made in parallel): `rust-modules/plex/` is the
-workspace member `plx_plex` (an `rlib`, `uses = base machine platform net`), holding `plex` (the
+workspace member `plx_plex` (an `rlib`, `uses = base machine os net`), holding `plex` (the
 typed Plex API, the session store, `grant`, `probe`, `identity`, with its `CLAUDE.md`) and `http`
 (the one request door). The members kept their names, so a path is `plx_plex::plex::session::load`
 and `plx_plex::http::...`, and every `crate::plex::` *inside* the moved files stayed valid; only the
 3 897 references in 213 application files changed, by `split-plex-rewrite.py` (`crate::plex` and
 `crate::http` to `plx_plex::plex` and `plx_plex::http`, `pub(crate)` to `pub`). The crate
-depends on `plx_base`, `plx_machine`, `plx_platform` and `plx_net`, owns no build script and links
+depends on `plx_base`, `plx_machine`, `plx_os` and `plx_net`, owns no build script and links
 nothing. Features: `devtriggers` and `hostsim` are forwarded, `test-support` is new and enables the
 four lower layers'. Its 458 tests run in their own binary. What it taught beyond the recipe:
 
@@ -963,7 +1138,8 @@ four lower layers'. Its 458 tests run in their own binary. What it taught beyond
   `PlaybackQuality`, legal in one crate and E0116 in two. `ceiling` and `label` (which build a
   `plex::Ceiling` and a localized row) moved onto `PlaybackQuality` in `plex::session`, beside its
   other methods; `from_index` and `index` read the route-owned `QUALITY_LADDER`, so they became
-  private free functions of `decision.rs` (`quality_from_index`, `quality_index`). Look for `impl X`
+  private free functions of the route module (`quality_from_index`, `quality_index`, now in
+  `route/prefs.rs` beside the live cells). Look for `impl X`
   without a trait in the layers above, not only for trait impls.
 - **A `cargo:rustc-env` reaches one crate, and the version is the thing that needed it.**
   `identity.rs` reported `env!("PLX_VERSION")` as `X-Plex-Version` and in the `User-Agent`.
@@ -1017,7 +1193,7 @@ that moved twice meanwhile (four changes, three of them to Home). Combining them
   rewrote the `crate::ui`/`crate::plex` paths `main` had added to `screens/home/mod.rs` since, and
   where `main` conflicted with the rewritten file its version was taken and rewritten again.
 - **The gates still fire in the combination**, proven by temporary violating edits: `plx_ui`
-  naming `plx_plex`, `plx_plex` naming `plx_ui`, and `plx_platform::webos`/`::keymanager` named
+  naming `plx_plex`, `plx_plex` naming `plx_ui`, and `plx_os::webos`/`::keymanager` named
   from `ui/src`, `plex/src` and `coldstart.rs` each fail `ci/check-module-layers.py` (the mounted
   crate is reported as `[ui]`); `nav`, `textmeasure` (in `ui/src` and in the application), `wall`,
   `uistorage`, `ticks`, `threads`, `tmppath` and `effect` fail `ci/check-deps.sh` from the new
@@ -1028,7 +1204,7 @@ that moved twice meanwhile (four changes, three of them to Home). Combining them
 - **One gate had gone quiet, and it was neither lane's own.** `ci/check-localization.py` reads a
   fixed list of product files, and `route/decision.rs` was on it for the quality row's text. The
   plex split moved that text (`PlaybackQuality::label`) into `plex/session.rs`, which the gate did
-  not read, and its constants table read `platform`, `gfx` and `ui` only. It reads
+  not read, and its constants table read `os`, `gfx` and `ui` only. It reads
   `plex/src/plex/session.rs` and every layer crate's constants now. When an inherent method moves
   down a layer, look for the gates that listed its old file.
 - **The security-relevant seams were checked in the artifact, not in the manifest.** In a host
@@ -1053,11 +1229,11 @@ that moved twice meanwhile (four changes, three of them to Home). Combining them
 
 Measured effect (`make build-bench`, same machine, 3 interleaved runs each, non-incremental; other
 lanes were building, both sets carry load warnings, so read the minima). Before, on `cab5834f`: an
-edit in `plx_base` 35.3 s (min 35.1), in `plx_machine` 34.6 s (min 34.6), in `plx_platform` 34.6 s
+edit in `plx_base` 35.3 s (min 35.1), in `plx_machine` 34.6 s (min 34.6), in `plx_os` 34.6 s
 (min 34.0), in `plx_gfx` 33.0 s (min 32.8), in `plx_net` 33.0 s (min 32.0), of the application
 crate 32.4 s (min 31.5), the hub edit (`ui/mod.rs`) 32.3 s (min 31.8), the unit suite 76.0 s (min
 75.2) with 5613 tests. After (measured before `main`'s second move, which adds Home tests): an edit in `plx_base` 30.9 s (min 27.8), in `plx_machine` 27.9 s
-(min 27.2), in `plx_platform` 28.1 s (min 26.7), in `plx_gfx` 25.3 s (min 24.2), in `plx_net`
+(min 27.2), in `plx_os` 28.1 s (min 26.7), in `plx_gfx` 25.3 s (min 24.2), in `plx_net`
 26.3 s (min 24.2), in `plx_ui` 24.4 s (min 23.7), in `plx_plex` 24.7 s (min 24.1), of the
 application crate 21.8 s (min 21.6), the hub edit (`plx_ui`'s `lib.rs`) 23.8 s (min 23.6), and the
 unit suite 72.0 s (min 71.7) with 5614 tests (the one added is the hand-in order test). An
@@ -1071,8 +1247,8 @@ or starting them.
 ### Split 8 (telemetry)
 
 `telemetry` was extracted eighth, alone (no parallel lane): `rust-modules/telemetry/` is the
-workspace member `plx_telemetry` (an `rlib`, `uses = base machine platform net plex`; the manifest
-depends on `plx_base`, `plx_platform`, `plx_net` and `plx_plex`, because no line of the crate names
+workspace member `plx_telemetry` (an `rlib`, `uses = base machine os net plex`; the manifest
+depends on `plx_base`, `plx_os`, `plx_net` and `plx_plex`, because no line of the crate names
 `machine`), holding `telemetry` (consent, the Sentry and PostHog wire formats, the spool and the
 worker) and `diag` (the typed usage-event schema; `diag::{heartbeat, spans, zlib}` are not here, they
 are `plx_base::diag::*`). The members kept their names, so a path is
@@ -1197,13 +1373,13 @@ taught is mostly about what would have gone quiet:
 Measured effect (`make build-bench`, same machine, 3 interleaved runs each, non-incremental, medians
 with the minimum after the slash). The "before" set, on `a23ddee1`, ran while this lane was also
 running cargo and other lanes were building (the log warns of a load of 16 to 18 on 10 cores in
-three runs), so its medians for the first rows (`plx_base` 57.5 s, `plx_platform` 40.7 s) are
+three runs), so its medians for the first rows (`plx_base` 57.5 s, `plx_os` 40.7 s) are
 noise and the minima are the guide; the "after" set, on the same base plus this change, ran with no
 load warning. Before: an edit in `plx_base` 57.5 s / 29.4 s, in `plx_machine` 30.9 / 29.3, in
-`plx_platform` 40.7 / 28.8, in `plx_gfx` 29.0 / 26.6, in `plx_net` 26.6 / 25.7, in `plx_ui` 25.6 /
+`plx_os` 40.7 / 28.8, in `plx_gfx` 29.0 / 26.6, in `plx_net` 26.6 / 25.7, in `plx_ui` 25.6 /
 25.0, in `plx_plex` 26.2 / 26.1, of the application crate 23.7 / 23.0, the hub edit 25.7 / 25.6, the
 unit suite 81.0 / 80.8 with 5620 tests. After: `plx_base` 26.9 / 25.6, `plx_machine` 26.3 / 25.1,
-`plx_platform` 25.9 / 24.7, `plx_gfx` 22.9 / 22.4, `plx_net` 23.7 / 22.9, `plx_ui` 22.4 / 21.6,
+`plx_os` 25.9 / 24.7, `plx_gfx` 22.9 / 22.4, `plx_net` 23.7 / 22.9, `plx_ui` 22.4 / 21.6,
 `plx_plex` 22.8 / 22.5, `plx_telemetry` 20.7 / 20.5 (new row: it rebuilds the telemetry crate and the
 application behind it), the application crate 19.8 / 19.7, the hub edit 21.6 / 21.5, the unit suite
 72.7 / 70.9 with the same 5620 tests (157 + 66 + 218 + 94 + 128 + 752 + 458 + 235 + 3512). The
@@ -1215,8 +1391,8 @@ binary and is no slower.
 ### Split 9 (data)
 
 `data` was extracted ninth, in parallel with the `session` lane: `rust-modules/data/` is the
-workspace member `plx_data` (an `rlib`, `uses = base machine platform net plex telemetry`; the
-manifest depends on `plx_base`, `plx_machine`, `plx_platform`, `plx_plex` and `plx_telemetry`, and
+workspace member `plx_data` (an `rlib`, `uses = base machine os net plex telemetry`; the
+manifest depends on `plx_base`, `plx_machine`, `plx_os`, `plx_plex` and `plx_telemetry`, and
 on `plx_net` as a dev-dependency only, because one fixture test calls it), holding `stores` (one
 command vocabulary and one machine per data store), `pms` (the Home catalog), `browse`, `metadata`,
 `person`, `collection`, `search` and `viewstate`. The members kept their names, so a path is
@@ -1235,7 +1411,7 @@ ready. What it taught beyond the recipe:
   attribute and body of `mod tests` / `mod *_tests` / `mod test_support` and the wholly-test files).
   No `cfg(not(test))` arm hid from it except the shipping arms it switches: `metadata`'s detail
   fetch (a test holds the fetch instead of spawning a thread), its two dev stand-ins, `person`'s two
-  plex.tv fetches (a test that reaches them fails to link) and `pms::run`'s `EditItem` arm. Then
+  plex.tv fetches (libcurl is bound at run time, so a test that reaches them links and then either finds no libcurl or sends a real request; cut for that reason) and `pms::run`'s `EditItem` arm (since replaced by the stores' `ApplyView` commands, which carry no cfg split). Then
   the exceptions the compiler found under `--features test-support`: what only the layer's own
   tests use stays `cfg(test)` (13 private items and two imports, because under `test-support`
   alone they are dead code; `split-data-revert.py` flips them).
@@ -1295,9 +1471,13 @@ ready. What it taught beyond the recipe:
   `with_refused_discovery_for_test`, `fixture_with_sources`, `queue_test_landing`,
   `reverse_test_hubs`, `remove_test_item`, `land_for_test`, `publish_shelves_for_test`,
   `hold_inflight_for_test`, `REFUSE_FETCH_FOR_TEST`, `REFUSE_DISCOVERY_FOR_TEST`,
-  `seed_items_for_owner_test`, `held_detail` or `seed_two_source_table_for_owner_test`; the
+  `seed_items_for_owner_test` or `seed_two_source_table_for_owner_test`; the
   `--features test-support` control build of the same crate finds every one (1 to 8 times each),
-  and `nm` matches the seam names in 4 symbols there against 0. The ARM shipping archive built the
+  and `nm` matches the seam names in 4 symbols there against 0. (The measured list also named
+  `held_detail`, the detail fetch's held lane. It no longer exists: the detail request emits a job
+  and the app's test runner parks it, `docs/sans-io.md`. `with_refused_fetches_for_test` and
+  `REFUSE_FETCH_FOR_TEST` are gone for the same reason: Home's Hubs read is a job too, and its
+  refusal is the runner's, `#[cfg(test)]` in the app.) The ARM shipping archive built the
   way the release is (`PLX_RELEASE=1 cargo rustc --release --target arm-unknown-linux-gnueabi --lib
   --crate-type staticlib --no-default-features`) has none of them either.
 - **FFI and the final link are untouched.** The layer has no `extern "C"`, `#[link]`, `dynlib!`,
@@ -1307,7 +1487,7 @@ ready. What it taught beyond the recipe:
 ### Split 10 (session)
 
 `session` was extracted tenth, in parallel with `data` (Split 9, its own lane): `rust-modules/session/`
-is the workspace member `plx_session` (an `rlib`, `uses = base machine platform net plex
+is the workspace member `plx_session` (an `rlib`, `uses = base machine os net plex
 telemetry`; the manifest names exactly those six, because no line of the crate names anything
 else), holding `auth` and nothing else: the sign-in controller (PIN and QR, discovery of the
 account's servers, who's-watching and the profile PIN, the install of the chosen profile's
@@ -1474,7 +1654,7 @@ they were combined) and landed as one change. Combining them:
   `devtriggers` only.
 - **The gates still fire in the combination**, proven by temporary violating edits, reverted byte
   for byte: `plx_data` naming `plx_session`, `plx_session` naming `appkit`, and
-  `plx_platform::webos`/`::keymanager` named from either crate fail `ci/check-module-layers.py`;
+  `plx_os::webos`/`::keymanager` named from either crate fail `ci/check-module-layers.py`;
   `plx_data::viewstate::reset(` in `coldstart.rs` fails `viewstate-owner` and
   `plx_data::person::pump(` in a screen fails `person-owner` (the application's spelling of the
   owner rules); `ticks` fires in both crates, `tmppath` in `session/src`, `threads` in `data/src`;
@@ -1494,11 +1674,11 @@ they were combined) and landed as one change. Combining them:
 
 Measured effect (`make build-bench`, same machine, 3 interleaved runs each, non-incremental, no load
 warning in either set; median / minimum). Before, on `11584830`: an edit in `plx_base` 28.9 s /
-28.7 s, in `plx_machine` 28.6 / 28.1, in `plx_platform` 27.8 / 27.5, in `plx_gfx` 24.9 / 24.5, in
+28.7 s, in `plx_machine` 28.6 / 28.1, in `plx_os` 27.8 / 27.5, in `plx_gfx` 24.9 / 24.5, in
 `plx_net` 25.6 / 25.1, in `plx_ui` 24.2 / 23.6, in `plx_plex` 25.2 / 24.7, in `plx_telemetry` 23.1 /
 22.8, of the application crate 22.2 / 22.0, the hub edit 24.1 / 24.1, the unit suite 80.7 / 80.4
 with 5630 tests in nine binaries. After: `plx_base` 23.5 / 23.3, `plx_machine` 22.8 / 22.7,
-`plx_platform` 22.4 / 22.4, `plx_gfx` 17.0 / 17.0, `plx_net` 20.4 / 20.3, `plx_ui` 16.4 / 16.3,
+`plx_os` 22.4 / 22.4, `plx_gfx` 17.0 / 17.0, `plx_net` 20.4 / 20.3, `plx_ui` 16.4 / 16.3,
 `plx_plex` 20.0 / 20.0, `plx_telemetry` 18.0 / 17.9, `plx_data` 16.9 / 16.8 and `plx_session` 16.1 /
 16.0 (new rows: each rebuilds its crate and the application behind it), the application crate 14.7 /
 14.5, the hub edit 16.5 / 16.4, and the unit suite 73.6 / 73.3 with the same 5630 tests in eleven
@@ -1510,10 +1690,17 @@ rebuilds the application only. The no-op build is 0.1 s in both.
 
 ### Split 11 (media)
 
+This section records the original media extraction. In the current layout,
+`plx_play_feed` owns the physical FFmpeg demuxer, HLS parser and access-unit
+queues; `plx_media_codecs` owns the FFmpeg binding and encoder. `plx_media::ff`
+re-exports `plx_media_codecs`' FFmpeg bindings and holds the integration fixtures;
+the feed's application entry points are `plx_play_feed`'s (`plx_play_feed::demux`).
+
 `media` was extracted eleventh: `rust-modules/media/` is the workspace member `plx_media` (an `rlib`,
-`uses = base machine platform gfx net plex telemetry data`; the manifest names those eight, with
-`plx_gfx` optional behind `hostsim` because only the simulator's `player::sim_video` draws), holding
-`ff` (the bundled-FFmpeg demuxer), `aq`, `abr`, `hls`, `curlio`, `player` (the buffer-feed engine,
+`uses = base machine os gfx net plex telemetry data`; the manifest names those eight, with
+`plx_gfx` optional behind `hostsim` because only the simulator's `player::sim_video` drew; that file
+has since moved to the application, `app::adapters::hostsim`, and the manifest no longer names `plx_gfx`), holding
+`ff` (then the bundled-FFmpeg demuxer), `aq`, `abr`, `hls`, `curlio`, `player` (the buffer-feed engine,
 `player/CLAUDE.md` with it) and `route`: 70 files, 84,579 lines. It is the layer with the FFI, and
 the one that held the last import cycle of the application, `abr curlio ff hls player route`, which
 is now inside one crate where a cycle is legal. The 12 root-level files the modules include by
@@ -1524,8 +1711,9 @@ files (`pub(super)` only where it was written at the top level of a file whose p
 root), and one intra-doc link to `screens` unbracketed. The module-cycle baseline now reads "3
 modules on the cycle (`app dev textinput`), 10 outside". What it taught:
 
-- **FFI and the final link: proven in the artifact, not assumed.** The crate holds every
-  `dynlib!` table of FFmpeg (`ff.rs`, four), libass (`player/ass.rs`) and the second libcurl table
+- **FFI and the final link: proven in the artifact, not assumed.** At this extraction, the crate held every
+  `dynlib!` table of FFmpeg (`ff.rs`, four), libass's subtitle surface (`player/ass.rs`; the UI text
+  surface's table is `plx_gfx::rtl`) and the second libcurl table
   (`curlio.rs`), `player::ffi`'s `extern "C"` block (the Starfish/ACB verbs, 29 undefined
   symbols the Makefile's link resolves), and the two `#[no_mangle] extern "C"` callbacks
   `src/starfish.c` calls, `sf_on_event` and `acb_on_event`. All of it moved byte for byte apart from
@@ -1537,7 +1725,7 @@ modules on the cycle (`app dev textinput`), 10 outside". What it taught:
   `acb_on_event` among them) and the same 279 undefined non-Rust symbols, by `llvm-nm`; `ci/expected-dt-needed.txt`
   and `LIBS_REAL` did not change. A `#[no_mangle]` item of an upstream rlib is kept in the
   staticlib under `lto = "fat"`: that is the claim the diff checks, and it holds.
-- **The port fence is unchanged.** `player::ffi` is in `[port webos]`, and the fence reads a
+- **The port fence is unchanged.** `player::ffi` is in `[platform webos]`, and the fence reads a
   reference by module name, so `plx_media::player::ffi::StarfishSink` in `port.rs` is the one
   allowed use. A `use plx_media::player::ffi::..` added to `appkit` and a
   `use crate::player::ffi::..` added to `route/plan.rs` both fail `ci/check-module-layers.py`.
@@ -1630,7 +1818,7 @@ modules on the cycle (`app dev textinput`), 10 outside". What it taught:
 ### Split 12 (appkit)
 
 `appkit` was extracted twelfth: `rust-modules/appkit/` is the workspace member `plx_appkit` (an `rlib`,
-`uses = base machine platform gfx net plex telemetry ui data session media`; the manifest names the nine
+`uses = base machine os gfx net plex telemetry ui data session media`; the manifest names the nine
 it calls, `net` and `session` being reached only through `media`), holding the player HUD, the
 track, more, info and chapters panels, `up_next`, `timing_capsule`, `skip_pill` and the Sources row
 model: 11 files, 12,813 lines. Like `ui` it is one module, so the manifest says
@@ -1643,7 +1831,7 @@ doc links that named `screens`, `app`, `lab` and `focusprobe` unbracketed. What 
 
 - **One orphan-rule hit, found by the compiler.** `impl Default for SubtitleBitmaps` sat in
   `screens/player/mod.rs`, a screen's impl of `std`'s trait for a type of the layer below; across a
-  crate boundary that is E0117. It lives beside the type in `player_hud.rs` now. The `Focusable`
+  crate boundary that is E0117. It lives beside the type in `player_hud/mod.rs` now. The `Focusable`
   and `Screen` impls of the application's own types are not affected (the traits are `plx_ui`'s and
   the types the application's). `appkit` defines no `#[macro_export]` macro and the crate has no
   `env!`, `option_env!`, `include_*!` or `CARGO_MANIFEST_DIR`.
@@ -1708,7 +1896,7 @@ doc links that named `screens`, `app`, `lab` and `focusprobe` unbracketed. What 
 ### Split 13 (screens)
 
 `screens` was extracted thirteenth and last: `rust-modules/screens/` is the workspace member
-`plx_screens` (an `rlib`, `uses = base machine platform gfx net plex telemetry ui data session media
+`plx_screens` (an `rlib`, `uses = base machine os gfx net plex telemetry ui data session media
 appkit`; the manifest names all twelve), holding every screen the dispatcher mounts (Home, the
 library, detail, search, person, the player screen, the Settings family with consent, onboarding,
 legal, profiles and preferences, the account, item and alternate-sources menus) and the `registry`
@@ -1837,8 +2025,8 @@ The last no-LTO figure is over the 12,426,000 limit, which made Splits 9 and 10 
 because whole-program optimisation with a single codegen unit sees the same code the single crate
 did. They also restore the cross-crate inlining the single crate had, which the per-frame UI code
 leans on. Only release-profile builds pay for it (the ARM staticlib and the storage helper when built as `release`, the
-Linux simulator of `make sim-linux` and `make macapp`); the dev profile that `make check`, the host
-tests and the macOS simulator use is untouched. The price is build time: CI's ARM library build
+Linux simulator of `make sim-linux` and `make macapp`); the `dev` and `test` profiles that the macOS
+simulator, `make check` and the host tests use are untouched. The price is build time: CI's ARM library build
 went from 2m40 to 4m15, and a local `ARM_PROFILE=release` one from 44 s to 94 s. A plain local `make` / `make deploy` no
 longer pays it: the Makefile builds the ARM staticlib with `[profile.tvdev]` (no LTO, 16 codegen
 units), which is faster and larger, and keeps `release` for CI, `RELEASE=1`, `SYMBOLS=1` and
@@ -1850,7 +2038,7 @@ units), which is faster and larger, and keeps `release` for CI, `RELEASE=1`, `SY
 - `cfg` predicates other than `test` count as possibly on, so the graph is the union of every
   feature configuration.
 - Files included from `OUT_DIR` are not read: the generated `i18n::msg` catalog and
-  `storage::state`'s install identities (both generated by `plx_platform`'s build script since
+  `storage::state`'s install identities (both generated by `plx_os`'s build script since
   Split 3). Today they name nothing outside their own parent module.
 - A `macro_rules!` that is neither `#[macro_export]` nor inside a `#[macro_use]` module is
   visible only to its own module and to children declared after it. The analyzer does not follow

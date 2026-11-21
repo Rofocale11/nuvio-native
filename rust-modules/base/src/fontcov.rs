@@ -37,7 +37,7 @@
 //! ## What it reads
 //!
 //! Only the sfnt table directory and the `cmap` table, by seek — never the whole file. That
-//! matters: `pkg/appfont-cjk.ttf` is 21 MB and its cmap is 233 KB. Unicode subtable formats 4, 6,
+//! matters: `pkg/appfont-cjk.ttf` is 13 MB and its cmap is 233 KB. Unicode subtable formats 4, 6,
 //! 12 and 13 are decoded and **unioned**; a mapping to glyph 0 is not coverage and is excluded,
 //! which is the difference between "the cmap has an entry" and "the font can draw it".
 
@@ -91,6 +91,27 @@ impl Coverage {
         // candidate. `partition_point` is the standard spelling of "how many start <= cp".
         let k = self.sup.partition_point(|&(s, _)| s <= cp);
         k > 0 && self.sup[k - 1].1 >= cp
+    }
+
+    /// The position of astral `cp` among this font's astral codepoints, in ascending order: 0 for
+    /// the lowest one above U+FFFF. `None` when the font does not map `cp`, or `cp` is in the BMP.
+    ///
+    /// `pkg/appfont-emoji.ttf` mirrors its i-th astral codepoint at U+E000 + i
+    /// (`tools/cut-noto-emoji.py`), because the television's SDL2_ttf keys glyphs on 16 bits and
+    /// cannot draw above U+FFFF. `text.rs` computes that mirror from this rank, out of the font's
+    /// own cmap, so the mapping cannot drift from the file.
+    pub fn astral_rank(&self, cp: u32) -> Option<u32> {
+        if cp <= 0xFFFF || !self.contains(cp) {
+            return None;
+        }
+        let mut rank = 0;
+        for &(lo, hi) in &self.sup {
+            if cp <= hi {
+                return Some(rank + (cp - lo));
+            }
+            rank += hi - lo + 1;
+        }
+        None
     }
 
     /// How many codepoints this font maps to a real glyph. The gate quotes it, and `text.rs` logs
@@ -276,7 +297,7 @@ fn parse_format6(t: &[u8], cov: &mut Coverage) -> Option<()> {
 fn parse_format12_13(t: &[u8], many_to_one: bool, cov: &mut Coverage) -> Option<()> {
     let n = be32(t, 12)? as usize;
     // The bounds check is done in u64, and that is load-bearing rather than tidy: **`usize` is
-    // 32 BITS on `arm-unknown-linux-gnueabi`**, the only target that ships. A `numGroups` of
+    // 32 BITS on `armv7-unknown-linux-gnueabi`**, the only target that ships. A `numGroups` of
     // 357_913_941 makes `n * 12` exactly 0xFFFF_FFFC, so `16 + n * 12` WRAPS to 12 — which is
     // ≤ `t.len()` — and the indexing below then panics out of the SDL main thread on the second
     // group. Release builds have overflow checks off, so it wraps silently rather than aborting.
@@ -377,21 +398,31 @@ pub fn of_file(path: &Path) -> Result<Coverage, CovErr> {
 ///
 /// Two reasons, both measured on the way in. The fallback's cmap is 233 KB and its format-4 walk
 /// is the most expensive thing this module does; and every `of_file` holds a descriptor, so
-/// fourteen tests reading three fonts in parallel moved the PROCESS-wide descriptor count enough
+/// fourteen tests reading the shipped fonts in parallel moved the PROCESS-wide descriptor count enough
 /// to trip `stream.rs`'s fd-leak assertion — whose slack is +8 over whatever the rest of the suite
 /// happens to be holding, and which then fails naming a leak that does not exist. Parsing once
-/// turns fourteen concurrent opens into three sequential ones.
+/// turns fourteen concurrent opens into one sequential open per font.
 #[cfg(any(test, feature = "test-support"))]
 pub fn shipped(name: &str) -> &'static Result<Coverage, String> {
     use std::sync::OnceLock;
     static REG: OnceLock<Result<Coverage, String>> = OnceLock::new();
     static BOLD: OnceLock<Result<Coverage, String>> = OnceLock::new();
     static CJK: OnceLock<Result<Coverage, String>> = OnceLock::new();
+    static EMOJI: OnceLock<Result<Coverage, String>> = OnceLock::new();
+    static ARABIC: OnceLock<Result<Coverage, String>> = OnceLock::new();
+    static ARABIC_BOLD: OnceLock<Result<Coverage, String>> = OnceLock::new();
+    static HEBREW: OnceLock<Result<Coverage, String>> = OnceLock::new();
+    static HEBREW_BOLD: OnceLock<Result<Coverage, String>> = OnceLock::new();
     let slot = match name {
         "appfont.ttf" => &REG,
         "appfont-bold.ttf" => &BOLD,
         "appfont-cjk.ttf" => &CJK,
-        other => panic!("no shipped-font slot for {other:?} — add one beside the other three"),
+        "appfont-emoji.ttf" => &EMOJI,
+        "appfont-arabic.ttf" => &ARABIC,
+        "appfont-arabic-bold.ttf" => &ARABIC_BOLD,
+        "appfont-hebrew.ttf" => &HEBREW,
+        "appfont-hebrew-bold.ttf" => &HEBREW_BOLD,
+        other => panic!("no shipped-font slot for {other:?} — add one beside the others"),
     };
     slot.get_or_init(|| {
         // The fonts are repository payload, not crate data — `pkg/` sits beside `rust-modules/`.
@@ -400,20 +431,33 @@ pub fn shipped(name: &str) -> &'static Result<Coverage, String> {
     })
 }
 
-/// **The shipped faces' horizontal advances, as a host-test text measure.** Unit tests have no
-/// SDL_ttf, so every other test `Measure` is a per-character guess — and a guess cannot say whether
-/// a translated line fits its row. This one reads `cmap`, `head`, `hhea` and `hmtx` out of
-/// `pkg/appfont*.ttf` and sums one advance per character, each rounded to a WHOLE pixel at the
+/// **The shipped faces' horizontal advances: one text model, the price of a HUD state everywhere.** Unit
+/// tests have no SDL_ttf, so every other test `Measure` is a per-character guess, and a guess cannot say
+/// whether a translated line fits its row. This module reads `cmap`, `head`, `hhea` and `hmtx` out of
+/// `appfont*.ttf` ([`Face::parse`]) and sums one advance per character, each rounded to a WHOLE pixel at the
 /// requested size: the faces are opened with hinting on (`TTF_HINTING_LIGHT`), so FreeType hands
 /// SDL2_ttf 2.0.x (the only versions any television ships) pixel-rounded advances, which it caches
 /// per glyph (`FT_CEIL(horiAdvance)`), and `TTF_SizeUTF8` is a plain left-to-right sum of them. The
 /// simulator's newer SDL_ttf sums fractional advances instead, which is why a sub-line the
 /// simulator fits can still come out ellipsised on the television (2026-09-28, the Belarusian
 /// Settings root).
-#[cfg(any(test, feature = "test-support"))]
+///
+/// **What ships.** [`Face`] (with [`Face::parse`] and [`Face::width`]), [`LINE_HEIGHT`], [`CAP_HEIGHT`] and
+/// [`WholePixelMeasure`], a pure value over two faces: no IO, no global, bytes in. The HUD plugins' cost
+/// ceilings (`hud_format::lint_cost`) are numbers taken with these advances and a line height of
+/// [`LINE_HEIGHT`] x size, so the cost of a state is priced by this model wherever the lint runs: whoever lints builds a [`WholePixelMeasure`] from the bytes of the
+/// two files `plx_gfx::text::app_font_path` names and hands it to `lint_price`. The text FIT stays on the live measure
+/// (the television's SDL_ttf, the simulator's own). What stays a host-test tool is `shipped` and
+/// `ShippedMeasure` (built under `test` and `test-support` only): they read the repository's `pkg/`.
 pub mod advances {
     use super::{be16, be32};
     use std::collections::HashMap;
+
+    /// A line's height as a share of its font size, and a capital's: the ratios [`WholePixelMeasure`] and the
+    /// host-test `ShippedMeasure` both answer, so one number serves both.
+    pub const LINE_HEIGHT: f32 = 1.21;
+    /// See [`LINE_HEIGHT`].
+    pub const CAP_HEIGHT: f32 = 0.73;
 
     pub struct Face {
         upem: f32,
@@ -478,7 +522,9 @@ pub mod advances {
     }
 
     impl Face {
-        fn parse(font: &[u8]) -> Option<Face> {
+        /// The advances of the font file `font` (its bytes), or `None` when one of the `head`, `hhea`,
+        /// `hmtx` or `cmap` tables is missing or short.
+        pub fn parse(font: &[u8]) -> Option<Face> {
             let upem = be16(table(font, b"head")?, 18)? as f32;
             let metrics = be16(table(font, b"hhea")?, 34)? as usize;
             let hmtx = table(font, b"hmtx")?;
@@ -501,7 +547,33 @@ pub mod advances {
         }
     }
 
+    /// **The price model: the regular and the bold face, whole-pixel advances, a line `LINE_HEIGHT` x size.**
+    /// Pure: two parsed [`Face`]s and nothing else (no file, no global), so it is built wherever the two
+    /// files' bytes are at hand. `plx_machine::machine::Measure` is implemented for it beside the trait, in
+    /// `machine/src/machine.rs`, as it is for the host-test `ShippedMeasure`.
+    pub struct WholePixelMeasure {
+        regular: Face,
+        bold: Face,
+    }
+
+    impl WholePixelMeasure {
+        /// The model over `regular` (`appfont.ttf`) and `bold` (`appfont-bold.ttf`).
+        pub fn new(regular: Face, bold: Face) -> WholePixelMeasure {
+            WholePixelMeasure { regular, bold }
+        }
+
+        /// The face a text of weight `bold` is measured with.
+        pub fn face(&self, bold: bool) -> &Face {
+            if bold {
+                &self.bold
+            } else {
+                &self.regular
+            }
+        }
+    }
+
     /// One of the two shipped text faces, parsed once for the test binary.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn shipped(bold: bool) -> &'static Face {
         use std::sync::OnceLock;
         static REG: OnceLock<Face> = OnceLock::new();
@@ -518,6 +590,7 @@ pub mod advances {
     /// implemented for it beside the trait, in `machine/src/machine.rs` (the lowest layer that names both
     /// the trait and this type), and the share of a column a line may fill under it is
     /// `ui::fit::HEADROOM`, which the callers name.
+    #[cfg(any(test, feature = "test-support"))]
     pub struct ShippedMeasure;
 }
 
@@ -587,6 +660,7 @@ mod tests {
         ("no-break space", '\u{00A0}'),
         ("copyright", '\u{00A9}'),
         ("registered", '\u{00AE}'),
+        ("vulgar fraction one half (rail duration bands)", '\u{00BD}'),
     ];
 
     // LINK 2 — `appfont-cjk.ttf` (Noto Sans CJK KR, cut by tools/cut-noto-cjk.py). Checklist #6
@@ -721,6 +795,46 @@ mod tests {
         );
     }
 
+    /// Table (offset, length) for `tag` in a plain sfnt, by seek.
+    fn table_span(f: &mut File, tag: &[u8; 4]) -> (u64, u64) {
+        let head = read_at(f, 0, 12).unwrap();
+        let num = be16(&head, 4).unwrap() as usize;
+        let dir = read_at(f, 12, num * 16).unwrap();
+        for i in 0..num {
+            let rec = &dir[i * 16..];
+            if &rec[0..4] == tag {
+                return (be32(rec, 8).unwrap() as u64, be32(rec, 12).unwrap() as u64);
+            }
+        }
+        panic!("no {} table", String::from_utf8_lossy(tag));
+    }
+
+    /// **Every shipped face must open under the OLDEST FreeType a television ships.** FreeType
+    /// 2.4.11 through 2.7.0 reject a font whose `loca` is `>= 0x40000` bytes (`ttpload.c`,
+    /// `table_len >= 0x40000L` -> `Invalid_Table`); a long `loca` holds `numGlyphs + 1` four-byte
+    /// offsets, so 65535 glyphs is exactly 0x40000 and fails with error 8 while 65534 opens.
+    /// SDL2_ttf then reports a face that "cannot be opened" and the whole fallback link is dead.
+    /// No host FreeType here is that old, so the bound is checked on the bytes.
+    #[test]
+    fn shipped_faces_open_under_old_freetype() {
+        for name in ["appfont.ttf", "appfont-bold.ttf", "appfont-cjk.ttf"] {
+            let p = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../pkg")).join(name);
+            let mut f = File::open(&p).unwrap();
+            let (maxp, _) = table_span(&mut f, b"maxp");
+            let n = be16(&read_at(&mut f, maxp + 4, 2).unwrap(), 0).unwrap();
+            let (head, _) = table_span(&mut f, b"head");
+            let fmt = be16(&read_at(&mut f, head + 50, 2).unwrap(), 0).unwrap();
+            let (_, loca_len) = table_span(&mut f, b"loca");
+            assert!(n <= 65_534, "{name}: {n} glyphs; FreeType <= 2.7.0 needs <= 65534");
+            if fmt == 1 {
+                assert!(
+                    loca_len < 0x40000,
+                    "{name}: long loca is {loca_len} bytes; FreeType 2.4.11-2.7.0 rejects >= 0x40000"
+                );
+            }
+        }
+    }
+
     /// The whole point: the chain, not any one link. This is the assertion that would have
     /// failed on 2026-08-22 and passed on 2026-08-23.
     #[test]
@@ -738,33 +852,161 @@ mod tests {
         }
     }
 
-    /// **RTL is out of scope, and this is where that is written down as a test rather than a
-    /// comment.** Neither shipped face carries Hebrew or Arabic — and neither does the television's
-    /// own `/usr/share/fonts/DroidSansFallback.ttf` (measured on webOS 4.10.0, 2026-08-23: 11172
-    /// Hangul, 20902 Han, zero Hebrew, zero Arabic), so no link of the chain can draw them.
-    ///
-    /// Coverage would not be enough even if it existed. "The font contains the codepoint" is not
-    /// "the renderer supports the script": Arabic needs joining and contextual shaping, Hebrew
-    /// needs bidi reordering, and `text.rs` has neither — it hands byte runs to
-    /// `TTF_RenderUTF8_Blended`, which in SDL2_ttf 2.0.x is a left-to-right advance loop with no
-    /// shaper behind it. Adding a face here would turn tofu into *fluent-looking wrong text*,
-    /// which is worse.
-    ///
-    /// So this test asserts the ABSENCE, deliberately: it fails the moment someone adds an RTL
-    /// face, and the failure message is the reason not to. **Checklist #6 / #48 must not be marked
-    /// Pass for RTL content on the strength of this unit.**
+    /// LINK 3: `appfont-emoji.ttf` (monochrome Noto Emoji, cut by tools/cut-noto-emoji.py). The
+    /// emoji people put in library names, and the mirror that lets the television draw them.
+    const LINK3_CHARS: &[(&str, u32)] = &[
+        ("clapper board", 0x1F3AC),
+        ("teddy bear", 0x1F9F8),
+        ("baby", 0x1F476),
+        ("child", 0x1F9D2),
+        ("star (BMP)", 0x2B50),
+        ("heart (BMP)", 0x2764),
+        ("grinning face", 0x1F600),
+        ("television", 0x1F4FA),
+    ];
+
+    /// Pins the cut, and checks the Private Use Area mirror `text.rs` relies on: every astral
+    /// emoji's rank lands on a mapped U+E000 + rank, and nothing past the last rank is mapped.
     #[test]
-    fn rtl_is_out_of_scope_and_stays_that_way() {
-        for name in ["appfont.ttf", "appfont-cjk.ttf"] {
+    fn bundled_emoji_face_is_the_pinned_cut_with_its_bmp_mirror() {
+        let c = cov("appfont-emoji.ttf");
+        for &(what, cp) in LINK3_CHARS {
+            assert!(c.contains(cp), "pkg/appfont-emoji.ttf cannot draw the {what} U+{cp:04X}");
+        }
+        let astral = (0x1_0000..=0x10_FFFF).filter(|&cp| c.contains(cp)).count() as u32;
+        assert_eq!(astral, 1_275, "pkg/appfont-emoji.ttf maps {astral} astral codepoints, not the \
+            1275 of @fontsource/noto-emoji 5.3.2. If the pin moved on purpose, move this number and \
+            tools/cut-noto-emoji.py's together.");
+        assert_eq!(c.len(), 1_464 + 1_275, "the 1464 emoji codepoints plus their 1275 mirrors");
+        for cp in (0x1_0000..=0x10_FFFF).filter(|&cp| c.contains(cp)) {
+            let rank = c.astral_rank(cp).expect("a mapped astral codepoint has a rank");
+            assert!(c.contains(0xE000 + rank), "U+{cp:05X} has no mirror at U+{:04X}", 0xE000 + rank);
+        }
+        assert!(!c.contains(0xE000 + astral), "a mirror past the last astral codepoint");
+    }
+
+    // LINKS 4 and 5 — `appfont-arabic.ttf` / `appfont-arabic-bold.ttf` (Noto Kufi Arabic) and
+    // `appfont-hebrew.ttf` / `appfont-hebrew-bold.ttf` (Noto Sans Hebrew), fetched UNMODIFIED by
+    // tools/fetch-noto-rtl.py. Coverage was never the hard part of right-to-left text: these faces
+    // are never handed to SDL2_ttf. Their runs are shaped by the bundled libass-plx (FriBidi for
+    // the order, HarfBuzz for joining and marks, `plx_gfx::rtl`), and THAT is graded by the native
+    // tests `make check-ass` runs. What is asserted here is the cheap half: the files carry every
+    // letter the languages that write with them need.
+    const RTL_BLOCKS: &[(&str, &str, u32, u32)] = &[
+        ("appfont-arabic.ttf", "Arabic letters, hamza to yeh", 0x0621, 0x064A),
+        ("appfont-arabic.ttf", "Arabic harakat (tashkeel), fathatan to sukun", 0x064B, 0x0652),
+        ("appfont-arabic.ttf", "Arabic-Indic digits", 0x0660, 0x0669),
+        ("appfont-arabic.ttf", "Extended Arabic-Indic digits (Persian, Urdu)", 0x06F0, 0x06F9),
+        ("appfont-hebrew.ttf", "Hebrew letters, alef to tav", 0x05D0, 0x05EA),
+        ("appfont-hebrew.ttf", "Hebrew points (niqqud), sheva to dagesh", 0x05B0, 0x05BC),
+    ];
+
+    const RTL_CHARS: &[(&str, &str, char)] = &[
+        ("appfont-arabic.ttf", "Arabic comma", '\u{060C}'),
+        ("appfont-arabic.ttf", "Arabic semicolon", '\u{061B}'),
+        ("appfont-arabic.ttf", "Arabic question mark", '\u{061F}'),
+        ("appfont-arabic.ttf", "tatweel", '\u{0640}'),
+        ("appfont-arabic.ttf", "zero-width non-joiner (the Persian half-space)", '\u{200C}'),
+        ("appfont-arabic.ttf", "Persian peh", '\u{067E}'),
+        ("appfont-arabic.ttf", "Persian tcheh", '\u{0686}'),
+        ("appfont-arabic.ttf", "Persian jeh", '\u{0698}'),
+        ("appfont-arabic.ttf", "Persian keheh", '\u{06A9}'),
+        ("appfont-arabic.ttf", "Persian gaf", '\u{06AF}'),
+        ("appfont-arabic.ttf", "Farsi yeh", '\u{06CC}'),
+        ("appfont-arabic.ttf", "Urdu tteh", '\u{0679}'),
+        ("appfont-arabic.ttf", "Urdu ddal", '\u{0688}'),
+        ("appfont-arabic.ttf", "Urdu rreh", '\u{0691}'),
+        ("appfont-arabic.ttf", "Urdu noon ghunna", '\u{06BA}'),
+        ("appfont-arabic.ttf", "Urdu heh goal", '\u{06C1}'),
+        ("appfont-arabic.ttf", "Urdu heh doachashmee", '\u{06BE}'),
+        ("appfont-arabic.ttf", "Urdu yeh barree", '\u{06D2}'),
+        ("appfont-hebrew.ttf", "maqaf", '\u{05BE}'),
+        ("appfont-hebrew.ttf", "geresh", '\u{05F3}'),
+        ("appfont-hebrew.ttf", "gershayim", '\u{05F4}'),
+    ];
+
+    /// Real titles. Every character must be drawable by the right-to-left face OR the base face
+    /// (Inter carries the Latin punctuation and the middle dot between them).
+    const RTL_SAMPLES: &[(&str, &str, &str)] = &[
+        ("appfont-arabic.ttf", "Arabic", "باب الحارة · الهيبة · رحلة إلى الفضاء (٢٠٢٤)"),
+        ("appfont-arabic.ttf", "Arabic, vowelled", "مُحَمَّد"),
+        ("appfont-arabic.ttf", "Persian", "جدایی نادر از سیمین"),
+        ("appfont-arabic.ttf", "Urdu", "زندگی گلزار ہے"),
+        ("appfont-hebrew.ttf", "Hebrew", "שטיסל · פאודה · הבורר"),
+        ("appfont-hebrew.ttf", "Hebrew, pointed", "שָׁלוֹם"),
+    ];
+
+    #[test]
+    fn bundled_rtl_faces_cover_the_declared_set() {
+        for font in ["appfont-arabic.ttf", "appfont-hebrew.ttf"] {
+            let c = cov(font);
+            let mut gaps = Vec::new();
+            for &(_, what, lo, hi) in RTL_BLOCKS.iter().filter(|r| r.0 == font) {
+                let miss = missing(c, lo, hi);
+                if !miss.is_empty() {
+                    gaps.push(format!("{what} U+{lo:04X}..U+{hi:04X}: missing {miss:X?}"));
+                }
+            }
+            for &(_, what, ch) in RTL_CHARS.iter().filter(|r| r.0 == font) {
+                if !c.contains(ch as u32) {
+                    gaps.push(format!("{what} U+{:04X}", ch as u32));
+                }
+            }
+            for &(_, what, s) in RTL_SAMPLES.iter().filter(|r| r.0 == font) {
+                let bad: Vec<char> = s
+                    .chars()
+                    .filter(|&ch| !c.contains(ch as u32) && !cov("appfont.ttf").contains(ch as u32))
+                    .collect();
+                if !bad.is_empty() {
+                    gaps.push(format!("{what} sample {s:?}: nothing draws {bad:?}"));
+                }
+            }
+            report(font, gaps);
+        }
+    }
+
+    /// Pins the files: Noto Kufi Arabic 2.110 and Noto Sans Hebrew 3.001 as published
+    /// (tools/fetch-noto-rtl.py checks their sha256; this checks what the app will read).
+    #[test]
+    fn bundled_rtl_faces_are_the_pinned_files() {
+        for (font, n) in [("appfont-arabic.ttf", 1_241), ("appfont-hebrew.ttf", 147)] {
+            assert_eq!(
+                cov(font).len(), n,
+                "pkg/{font} covers {} codepoints, not the pinned {n}. If the pin moved on purpose, \
+                 move this number and tools/fetch-noto-rtl.py's SOURCES together.",
+                cov(font).len()
+            );
+        }
+    }
+
+    /// The facade opens the bold file for a bold run, but `text.rs` reads coverage only from the
+    /// regular one; this is what makes that sound.
+    #[test]
+    fn bold_rtl_faces_cover_exactly_what_the_regular_ones_do() {
+        for (regular, bold) in [
+            ("appfont-arabic.ttf", "appfont-arabic-bold.ttf"),
+            ("appfont-hebrew.ttf", "appfont-hebrew-bold.ttf"),
+        ] {
+            let (r, b) = (cov(regular), cov(bold));
+            let differ: Vec<u32> = (0..0x11_0000u32).filter(|&cp| r.contains(cp) != b.contains(cp)).take(12).collect();
+            assert!(differ.is_empty(), "pkg/{bold} and pkg/{regular} differ at {differ:X?}");
+        }
+    }
+
+    /// Only the shaped faces carry Hebrew or Arabic. Every face SDL2_ttf draws must stay without
+    /// them: a codepoint there would be picked by the chain ahead of the shaped face and printed
+    /// unjoined and backwards, the fluent-looking wrong text the run layout exists to prevent.
+    /// (This replaces the test that asserted no face carried them while no shaper existed.)
+    #[test]
+    fn only_the_shaped_faces_carry_hebrew_or_arabic() {
+        for name in ["appfont.ttf", "appfont-bold.ttf", "appfont-cjk.ttf", "appfont-emoji.ttf"] {
             let c = cov(name);
             for (script, lo, hi) in [("Hebrew", 0x05D0u32, 0x05EAu32), ("Arabic", 0x0620, 0x064A)] {
-                let n = count(&c, lo, hi);
+                let n = count(c, lo, hi);
                 assert_eq!(
                     n, 0,
-                    "pkg/{name} now carries {n} {script} codepoints. Coverage is NOT support: \
-                     text.rs does no bidi and no shaping, so this would render fluent-looking \
-                     wrong text instead of tofu. Ship a shaper before you ship the face, and do \
-                     not mark checklist #6/#48 Pass for RTL until you have."
+                    "pkg/{name} now carries {n} {script} codepoints. SDL2_ttf would draw them \
+                     unshaped, ahead of the shaped face in text.rs's chain."
                 );
             }
         }
@@ -857,6 +1099,17 @@ mod tests {
             c.len(),
             (0x2_A6DF - 0x2_0000 + 1) + (0x1_F64F - 0x1_F600 + 1)
         );
+    }
+
+    #[test]
+    fn astral_rank_counts_across_ranges_and_refuses_what_is_not_mapped() {
+        let f = sfnt(&cmap1(3, 10, &format12(&[(0x1_F600, 0x1_F602, 1), (0x1_F9F8, 0x1_F9F8, 9)])));
+        let c = of_reader(&mut Cursor::new(f)).expect("decodes");
+        assert_eq!(c.astral_rank(0x1_F600), Some(0));
+        assert_eq!(c.astral_rank(0x1_F602), Some(2));
+        assert_eq!(c.astral_rank(0x1_F9F8), Some(3));
+        assert_eq!(c.astral_rank(0x1_F603), None, "not mapped");
+        assert_eq!(c.astral_rank(0x41), None, "the BMP has no rank");
     }
 
     /// Format 4's second addressing mode (`idRangeOffset != 0`) indexes a trailing glyph array by

@@ -364,7 +364,7 @@ impl Drop for TempCanonicalRoot {
 /// Exercise the canonical host store and real save/clear/load paths across simulated relaunches.
 #[test]
 fn language_survives_ordinary_signout_fresh_login_and_relaunch() {
-    use plx_platform::i18n::Preference;
+    use plx_os::i18n::Preference;
     let _serial = plx_base::testlock::serial();
     let root = TempCanonicalRoot::new("language-signout-relaunch");
     struct Restore {
@@ -372,12 +372,12 @@ fn language_survives_ordinary_signout_fresh_login_and_relaunch() {
     }
     impl Drop for Restore {
         fn drop(&mut self) {
-            plx_platform::i18n::set_saved_preference(self.preference);
+            plx_os::i18n::set_saved_preference(self.preference);
             redirect_candidates_for_test(None);
             redirect_for_test(None);
         }
     }
-    let _restore = Restore { preference: plx_platform::i18n::saved_preference() };
+    let _restore = Restore { preference: plx_os::i18n::saved_preference() };
     redirect_for_test(None);
     redirect_candidates_for_test(Some(vec![root.dir.join("legacy-auth.json")]));
 
@@ -389,7 +389,7 @@ fn language_survives_ordinary_signout_fresh_login_and_relaunch() {
 
     // A new process has neither the old session cache nor the confirmed-preference atomic.
     redirect_for_test(None);
-    plx_platform::i18n::set_saved_preference(Preference::System);
+    plx_os::i18n::set_saved_preference(Preference::System);
     let mut fresh_login = load_with_id(|| "new-install-id".into());
     assert!(fresh_login.account_token.is_empty());
     assert!(fresh_login.server.token.is_empty());
@@ -401,7 +401,7 @@ fn language_survives_ordinary_signout_fresh_login_and_relaunch() {
     fresh_login.account_token = "different-test-account".into();
     save_fresh_reauthentication(&fresh_login);
     redirect_for_test(None);
-    plx_platform::i18n::set_saved_preference(Preference::System);
+    plx_os::i18n::set_saved_preference(Preference::System);
     let relaunched = load_with_id(|| panic!("fresh login already persisted its client id"));
     assert_eq!(relaunched.account_token, "different-test-account");
     assert_eq!(relaunched.language, Preference::Be,
@@ -584,7 +584,7 @@ fn clear_under_a_redirected_legacy_fixture_never_touches_the_canonical_authority
 /// `signout-leaves-token-in-unswept-candidates`: `clear()` must actually reach
 /// `persistence::cleanup_after_confirmed_clear()` after a durable canonical commit — the step
 /// that retires the full recognized migration-candidate set
-/// (`paths::session_migration_candidates()`, plus the pre-DB8 canonical JSON wrapper on ARM),
+/// (`paths::session_migration_candidates()`, plus the pre-DB8 canonical JSON wrapper where the helper is canonical),
 /// which is a strict superset of the legacy `auth_paths()` list `clear()`'s own loop sweeps.
 ///
 /// **On the honesty of this test**: `persistence::bootstrap`/`cleanup_after_confirmed_clear`
@@ -730,13 +730,13 @@ fn clear_reports_a_non_durable_outcome_when_the_canonical_commit_is_refused() {
 #[test]
 fn prepare_load_seeds_a_fresh_playback_quality_for_cleared_exactly_as_for_missing() {
     let missing = prepare_load(&ReadState::Missing, || "id-missing".to_string()).0;
-    let cleared = prepare_load(&ReadState::Cleared { language: plx_platform::i18n::Preference::System }, || "id-cleared".to_string()).0;
+    let cleared = prepare_load(&ReadState::Cleared { kept: Default::default() }, || "id-cleared".to_string()).0;
     assert!(
-        missing.playback_quality.is_some(),
+        missing.prefs.playback_quality.is_some(),
         "setup: a Missing read must seed a fresh quality"
     );
     assert!(
-        cleared.playback_quality.is_some(),
+        cleared.prefs.playback_quality.is_some(),
         "a Cleared read must seed a fresh playback quality exactly like Missing; today \
          `persisted` conflates Cleared with Locked/Blocked and refuses to seed one"
     );
@@ -749,37 +749,10 @@ fn prepare_load_seeds_a_fresh_playback_quality_for_cleared_exactly_as_for_missin
 /// (the `Locked | Blocked` bucket) leaves the rest of this module's suite green.
 #[test]
 fn read_identity_gives_cleared_its_own_bucket_distinct_from_every_other_state() {
-    let cleared = read_identity(&ReadState::Cleared { language: plx_platform::i18n::Preference::System });
+    let cleared = read_identity(&ReadState::Cleared { kept: Default::default() });
     assert_ne!(cleared, read_identity(&ReadState::Missing));
-    assert_ne!(cleared, read_identity(&ReadState::Locked { language: plx_platform::i18n::Preference::System }));
+    assert_ne!(cleared, read_identity(&ReadState::Locked { kept: Default::default() }));
     assert_ne!(cleared, read_identity(&ReadState::Blocked));
-}
-
-/// **The route ground's one persisted seed.** A fresh device has recorded nothing, a real
-/// hero is remembered across the read-modify-write cycle `update` uses everywhere else, and
-/// recording the SAME envelope again is a no-op rather than a second disk write.
-#[test]
-fn last_hero_blur_round_trips_and_skips_a_redundant_write() {
-    let _g = plx_base::testlock::serial();
-    let _t = TempSession::new("last-hero");
-    save(&signed_in());
-    assert_eq!(last_hero(), None, "a fresh device has shown no hero yet");
-
-    let envelope = [[0.1, 0.2, 0.3]; 4];
-    assert!(record_last_hero(envelope), "a new envelope is a real write");
-    assert_eq!(last_hero(), Some(envelope));
-
-    assert!(
-        !record_last_hero(envelope),
-        "recording the same envelope again must not touch the file"
-    );
-
-    let second = [[0.9, 0.8, 0.7]; 4];
-    assert!(
-        record_last_hero(second),
-        "a genuinely different hero writes"
-    );
-    assert_eq!(last_hero(), Some(second), "…and replaces the stored one");
 }
 
 /// A temporary LS2/key-store failure must never turn ciphertext back into plaintext or make
@@ -792,8 +765,8 @@ fn an_unopenable_secure_session_is_preserved_without_plaintext_downgrade() {
     let envelope = SecureEnvelope {
         format: SECURE_FORMAT.to_string(),
         version: 1,
-        sealed: plx_platform::tv::secure::Sealed {
-            backend: plx_platform::tv::secure::Backend::Keymanager3,
+        sealed: plx_os::tv::secure::Sealed {
+            backend: plx_os::tv::secure::Backend::KEYMANAGER3,
             key: "plxnative.session.v1".to_string(),
             iv: "AAAAAAAAAAAAAAAAAAAAAA==".to_string(),
             data: "c2VjcmV0".to_string(),
@@ -857,6 +830,49 @@ fn an_unknown_secure_envelope_version_is_locked_and_never_rewritten_as_plaintext
     );
 }
 
+/// A sealed envelope for `signed_in()` under `backend`, in the file format `save` writes.
+fn envelope_for_signed_in(backend: plx_os::tv::secure::Backend) -> Vec<u8> {
+    serde_json::to_vec_pretty(&SecureEnvelope {
+        format: SECURE_FORMAT.to_string(),
+        version: 1,
+        sealed: plx_os::tv::secure::Sealed {
+            backend,
+            key: "plxnative.session.v1".to_string(),
+            iv: "synthetic-iv".to_string(),
+            data: plx_base::b64::encode(&serde_json::to_vec_pretty(&signed_in()).unwrap()),
+        },
+    })
+    .unwrap()
+}
+
+/// The control for the test below: the same plaintext, sealed under the tag the synthetic
+/// platform does know, opens.
+#[test]
+fn an_envelope_with_the_platforms_own_backend_tag_opens() {
+    let _g = plx_base::testlock::serial();
+    let _keymanager = SyntheticKeymanager::new();
+    let t = TempSession::new("secure-own-tag");
+    std::fs::write(t.file(), envelope_for_signed_in(plx_os::tv::secure::Backend::KEYMANAGER3)).unwrap();
+    assert_eq!(load().account_token, "acct");
+}
+
+/// The backend tag is an opaque string, so an envelope naming a store no installed platform knows
+/// still parses. It is REFUSED on open and never reinterpreted as the platform's own store: the
+/// file stays locked ciphertext and the run signs in again.
+#[test]
+fn an_envelope_with_a_backend_tag_no_platform_knows_is_locked_and_left_as_it_was() {
+    let _g = plx_base::testlock::serial();
+    let _keymanager = SyntheticKeymanager::new();
+    let t = TempSession::new("secure-foreign-tag");
+    let foreign = envelope_for_signed_in(plx_os::tv::secure::Backend::new("host_file"));
+    std::fs::write(t.file(), &foreign).unwrap();
+
+    let loaded = load();
+    assert!(loaded.account_token.is_empty(), "a tag nobody knows opens nothing");
+    assert!(!loaded.client_id.is_empty(), "the run still gets an ephemeral id");
+    assert_eq!(std::fs::read(t.file()).unwrap(), foreign, "reading it rewrites nothing");
+}
+
 #[test]
 fn a_precreated_tmp_symlink_cannot_redirect_session_bytes() {
     use std::os::unix::fs::symlink;
@@ -887,7 +903,7 @@ fn a_quality_choice_persists_without_replacing_other_session_state() {
     save(&s);
 
     assert!(update(|cur| Some(
-        cur.with_playback_quality(PlaybackQuality::P720)
+        cur.with_pref::<QualityPref>(PlaybackQuality::P720)
     )));
     let landed = peek();
     assert_eq!(landed.playback_quality(), PlaybackQuality::P720);
@@ -965,13 +981,13 @@ fn loading_legacy_json_without_an_id_repairs_only_the_id_not_the_quality() {
     assert_eq!(loaded.account_token, "legacy-account");
     assert_eq!(loaded.playback_quality(), PlaybackQuality::Original);
     assert_eq!(
-        loaded.playback_quality, None,
+        loaded.prefs.playback_quality, None,
         "a parsable old file is not fresh and must not acquire a default choice"
     );
 
     let saved: Session = serde_json::from_slice(&std::fs::read(t.file()).unwrap()).unwrap();
     assert_eq!(saved.playback_quality(), PlaybackQuality::Original);
-    assert_eq!(saved.playback_quality, None);
+    assert_eq!(saved.prefs.playback_quality, None);
 }
 
 #[test]
@@ -982,13 +998,13 @@ fn loading_with_no_file_records_the_gated_fresh_default() {
 
     let loaded = load();
     assert_eq!(
-        loaded.playback_quality,
+        loaded.prefs.playback_quality,
         Some(PlaybackQuality::Auto),
         "the production readiness gate gives only a genuinely fresh install Auto"
     );
     let saved: Session = serde_json::from_slice(&std::fs::read(t.file()).unwrap()).unwrap();
     assert_eq!(
-        saved.playback_quality,
+        saved.prefs.playback_quality,
         Some(PlaybackQuality::Auto),
         "freshness is decided once and stored explicitly"
     );
@@ -1154,7 +1170,7 @@ fn a_language_update_reports_when_the_next_launch_cannot_be_persisted() {
     let dir = t.file().parent().unwrap().to_path_buf();
     let result = update_with_outcome(|cur| {
         let mut next = cur.clone();
-        next.language = plx_platform::i18n::Preference::Be;
+        next.language = plx_os::i18n::Preference::Be;
         // Remove the writable directory after the read, before the atomic replacement. A file
         // at the parent path makes this fail on every host, including privileged test runners.
         std::fs::remove_file(t.file()).unwrap();
@@ -1175,7 +1191,7 @@ impl CanonicalReadOverride {
     fn unavailable() -> Self {
         persistence::READ_FOR_TEST.with(|hook| {
             hook.set(Some(|| {
-                persistence::CanonicalRead::Blocked(plx_platform::storage::StoreError::HelperUnavailable)
+                persistence::CanonicalRead::Blocked(plx_os::storage::StoreError::HelperUnavailable)
             }))
         });
         Self
@@ -1204,13 +1220,13 @@ fn unavailable_helper_fallback_survives_cache_drop_and_restart() {
     assert!(matches!(
         outcome.commit,
         Some(persistence::CanonicalCommit::Failed(
-            plx_platform::storage::StoreError::HelperUnavailable
+            plx_os::storage::StoreError::HelperUnavailable
         ))
     ));
     for _ in 0..2 {
         // No cache/Session survives: read the on-disk candidates as a new process would.
         invalidate_for_test();
-        let actual = peek_at(std::time::Instant::now());
+        let actual = refresh_blocking_for_test();
         assert_eq!(actual.account_token, expected.account_token);
         assert_eq!(actual.client_id, expected.client_id);
     }
@@ -1218,7 +1234,7 @@ fn unavailable_helper_fallback_survives_cache_drop_and_restart() {
 
 #[test]
 fn fallback_never_outranks_present_or_untrusted_canonical_state() {
-    use plx_platform::storage::StoreError as E;
+    use plx_os::storage::StoreError as E;
     use persistence::CanonicalRead as C;
     let _serial = plx_base::testlock::serial();
     let (_paths, candidates) = TempCandidates::new("blocked-priority");
@@ -1236,7 +1252,7 @@ fn fallback_never_outranks_present_or_untrusted_canonical_state() {
             public: Session::default(),
             protection: None,
         },
-        || C::Cleared { revision: 1, language: plx_platform::i18n::Preference::System },
+        || C::Cleared { revision: 1, kept: Default::default() },
         || C::Data {
             revision: 1,
             payload: "not json".into(),
@@ -1249,7 +1265,7 @@ fn fallback_never_outranks_present_or_untrusted_canonical_state() {
         || C::Blocked(E::HelperProtocol),
         || {
             C::Blocked(E::Io {
-                stage: plx_platform::storage::CommitStage::Readback,
+                stage: plx_os::storage::CommitStage::Readback,
                 errno: 5,
             })
         },
@@ -1302,15 +1318,15 @@ fn fallback_cache_retries_and_observes_recovery_without_reviving_revocation() {
     let _helper = CanonicalReadOverride::unavailable();
     assert!(save_legacy_fallback_locked(&signed_in(), false, false).is_some());
     reset_reads_for_test();
-    let now = std::time::Instant::now();
-    assert_eq!(peek_at(now).account_token, "acct");
+    assert_eq!(refresh_blocking_for_test().account_token, "acct");
     assert!(peek_settled().is_none());
     let mut watch = VisibleSessionWatch::default();
     assert!(watch.changed());
     let generation = visible_generation();
-    assert_eq!(peek_at(now + LOCKED_RETRY / 2).account_token, "acct");
-    assert_eq!(reads_for_test(), 1);
-    assert_eq!(peek_at(now + LOCKED_RETRY).account_token, "acct");
+    assert!(refresh_need().is_some_and(|need| need.transient), "the fallback stays a standing request to retry");
+    assert_eq!(peek().account_token, "acct");
+    assert_eq!(reads_for_test(), 1, "peek never re-reads");
+    assert_eq!(refresh_blocking_for_test().account_token, "acct");
     assert_eq!(reads_for_test(), 2);
     assert_eq!(visible_generation(), generation);
     assert!(!watch.changed());
@@ -1320,7 +1336,7 @@ fn fallback_cache_retries_and_observes_recovery_without_reviving_revocation() {
             session: signed_in(),
         }))
     });
-    assert_eq!(peek_at(now + LOCKED_RETRY * 2).account_token, "acct");
+    assert_eq!(refresh_blocking_for_test().account_token, "acct");
     assert!(peek_settled().is_some());
     assert!(
         watch.changed(),
@@ -1330,7 +1346,7 @@ fn fallback_cache_retries_and_observes_recovery_without_reviving_revocation() {
     revoke_cached_session();
     {
         let _io = io();
-        refresh_locked(now + LOCKED_RETRY * 3);
+        refresh_locked();
     }
     assert!(cache_revoked());
     assert!(!update(|s| Some(s.with_auto_sign_in(true))));
@@ -1363,7 +1379,7 @@ fn signout_with_unavailable_helper_removes_all_fallback_candidates() {
     assert!(files.iter().all(|p| !p.exists()));
     redirect_for_test(None); // new process: no local Revoked barrier
     assert!(matches!(read_live_locked(), ReadState::Blocked));
-    assert!(peek_at(std::time::Instant::now()).account_token.is_empty());
+    assert!(refresh_blocking_for_test().account_token.is_empty());
     std::fs::remove_file(&root.dir).unwrap();
 }
 
@@ -1537,14 +1553,14 @@ fn p1_authoritative_reads_retire_only_marked_files() {
     for read in [
         (|| C::Opened { revision: 1, session: signed_in() }) as fn() -> C,
         || C::Data { revision: 1, payload: serde_json::to_string(&signed_in()).unwrap() },
-        || C::Cleared { revision: 1, language: plx_platform::i18n::Preference::System },
+        || C::Cleared { revision: 1, kept: Default::default() },
     ] {
         assert!(save_legacy_fallback_locked(&signed_in(), false, false).is_some());
         persistence::READ_FOR_TEST.with(|hook| hook.set(Some(read)));
         { let _io = io(); let _ = read_live_locked(); }
         assert!(!marked.exists());
         assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes);
-        persistence::READ_FOR_TEST.with(|hook| hook.set(Some(|| C::Blocked(plx_platform::storage::StoreError::HelperUnavailable))));
+        persistence::READ_FOR_TEST.with(|hook| hook.set(Some(|| C::Blocked(plx_os::storage::StoreError::HelperUnavailable))));
         assert!(matches!(read_live_locked(), ReadState::Blocked));
     }
 }
@@ -1621,8 +1637,8 @@ fn signout_counts_an_absent_candidate_behind_a_read_only_mount_as_retired() {
     let _serial = plx_base::testlock::serial();
     let file = TempSession::new("absent-behind-erofs");
     assert!(!file.file().exists(), "the legacy candidate does not exist");
-    let _erofs = plx_platform::storage::UnlinkFaultForTest::install(&file.dir, libc::EROFS);
-    assert_eq!(plx_platform::storage::unlink(&file.file()).unwrap_err().raw_os_error(), Some(libc::EROFS));
+    let _erofs = plx_os::storage::UnlinkFaultForTest::install(&file.dir, libc::EROFS);
+    assert_eq!(plx_os::storage::unlink(&file.file()).unwrap_err().raw_os_error(), Some(libc::EROFS));
     assert_eq!(neutralize_session_candidate(&file.file()).unwrap_err().raw_os_error(), Some(libc::ENOENT),
         "the TV's pair: unlink EROFS, neutralize ENOENT");
     assert!(retire_session_candidate(&file.file()), "an absent candidate is retired");
@@ -1642,7 +1658,7 @@ fn signout_keeps_reporting_a_present_candidate_behind_a_read_only_mount() {
     assert!(save_legacy_fallback_locked(&signed_in(), false, false).is_some());
     let credentials = std::fs::read(file.file()).unwrap();
     let _permissions = RestorePermissions::set(&[(file.file().as_path(), 0o400)]);
-    let _erofs = plx_platform::storage::UnlinkFaultForTest::install(&file.dir, libc::EROFS);
+    let _erofs = plx_os::storage::UnlinkFaultForTest::install(&file.dir, libc::EROFS);
     for attempt in 0..3 {
         assert_eq!(clear(), ClearOutcome::Durable { legacy_swept: false },
             "attempt {attempt}: a surviving credential is never reported as retired");
@@ -1665,7 +1681,7 @@ fn revocation_marker_absent_behind_a_read_only_mount_is_retired() {
     let marker = fallback_revocation_path(&file.file());
     let tenure = REVOCATION_GENERATION.load(std::sync::atomic::Ordering::Acquire);
     PENDING_REVOCATION_REMOVALS.lock().unwrap().push((marker.clone(), tenure));
-    let _erofs = plx_platform::storage::UnlinkFaultForTest::install(&file.dir, libc::EROFS);
+    let _erofs = plx_os::storage::UnlinkFaultForTest::install(&file.dir, libc::EROFS);
     assert!(retry_pending_revocation_removals_locked());
     assert!(PENDING_REVOCATION_REMOVALS.lock().unwrap().is_empty());
     // A PRESENT marker behind the refusal stays pending.
@@ -1728,7 +1744,7 @@ fn signout_sweeps_cannot_complete_while_a_recovery_flush_is_pending() {
     RETIRE_PARENT_SYNC_FOR_TEST.with(|hook| hook.set(Some(|| Some(libc::EIO))));
     assert!(!with_io_for_test(retire_marked_fallbacks_locked));
     assert!(!file.file().exists());
-    persistence::READ_FOR_TEST.with(|hook| hook.set(Some(|| persistence::CanonicalRead::Cleared { revision: 1, language: plx_platform::i18n::Preference::System })));
+    persistence::READ_FOR_TEST.with(|hook| hook.set(Some(|| persistence::CanonicalRead::Cleared { revision: 1, kept: Default::default() })));
     assert_eq!(with_io_for_test(persistence::cleanup_after_confirmed_clear),
         persistence::ClearCleanupOutcome::LegacyRetireFailed);
     assert_eq!(clear(), ClearOutcome::Durable { legacy_swept: false });
@@ -1746,15 +1762,15 @@ fn signout_sweeps_cannot_complete_while_a_recovery_flush_is_pending() {
 // LS2 protocol round trip is covered by keymanager's own
 // `a_synthetic_keymanager3_round_trips_through_seal_and_open`.
 struct SyntheticKeymanager;
-static STORE: plx_platform::tv::secure::TestStore = plx_platform::tv::secure::TestStore {
-    seal: |plain| Some(plx_platform::tv::secure::Sealed {
-        backend: plx_platform::tv::secure::Backend::Keymanager3,
+static STORE: plx_os::tv::secure::TestStore = plx_os::tv::secure::TestStore {
+    seal: |plain| Some(plx_os::tv::secure::Sealed {
+        backend: plx_os::tv::secure::Backend::KEYMANAGER3,
         key: "plxnative.session.v1".into(),
         iv: "synthetic-iv".into(),
         data: plx_base::b64::encode(plain),
     }),
     open: |sealed| {
-        if sealed.backend == plx_platform::tv::secure::Backend::Keymanager3 && sealed.key == "plxnative.session.v1" {
+        if sealed.backend == plx_os::tv::secure::Backend::KEYMANAGER3 && sealed.key == "plxnative.session.v1" {
             plx_base::b64::decode(&sealed.data)
         } else {
             None
@@ -1764,13 +1780,13 @@ static STORE: plx_platform::tv::secure::TestStore = plx_platform::tv::secure::Te
 };
 impl SyntheticKeymanager {
     fn new() -> Self {
-        plx_platform::tv::secure::STORE_FOR_TEST.with(|hook| hook.set(Some(&STORE)));
+        plx_os::tv::secure::STORE_FOR_TEST.with(|hook| hook.set(Some(&STORE)));
         Self
     }
 }
 impl Drop for SyntheticKeymanager {
     fn drop(&mut self) {
-        plx_platform::tv::secure::STORE_FOR_TEST.with(|hook| hook.set(None));
+        plx_os::tv::secure::STORE_FOR_TEST.with(|hook| hook.set(None));
     }
 }
 
@@ -1993,16 +2009,15 @@ fn marked_missing_migration_failure_stays_transient_and_retries() {
         drop(helper);
         struct ResetFailure;
         impl Drop for ResetFailure {
-            fn drop(&mut self) { plx_platform::storage::clear_injected_commit_failure_for_test(); }
+            fn drop(&mut self) { plx_os::storage::clear_injected_commit_failure_for_test(); }
         }
         let _reset = ResetFailure;
-        plx_platform::storage::inject_next_commit_failure_for_test(plx_platform::storage::CommitStage::CreateTemp);
+        plx_os::storage::inject_next_commit_failure_for_test(plx_os::storage::CommitStage::CreateTemp);
         assert_eq!(load().account_token, "acct");
         assert!(peek_settled().is_none(), "a failed marked migration must remain retryable");
         assert!(matches!(*CACHE.lock().unwrap(), Cached::Transient { .. }));
-        let now = std::time::Instant::now();
         assert!(candidates[2].exists());
-        assert_eq!(peek_at(now + LOCKED_RETRY).account_token, "acct");
+        assert_eq!(refresh_blocking_for_test().account_token, "acct");
         assert!(peek_settled().is_some());
         assert!(matches!(persistence::load(), persistence::CanonicalRead::Data { .. }));
         assert!(!candidates[2].exists());

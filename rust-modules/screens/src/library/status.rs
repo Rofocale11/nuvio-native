@@ -49,12 +49,16 @@ impl LibraryScreen {
     /// shows changed, so the caller damages the frame (the reason line moves the action row).
     pub(super) fn watch_readout<H: LibraryLike>(&mut self, cx: &Cx<'_, H>) -> bool {
         use super::super::plaintext_question::{asks, Near};
-        let machine = (self.readout == Readout::Failed)
-            .then(|| H::directory(cx).source().and_then(|(sid, _)| plx_plex::plex::client_for(*sid)))
-            .flatten()
-            .map(|client| client.machine_id());
-        let offer_moved = self.plaintext.refresh(machine, Near::Only);
-        let clock_moved = self.clock.refresh(machine);
+        let facts = H::clock_facts(cx);
+        let inputs = H::screen_inputs(cx);
+        let source = (self.readout == Readout::Failed)
+            .then(|| H::directory(cx).source().map(|(sid, _)| *sid)).flatten();
+        // Plaintext offers use the published server identity even without a clock publication.
+        let machine = source.and_then(|sid| inputs.servers.iter()
+            .find(|(_, slot)| *slot == sid).map(|(machine, _)| machine.as_str()));
+        let offer_moved = self.plaintext.refresh(&inputs.grants.offers, machine, Near::Only);
+        let clock_machine = source.and_then(|sid| facts.and_then(|facts| facts.machine(sid)));
+        let clock_moved = self.clock.refresh(facts, clock_machine);
         if self.plaintext_alert.is_open()
             && !(self.readout == Readout::Failed
                 && self.plaintext_alert.subject() == self.plaintext.verdict().map(|v| v.machine_id.as_str())
@@ -77,13 +81,13 @@ impl LibraryScreen {
         let (caption, reason) = match self.readout {
             Readout::Failed => {
                 let source = directory.source().map(|(_, source)| source);
-                let name = source.map(|source| source.name.as_str()).filter(|name| !name.is_empty()).unwrap_or(plx_platform::i18n::msg::browse_library_server());
+                let name = source.map(|source| source.name.as_str()).filter(|name| !name.is_empty()).unwrap_or(plx_os::i18n::msg::browse_library_server());
                 let owner = source.map(|source| source.handle.as_str()).filter(|owner| !owner.is_empty());
                 // Your own server is "your Plex server", the words Home uses for the same fault;
                 // a borrowed one is named, since "your" would be untrue of it.
                 let caption = match owner {
-                    None => plx_platform::i18n::msg::browse_home_failed().to_string(),
-                    Some(_) => plx_platform::i18n::msg::browse_library_unreachable(name),
+                    None => plx_os::i18n::msg::browse_home_failed().to_string(),
+                    Some(_) => plx_os::i18n::msg::browse_library_unreachable(name),
                 };
                 // A server discovery offers "Connect without encryption?" for says why instead,
                 // and names what *Connect* / *Try again* does (`auth::plaintext_copy`).
@@ -93,34 +97,30 @@ impl LibraryScreen {
                     // else a wrong clock, then who shares the server.
                     None => match self.clock_cause() {
                         Some((reason, _)) => Some(reason.to_string_lossy().into_owned()),
-                        None => owner.map(|owner| plx_platform::i18n::msg::browse_library_shared_unreachable(owner)),
+                        None => owner.map(|owner| plx_os::i18n::msg::browse_library_shared_unreachable(owner)),
                     },
                 };
                 (caption, reason)
             }
             Readout::Empty => {
-                let caption = if self.wanted_kind.is_some() { plx_platform::i18n::msg::browse_library_no_matches().into() }
-                    else if directory.sections().is_empty() { plx_platform::i18n::msg::browse_library_empty().into() }
-                    else if listing.unwatched() || listing.genre().is_some() { plx_platform::i18n::msg::browse_library_no_matches().into() }
+                let caption = if self.wanted_kind.is_some() { plx_os::i18n::msg::browse_library_no_matches().into() }
+                    else if directory.sections().is_empty() { plx_os::i18n::msg::browse_library_empty().into() }
+                    else if listing.unwatched() || listing.genre().is_some() { plx_os::i18n::msg::browse_library_no_matches().into() }
                     else if let Some(section) = directory.current().and_then(|i| directory.sections().get(i)) {
-                        listing.library_type().empty_readout(section.kind, &section.row.title)
-                    } else { plx_platform::i18n::msg::browse_library_no_matches().into() };
+                        if self.listing == Listing::Collections { super::collections_page::empty_text(&section.row.title) }
+                        else { listing.library_type().empty_readout(section.kind, &section.row.title) }
+                    } else { plx_os::i18n::msg::browse_library_no_matches().into() };
                 (caption, None)
             }
             // placeholder-exempt: builds the caption only; a Loading readout draws as the Library spinner (draw_page, LibrarySpinner)
-            Readout::Loading => (plx_platform::i18n::msg::browse_library_loading().into(), None),
+            Readout::Loading => (plx_os::i18n::msg::browse_library_loading().into(), None),
             Readout::Grid => (String::new(), None),
         };
         (CString::new(caption).unwrap_or_default(), reason.map(|reason| CString::new(reason).unwrap_or_default()))
     }
 
     pub(super) fn status_frame(&self) -> Rect {
-        // Under shelves, an empty answer stands in its own document band below the heading row
-        // (`Layout::empty_band`) and scrolls with it; the fixed region would put it on a shelf.
-        if let Some((top, h)) = self.layout.empty_band().filter(|_| self.layout.shelves > 0) {
-            return Rect::new(MARGIN_X, CONTENT_TOP + top - self.scroll.pos, SCR_W - 2.0 * MARGIN_X, h);
-        }
-        // The legacy readout occupies the fixed content region, inside the overscan frame.
+        // The readout occupies the fixed content region, inside the overscan frame.
         const STATUS_TOP: f32 = 232.0;
         Rect::new(MARGIN_X, STATUS_TOP, SCR_W - 2.0 * MARGIN_X,
             SCR_H - STATUS_TOP - plx_ui::consts::MARGIN_Y)

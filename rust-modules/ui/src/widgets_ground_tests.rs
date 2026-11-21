@@ -72,7 +72,7 @@ fn mid_dive_the_art_keeps_the_top_and_the_wash_alone_has_the_foot() {
     assert_eq!(bands.map(q), [None, Some((0.0, 600.0, SCR_W, SCR_H - 600.0)), None, None]);
 }
 
-/// Home's ramp as the ground carries it is `base_scrim_a` — the curve the two layered `rect`s
+/// Detail's lower ramp as the ground carries it is `base_scrim_a` — the curve the two layered `rect`s
 /// drew and the legibility table is graded on — at both stops, either side of each, and beyond.
 #[test]
 fn the_grounds_ramp_is_the_hero_scrim_curve() {
@@ -84,7 +84,7 @@ fn the_grounds_ramp_is_the_hero_scrim_curve() {
             assert!((ramp.alpha(y) - want).abs() < 1e-5, "hero_a {hero_a} y {y}: {} vs {want}", ramp.alpha(y));
         }
     }
-    // Detail's single stop, written by repeating its foot: linear to the foot, never a divide by 0.
+    // A two-stop caller may repeat its foot: linear to the foot, never a divide by 0.
     let ramp = WashRamp { ink: theme::scrim(1.0), stops: [(400.0, 0.0), (SCR_H, 0.6), (SCR_H, 0.6)] };
     assert_eq!(ramp.alpha(400.0), 0.0);
     assert!((ramp.alpha(740.0) - 0.3).abs() < 1e-6);
@@ -92,25 +92,36 @@ fn the_grounds_ramp_is_the_hero_scrim_curve() {
 }
 
 /// **The ramp is carried per VERTEX, so it must be one straight segment inside every strip.** The
-/// strips `cut_at` makes tile their rect, cut on whole rows at the knees, and within each the
+/// strips `cut_at` makes tile their rect, cut on whole rows at the stops, and within each the
 /// ramp at every pixel centre is the linear interpolation of its two edge values — which is what
-/// the vertex shader's `mix(u_inka.x, u_inka.y, a_pos.y)` interpolates to.
+/// the vertex shader's `mix(u_inka.x, u_inka.y, a_pos.y)` interpolates to. Detail's lower ramp (a foot
+/// on the panel's), and the shelf fade, whose foot stands at the caption line with its alpha held
+/// below.
 #[test]
 fn the_ramp_is_straight_inside_every_strip_the_ground_draws() {
     let [y0, knee, mid, foot] = crate::landing_hero::base_scrim_ramp(1.0);
-    let ramp = WashRamp { ink: theme::scrim(1.0), stops: [(y0, 0.0), (knee, mid), (SCR_H, foot)] };
-    for band in [Rect::FULL, Rect::new(0.0, 600.0, SCR_W, 480.0), Rect::new(0.0, 0.0, SCR_W, 300.0)] {
-        let strips: Vec<Rect> = cut_at(band, [Some(y0), Some(knee)]).collect();
-        let covered: f32 = strips.iter().map(|s| s.h).sum();
-        assert_eq!(covered, band.h, "{band:?}: strips {strips:?} must tile it");
-        for s in &strips {
-            let (a0, a1) = (ramp.alpha(s.y), ramp.alpha(s.y + s.h));
-            for y in rows(s.y, s.h) {
-                let c = y as f32 + 0.5;
-                let lerp = a0 + (a1 - a0) * (c - s.y) / s.h;
-                // A knee snapped to its row moves the kink by at most half a pixel.
-                assert!((lerp - ramp.alpha(c)).abs() < 2e-3, "{band:?} strip {s:?} y {c}: {lerp} vs {}",
-                    ramp.alpha(c));
+    let ramps = [
+        WashRamp { ink: theme::scrim(1.0), stops: [(y0, 0.0), (knee, mid), (SCR_H, foot)] },
+        crate::landing_hero::shelf_fade(crate::landing_hero::SHELF_TOP, 1.0),
+        crate::landing_hero::shelf_fade(crate::landing_hero::SHELF_TOP, 0.4),
+        crate::landing_hero::shelf_fade(300.0, 1.0),
+        crate::landing_hero::shelf_fade(-120.0, 0.7),
+    ];
+    for ramp in ramps {
+        let knees = ramp.stops.map(|(y, _)| Some(y));
+        for band in [Rect::FULL, Rect::new(0.0, 600.0, SCR_W, 480.0), Rect::new(0.0, 0.0, SCR_W, 300.0)] {
+            let strips: Vec<Rect> = cut_at(band, knees).collect();
+            let covered: f32 = strips.iter().map(|s| s.h).sum();
+            assert_eq!(covered, band.h, "{band:?}: strips {strips:?} must tile it");
+            for s in &strips {
+                let (a0, a1) = (ramp.alpha(s.y), ramp.alpha(s.y + s.h));
+                for y in rows(s.y, s.h) {
+                    let c = y as f32 + 0.5;
+                    let lerp = a0 + (a1 - a0) * (c - s.y) / s.h;
+                    // A knee snapped to its row moves the kink by at most half a pixel.
+                    assert!((lerp - ramp.alpha(c)).abs() < 2e-3, "{band:?} strip {s:?} y {c}: {lerp} vs {}",
+                        ramp.alpha(c));
+                }
             }
         }
     }
@@ -132,6 +143,132 @@ fn one_opaque_fragment_is_the_wash_the_art_and_the_ramp_stacked() {
                     assert!((one - layered).abs() < 1e-6, "wash {wash} art {art} a {a} ink {inka}");
                 }
             }
+        }
+    }
+}
+
+// ── The flat ground (`AmbientWash::draw_flat_ground`) is its own call; `draw_ground` stays layered ──
+
+/// A ramp with both knees inside the panel, so the layered path cuts the wash into three bands.
+fn knee_ramp() -> WashRamp {
+    WashRamp { ink: [0.0, 0.0, 0.0, 1.0], stops: [(300.0, 0.0), (700.0, 0.4), (SCR_H, 0.7)] }
+}
+
+/// What a recording painter was handed while `f` ran: `(command tag, screen rect)` in draw order.
+fn handed(f: impl FnOnce(Painter)) -> Vec<(u64, Rect)> {
+    crate::draw_census::capture(|| f(Painter::recording()))
+}
+
+/// **`draw_ground` with no photograph is still the layered picture, and never takes the ramp the
+/// driver cannot carry.** A ground whose art is pending, held, sliding or scrolled to nothing is a
+/// gradient with a photograph about to go over it; folding it to one colour for those frames jumps
+/// the page in a frame. So the call is main's: the wash as the four sampled corners, the ramp riding
+/// the wash per band only where the ink program exists (`gfx::wash_ink_ok`) and otherwise left to
+/// the caller (`false`). Art whose texture is 0 is no art.
+#[test]
+fn a_ground_with_no_art_is_still_the_layered_picture() {
+    let w = wash_on([
+        [code8(200), code8(10), code8(90)],
+        [code8(20), code8(240), code8(90)],
+        [code8(60), code8(130), code8(5)],
+        [code8(250), code8(70), code8(180)],
+    ]);
+    let pending = WashArt {
+        tex: 0,
+        rect: Rect::FULL.cover(1280.0, 720.0),
+        uv: plx_gfx::gfx::UV_FULL,
+        tint: [1.0; 4],
+    };
+    let inked = plx_gfx::gfx::wash_ink_ok();
+    let ramp = knee_ramp();
+    for art in [None, Some(pending)] {
+        // No ramp: one plain wash pass over the rect, and nothing taken.
+        let mut took = true;
+        assert_eq!(handed(|p| took = w.draw_ground(p, Rect::FULL, art, None, None)), [(16, Rect::FULL)]);
+        assert!(!took, "no ramp to take");
+        // A ramp: carried per band (tag 23) only where the driver has the program, else the caller's.
+        let mut took = !inked;
+        let got = handed(|p| took = w.draw_ground(p, Rect::FULL, art, Some(ramp), None));
+        let want: Vec<(u64, Rect)> = if inked {
+            cut_at(Rect::FULL, [Some(300.0), Some(700.0), Some(SCR_H)]).map(|b| (23, b)).collect()
+        } else {
+            vec![(16, Rect::FULL)]
+        };
+        assert_eq!(got, want, "art {:?}", art.map(|a| a.tex));
+        assert_eq!(took, inked, "the ramp is taken exactly when the wash can carry it");
+    }
+}
+
+/// **`draw_flat_ground` is the flat colour, as ONE primitive over the rect** (the renderer clears
+/// it), never the per-band split of the layered ground, and it takes no ramp: it has nothing to
+/// hand back.
+#[test]
+fn the_flat_ground_is_one_primitive() {
+    let w = wash_on([[code8(31), code8(27), code8(40)]; 4]);
+    assert_eq!(handed(|p| w.draw_flat_ground(p, Rect::FULL)), [(16, Rect::FULL)]);
+    let part = Rect::new(100.0, 50.0, 1200.0, 700.0);
+    assert_eq!(handed(|p| w.draw_flat_ground(p, part)), [(16, part)]);
+}
+
+// ── A ground with no photograph is ONE flat colour (`AmbientWash::flat_ground`) ──────────────────
+
+/// A wash resting on `corners` (tl, tr, br, bl), the way `AmbientWash::jump` puts it there.
+fn wash_on(corners: [[f32; 3]; 4]) -> AmbientWash {
+    let mut w = AmbientWash::flat([0.0; 4]);
+    w.jump(corners.map(|c| [c[0], c[1], c[2], 1.0]));
+    w
+}
+
+/// An 8-bit code as the float the GPU is sent.
+fn code8(v: u8) -> f32 {
+    v as f32 / 255.0
+}
+
+/// A channel sits on an 8-bit code to float precision (the clear is exact only there).
+fn on_code(v: f32) -> bool {
+    ((v * 255.0) - (v * 255.0).round()).abs() < 1e-4
+}
+
+/// **A wash that is already one colour is that colour, to the code** - the page's resting ground
+/// and every artless poster's, so a flat clear of it is the shader's picture minus its dither.
+/// Off-code springs (a cascade mix, a settling tail) land on the nearest code, never between two.
+#[test]
+fn a_flat_wash_is_its_own_colour_on_exact_codes() {
+    for c in [[code8(31), code8(27), code8(40)], [0.0; 3], [1.0; 3], [0.2001, 0.5004, 0.9996]] {
+        let want = c.map(code);
+        let w = wash_on([c; 4]);
+        assert_eq!(w.flat_ground(), want, "{c:?}");
+        assert!(want.into_iter().all(on_code), "{want:?}");
+    }
+}
+
+/// **A gradient wash is the mean of the field the shader would have drawn**: the 8x8 grid of the
+/// bilinear (`sample`) over the panel, which for a bilinear is the mean of its four corners. Checked
+/// against the grid itself, on a field that leans a different way in every channel.
+#[test]
+fn a_gradient_wash_is_the_mean_of_its_eight_by_eight_field() {
+    let corners = [
+        [code8(200), code8(10), code8(90)],
+        [code8(20), code8(240), code8(90)],
+        [code8(60), code8(130), code8(5)],
+        [code8(250), code8(70), code8(180)],
+    ];
+    let w = wash_on(corners);
+    for r in [Rect::FULL, Rect::new(100.0, 50.0, 1200.0, 700.0)] {
+        let mut mean = [0.0f32; 3];
+        for j in 0..8 {
+            for i in 0..8 {
+                let c = w.sample(r, r.x + r.w * (i as f32 + 0.5) / 8.0, r.y + r.h * (j as f32 + 0.5) / 8.0);
+                for (m, v) in mean.iter_mut().zip(c) {
+                    *m += v / 64.0;
+                }
+            }
+        }
+        let got = w.flat_ground();
+        for ch in 0..3 {
+            assert!(on_code(got[ch]), "channel {ch}: {} is between codes", got[ch]);
+            // Rounding to the nearest code moves a channel by at most half of one.
+            assert!((got[ch] - mean[ch]).abs() <= 0.5 / 255.0 + 1e-5, "channel {ch}: {} vs mean {}", got[ch], mean[ch]);
         }
     }
 }

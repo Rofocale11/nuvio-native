@@ -76,9 +76,8 @@ pub(super) mod server_id {
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<plx_plex::plex::ServerId, D::Error> {
         let n = u16::deserialize(d)?;
-        if usize::from(n) >= plx_plex::plex::MAX_SERVERS && n != u16::MAX {
-            return Err(serde::de::Error::custom("invalid server slot"));
-        }
+        // No range check: the registry issues every `u16` except the reserved UNSET, which is
+        // itself a valid recorded value (`ServerId::UNSET` round-trips as `u16::MAX`).
         Ok(plx_plex::plex::ServerId::from_raw(n))
     }
 }
@@ -105,20 +104,33 @@ mod tests {
         // Exhaustive on purpose: adding a row field owes a codec/shape review, not an implicit
         // default in the only test claiming complete row preservation.
         let m = PmsMovie {
+            edition: String::new(),
             sid: plx_plex::plex::ServerId::from_raw(3), sec: 8, title: "Episode".into(), year: 2026,
             rating: "TV-14".into(), dur_ns: i64::MAX, part: "/part".into(), thumb: "/poster".into(),
             still: "/still".into(), art: "/art".into(), summary: "Summary".into(), rk: "17".into(),
+            logo: Some("/library/metadata/10/clearLogo/1700000000".into()),
             vcodec: "hevc".into(), acodec: "aac".into(),
             blur: [[-0.0, f32::from_bits(0x7fc01234), f32::INFINITY]; 4], has_blur: true,
             kind: 3, resume_ms: 12345, show_rk: "10".into(), season_index: 2,
             show_title: "Show".into(), ep_index: 4, unwatched: false, watched: true,
             aired: "2026-09-08".into(), child_count: i64::MAX,
+            guid: Some([1; 12]), show_guid: Some([2; 12]),
+            subtype: Some("movie".into()), smart: true, genre: Some("Drama".into()), secondary_genre: Some("Crime".into()),
+            video_resolution: Some("4k".into()), hdr: true, dolby_vision: true, audience_rating: Some(7.5),
+            leaf_count: Some(10), viewed_leaf_count: Some(4), added_at: Some(i64::MAX),
+            sort_info: Some(crate::pms::SortInfo { rating: Some(9.1), user_rating: Some(8.0),
+                view_count: Some(7), bitrate_kbps: Some(8000), media_count: 2, ..Default::default() }),
+            versions: vec![crate::pms::MediaVersion {
+                id: plx_plex::plex::MediaId(3082), kbps: 25_200, resolution: "4k".into(),
+                vcodec: "hevc".into(), size: i64::MAX, hdr: true, ..Default::default()
+            }],
         };
         Landing { gen: 7, seq: 19, sid: m.sid, client: None, token_gen: 5,
             build: Some(SourceBuild {
-                cw: vec![CwItem { last_viewed_at: i64::MAX, m: Arc::new(m.clone()) }],
-                shelves: vec![Shelf { positions: Vec::new(), title: "Shelf".into(), hub_id: "provider.hub".into(),
-                    key: "/hub/key".into(), items: vec![Arc::new(m)], total: 0, offset: 0, end: 0, more: false }],
+                lane: Default::default(),
+                cw: vec![CwItem { last_viewed_at: i64::MAX, m: Arc::new(m.clone()), position: 0 }],
+                shelves: vec![Shelf { epoch: 0, positions: Vec::new(), title: "Shelf".into(), hub_id: "provider.hub".into(),
+                    key: "/hub/key".into(), items: vec![Arc::new(m)], total: 0, offset: 0, end: 0, more: false, shown: 0, row: Default::default() }],
             }) }
     }
 
@@ -131,6 +143,28 @@ mod tests {
         let m = &decoded.build.as_ref().unwrap().shelves[0].items[0];
         assert_eq!(m.blur[0].map(f32::to_bits), [0x80000000, 0x7fc01234, 0x7f800000]);
         assert_eq!(m.dur_ns, i64::MAX);
+        assert_eq!(m.logo.as_deref(), Some("/library/metadata/10/clearLogo/1700000000"));
+    }
+
+    #[test]
+    fn the_shared_row_codec_keeps_required_fields_and_rejects_unknown_and_duplicate_keys() {
+        let l = landing();
+        let row = &l.build.as_ref().unwrap().shelves[0].items[0];
+        let value = serde_json::to_value(row).unwrap();
+        let mut legacy = value.clone();
+        legacy.as_object_mut().unwrap().remove("logo");
+        let legacy = serde_json::from_value::<PmsMovie>(legacy).unwrap();
+        assert!(legacy.logo.is_none());
+        assert!(serde_json::to_value(&legacy).unwrap().get("logo").is_none());
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("title");
+        assert!(serde_json::from_value::<PmsMovie>(missing).is_err());
+        let mut unknown = value.clone();
+        unknown["unrecognised_row_field"] = json!(true);
+        assert!(serde_json::from_value::<PmsMovie>(unknown).is_err());
+        let wire = value.to_string();
+        let duplicate = format!("{{\"title\":\"duplicate\",{}", &wire[1..]);
+        assert!(serde_json::from_str::<PmsMovie>(&duplicate).is_err());
     }
 
     #[test]
@@ -148,11 +182,27 @@ mod tests {
             absent.as_object_mut().unwrap().remove(key);
             assert!(decode(absent, |_| None).is_err(), "missing {key} must not acquire a default");
         }
-        for (key, value) in [("version", json!(2)), ("sid", json!(100)), ("unexpected", json!(1))] {
+        // Every u16 is a slot number or the reserved UNSET, so a bad `sid` is a wrong TYPE, not a
+        // number past some ceiling.
+        for (key, value) in [("version", json!(2)), ("sid", json!("3")), ("unexpected", json!(1))] {
             let mut bad = failed.clone();
             bad[key] = value;
             assert!(decode(bad, |_| None).is_err());
         }
+    }
+
+    #[test]
+    fn a_server_id_past_the_old_sixteen_slot_table_round_trips() {
+        // Slot 40 is a server the registry issues once a household has signed out enough times;
+        // a recorded landing for it must decode, not be refused as an invalid slot.
+        let mut l = landing();
+        l.sid = plx_plex::plex::ServerId::from_raw(40);
+        l.build = None;
+        let encoded = encode(&l);
+        assert_eq!(encoded["sid"], json!(40));
+        let decoded = decode(encoded.clone(), |_| None).unwrap();
+        assert_eq!(decoded.sid.raw(), 40);
+        assert_eq!(encode(&decoded), encoded);
     }
 
     #[test]

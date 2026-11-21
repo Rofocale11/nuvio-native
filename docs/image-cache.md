@@ -3,13 +3,13 @@
 ## Storage and ownership
 
 All reusable remote artwork enters `app/adapters/poster.rs` through the shared `ui::tex::Source`.
-Its two demand workers read the disk tier before fetching and decode off the render thread.
+Its demand workers (two, or three on a set with at least four cores and 2 GiB: `workers_for` in `poster.rs`, logged as `posters: workers=`) read the disk tier before fetching and decode off the render thread.
 `imgcache.rs` owns persistence; `ui::tex::TexCache` owns GPU residency. Screens choose the image
 and size, without choosing a caching policy. The sign-in QR code is transient authentication data
 and remains outside the artwork cache; bundled icons and fonts already live in the app package.
 
 Disk entries contain compressed image bytes and a small versioned header with fetch time and
-payload length. A SHA-256 filename identifies the stable Plex machine id (canonical server origin
+payload length. For Plex transcodes, a SHA-256 filename identifies the stable Plex machine id (canonical server origin
 until an id is known), source and every requested transform. The outer `X-Plex-Token` is excluded.
 Source version queries, size, cover mode and format remain distinct. Only the recognized Plex
 avatar roster's volatile `c=` stamp is ignored. No request URL or token is stored as metadata.
@@ -17,7 +17,13 @@ Existing avatar files migrate on their first hit while preserving their original
 
 The cache chooses a writable persistent directory through `paths::image_cache_candidates`,
 isolated by installation flavour (or simulator instance). It caps committed storage at **128 MiB**
-and **8,192 files**, with **4 MiB** maximum compressed image size. One temporary write can consume
+and **8,192 files**, with **4 MiB** maximum compressed image size. The byte cap is further limited
+to half of what the chosen filesystem can spare (its free space plus the cache's own files), and
+below 8 MiB of spare the disk tier is off: on webOS 3.4.3 the only writable persistent directory is
+`/media/developer/temp`, on the partition installed apps share, which had 76.5 MB free. That
+directory is world-writable, so the cache directory inside it is created `0700` (an existing one we
+own is tightened to `0700`; a foreign-owned one or a symlink is refused); the other candidates keep
+the mode they are given. One temporary write can consume
 up to another image's size. A lazy startup scan builds a byte-accounted LRU index; normal reads
 and writes use that index, avoiding repeated directory scans. Reads advance recency in memory;
 file modification times persist recency at most once an hour per accessed entry. The header's
@@ -25,11 +31,17 @@ fetch timestamp never moves on a hit. Writes use a temporary file and rename, ca
 size-bounded, and corrupt entries are removed and fetched again. Unavailable storage is a cache
 miss; a failed write cannot prevent the image from displaying.
 
-On a disk hit older than **24 hours**, stale artwork is displayed immediately. A separate refresh worker starts work
+On a Plex-transcode disk hit older than **24 hours**, stale artwork is displayed immediately. A separate refresh worker starts work
 when demand loading is idle, with at most 32 queued jobs and a bounded recent-attempt set to
 suppress retry storms. Refresh validates decoding before replacing a file and affects the next
 load; it never holds the source-store lock while accessing the network. A failed refresh keeps
 the old image. Changed versioned source paths miss immediately rather than waiting for expiry.
+
+Gallery previews are public immutable PNGs addressed by their SHA-256 filename. They use the same disk LRU,
+workers, decode bounds and GPU cache. Their cache identity is a separate digest namespace, independent of Plex
+accounts and transforms. The worker verifies the compressed bytes before decode or persistence on both disk and
+network paths, uses credential-free HTTPS without redirects, and reuses a valid digest hit regardless of its age.
+A catalog refresh failure keeps dated cached entries available and does not prevent an explicit download retry.
 
 RAM residency remains independent of library size: 64 source slots and a 44 MiB GPU texture
 budget. Demand workers stop claiming requests when combined decoded and pending-upload pixels

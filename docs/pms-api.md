@@ -17,7 +17,7 @@ All endpoints below were verified live on 2026-07-03 with read-only GETs, **exce
 
 **JSON instead of XML:** send `Accept: application/json`. Every response is wrapped in a top-level `MediaContainer` object.
 
-**Paging:** either headers `X-Plex-Container-Start` / `X-Plex-Container-Size` or same-named query params. Response carries `size`, `totalSize`, `offset`.
+**Paging:** either headers `X-Plex-Container-Start` / `X-Plex-Container-Size` or same-named query params. A paged response carries `size`, `totalSize`, `offset`; an unpaged one carries neither total nor offset (see [Paging, observed](#paging-observed)).
 
 ---
 
@@ -105,8 +105,9 @@ spec's "Media Queries" section documents the full query language.
   them with params instead.
 - **Server-driven menus:** `GET /library/sections/{key}/all?includeMeta=1` → `MediaContainer.Meta.Type[]`
   with `Sort[]` (`{key, descKey, defaultDirection, title, firstCharacterKey?}` — movies: 9 entries)
-  and `Filter[]` (`{filter, filterType, key=value-list URL, title}` — movies: 27). With header
-  `X-Plex-Container-Size: 0` it's a menus+totalSize-only probe. Standalone `/filters` and `/sorts`
+  and `Filter[]` (`{filter, filterType, key=value-list URL, title}` — movies: 27). With headers
+  `X-Plex-Container-Start: 0` and `X-Plex-Container-Size: 0` (both, see "Paging gotcha") it's a
+  menus+totalSize-only probe. Standalone `/filters` and `/sorts`
   endpoints exist too. **The client hardcodes no menu contents** (`browse.rs` consumes these).
 - **Sorting:** `sort=key:asc|desc` (comma-chain for multi-level, `nullsLast` supported);
   `sort=random` works. Composes with filters + paging.
@@ -114,29 +115,72 @@ spec's "Media Queries" section documents the full query language.
   `/collection`, …) → `Directory[]` `{key: tag id, title, fastKey}` where **`fastKey` is the
   ready-made listing URL** (`/library/sections/1/all?genre=150`). Apply as `/all?genre={id}`.
 - **Media-query operators** (URL-encode the key side): string `=` contains / `==` equals /
-  `<=` begins-with; int+date `>>=` gt/after, `<<=` lt/before; bool `=1/=0`; relative dates
-  `addedAt>>=-3w`; OR via comma; parens via `push=1`/`pop=1`/`or=1`. Episode scoping
+  `<=` begins-with; int+date `>>=` gt/after, `<<=` lt/before (on int, float and date fields `>=` and
+  `<=` are the inclusive comparisons and `=` is equality: measured 2026-10-31, "Count probes at band
+  edges" below); bool `=1/=0`; relative dates `addedAt>>=-3w`; OR via comma; parens via
+  `push=1`/`pop=1`/`or=1`. Episode scoping
   `type=4&show.id={rk}` works; scoped exact `show.title==` does NOT (use `show.id`).
 - **Unwatched:** movies `unwatched=1`; **shows use `unwatchedLeaves=1`** (`unwatched=1` on
-  type=2 has odd semantics — returned 1 of 10 live); episodes `unwatched=1` normal.
+  type=2 has odd semantics — returned 1 of 10 live; re-measured 2026-10-25, PMS 1.43.5: 30 of 33
+  shows against 24 for `unwatchedLeaves`); episodes `unwatched=1` normal. `firstCharacter` takes
+  the same keys (Letter index, below).
 - **Show granularity:** `?type=2|3|4` on `/all` lists shows/seasons/episodes flat (no
   children-walking). Type ids: movie=1, show=2, season=3, episode=4.
-  Rechecked live 2026-09-26: `includeMeta=1` returns all three `Type` entries and marks the
-  requested one `active`. Seasons and episodes advertise a compound Show sort and its `descKey`;
-  use that descending expression as supplied. Neither advertises a Genre filter. Typed
-  `/firstCharacter?type=2|3|4` counts match the corresponding flat listing totals.
-  Seasons accept `unwatchedLeaves=1`; episodes use `unwatched=1`.
+  `includeMeta=1` returns every `Type` entry (show, season, episode and, on PMS 1.43.5, a folder
+  entry) and marks the requested one `active` (the 2026-09-26 recheck saw three entries, the
+  2026-10-31 one on 1.43.5 four). Seasons and episodes advertise a compound Title sort (the show
+  order) and its `descKey`; use that descending expression as supplied. Neither advertises a
+  Genre filter. Typed `/firstCharacter?type=2|3|4` counts match the corresponding flat listing
+  totals. Seasons accept `unwatchedLeaves=1`; episodes use `unwatched=1`.
 - **Letter index:** `GET /library/sections/{key}/firstCharacter` → per-letter `Directory[]` with
   `size` counts in titleSort order (articles stripped); `/firstCharacter/{L}` returns the items.
   **`?firstCharacter=X` on `/all` is silently IGNORED** — jump = prefix-summed
   `X-Plex-Container-Start` offset into the titleSort listing. (Spec's plural `/firstCharacters`
   404s.) `titleSort<=`/`>=` behave as a lexicographic range, not begins/ends-with.
+  **`firstCharacter` takes the same terms as `/all`** (`type`, `unwatched`, `unwatchedLeaves`,
+  `genre`, composed): its counts describe the filtered listing, so they sum to that listing's
+  `totalSize`, a letter with no title left is omitted, and a filter that matches nothing answers
+  an empty `Directory` (no error). The prefix-summed offsets still land on the first title of each
+  letter in `/all?sort=titleSort` with the same terms (and over the reversed letter list for
+  `sort=titleSort:desc`). Measured 2026-10-25 on PMS 1.43.5: movies (none, `unwatched`, `genre`, both,
+  and `unwatched` descending), shows (`type=2` with `unwatchedLeaves`, with `genre`, with both);
+  every letter's offset checked, none off. Seasons and episodes advertise no plain `titleSort`
+  sort but a composite Title key, which the letters land on (measured 2026-10-31, "Count probes for
+  seasons and episodes" below): the app offers the title-sort A-Z rail for the section's own listing
+  and collections by the literal `titleSort`, and for seasons and episodes by the declared Title entry
+  (`SortEntry::is_title_order`), ascending, sending that entry's `key` and never `titleSort`.
+  The app sends `firstCharacter` the very terms of the grid's page request and shows the counts only
+  while they describe it (`data/src/browse/letters.rs`). A VALUE sort's bands come from count
+  probes instead (next section): the data job asks them for every banded sort (critic rating,
+  duration, unplayed, plays, date added, date viewed, last episode added, release date) on a movie or
+  show section's own listing, and for a show library's Episodes listing its date added, date viewed,
+  release date and rating (`BandFamily::of_sort`; Seasons have none), with the same terms (`type=4`
+  included). Of those four, date added and release date were verified at their edges; the critic
+  rating and the date viewed were accepted as filters but no episode had a value on the measured
+  server, so they were never checked at an edge: they stay mapped (a library with values may be
+  exact), and where nobody has a value there is no rail (a rail needs two populated bands), where
+  the server ignores the filter or the counts are not monotone the read refuses them.
+  `ListingView::bands()` exposes the bands; the
+  calendar ones also need the day the Library hands over with its ask. `rail_available` stays the
+  letters' alone and `bands_available` is the value sorts' (the two never both). The Library's rail
+  draws whichever the sort has (`library/rail.rs`, labels in `library/rail_bands.rs`): the bands in
+  listing order, an empty band dimmed and skipped by focus, and the items the sort leaves without a
+  value (the unlabelled lead or tail) in no band. Last episode added has bands for a descending
+  sort only (see `episode.addedAt` below), so an ascending one shows no rail.
 - **Collections — two id spaces:** `/library/sections/{key}/collections` → `Metadata[]` with
   **ratingKey** (browse via `/library/collections/{rk}/children`); the `/collection` filter dir
   returns **tag ids** for `/all?collection={tag}`. Don't mix. A collection row's `index` is that
   tag id, while its `guid` is shared with search hits and member `Collection[]` tags. Adding
   `includeCollections=1` to `/hubs/search` yields full collection `Metadata[]` rows rather than
   tag-shaped `Directory[]` hits.
+- **Collections count (the Library header's "Collections · N"):** `GET
+  /library/sections/{key}/all?type=18` with `X-Plex-Container-Start=0` and `X-Plex-Container-Size=0`
+  returns no rows and the section's collection count as `totalSize` (the same count the
+  `/collections` listing and `firstCharacter?type=18` total to). The client reads three answers apart:
+  a number (a real `0` included), a refusal (401/403 — an unshared section, as the listing above),
+  and unknown (404, transport failure, malformed body). Collection rows also carry `subtype` (`movie`, `show`, …), `smart`
+  (`"1"` for a smart collection — a saved filter whose `childCount` is its current match count, not a
+  hand-picked set), `childCount` and `addedAt`; a show row's `childCount` is its season count.
 - **Collection routes and hubs:** `/library/collections/{rk}/children` and `/items` return the same
   paged members. A promoted `custom.collection.*` hub embeds the members and carries the collection
   ratingKey in its identifier; a member's `collection.related.*` hub lists the whole collection.
@@ -144,9 +188,205 @@ spec's "Media Queries" section documents the full query language.
   custom poster is `/library/metadata/{rk}/thumb/{stamp}`. An unshared section answers 403 from its
   collections listing; preserve that as authorization denial rather than an empty result.
 - **Paging gotcha:** a query-param `X-Plex-Container-Size` WITHOUT `Start` is silently ignored —
-  always send both (the client does), or use the headers. Header `Size: 0` = count-only probe.
+  always send both (the client does). The header form is no way round it: `Container-Size: 0`
+  without `Container-Start` is ignored too (every row, no `totalSize`), measured 2026-10-31. Headers
+  `Start: 0` + `Size: 0` (or the two query parameters) are the count-only probe.
   `totalSize` is only present on paged responses.
 - **Payload slimming:** `excludeElements=Media` etc. per the spec (not used yet).
+
+### Count probes at band edges (measured 2026-10-31, PMS 1.43.5.11029, Guest, 44 movies / 15 shows)
+
+The question: can a value-sort rail (Critic rating, Duration, Date added, ...) take its band offsets
+from COUNTS instead of loading the listing? `GET /library/sections/{k}/all?type=T&<field><op>=E`
+with `X-Plex-Container-Start: 0` and `X-Plex-Container-Size: 0` returns no rows and the number of
+items that satisfy the term as `totalSize`. Measured read-only (GET only, 100 ms apart) by
+`tools/pms-band-probe.py`. **The evidence is one small library of each kind: every verdict below is
+"exact there, not proven at scale"** (edges were data-driven quantiles of the distinct values: four
+per family, two where a family had only three distinct values). VERIFIED means each edge's count
+equalled the count derived from the full listing's own values, and the real paged listing was read
+at the first and last edge (`Start=count-1, Size=2`) and straddled the edge there.
+
+| family (filter key = sort key) | movies | shows |
+|---|---|---|
+| `rating` | VERIFIED, floats | UNTESTABLE (no show had one) |
+| `audienceRating` | VERIFIED, floats | ROUNDED |
+| `duration` (ms) | VERIFIED | not a show field |
+| `addedAt` (epoch s) | VERIFIED | VERIFIED |
+| `lastViewedAt` (epoch s) | VERIFIED | VERIFIED |
+| `year` | VERIFIED | VERIFIED |
+| `originallyAvailableAt` | VERIFIED as UTC-midnight epochs | VERIFIED, same |
+| `viewCount` | UNTESTABLE (no play count in the listing; it stores zeros the listing hides, see "Stored zeros") | VERIFIED (3 distinct values, 2 edges) |
+| `unviewedLeafCount` | not a movie field | VERIFIED (integers; it equals `leafCount - viewedLeafCount`, but every `viewedLeafCount` was 0, so only `leafCount` was exercised) |
+| `viewedLeafCount` | not a movie field | UNTESTABLE (all 0 under the Guest) |
+| `episode.addedAt` (`type=2`) | not a movie field | VERIFIED for `:desc` only, see below |
+| `leafCount` | not a movie field | not usable: silently ignored as a filter |
+
+ROUNDED: the listing shows the show audience rating to 0.1 while the filter compares finer stored
+values, so every count lay within +-0.05 of the listing's and no 0.01-precise edge is exact (the
+movie ratings were exact tenths). No planned family came out UNSUPPORTED or IGNORED.
+
+- **A count probe needs BOTH `Container-Start: 0` and `Container-Size: 0`.** Header or query form
+  alike answer `size` 0, `totalSize` N, `offset` 0, no rows. `Size: 0` alone is silently ignored
+  (every row, no `totalSize`), in either form.
+- **Floats are compared as floats**, not cast to integers: around a movie rated 9.5, `rating>>=9.49`,
+  `>>=9.5` and `>>=9.51` answered 12, 10, 10 where integer truncation would have given 16, 16, 16
+  (six discriminating probes, six float hits, no cast hit). Keys URL-encoded (`rating%3E%3E=9.5`)
+  and raw (`rating>>=9.5`) answer alike.
+- **Operators:** `>>=` (strictly greater), `>=` (inclusive), `<<=` (strictly less), `<=` (inclusive)
+  and `=` were all accepted (HTTP 200) and exact on int, float and date fields, each checked at ONE
+  value per family (the median distinct value), not swept. `!=` was not measured. "Items at or above E"
+  is therefore either `>=E` or `>>=E-1unit` (1 ms, 1 s, 1 count, 0.01 of a rating).
+- **Items with no value** (no rating, never viewed, no release date) sort FIRST in `:asc` and LAST
+  in `:desc` (the server treats no value as the smallest); `:nullsLast` puts them last in both
+  directions (one show `viewCount` listing kept one of its 11 first). `>>=` and `>=` EXCLUDE
+  them (`rating>>=<below the minimum>` answered the non-null count, 38 of 44) while `<<=` and `<=`
+  INCLUDE them (movie `lastViewedAt<<=<mid>` answered 35 = 10 with a value + 25 without). `=`
+  counts only items with the value.
+- **Stored zeros, and a probe at zero** (measured 2026-10-31, same server, `tools/pms-band-probe.py
+  --floor-and-negative-only`). A listing shows a stored zero as no value at all, but the filter sees
+  it: movie `viewCount` has no value on any row, yet `viewCount>>=-1` and `viewCount>=0` answered 25
+  of 44 and `viewCount>>=0` answered 0 (25 items store 0, 19 hold nothing); on the shows 5, 5 and 4
+  of 15 (one stored zero). So **`>>=0` leaves out the no-value items AND the stored zeros (it counts
+  "above zero"), while `>=0` leaves out only the no-value items and counts the stored zeros.** Movie
+  `rating` (38 of 44 rated), movie `duration` (44 of 44) and show `unviewedLeafCount` (15 of 15) held
+  no stored zero, and there `>>=-1`, `>>=0` and `>=0` all answered the same (38, 44, 15): a probe at
+  zero never counted the 6 unrated movies. What was NOT exercised is a stored rating of 0.0 or a
+  duration of 0 (none existed). A negative literal on a numeric field is an absolute number (`>>=-1`
+  answered like `>=0` in all five families).
+- **Offsets.** In a `:desc` listing the first item below E sits at offset `count(>=E)`. In `:asc`
+  the first item at or above E sits at `total - count(>=E)`, which is also `count(<<=E)` because
+  that counts the leading no-value items. The no-value tail or lead is `total - count(>>=<below the
+  minimum>)`. The ascending form was read directly for movie `rating` and `lastViewedAt` and for
+  show `lastViewedAt`, `unviewedLeafCount` and `viewCount`; for the families without no-value
+  items the `:asc` listing was the exact reverse of `:desc`, which implies it.
+- **Dates.** `addedAt` and `lastViewedAt` are instants (epoch seconds), so a calendar edge is the
+  viewer's local midnight. `originallyAvailableAt` is a DATE: the filter compares the day as the
+  epoch of UTC midnight (4 of 4 edges in both libraries; the local-midnight reading 0 of 4, on a host
+  that is not in UTC), so its edge must be built with UTC arithmetic. `year` equalled the release
+  date's year for every item in both libraries.
+- **The extent of a date rail is one more read, by design.** The bands of a date sort run back to the
+  year of the oldest item, which the app finds as the first row of `sort=<field>:asc:nullsLast` with
+  `Start=0, Size=1` over the grid's own terms, read from the row's `addedAt`, `lastViewedAt` or
+  `originallyAvailableAt` (`Client::section_oldest`). `nullsLast` is what puts the oldest VALUE first
+  (a plain `:asc` leads with the items that have none, see "Items with no value"); that it does so for
+  these three fields on a small library is the measurement above, not a run of this read. A show row
+  carries no `episode.addedAt`, so the last episode added reads the section's oldest EPISODE
+  (`type=4`, `sort=addedAt:asc:nullsLast`, no other filter), which is never newer than any show's
+  newest one. The app judges the year it gets: one after the current year gives the sort
+  no rail, and one before 1900 starts the bands at 1900 (an 1895 film or a `0001-01-01` date joins the
+  items with no value, at the low end, instead of costing a probe for every year in between).
+- **`episode.addedAt` is not mirror-symmetric.** With `type=2`, `episode.addedAt>>=E` is the shows
+  that have ANY episode newer than E, which equals "whose newest episode is newer" (checked against
+  the per-show maximum of 525 episodes: 4 of 4 edges, 2 of 2 straddles), and
+  `sort=episode.addedAt:desc` orders by the newest episode. But `:asc` orders by the OLDEST episode
+  (non-decreasing in the per-show minimum, not in the maximum) and `episode.addedAt<<=E` is "has ANY
+  episode older than E" (9 of 15 at the mid value, where "newest older than E" would give 7). The
+  ascending offset is `count(<<=E)`, not `total - count(>>=E)`: bands for this family are valid for
+  `:desc` only. Every show had episodes, so the placement of one without was not measured.
+- **`/year` and `/decade` carry no per-bucket `size`** (`key`, `title`, `fastKey` only: 25 and 6
+  buckets on the movie library); only `/firstCharacter` does. A year or decade band therefore costs
+  one count probe per bucket (`decade=D` over the six movie decade keys summed to the library total).
+- **A negative bare number on a date field is an absolute epoch, not a relative date** (measured
+  2026-10-31, movie and show libraries of 44 and 15 items, HTTP 200 on all 28 probes). On
+  `originallyAvailableAt` and on `addedAt`: `>=-315619200` (1960-01-01 UTC), `>>=-315619201`, `>=-1`,
+  `>>=-1` and `>=0` answered the whole library (44 movies, 15 shows), `<<=-1` and `<=-315619200`
+  answered 0. Read as seconds-ago relative dates, the movie `originallyAvailableAt` probes would
+  have answered 15, 15, 0, 0 (the four `>=`/`>>=` ones, 8, 8, 0, 0 on the shows) and 44, 29 (the two
+  `<<=`/`<=` ones), and an ignored term would have answered 44 to all of them; only the absolute
+  reading fits all seven probes of each field. A unit (`-3w`) is still relative. **Not exercised:**
+  neither library held an item dated before 1970 or an item without a release date, so a
+  comparison AT a real pre-1970 value was not seen, only that a negative edge is read as a number
+  and compared as one.
+- **Relative dates** (`addedAt>>=<form>`): `-12h`, `-30d`, `-3w`, `-4w`, `-1mon`, `-6mon`, `-1y`, `-2y`
+  were accepted and cut at their nominal ages. **`-6m` is MINUTES** (0 of 44 movies), and **`-1mo` is
+  HTTP 500**. Build absolute epochs instead.
+- **A filter can be silently ignored.** An unknown key (`bogusfield>>=100`) and even a real attribute
+  (`leafCount>>=100` on shows) answer the WHOLE library with no error, and `Field[]` is no list of
+  what filters: `rating` and `audienceRating` are absent from the movie `Field[]` and filter correctly.
+  A client that reads the counts must fail closed: when every edge's count equals the unfiltered
+  total, or the counts are not monotone in the edge, show no rail.
+- **`Sort[]`** (server-driven, so a rail appears only for a sort the server lists): movies list
+  `titleSort`, `originallyAvailableAt`, `rating`, `audienceRating`, `duration`, `addedAt`,
+  `lastViewedAt`, `mediaHeight`, `random`; shows list `titleSort`, `originallyAvailableAt`, `rating`,
+  `audienceRating`, `unviewedLeafCount`, `episode.addedAt`, `lastViewedAt`, `random`. `year` and
+  `viewCount` are accepted as sorts but are not listed. The same read with `type=3|4` (recorded
+  2026-10-31, `includeMeta=1`, PMS 1.43) lists **seasons**: a Title entry whose key is the compound
+  show order `show.titleSort,index` (descKey `show.titleSort:desc,index`) and `random`, nothing else;
+  and **episodes**: a Title entry whose key is the compound show order
+  `show.titleSort,season.index:nullsLast,episode.index:nullsLast,episode.originallyAvailableAt:nullsLast,episode.titleSort,episode.id`
+  (its descKey flips the first term), `originallyAvailableAt` (Release Date), `rating` (Critic
+  Rating), `audienceRating`, `addedAt` (Date Added), `lastViewedAt` and `random`. Neither lists a
+  plain `titleSort`, nor a duration, plays, resolution or year sort. The Title entry, the compound
+  show order, is the sort the A-Z letters belong to (Letter index, above) and the default of both views.
+  The Library's Sort value line (`screens/src/registry/sort_info.rs`) words, for an episode row,
+  the air date, the two scores, Date added and Date viewed from the listing's own fields
+  (`originallyAvailableAt`, `rating` + `ratingImage`, `audienceRating` + `audienceRatingImage`,
+  `addedAt`, `lastViewedAt`/`viewCount`) and, for a season row, `addedAt`, `lastViewedAt`,
+  `viewCount` and `leafCount - viewedLeafCount`; the Title entry and Random show no value, and a
+  Seasons view lists no sort that has one.
+- **The grid's own terms** are honoured by the probes: two edges per family, counted with the terms
+  and compared with the same-terms listing, matched. `genre` was probed on both libraries (movie
+  `rating` and `addedAt`, show `unviewedLeafCount`), `inProgress=1` on the movie library only (`rating`
+  and `addedAt`). `unwatched=1` and `unwatchedLeaves=1` proved nothing here (the Guest had no
+  completed view, so they left every total unchanged).
+- **Cost** (loopback, small libraries): a count probe median 3.2 ms (max 17 ms, 234 probes), a row
+  page of up to 200 rows median 6.5 ms, a directory read 1-5 ms; the first read after an idle spell
+  took 0.67-0.82 s and the first `/library/sections` of a session ~0.7 s.
+
+`tests/mock_pms.py` reproduces these rules (range operators, null placement, the `Size: 0` quirk and
+the `episode.addedAt` asymmetry; the spread data and the per-type `Sort[]` lists behind
+`--band-fixture`), so the data layer can be tested without a server.
+
+### Count probes for seasons and episodes (measured 2026-10-31, PMS 1.43.5.11029, Guest, 15 shows / 48 seasons / 525 episodes)
+
+The same probes against `type=3` (seasons) and `type=4` (episodes) of the one show library, read-only
+by `tools/pms-band-probe.py --types 3,4`. **Exact there, not proven at scale** (one small library; four
+data-driven edges per field).
+
+- **The count probe works on both** (`Start: 0` + `Size: 0`): `totalSize` 48 and 525, no rows, equal to the
+  unfiltered listing's size.
+- **`Sort[]` differs per type, and only the entry marked `active` in `Meta.Type[]` is the listing's** (the
+  array lists the show, season, episode and folder types). Seasons declare only Title and `random`.
+  Episodes declare Title, `originallyAvailableAt`, `rating`, `audienceRating`, `addedAt`, `lastViewedAt`
+  and `random`. Every entry carries a `descKey`, which for Title is a separate string.
+- **The Title key of both types is a COMPOSITE, not `titleSort`**: seasons `show.titleSort,index`, episodes
+  the show's title, then season index, episode index, release date, the episode's own sort title and id:
+  `show.titleSort,season.index:nullsLast,episode.index:nullsLast,episode.originallyAvailableAt:nullsLast,episode.titleSort,episode.id`.
+  The literal `sort=titleSort` is accepted (HTTP 200) but orders differently: episodes come out not grouped
+  by show (330 runs for 15 shows), seasons grouped by show in another show order. For a descending Title
+  listing use the entry's `descKey`; appending `:desc` to the episode key does not reverse the shows.
+
+Verdicts per field (four data-driven edges; the other operators exact at one value where VERIFIED):
+
+| field | seasons | episodes |
+|---|---|---|
+| `addedAt` | VERIFIED (sort works although undeclared) | VERIFIED |
+| `lastViewedAt` | VERIFIED, but 5 of 48 rows have a value (sort works although undeclared) | UNTESTABLE (no row has one under the Guest; the key is a real filter, `>>=-1` counted 0) |
+| `originallyAvailableAt` | UNTESTABLE (no season carries one) | VERIFIED as UTC-midnight epochs, like movies |
+| `rating` | UNTESTABLE (none) | UNTESTABLE (none of 525; a real filter, `>>=-1` counted 0) |
+| `audienceRating` | UNTESTABLE (none) | ROUNDED (listing 0.1-rounded; 3 of 4 edges missed by 1 to 4 rows) |
+
+- **Null placement is the same as for movies and shows** (no value sorts first `:asc`, last `:desc`, last both
+  ways with `:nullsLast`; `>>=`/`>=` exclude, `<<=`/`<=` include). A sort with no value on any row
+  (`rating`, `lastViewedAt` on episodes; `rating`, `audienceRating`, `originallyAvailableAt` on seasons) is
+  accepted and changes nothing, so its rail has no band to draw.
+- **The letters index counts by the SHOW's title for both types.** `/firstCharacter?type=3` and `type=4` each
+  answered 9 buckets whose `size`s sum to the type's total (48, 525) and equal the number of rows whose
+  show's first sort-title glyph is that letter, not the row's own. Laid end to end they land on the real
+  letter boundaries of the listing in the DECLARED Title order or the default order (48 of 48 and 525 of
+  525 rows in their bucket; descending with the `descKey` and the buckets reversed, the same), and NOT of
+  `sort=titleSort` (41 of 48, 125 of 525). `firstCharacter=<letter>` is no filter on these listings (nor on
+  `type=2`): it answered the whole type for every letter, so a letter jump takes the prefix-sum offset.
+- **Does the letters index follow the grid's terms on these listings?** Asked with
+  `tools/pms-band-probe.py --types 3,4 --letters-under-filters` (26 requests, counts only), the letters' sizes
+  summed to the `Size=0` count of the SAME terms every time, for the terms that could tell a followed term from
+  an ignored one: `year=<the most common year>`, a proper subset (seasons 3 of 48 in 2 buckets, episodes 54 of
+  525 in 3 buckets), and the app's Unwatched key spelled `=0` (`unwatchedLeaves=0` on seasons, `unwatched=0` on
+  episodes: 0 and 0, no bucket). The app's own `unwatchedLeaves=1` (seasons) and `unwatched=1` (episodes) both
+  matched the WHOLE type here (48 and 525: nothing was watched through), so they could not tell. Genre is
+  UNMEASURED: this library's `/genre?type=3` and `type=4` list no values. The application therefore does not
+  compare the letters' sum with the listing's total; a server that ignored a term would put the jumps off.
+- **Cost** (loopback): count probe median 3.4 ms (seasons) and 5.1 ms (episodes); a 200-row episode page 36.5 ms.
 
 ---
 
@@ -216,7 +456,14 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   `/tmp/plxnative-personbio` exists for one step further along — the biography degrades to a blank
   line, the filmography to nothing at all — and it is why `/tmp/plxnative-personcredits` had to be
   written. Reaching either with real data needs a signed-in account (`make sim` with a real
-  session, or the debug install with `--no-token`).
+  session, or the debug install with `--no-token`). A `devtriggers` build does not even ask on such
+  a boot, by decision (fail closed; the cost is accepted): with no Discover stand-in armed
+  (`plxnative-discover`, or a `plxnative-plextv` redirect that Discover follows) the person store
+  settles both reads as an empty answer without spawning a worker, `AccountClient::person_profile` /
+  `person_credits` refuse the same read if anything else calls them, and `discover: GET … refused` is
+  logged once. Such a boot shows no biography and no filmography credits; with a stand-in armed,
+  `tests/mock_pms.py` answers both routes with synthetic data (the credits 401 without a token there
+  too).
 - **The person's titles:** `GET /library/people/{personId}/media` → `Metadata[]`, everything the
   person appears in **across EVERY library section in one request** (person 161 → 3 items;
   person 6059 → 6). This is the right call for a person page; `?actor=<id>` below is the right
@@ -233,6 +480,42 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   the PMS photo transcoder rather than through the app's PMS-origin HTTP client: `image_transcode_path`
   passes the whole URL as `url=` to `/photo/:/transcode` and **the server does the TLS** — the
   same path posters take. Never invent another image route for them.
+
+---
+
+## 2d. Which of these guids does this server hold? — `GET /library/all?type=T&guid=a,b,c`
+
+(Measured 2026-10 on PMS 1.43.4 with a per-server token, read-only. The Watchlist's join from a
+Discover guid to a server's own ratingKey; `docs/watchlist.md`.)
+
+- **One request answers many guids.** `guid=<a>,<b>,<c>` in a SINGLE parameter returns every row whose
+  `guid` is listed; a guid the server does not hold is silently absent, there is no error row.
+  Repeated `guid=a&guid=b` keeps only the last. The separator is a literal `,`; each guid is
+  percent-encoded on its own first.
+- **Only the primary `plex://` guid matches.** `plex://movie/<24 hex>` and `plex://show/<24 hex>`.
+  `imdb://`, `tmdb://` and `tvdb://` (which the items carry in `Guid[]` with `includeGuids=1`) answer
+  size 0, so a title with no `plex://` guid cannot be looked up this way.
+- **An episode's `grandparentGuid` is the show's catalog id.** Measured 2026-10-21 on the local PMS: it
+  is `plex://show/<24 hex>` even for an episode whose own `guid` is `local://N`, and it is the global
+  agent id, the same on every server using the Plex agent. Continue Watching groups on it
+  (`docs/shared-servers.md`, "One tile per show in Continue Watching").
+- **A scrobble restamps `lastViewedAt` and moves the deck.** `/:/scrobble` on a never-watched episode
+  set `viewCount=1` and `lastViewedAt` to now, and `/hubs/continueWatching/items` then listed the show's
+  next episode first with that same `lastViewedAt`; `/:/unscrobble` restored both. Every row of that
+  hub carried `Media[0].Part[0]` (the hub parse fills `PmsMovie::part` from it).
+- **`type` narrows and must be right.** `type=1` movies, `type=2` shows. A wrong `type` answers
+  size 0, which is indistinguishable from "not held", so the call is made once per kind and the kind
+  comes from the guid's own prefix. Rows carry `librarySectionID` and, when the server has them,
+  `UltraBlurColors`.
+- **The client chunks at 40 guids** (`GUIDS_PER_REQUEST`) to keep the URL short; PMS's own URL limit
+  was not measured, so 40 is a conservative choice rather than a found ceiling. Cost is
+  servers x kinds x ceil(N/40) requests (about 10 to 12 for 200 titles on two servers).
+- **Absence is only proof when the server answered.** `Client::find_by_guids` returns `Err` when any
+  chunk got no readable answer, and the caller must not read that as "absent": a silent share would
+  otherwise turn a playable title into "Not on your servers".
+- The same guid in two libraries is reported once, with the first row's key.
+- A single-guid form `GET /library/all?guid=plex://movie/<hex>[&type=1]` also works and is what
+  "Also available" uses one guid at a time.
 
 ---
 
@@ -255,33 +538,38 @@ Verified hub list (`MediaContainer.Hub[]`), each hub has
 | `movie.recentlyadded.1` (promoted) | Recently Added in Movies | `/library/sections/1/all?sort=addedAt:desc` |
 | `custom.collection.*` | collection shelves | `/library/collections/{id}/children` |
 
-**`/hubs` has no paging** (`docs/plex-openapi.json`: its only parameters are `count`, `onlyTransient`
-and `identifier`). Home requests all rows, with 12 preview cards per row. Recently Added rows
-load more items through their provider's listing `key`, with both `X-Plex-Container-Start` and
-`X-Plex-Container-Size`. The client preserves the key's type, library, and sort parameters.
-Other Home rows, including collections, keep their 12-card preview.
+**The spec gives `/hubs` no paging** (`docs/plex-openapi.json`: its only parameters are `count`, `onlyTransient`
+and `identifier`), but a windowed request does page its hub list on a live server (see [Paging, observed](#paging-observed)).
+Home reads all rows, in windows of `HUB_WINDOW` hubs (`home_hubs` is the whole-list fallback), with 12 preview cards per row. A row pages
+through its provider's listing `key`, with both `X-Plex-Container-Start` and
+`X-Plex-Container-Size`, when `plx_plex::plex::is_pageable_hub_key` admits the key: `/hubs/…`,
+`/library/sections/…`, `/library/metadata/{id}/similar` and `/library/collections/{id}/children`
+(the listing the Collection page pages). The client preserves the key's type,
+library, and sort parameters. A row behind any other key keeps its 12-card preview and logs that
+once per hub; the Home, Library-section and Detail related rows share this one allowlist.
 
 A PMS response observed on 2026-10-09 returned `offset=0`, `size=36`, and `totalSize=50`.
 The next response returned `offset=36`, `size=14`, and `totalSize=50`. This confirms the
 required offset fields on that server. Other server versions remain unverified. The client
 rejects a response whose offset differs from the requested start.
 
-Home keeps a moving window of at most 24 cards per Recently Added row, with an overlap of up to 12 eligible cards.
+Home keeps a moving window of at most 24 cards per pageable row, with an overlap of up to 12 eligible cards.
 Server offsets are kept separately from visible card positions. A page retains the overlap
 and skips items from hidden libraries. One paging worker scans at most eight server chunks.
 If those chunks are hidden, it publishes the advanced cursor and keeps the current cards.
 A refresh scans the previous raw range so that hidden items do not shorten the retained window.
 It requests another window near the visible end and fetches an earlier window when the user
 scrolls back. Requests run outside the drawing loop. Failed page requests retain the current
-cards and stop after three attempts. Leaving the row cancels its paging demand. Returning to
-the row can start another attempt. A normal refresh reloads the current window. A profile change
+cards, and the store drops a page after three failed reads. While focus stays at the edge the
+shelf repeats an unanswered ask on its retry ladder (0.25 s rising to 30 s, with no give-up), so
+the next attempt needs no key press. Leaving the row cancels its paging demand. A normal refresh reloads the current window. A profile change
 starts from the new profile's preview. Both operations reject old results.
 The shared shelf widget draws only visible cards. Paging preserves the banner's current items.
 
-`pms.rs::HOME_CARDS_MAX` is a 2,048-slot preview budget. A Recently Added window spends at most
-12 preview slots. Other rows spend their published card count. Thus published rows hold at most
-4,096 cards, plus at most eight retained banner items. Whole rows beyond the preview budget
-are omitted from the tail of a source and logged as `hubs: card bound 2048 reached`.
+Home holds cards for at most `HOLD_ROWS` (16) rows at a time, each a window of at most
+`MAX_SHELF_ITEMS` (24) cards, plus at most eight retained banner items. Every row keeps a
+descriptor, so none is dropped; a row outside the held range publishes placeholders and is
+read again at its remembered offset when it returns.
 
 Verified Continue Watching item (movie, trimmed):
 
@@ -296,11 +584,12 @@ Verified Continue Watching item (movie, trimmed):
 per-string translation coverage for a tag is partial, which this app now papers over for every
 STANDARD hub rather than forwarding it as-is** (issue #12, investigated 2026-09-28: a Belarusian
 UI showed some hub titles in Belarusian and others in Russian/English on one Home screen).
-`plex::client::headers`/`pms_headers` still send the literal selected UI tag (`en`/`es`/`be` —
+`plex::client::headers`/`pms_headers` still send the literal selected UI tag (`Language::tag()` of each language in
+`i18n::SHIPPED` —
 `identity::language()` → `i18n::current().language().tag()`) on **every** PMS operation, hubs
 included (`rust-modules/plex/src/plex/client.rs`'s
-`pms_headers_carry_the_literal_selected_ui_language_be_included` test pins that for all three
-shipped tags) — that part of the earlier record stands. What changed is that neither
+`pms_headers_carry_the_literal_selected_ui_language_be_included` test pins that for every
+shipped tag) — that part of the earlier record stands. What changed is that neither
 `screens/home/mod.rs` nor a library's own browse grid renders `hub.title` unconditionally:
 `plex::hub_title::localized_hub_title` sits between a PMS `Hub` and the row the screen draws, at
 BOTH call sites — Home's whole-catalog merge (`pms.rs::project`, one row per source, `/hubs`) and
@@ -382,11 +671,13 @@ Measured on this server, and every one of these is a thing the OpenAPI spec does
   hub is required, not a nicety.
 * **`count` defaults to 6** and is honoured up to at least 24. It is items-per-hub; it never
   changes how many hubs come back.
-* **There is no paging of hubs** (the route's parameters are `count`, `onlyTransient` and
-  `identifier`), so a server with many promoted collections answers with all of them at once. The
-  Library takes every hub the server sends, at most `MAX_SHELF_ITEMS` (24) cards each, and bounds
-  only the section's total: `section_hubs::SECTION_CARDS_MAX` = `HOME_CARDS_MAX` = 2,048 cards,
-  whole shelves dropped from the tail and logged as `libhubs: card bound 2048 reached`.
+* **The spec gives the hub list no paging** (the route's parameters are `count`, `onlyTransient` and
+  `identifier`); a windowed request pages it on a live server (see [Paging, observed](#paging-observed)).
+  The Library reads it in windows of `HUB_WINDOW` hubs (`paging::read_hub_list`; `library_hubs` remains the
+  whole-list fallback for a server that ignores the window), so a server with many promoted collections never
+  answers with all of them at once. The Library keeps a descriptor for every hub the windows
+  bring; cards are held for at most `HOLD_ROWS` (16) rows, each a window of at most
+  `MAX_SHELF_ITEMS` (24) cards that pages through the hub's own key.
 * **`onlyTransient` is a no-op on this server** — `0`, `1` and absent all returned the same nine
   hubs. Do not send it and do not rely on it.
 * **`Accept: */*` returns XML here too**, like every other PMS route. The client's explicit
@@ -708,10 +999,25 @@ GET /library/metadata/{rk}?includeMarkers=1&includeChapters=1
   playhead routinely stops short of — treat it as open-ended rather than exclusive, or an
   end-of-item prompt blinks out over the last frames.
 
+### Reads by key — `skipRefresh` (the spec, and timed on one PMS)
+
+`plex-openapi.json` describes `skipRefresh=1` on `GET /library/metadata/{ids}` as skipping the synchronous
+local media agent and analysis refresh, which the default (false) runs. This client's background reads by
+key (`plex::Client::metadata_many`, which a Home row re-read, a hub or listing page's batch, the
+view-state read-back after Mark Watched or a stopped play and a person's filmography go through,
+`Client::metadata_background`, and the `includePreferences=1` show-preferences read of every episode play)
+send `skipRefresh=1`; the preferences read still returns the same `Preferences` with it (3 shows on one
+PMS). The detail read (`Client::metadata`), which a viewer opened, sends none. Plex Web 4.162.1 sends `skipRefresh=1` on its
+re-reads by key and never takes the refresh. On one household PMS the first batch read without it took 138
+to 948 ms in four of five sets, and no read with it was slow; a field log over a remote link read 4 to 9 s
+per Home row, with a timeline "item processed" notification about once a second while Home scrolled
+(issue #1458).
+
 ### Up Next — the `continuous=1` PlayQueue already carries it (verified live 2026-07-29)
 
 There is no "what plays next" endpoint to call: the `POST /playQueues?continuous=1` the app makes
-for **every** playback (§7) returns the show's remaining episodes after the selected one, each a
+for a playback of an item with no show (§7; an episode whose show is not known, a movie) returns
+the show's remaining episodes after the selected one, each a
 **full** `Metadata` row — `thumb`, `parentIndex`/`index`, `duration`, `viewOffset`, `summary`, and
 `Media[0].videoCodec`/`audioCodec` + `Part[0].key`. That is everything both the Up Next card and a
 subsequent direct-play need, so the feature costs zero extra round-trips.
@@ -722,6 +1028,37 @@ subsequent direct-play need, so the feature costs zero extra round-trips.
 - The queue does **not** span past the available episodes: the last episode a server holds for a
   show returns `playQueueTotalCount: 1`, i.e. no successor. A movie behaves the same way.
 - The POST needs an `X-Plex-Client-Identifier`; without it PMS answers with an empty body.
+
+### A show-keyed PlayQueue — the episodes BEFORE the playing one (spec- and client-derived, NOT yet observed live)
+
+The episode-only request above answers the selected episode and the ones after it with
+`playQueueSelectedItemOffset: 0`; there is **no row before the selected one**, so a queue created
+that way can never serve Previous (the HUD's Previous is `index > 0` of the queue's rows, and an
+episode played fresh from a Continue Watching tile or a detail page started at index 0). The
+`GET /playQueues/{id}` window parameters (`includeBefore`, `center`) only window a queue that
+already holds the rows, so they cannot add predecessors the queue lacks.
+
+For an episode whose show is known the app therefore asks for the queue of the SHOW with the
+episode as its first item to play:
+
+```
+POST /playQueues?type=video&uri=server://{machine}/com.plexapp.plugins.library/library/metadata/{showRk}
+                 &key=/library/metadata/{episodeRk}&shuffle=0&repeat=0      (no `continuous`)
+```
+
+`docs/plex-openapi.json` documents `key` as "the key of the first item to play" and the show URI as
+a valid `uri` (`onDeck` applies to show/season queues); python-plexapi's `PlayQueue.create(show,
+startItem=episode)` sends exactly `uri` + `key`. The answer is expected to hold the show's episodes
+in order with the keyed one selected (`playQueueSelectedItemID`/`Offset` on it). **That response
+shape has not been observed on a live server** (no PMS was probed for this change), so the app
+trusts it only when the selected row IS the requested episode on this server; a server that
+ignores `key` (and answers the first episode, or the show itself), refuses it, or does not answer
+costs one extra round trip (and an unused show queue left on the server): the app then asks the
+episode-only request above, as it always did. When the offset says
+rows precede the selected one but the answer's window opens on it, the existing window read
+(`GET /playQueues/{id}?center=…`, `queue_window.rs`) is spent once to fetch them. To verify live
+(owner's TV or a mock-free read-only probe): play an episode from the middle of a season and read
+the `playQueueSelectedItemOffset` and the first row of the log's queue line.
 
 ### Show chain (verified against a show, ratingKey 1857)
 
@@ -856,6 +1193,52 @@ Verified live:
 | `width=420&height=236&url=/library/metadata/1/art/...` | 200, `image/jpeg`, 420×236, 29 KB |
 | `width=300&height=450&url=/library/metadata/1/thumb/...` | 200, `image/jpeg`, 300×450, 36 KB |
 
+### Hub rows carry `Image[]`, with a stamped clearLogo (measured 2026-11-09, PMS 1.43.5.11079, Guest)
+
+`GET /hubs/continueWatching` and `GET /hubs/sections/{id}` (the `movie.inprogress.N` and
+`tv.inprogress.N` hubs) put the same `Image[]` on every row that `GET /library/metadata/{rk}`
+does (see `docs/plex-api.md`, "Artwork"). Each entry is `{type, url, alt}`; `alt` is the title.
+Every url is a server-relative path with the item's **update stamp** as its last segment:
+
+```
+coverPoster       /library/metadata/<rk>/thumb/<ts>
+background        /library/metadata/<rk>/art/<ts>
+clearLogo         /library/metadata/<rk>/clearLogo/<ts>
+backgroundSquare  /library/metadata/<rk>/squareArt/<ts>
+snapshot          /library/metadata/<episode rk>/thumb/<ts>      (episodes only)
+```
+
+The app uses the stamped clearLogo path for both hero logos and baked cards, so a replacement
+uses a new cache key as soon as updated metadata lands. When the server omits the image list,
+the app can still look up a logo via `/library/metadata/{rk}/clearLogo`. **An episode's `Image[]` names its SHOW's
+rating key** for `coverPoster`, `background`, `clearLogo` and `backgroundSquare` (the row's own
+`ratingKey` 732, the show's 605, in the probe), and only `snapshot` is the episode's own: the
+episode's `thumb` still. A movie row has no `snapshot`. Every row of the probe (4 movies and 1
+episode in Continue Watching) had `clearLogo`, `background` and `coverPoster`; none had a
+`coverArt` (that type exists only on the Discover provider, which PMS does not serve). Whether a
+title without a logo omits the entry or carries an empty url was not observed. A parser must
+treat an absent entry as "none".
+
+The row's `guid` is `plex://movie/<24 hex>` for a movie and `plex://episode/<24 hex>` for an
+episode; the episode's `grandparentGuid` is `plex://show/<24 hex>` (the catalog id of its show).
+
+### An absolute Discover image URL through the transcoder (measured 2026-11-09, PMS 1.43.5.11079, Guest)
+
+A Discover `coverArt` is an absolute URL on `https://metadata-static.plex.tv` (or, for a localized
+cover, `https://image.tmdb.org`; `docs/plex-api.md`). The PMS photo transcoder takes it as `url=` like
+a headshot and fetches it server-side:
+
+| request (`minSize=1`, `url=` the urlencoded absolute coverArt) | result |
+|---|---|
+| `width=420&height=236`, source 1920x1080 | 200, `image/jpeg`, **420x236**, 22 KB (source 263 KB) |
+| `width=420&height=236`, source 3840x2160 (three titles) | 200, `image/jpeg`, **420x236**, 12 to 28 KB (source 0.5 to 1.5 MB) |
+| the same without `minSize` | 200, identical bytes (a 16:9 source at a 16:9 box) |
+
+All four were 16:9 sources, so the box was filled exactly; whether a non-16:9 cover overshoots
+(`minSize=1`, above) was not probed. The request carries the PMS token only, never the Discover
+token. A raw GET of the same absolute URL from the dev Mac also answered 200 with no credential,
+at the full source size.
+
 ### Raw (no transcode wrapper) — verified, do NOT use for grids
 
 ```
@@ -911,7 +1294,7 @@ Byte-range serving works, so seek-by-range is available to the player.
 |---|---|---|
 | `container` | `mkv`, `mp4` | demuxer support check |
 | `videoCodec` | `h264`, `hevc` | webOS decoder check |
-| `audioCodec` | `ac3`, `eac3`, `aac` | audio passthrough/decode check |
+| `audioCodec` | `ac3`, `eac3`, `aac`, `dca` | audio passthrough/decode check. PMS spells DTS `dca` (every DTS entry in its shipped profiles does), the pipeline and the device table say `dts`: `devcaps::audio_codec_id` is the one canonicaliser, and the client profile names it `dca` too |
 | `width` / `height` | 1920/858, 3840/1920 | ≤ panel/decoder max (4K HEVC ok on most webOS) |
 | `bitrate` | 16248 (kbps) | LAN is fine; cap for Wi-Fi profiles |
 | `videoResolution` | `1080`, `4k` | coarse version picker among multiple `Media[]` |
@@ -975,8 +1358,9 @@ for the raw captures behind this table.
 | M4 | Enhanced remux plus `subtitleStreamID` for an embedded SRT | `subtitles=embedded` or `=sidecar`: video copy, subtitle decision `unavailable` — PMS refuses to carry a text subtitle into the progressive MKV the enhancement produces. `subtitles=auto`: the server instead re-encodes the video and burns it. Either way a subtitle and the enhancement cannot share a route, which is I6. |
 | M5 | Part GET (`Range: bytes=0-1023`) on a transcode session, after MDE, after MDE followed by an enhanced-remux decision on the same session, and after only an enhanced decision | 206 Partial Content in every case from a host, including with the remux encoder still live, stopped physically, stopped with `closeResourceSession=1`, or abandoned. PR 4's device run nonetheless met a **503** on the Part right after releasing an enhanced remux; what PMS keyed it on did not reproduce off the television, so a release asks for the Part before it trials it and falls to the plain remux on a refusal (`route::decision::admit_original_part`). |
 | M6 | MDE `/decision` on a session whose transcoder is live | The MDE ENDS that transcoder: an HLS session's later segments answer 404 (200 without the MDE) and its stop 404; a progressive session's `start.mkv` at an offset on the same id answers 400 until it is re-decided. Re-issuing MDE is harmless only when nothing is live — never before a Part GET whose rollback needs the encoder still running. |
-| M7 | Enhanced remux plus an explicit `subtitleStreamID=<id>&subtitles=burn` for an embedded subtitle, instead of the `=embedded`/`=sidecar`/`=auto` shapes M4 measured | **Verified live (PMS 1.43.4, host, Guest identity, 2026-09-29)**, against our own transcode query shape plus `normalizeLoudness=1`. Enhanced remux + `subtitles=embedded`: video copy, the text subtitle is absent from the decision entirely, and a PGS one decides `unavailable` — confirming M4's refusal generalizes past SRT. Enhanced + `subtitles=burn` at a re-encode flavour (`videoResolution=3840x2160&maxVideoBitrate=60000`) on HDR10 4K sources, both SRT and PGS: video transcodes to HEVC 10-bit with `colorTrc` kept at `smpte2084` (confirmed by `ffprobe` on the output: `yuv420p10le`/`smpte2084`), the hardware encoder runs it, throughput measured 2.0–2.6× realtime, source resolution is kept (no downscale), and the PGS case's own decision reads `burn`. The SRT case lists no subtitle Stream in the decision at all even though the video is re-encoded — the burn happens, but the decision body gives no wire signal of it for a text track; a visual (on-screen) confirmation that the burned text actually appears is still pending the device run. The SAME sources with the enhancement OFF cost the identical video transcode — the burn itself is the cost, not the DSP params riding along with it. A Dolby Vision Profile 8 source asked to burn: PMS copies the video (`DOVIPresent=1` in the decision, matching `EnhancementRoute::RemuxDropsDolbyVision`'s "video copy" half) and silently drops the subtitle — confirming `DisabledReason::DolbyVisionSubtitle`'s refusal is not just this app being conservative; the server itself cannot do both. Official Plex clients ask for `subtitles=burn` explicitly rather than relying on `=auto`'s refuse-then-decide path M4 found; this app now does the same: an embedded subtitle forces `remux: false` (a real re-encode, `EnhancementRoute::Burn`) carrying both the DSP params and the burn request in the one decision, so the subtitle is never silently dropped (superseding I6's "cannot share a route" for the embedded case). An external sidecar stays on the ordinary enhanced remux and is drawn by the app over it: a remux contract never names a subtitle (see M8), and picking or clearing a sidecar on a live remux rebuilds nothing. |
+| M7 | Enhanced remux plus an explicit `subtitleStreamID=<id>&subtitles=burn` for an embedded subtitle, instead of the `=embedded`/`=sidecar`/`=auto` shapes M4 measured | **Verified live (PMS 1.43.4, host, Guest identity, 2026-09-29)**, against our own transcode query shape plus `normalizeLoudness=1`. Enhanced remux + `subtitles=embedded`: video copy, the text subtitle is absent from the decision entirely, and a PGS one decides `unavailable` — confirming M4's refusal generalizes past SRT. Enhanced + `subtitles=burn` at a re-encode flavour (`videoResolution=3840x2160&maxVideoBitrate=60000`) on HDR10 4K sources, both SRT and PGS: video transcodes to HEVC 10-bit with `colorTrc` kept at `smpte2084` (confirmed by `ffprobe` on the output: `yuv420p10le`/`smpte2084`), the hardware encoder runs it, throughput measured 2.0–2.6× realtime, source resolution is kept (no downscale), and the PGS case's own decision reads `burn`. The SRT case lists no subtitle Stream in the decision at all even though the video is re-encoded — the burn happens, but the decision body gives no wire signal of it for a text track; a visual (on-screen) confirmation that the burned text actually appears is still pending the device run. The SAME sources with the enhancement OFF cost the identical video transcode — the burn itself is the cost, not the DSP params riding along with it. A Dolby Vision Profile 8 source asked to burn: PMS copies the video (`DOVIPresent=1` in the decision, matching the enhanced remux's video copy) and silently drops the subtitle — confirming `DisabledReason::DolbyVisionSubtitle`'s refusal is not just this app being conservative; the server itself cannot do both. Official Plex clients ask for `subtitles=burn` explicitly rather than relying on `=auto`'s refuse-then-decide path M4 found; this app now does the same: an embedded subtitle forces `remux: false` (a real re-encode, `EnhancementRoute::Burn`) carrying both the DSP params and the burn request in the one decision, so the subtitle is never silently dropped (superseding I6's "cannot share a route" for the embedded case). An external sidecar stays on the ordinary enhanced remux and is drawn by the app over it: a remux contract never names a subtitle (see M8), and picking or clearing a sidecar on a live remux rebuilds nothing. |
 | M8 | **UNMEASURED** — a remux (plain or enhanced) whose subtitle the app draws sends `subtitleStreamID=0&subtitles=none` on the transcode leg (`route::plan::transcode_spec`, `TranscodeSpec::client_subtitles`) | The spelling is the MDE handshake's client-rendered mode (`Client::mde_decision`), which PMS has accepted before; it has not been sent on a `/video/:/transcode/universal/decision` or `start.mkv` request. Expected: video copy, subtitle absent from the decision, no re-encode. A TV or host run must confirm PMS does not answer `auto`'s refuse-then-decide path or burn the part's own selected subtitle instead. **A TV run on 2026-10-06** showed PMS serving the Part to a fresh session id (`<live>-subs`) during a live remux, which is what the side reader (`player::subside`, `route::side_reader_target`) reads for an embedded subtitle. **Measured on the same TV (2026-10-06):** a Part `Range` read during a live remux answers 503 when it carries that remux session id and 206 with a fresh or absent session id; so a release from a remux (or burn) back to Direct Play (`route::decision::OriginalRecoveryPlan::direct_session`) probes and opens the Part on a freshly minted session id and stops the old remux once decoded frames confirm, while a release from a live hls encoder keeps that encoder's id (the Part shares its Streaming Resource). Whether `subtitles=none` on the start leg keeps the video a copy is still UNMEASURED: that run sent the dev trigger's remux with no subtitle selected. |
+| M9 | Enhanced remux (`directStream=1&directStreamAudio=1&boostDialog=1&subtitles=none`, `start.mkv`) of a Dolby Vision Profile 8 and a Profile 7 FEL source | **Measured 2026-10-19 (PMS 1.43.4.10903, host, Guest identity; the dev TV for the picture).** Both `/decision` answers copied the video (`decision=copy`), the decision Stream carrying `DOVIPresent=1` and the source's `DOVIProfile`. `ffprobe` of the output found the DOVI configuration record intact (P8: profile 8, compat 1; P7: profile 7, `el_present` 1, `bl_present` 1, compat 6), and the P7 output still carried its UNSPEC62 RPUs and UNSPEC63 enhancement-layer NALs. On the dev TV both played with the panel in Dolby Vision (Glasshouse `picture.dynamicRange`), the P7 one with the app's P7→P8.1 conversion armed on the remuxed stream. So a video copy keeps the declaration the file would have made as a direct play, and `route::plan::copied_video_dv` declares it. With an embedded subtitle selected the server instead re-encoded the video to burn it (`decision=transcode`), and no declaration is made. |
 
 **Known device-only gap on M5 (`audio_enhancement_normalize_reset`, `tests/manifest.json`, 2026-09-29).**
 Admitting the Part before the trial (`admit_original_part`) does not close the 503 in every case (the admission and the trial now read the Part on a fresh session id rather than the remux's, per M8, which this entry predates; whether that closes the case below is unmeasured):
@@ -994,7 +1378,7 @@ understood or worked around; a release from a session that has posted playing ti
 Direct Play only when PMS admits the Part, otherwise it returns to the plain Original remux.
 
 **Client-side reading.** `route::plan::enhancement_availability` (I1-I7, M7) gates the ASK and its
-flavour (`EnhancementRoute::Remux` / `RemuxDropsDolbyVision` / `Burn`, or a `DisabledReason` for
+flavour (`EnhancementRoute::Remux` / `Burn`, or a `DisabledReason` for
 every gate but "no Plex Pass" — see M7); the wire params are never sent outside a Direct/Remux
 target even when the viewer's preference is on (M3, I5).
 `route::EnhancementOutcome` grades the ANSWER from the params' own observability in the table above:
@@ -1077,8 +1461,9 @@ against a PMS, which nobody has run.
 **What THIS app sends is a subset of the table, and the two must not be read as one.**
 `rust-modules/plex/src/plex/client.rs::playback_identity` (constants in `plex/identity.rs`) always emits
 nine fields: `X-Plex-Client-Identifier`, `-Product`, `-Version`, `-Platform`, `-Platform-Version`,
-`-Device`, `-Device-Name`, `-Model` and `-Provides`, plus the token. The central PMS request choke
-point sends **`X-Plex-Language` as a header** on every operation, using the UI language resolved
+`-Device`, `-Device-Name`, `-Model` and `-Provides`, plus the token. Ordinary PMS requests, including metadata and the notification feed, send the
+first seven fields as HTTP headers. This lets a server apply the same per-client rules when it
+returns the version picker's `Media[]` as it does during playback. The central PMS request path also sends **`X-Plex-Language` as a header** on every operation, using the UI language resolved
 at boot from the app preference and TV locale (English fallback). This is THIS app's own
 System-preference resolution (webOS locale → shipped catalog, `i18n::mod.rs`); once resolved, the
 literal tag is what goes on the wire, unchanged by whether PMS happens to have a full translation
@@ -1217,6 +1602,22 @@ names the real selected id and "do not burn" is carried only by the transcode de
 sent `0` at every transcode start until 2026-10-06, which is how a freshly searched subtitle was
 lost at the next playback.
 
+**The track-memory write-back follows that rule and is UNMEASURED against a real server.** When a
+viewer's fresh play of an episode applied a remembered audio or subtitle on a DIRECT PLAY, the app
+sends one `PUT /library/parts/<part>?allParts=1[&audioStreamID=<A>][&subtitleStreamID=<S>]` on the
+landing's first decoded frame (`route::send_parked_write_back`), so the selection the server holds
+matches the screen. Nothing else changes: no watch state, no show- or account-level preference, no
+stream offset. `<S>` is the remembered track, `0` only for a remembered Off over a Part that has a
+subtitle selected; an audio-only write names the Part's own selected subtitle unchanged (which keeps
+a download alive) and omits the field when none is selected, so it never creates an explicit Off.
+Nothing is written for a declined memory, a fall-through pick, a retry or preview, a refused direct
+play, a transcode (its start PUT is the write) or a pick not on screen, and the subtitle selection
+is never moved for a Part that carries a downloaded or external subtitle. That the write lands on the VIEWER's
+own selection (not a household-wide one), that it spares another user's download, and that
+omitting `subtitleStreamID` leaves the subtitle selection alone all rest on the OpenAPI spec and
+the in-tree fake (`selection_pms`) alone; `tests/mock_pms.py`'s selection is global. A real-server
+Guest check is still owed.
+
 The same loss, second sequence (2026-10-06): a download installed and selected mid-playback, playback
 stopped and restarted two seconds later, and the start's `PUT .../parts/<part>?allParts=1&subtitleStreamID=<E>&audioStreamID=<A>`
 named the part's EMBEDDED English track `<E>` (re-picked from the page's pre-playback copy of the
@@ -1232,9 +1633,291 @@ it is a 400).
 
 ---
 
+## 9. Notifications (SSE) — `/:/eventsource/notifications` (measured on PMS 1.43.4, Guest token; ON for owned servers)
+
+The server pushes what other clients are doing. The app reads it with `plex::notify` (the protocol)
+and `stores::notify` (the policy); both ship on (`NOTIFY_ENABLED = true`) and the feed opens
+only to a server the account OWNS. Notifications are hints about a stranger's playback: they never
+reach a timeline, a stop, an end-of-stream candidate or a resume point.
+
+```
+GET /:/eventsource/notifications?filters=playing%2Ctimeline   (Accept: text/event-stream; X-Plex-Token in the query)
+```
+
+Measured against a local server with a Guest token:
+
+- **The query parameter is `filters`, and the path is `/:/eventsource/`.** `plex-openapi.json`
+  documents the path as `/:/eventsource/notifications` but the parameter as `filter`; the WebSocket
+  twin is `/:/websockets/notifications` on the server and `/:/websocket/notifications` in the spec.
+  The measurements win.
+- **A Guest token receives only `playing` events** (session key, the playing client's
+  `clientIdentifier`, `ratingKey`, `viewOffset`, `state`). The app requests `filters=playing,timeline`
+  (the comma sent percent-encoded). The idle measurements below used `filters=playing` alone; a later
+  capture on the owner's own server shows the server **accepts both `filters=playing,timeline` and
+  `filters=playing%2Ctimeline` and then sends `timeline` frames** (the fallback, no `filters`, is not
+  wired and is not needed).
+- **An owner token, watched read-only from the host over loopback HTTP** (one stream at a time, the
+  app's identity headers' client identifier, token in a header, no other request): with
+  `filters=playing`, 601 s: HTTP 200 `text/event-stream`, 60 frames, every one an SSE `ping`
+  (6.0 per minute, about 10 s apart), largest frame 20 bytes, 1320 bytes in all; no `playing` and no
+  other type arrived. Without `filters`, 180 s: 18 frames, again only `ping` (6.0 per minute, largest
+  frame 20 bytes). The server was idle for both windows, so this shows the owner token is accepted,
+  the stream is quiet at rest and no unfiltered type (activity, timeline, status, update) arrived
+  unprompted. It does NOT show whether `filters` suppresses anything, or whether the parser sees a
+  non-`playing` type, because nothing but pings was ever sent; that needs library activity.
+- **A ping about every 10 seconds**, and **no replay**: events missed while disconnected are gone,
+  so a reconnect after a live stream must re-read what the screens show (`resync_epoch`).
+- **Scrobble and unscrobble emit nothing.** The feed does not tell a client that an item became
+  watched; the re-read backstop does.
+- **No `ETag`** on any related read.
+- **One persisted client identifier.** Every new `X-Plex-Client-Identifier` the server sees raises
+  a new-device alert on the account, so the feed sends the same identifier the rest of the app does
+  and never mints one per connection. It sends the identity headers (`Client-Identifier`, `Product`,
+  `Version`, `Platform`, `Platform-Version`, `Device`, `Device-Name`) and no `X-Plex-Provides`: this
+  client is not a controllable player.
+
+What the parser accepts, leniently: a `data` JSON whose `NotificationContainer.type` is `playing`
+(or absent) and whose `PlaySessionStateNotification` array lists the sessions, or whose type is
+`timeline` (below); every field optional,
+ids as strings or numbers, unknown fields and unknown types ignored. A session whose
+`clientIdentifier` is this device's own is dropped before anything else sees it. The envelope's field
+names are the parser's reading and are not yet confirmed by a capture committed here: a verbatim
+frame would carry the session's key, client id and rating key, so it stays out of the repository
+(scrubbed captures hold only the ping cadence).
+
+**`timeline` frames: CAPTURED** (passive, read-only streams on the owner's own server while its library
+scanned; the raw captures hold titles and paths and stay out of the repository). One frame is
+`event: timeline` + `data: {"TimelineEntry":{...}}`: a single OBJECT, not an array, and no
+`NotificationContainer`. Scrubbed shape (synthetic values):
+`{"TimelineEntry":{"identifier":"com.plexapp.plugins.library","sectionID":"1","itemID":"1001","type":1,
+"title":"Movie A","state":5,"metadataState":"processing","updatedAt":1760000001}}`. `sectionID` and
+`itemID` are STRINGS; `type` and `state` are integers; `metadataState` ("queued", "matching",
+"processing", "loading") and `mediaState` ("analyzing") appear on some frames only. `type`: 1 movie, 2
+show, 3 season, 4 episode, 10 track. `state` values seen: 2, 3, 4, 5.
+
+The sequence of one movie or show is `state` 5 + `metadataState` "processing", then 4 + "loading", then
+**5 with no `metadataState`: the finished frame, the last of its sequence**. So state 5 opens AND closes a
+sequence (the first, before the item has metadata, is not "finished"). A season runs 2 ("matching"), 5, 3
+("queued"), 3 ("processing"), 4 ("loading") and a final 5, with its episodes (5, 4, 4, 5 each)
+interleaved; a music track is two state-5 frames, the first with `mediaState` "analyzing". The sequence
+is the same whether the item is new or only refreshed (the captures cannot tell them apart), so a
+"create" is "the item finished processing". **Deletion has NOT been observed** (no delete happened in any
+capture): the community-documented state 9 is kept as the delete value and is UNVERIFIED, as is the rest
+of the delete frame.
+
+The parser keeps an entry only when `itemID`, `type` and `state` are present (numbers as numbers or
+numeric strings), `type` is 1 or 2, the `identifier`, when present, is the library plugin's and
+`state` is 5 with neither `metadataState` nor `mediaState` (created) or 9 (deleted, UNVERIFIED); every
+other frame is dropped. The community `NotificationContainer` envelope with an array is still read.
+An `itemID` is the item's `ratingKey` on that server, not a guid. The fixtures
+(`rust-modules/plex/src/plex/notify/fixtures.rs`) are this shape with synthetic titles and ids.
+
+**Frame rates (measured, owner's server, 12 h).** `timeline`: 53 frames in 720 min = 0.07 per minute
+over the window, 7.6 per minute over the 7 minutes that had any; a scan arrives in bursts, the peak
+60 s window held 20 frames (all within one second, a 10-track music add) and a 36-frame season add held
+18 in its busiest minute. Idle is pings only: 6 per minute (4319 in 720 min), 2 bytes of data each.
+`filters=playing,timeline` costs 53 timeline + 4319 ping frames, 19 KB, in 12 h. **Without `filters`**
+the same 12 h held 27 990 frames and 6.8 MB: `activity` 22 004 frames, mean 30.6 per minute over the
+window, 66.9 over its 329 active minutes, peak 215 in one minute and 62 in one second (437 bytes at most),
+plus `progress` 1 401, `status` 106, `account` 59, `reachability` 47 and `preference` 1. Filtering is what
+keeps the feed quiet; an unfiltered subscription is not an option.
+
+What a hint does (`stores::notify_map`): a session that is new or changed state on an item a page
+HOLDS owes that item a read-back of OUR state. A page holds what its store enumerates while the page
+is on the navigation stack, visible or covered: Home's, the Library page's and Search's rows only
+while those pages are on it (a popped page holds nothing), the Watchlist page's matched copies
+on reachable servers inside its hold window (the same rule), a Person, Filmography or Collection page's
+rows, and a Detail page's own item, plus, while it is the loaded Detail, the episodes of its current
+season window (read the owing way) and its related and collection tiles (read quiet). A steady
+`playing` ping owes nothing, `buffering` counts as `playing` and an unknown state is ignored, and two
+clients without a session key are told apart by client id. A `stopped` session also owes its server one
+quiet Home refetch (`RefetchSourceQuiet`, coalesced per server), and, when no page holds the item, one
+`HubsInvalidateServer` for that server only: its section shelves are re-read, behind its failure
+backoff (a hint does not reset it) and at most once per quiet-refetch spacing per section. An item a
+Detail page shows is read the owing way, so the landed row (and, for an episode, its season and show)
+reaches the page through `DetailReconcile` (in place, no focus or scroll move); any other held card is
+read quiet and a Detail on screen is not re-fetched for it. Nothing is spent under the player or while
+a recording or replay is armed: it stays queued. A feed that comes back after a gap forgets what it had
+seen and owes the covered pages their re-read. A hint is never a playback event: it does not queue a
+stop, an end-of-stream candidate or a resume point, so a stranger's `stopped` cannot scrobble our
+other servers.
+
+What a hint does for the Watchlist: a session on a matched title that the page holds owes a read-back like
+any held card. A `timeline` create or delete does not read the item: it owes the Watchlist store ONE re-match
+of that server and kind (a delete of the item a tile is matched to asks again about that guid, a create asks
+again about the kind's titles the server was not seen to hold, `/library/all?type=T&guid=…` at 40 guids to a
+request), deduplicated per server and kind, only once the Watchlist has loaded and only when `reread_allowed`
+(it stays queued otherwise). A feed that came back
+after a gap re-asks the server's titles whole. The tile flips when the answer lands (`docs/watchlist.md`,
+*Live-update gaps*). The same create or delete also moves that server's lists: one quiet Home refetch
+and one section-shelf invalidate (coalesced like a `stopped`'s), and one `BrowseCmd::ListingsChanged` for its
+library listings. **None of these four (the re-match, the refetch, the invalidate and the re-list) is made
+when the entry arrives.** A scan delivers about one finished entry a second for minutes, and over a remote
+link one row read takes seconds, so re-reading on each entry kept every read the viewer scrolled to stuck in
+a queue (#1458). A server's entries wait for ITS feed to go quiet: the four are made once, when no library
+entry for that server has arrived for 10 s (`LIBRARY_QUIET_FRAMES`) or when 60 s
+(`LIBRARY_LONGEST_WAIT_FRAMES`) have passed since the oldest entry not yet spent, so a feed that never goes
+quiet still refreshes about once a minute; the next entry starts a new wait. The wait is counted in pumped frames and holds only library entries: a `stopped` session's
+refetch and invalidate, a feed gap's sweep and the read-backs above are not waited on, and the spacings
+downstream (5 s per quiet refetch, per section shelf and per re-match) still apply.
+PMS sends the same `finished` frame for a refreshed item as for a new one, so the open grid
+is never listed again while it is visible: it is marked stale, as a read-back that moves a row's membership
+marks it, and re-queried keeping the reader's place when a page covers it (at once when no Library page is
+on the navigation stack). The server's other sections forget their pages and fetch afresh on their next
+visit, and so does a section left while stale. A watched toggle on another client emits
+nothing, and the plex.tv membership itself has no PMS signal at all.
+
+Connection policy: idle 25 s ends a stream as `Silent`; `Silent`, `Closed`, a transport failure and a
+5xx retry after 2, 4, 8 ... 60 s counted in frames; a 401 parks the server until its token changes; any
+other 4xx and a build that cannot stream (libcurl unbound or only serialised HTTPS) park it for the
+session, while a request the credential gate refused (status 0, a state of the moment) backs off; a background cancels every stream and a foreground reopens them.
+
+TV checks (debug install signed in through `tests/mock_pms.py`'s own plex.tv, so the mock's server
+arrives OWNED and the owned-only rule runs unmodified; `tools/tv-session.sh up --mock-plextv`):
+connects and goes live on an owned server (passed); ten idle minutes with no churn (0 reconnects, 0
+ends in 600 s; passed); the mock stopped and restarted: `Transport` end, escalating Backoff, reconnect,
+exactly one resync (passed); another client's `playing` then `stopped` refetches Continue Watching
+once, and an open Detail re-reads in place with its layout and focus unchanged (passed). Background and foreground
+on the set (2026-10-16; `tv-session.sh background` launches a full-screen app over ours, `foreground`
+launches ours again with the pid unchanged): two WILL/DID background edges each logged one `notify:
+suspend conns=1`; the foreground logged `network changed conns=1`, `resume conns=1`, then ONE
+`connecting` and `live`, with no `resync`, no `ended` and no park line (the page re-read comes from
+`reread.resume`, not from a feed gap) (passed, twice). A profile switch through the who's-watching
+picker on a three-profile mock household: `auth: switch ... ok (per-user server token)`, `plex: 1
+server(s) revoked - profile changed`, then `roster`, `connecting`, `live`: the feed reopened on the
+new profile with no `ended` and no refused-credential line; the empty-token and old-mailbox rules are
+pinned by `notify_tests` (`empty_token_never_connects`, `token_change_reconnects_and_drops_old_mailbox`),
+and the log cannot show which token the stream carried (the mock accepts any non-empty one), so the
+on-set evidence is that it reconnected, not what it sent. Roster rebuilds right after a switch can
+show a second `connecting` before the first `live` (the first connection is cancelled by the new
+key). A silent peer (the mock process SIGSTOPped for 60 s with its socket open, nothing sent):
+two `ended Silent -> Backoff` with their reconnects in 60 s, then on SIGCONT one `resync` and `live`
+(passed). A REAL-LOOKING network loss (2026-10-16; `tools/netloss-proxy.py`, a host-side TCP proxy between the set and the mock, no
+root and no change to the set's network: the mock was started with `--advertise-ip <host LAN IPv4>
+--advertise-port <proxy port>` so every PMS connection the app opened, the feed included, crossed
+it; `tv-session.sh up --mock-plextv` for the owned sign-in, then `POST /_proxy/mode`): the proxy's
+`blackhole` keeps existing connections open and stops forwarding in both directions (no FIN, no
+RST; new connections are accepted and never answered), `reset` RSTs everything and resets each new
+connection on accept. Heartbeat counts are `loop=` lines (about one a second) and every one read
+`dropped=0`. (1) Blackhole 60 s on the idle picker: `ended Silent -> Backoff` twice (the stream was
+silent 25 s each time), two reconnects accepted by the proxy and never answered (+24 s, +54 s), no
+park; 62 heartbeat lines in the 62 s window, so the loop never stalled; on restore ONE `resync epoch=1`
+and `live` (passed). (2) Reset, restored after 30 s: `ended Transport` four times with reconnects at
++2.4, +6.9, +16.7 s (each reset on accept) and +36 s (the first after restore), one `resync`, `live`
+(passed; 33 heartbeat lines in the 32 s of reset). (3) Blackhole 300 s: six `ended Silent` and six reconnects, the gaps
+between connects 29.7, 33.7, 41.6, 59.4, 89.7 s (the 25 s silence plus the 2, 4, 8, 16 ... up to
+60 s backoff), no park; the sixth connection, held since +279 s, went `live` when the link came
+back, with ONE `resync` (passed; 299 heartbeat lines in the 302 s window). (4) Normal requests during a 60 s blackhole
+(re-picking a profile through the who's-watching picker, which re-reads the server): `pms: server 0
+info unavailable (GET / failed)`, `browse: source 0 ... did not answer`, `hubs: source 0 FAILED
+(attempt 1) - retrying in 2s`, `auth: ... probe timed out`; the page showed its "Couldn't load
+libraries / Try again" read-out, BACK and OK were still handled during the loss, and 81 heartbeat
+lines in the 82 s window all read `dropped=0`, with `fps=60` while the spinner ran (passed). A restore that releases
+many held connections at once can overrun the mock's small accept queue (six of 24 were reset by
+it once); the proxy retries its upstream connect, so that is the mock's artefact, not the link's.
+NOT determined: the cases a lit Home would add (only the picker and the library-choice page carry
+PMS traffic without pressing *Start watching*, which this run did not), a loss on the set's own
+route (the proxy is a userland analogue: the TCP stack on the set still sees an ordinary peer that
+went quiet or reset), and a lossy rather than dead link (no partial loss, latency or reordering).
+Also not determined: whether Home focus stays put under a tile update (only the Detail page
+was captured).
+
+---
+
+## Paging, observed
+
+Observed on PMS 1.43.4 with a small library, by read-only GETs. Only the endpoints in the table were
+probed; the other listings this file describes are not covered by this section.
+
+A request pages when it carries the window's start (`X-Plex-Container-Start`, as a query parameter or
+a header; see the paging gotcha in §2b). A paged answer echoes `offset`, carries the listing's
+`totalSize`, and `size` is the number of rows returned. An unpaged answer carries no `totalSize` and
+no `offset`: a `similar` listing without a window has none, and a library search without one carries
+only `size`.
+
+| Endpoint | Pages? | Carries `totalSize` and `offset` when paged | Notes |
+|---|---|---|---|
+| `/hubs/continueWatching/items` (the key of the Continue Watching hub) | yes | yes | Windows (0,3) and (3,3) are contiguous; rows are sorted by `lastViewedAt`, descending. The library held six items, so nothing past twelve was seen. |
+| `/library/metadata/{id}/similar` (the key of `movie.similar`) | yes | yes | `totalSize` 24 to 26 across calls; windows are contiguous; the related hub's preview is the exact head of the listing; order is stable. |
+| `/library/sections/{id}/all` with a `title=` filter | yes | yes | Pages as an unfiltered section listing does. |
+| `/library/sections/{id}/collections?title=`, `/library/sections/{id}/all?type=18&title=`, `/library/all?type=18&title=` | yes | yes | Matches collections by title. For the same three-letter prefix, the collection hub of `/hubs/search` returned no rows, so the two match sets are not known to be equal. |
+| `/library/search?searchTypes=movies`, `tv`, `people`, `music` | yes | yes | Each row is `{Metadata, score}`; a people row is `{Directory, score}`, with `tagKey` and `count`. `totalSize` is capped by `limit` (`tv` gave 30 at `limit=30`). `searchTypes=movies,tv` returns one mixed list, movies first, then shows, then episodes. |
+| `/library/search` with a kind the server does not know (`shows`, `episodes`, `actors`, `bogus`) | not applicable | `totalSize=0` | Empty, with no error: an unsupported kind looks like no hits. |
+| `/hubs?count=…` (the hub list) | yes, by hub | yes | A window of three over ten hubs returned three hubs, `totalSize=10`, `offset` echoed. |
+| `/hubs/sections/{id}?count=…` (one library's hub list) | yes, by hub | yes | Windows (0,3) and (3,3) over nine hubs; order is stable across two calls. |
+| `/hubs/search` with a window | no | not per hub | Not a per-hub offset: seven hubs shrank to one hub with two rows, with `size=7`, `totalSize=17`, `offset=10`. Search hubs carry no key, and `more` is false even on a hub cut at its limit. |
+| Key of `movie.topunwatched` and `movie.by.actor.or.director` (random hubs) | yes | not recorded | The listing came back in the same order on two calls; the windows (0,6) and (6,50) together equal the whole listing; every preview card is in it. The library held only 13 items, so large lists are not covered. |
+| `/playlists/all` (the key of the playlists hub in the Home hub list, `/hubs` and `/hubs/promoted`) | yes | yes | Measured on PMS 1.43: `X-Plex-Container-Start=2&X-Plex-Container-Size=2` answered `size` 2, `totalSize` 5, `offset` 2, items of type `playlist`. The app does not page it and no row shows it: a hub of type `playlist` is not listed (`pms::listable`), so it never reaches a shelf, and `is_pageable_hub_key` does not admit the key. |
+
+
 ## App data-layer summary
 
-- 3 startup requests: `/library/sections` (find movie/show keys), `/hubs/promoted` (home shelves, items include Media for instant resume), then lazy `/library/sections/{key}/all` pages of 50.
+- 3 startup requests: `/library/sections` (find movie/show keys), `/hubs/promoted` (home shelves, items include Media for instant resume), then lazy `/library/sections/{key}/all` pages of `stores::page_cache::PAGE` (60).
 - One JSON shape covers movie/show/season/episode; parse the field table in §2 with all-optional semantics.
 - Every image through `/photo/:/transcode` at exact card size; never raw `thumb`.
 - Direct play = `Media[].Part[].key` + token; server supports byte ranges.
+
+## Viewer marker capabilities (`GET /api/v2/features` on plex.tv)
+
+Evidence checked 2026-11-04: Plex Web 4.163.0's
+[public implementation](https://app.plex.tv/desktop/js/main-8792-0fadf59092c873ab638b-plex-4.163.0-8246fd2.js)
+(module 11090, UserFeatureCollection) reads `/api/v2/features` under the active viewer credential.
+Modules 7278 and 77948 select its feature IDs; module 22701 defines `intro-markers` and
+`credits-markers`, which the player uses to filter library markers. The response is a bare
+array of `{ "id": "…", "uuid": "…" }` records. `uuid` identifies the feature, not a viewer.
+A public unauthenticated read with a synthetic client identifier returned a valid list without
+either marker capability. An empty list is a valid denial; a malformed response is unavailable.
+
+**`pass` in this list grants both.** An account with an active Plex Pass, read on a webOS 10 set
+on 2026-11-05, listed 109 features including `pass` and neither `intro-markers` nor
+`credits-markers`, so both settings were hidden from a Pass holder watching on that account. The
+list is read with the viewer's credential, so `pass` there is the Pass plex.tv reports for the
+viewer (their own, or, unmeasured, their Plex Home's), never a shared server owner's. Only the
+Pass holder's own account was measured.
+
+[Plex's intro documentation](https://support.plex.tv/articles/skip-content/) and
+[credits documentation](https://support.plex.tv/articles/credits-detection/) tie skipping to the
+player's viewer or that viewer's eligible Plex Home, rather than an unrelated server owner's Pass.
+Do not infer either grant from PMS `myPlexSubscription`, generic account subscription activity,
+or membership in some server owner's Home; `pass` in the viewer-credential `/api/v2/features`
+list above is the one subscription signal accepted.
+
+**A managed Home profile also takes its Home administrator's grants (owner decision, 2026-11-11).**
+A managed profile's own `/api/v2/features` list was expected to lack `pass` (the one managed
+profile measured, a Guest, had no Plex Pass: `docs/watchlist-plan.md`, INPUT 2), which hid both
+settings on a managed profile of a Pass household. **The real managed account's feature list and
+its `/api/v2/user` answer were never observed**; the rule below is the owner's policy, not a
+measurement, and the `marker-grants:` event-log line (`seat=member`, grants or the error's name)
+is how a report will say what plex.tv actually answered.
+`PreferenceRequest::load_marker_access_in_home` reads the seated member as above; when either
+grant is missing (or the member's own read failed other than as stale), and
+`PreferenceRequest::home_admin_marker_request` accepts the seat, it reads the **administrator's**
+`/api/v2/user` and `/api/v2/features` with the stored account token (`Session::account_token`) and
+ORs the administrator's grants in. The seat is accepted only when the stored session's seated
+profile is a roster-listed NON-administrator, the roster names exactly one administrator with an
+identity, and the captured request's account stamp matches the stored account token; the
+administrator's `/api/v2/user` must match that roster identity (a stranger's answer is refused
+and the member's own answer stands). The administrator's grants only add to the member's own,
+never replace them, and a failed read leaves the member's answer as it was. The account token is
+used for these two GETs only: never for a write or a preference save, and
+`session::plex_tv_credential`'s rule for everything else (a managed profile never borrows the
+owner's or the PMS token) is untouched. The request keeps the seat's key, so a landing is fenced to
+the profile it was made for.
+
+`PreferenceRequest::load_marker_access` first verifies `/api/v2/user` with the captured viewer
+credential, requiring at least one known ID/UUID to match and neither to conflict, then reads
+`/api/v2/features` with the same credential. Profile replacement before or after either read
+refuses its result. The runner coalesces requests per seated identity and uses the account cache's
+five-minute success lifetime and 45-second failure cooldown, but only to SCHEDULE the next read: what
+`AccessState::view` publishes as the independent intro/credits frame inputs is the last SETTLED
+answer for the seat. A stale answer, a re-read in flight and a failed re-read all keep those settled
+grants, so a Settings row or an automatic offer never drops out and returns while the viewer sits on
+it; only a landed successful answer replaces them, and another seat clears them. A seat with no
+answer yet has no grants. It never logs a response body or credentials.
+
+An implicit owner (no Home profile selected) keeps its original blank profile key. Marker access
+uses the unique admin roster identity only when the captured credential is the same account token,
+the account stamp matches, and the stored session confirms that implicit owner. The `/api/v2/user`
+response must match that roster identity before the features read. Missing or ambiguous owner proof
+leaves marker access unavailable; selected profiles never borrow an owner identity for their OWN
+read (the Home administrator's feature list is a separate, additional read, above).

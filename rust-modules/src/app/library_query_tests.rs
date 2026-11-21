@@ -29,7 +29,8 @@ fn leaving_after_query_commit_before_arrival_cannot_restore_the_old_query_bookma
     );
     plx_plex::plex::set_current(sid);
     let mut d = Dispatcher::<AppHost>::new();
-    let mut rig = Bridge::for_test(|| 0);
+    let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+    let mut rig = owner.bridge();
     rig.stores.browse.borrow_mut().seed_registered_table_for_test([sid, shared]);
     rig.refresh_browse_directory();
     rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
@@ -45,7 +46,7 @@ fn leaving_after_query_commit_before_arrival_cannot_restore_the_old_query_bookma
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
     let entry = d.nav.top_page().unwrap().id;
-    let id = rig.listing.view().id().unwrap();
+    let id = rig.retained.listing.view().id().unwrap();
     d.emit(
         MachineId::Nav,
         Fx::App(AppFx::Store(
@@ -71,7 +72,7 @@ fn leaving_after_query_commit_before_arrival_cannot_restore_the_old_query_bookma
     assert_ne!(owned_id.query, id.query,
         "the accepted command mutates the explicit owner in the same dispatcher turn");
     rig.capture_views(&mut d);
-    let snapshot = rig.listing.clone();
+    let snapshot = rig.retained.listing.clone();
     assert_eq!(snapshot.view().id(), Some(owned_id));
     assert_eq!(snapshot.view().total(), -1, "no new page has arrived");
     assert!(snapshot.view().cursor().is_none_or(|cursor| matches!(cursor.at, plx_data::stores::browse::CursorAt::SlotIndex(0))),
@@ -113,9 +114,12 @@ fn leaving_after_query_commit_before_arrival_cannot_restore_the_old_query_bookma
         script_key(Key::Down, tick(167)),
     );
     let (item, _) = rig.library_selection(&d, new_entry, d.focus()).unwrap();
-    assert_eq!(
-        item.rk, "1",
-        "the new entry starts the accepted query at its first item"
+    // Down from the header lands on the grid's first row (the new entry remembers nothing, so
+    // the engine projects under the control it left), never on the old query's bookmark.
+    let slot: usize = item.rk.parse().expect("synthetic ratingKeys are slot numbers");
+    assert!(
+        (1..=6).contains(&slot),
+        "the new entry starts the accepted query on its first row, got {}", item.rk
     );
 }
 
@@ -137,7 +141,8 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
         plx_plex::plex::register_for_test("query-shared", "127.0.0.1", 10, "synthetic", "fixture");
     plx_plex::plex::set_current(sid);
     let mut d = Dispatcher::<AppHost>::new();
-    let mut rig = Bridge::for_test(|| 0);
+    let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+    let mut rig = owner.bridge();
     rig.stores.browse.borrow_mut().seed_registered_table_for_test([sid, shared]);
     rig.refresh_browse_directory();
     rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
@@ -189,6 +194,7 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
         tick(81),
         script_key(Key::Right, tick(81)),
     );
+    frame(&mut d, &mut rig, AppArg::Library, tick(81), script_key(Key::Right, tick(81)));
     let toolbar = d.focus().unwrap();
     let page = d
         .top_screen()
@@ -202,7 +208,7 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
         "toolbar",
         "toolbar seat: {toolbar:?}"
     );
-    rig.take_library_reqs();
+    rig.take_observed_library_commands();
     frame(
         &mut d,
         &mut rig,
@@ -213,43 +219,42 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
     for i in 83..106 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
-    let requests = rig.take_library_reqs();
+    let requests = rig.take_observed_library_commands();
     let evidence = format!(
         "focus={:?} live={} requests={:?}",
         d.focus(),
         d.input.press.is_live(),
         requests.iter().map(|(_, req, _)| req).collect::<Vec<_>>()
     );
-    let (kind, anchor, target) = requests
+    let (kind, anchor, target, folded, control) = requests
         .into_iter()
         .find_map(|(_, req, _)| match req {
             LibraryReq::Menu {
                 kind,
                 anchor,
                 target,
-            } => Some((kind, anchor, target)),
+                folded,
+                control,
+            } => Some((kind, anchor, target, folded, control)),
             _ => None,
         })
         .unwrap_or_else(|| panic!("the real toolbar activation must request its menu: {evidence}"));
-    assert_eq!(kind, plx_screens::registry::LibraryMenuKind::Filter);
-    d.nav.next_style = plx_ui::containers::modal::Style::Compact;
-    d.request(
-        MachineId::Nav,
-        NavOp::Present(AppArg::LibraryMenu(
-            plx_screens::registry::LibraryMenuArg {
-                host: instance,
-                kind,
-                anchor,
-                target,
-            },
-        )),
-    );
+    assert_eq!(kind, plx_screens::registry::LibraryMenuKind::SortFilter);
+    let AppArg::LibraryMenu(arg) = &d.nav.modals.top().expect("the product runner presented the menu").entry.arg
+        else { panic!("the actual toolbar menu") };
+    assert_eq!(arg.host, instance);
+    assert_eq!(arg.kind, kind);
+    assert_eq!(arg.anchor, anchor);
+    assert_eq!(arg.target, target);
+    assert_eq!(arg.folded, folded);
+    assert_eq!(arg.opener, Some((entry, control)));
+    assert_eq!(d.nav.modals.surfaces.len(), 1, "observation must not present the menu twice");
     for i in 106..140 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
     }
     let menu_focus = d.focus().unwrap();
     assert_ne!(menu_focus.entry, entry);
-    let query = rig.listing.view().id().unwrap().query;
+    let query = rig.retained.listing.view().id().unwrap().query;
     frame(
         &mut d,
         &mut rig,
@@ -260,7 +265,7 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
     let mut landed_at = None;
     for i in 141..190 {
         frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
-        if rig.listing.view().id().unwrap().query != query {
+        if rig.retained.listing.view().id().unwrap().query != query {
             landed_at = Some(i);
             break;
         }
@@ -323,8 +328,9 @@ fn a_filter_menu_resets_its_covered_library_grid_memory_without_taking_menu_focu
         tick(290),
         script_key(Key::Down, tick(290)),
     );
-    // DOWN from the heading lands in the grid's first row, under the chip it left
-    // (`focus::projects_across`); the reset memory above is what the rail's door reads.
+    // DOWN from the heading lands in the grid's first row (the reset left nothing remembered, so
+    // `CONTENT_HEAD_SEAT` projects under the chip it left); the reset memory above is what the
+    // rail's door reads.
     let page = d
         .top_screen()
         .unwrap()

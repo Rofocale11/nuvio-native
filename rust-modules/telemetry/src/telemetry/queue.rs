@@ -257,7 +257,8 @@ pub fn decode_all(buf: &[u8]) -> Decoded {
 
 /// Enforce both caps and say how many went.
 ///
-/// Error records have priority over usage records, so route-event volume cannot erase the crash
+/// Priority, highest first: one-off reports, crash reports, release-health sessions (also Errors
+/// records, but trivia next to a crash), usage records. Error records outrank usage, so route-event volume cannot erase the crash
 /// reports this durable queue principally exists to preserve. Within each category, newest wins;
 /// the retained set is restored to its original FIFO order before being written.
 pub fn trim(mut records: Vec<Record>) -> (Vec<Record>, usize) {
@@ -266,9 +267,17 @@ pub fn trim(mut records: Vec<Record>) -> (Vec<Record>, usize) {
     // Select newest records up to both caps, visiting Errors before Usage, then restore FIFO order.
     let mut selected = Vec::new();
     let mut bytes = 0usize;
-    for category in [Category::OneOff, Category::Errors, Category::Usage] {
+    // A release-health session is an Errors record, but a crash report outranks it: at the cap the
+    // sessions go first.
+    let rank = |r: &Record| match r.category {
+        Category::OneOff => 0,
+        Category::Errors if !super::session::is_session_body(&r.body) => 1,
+        Category::Errors => 2,
+        Category::Usage => 3,
+    };
+    for wanted in 0..4 {
         for (index, record) in records.iter().enumerate().rev() {
-            if record.category != category || selected.len() >= MAX_RECORDS {
+            if rank(record) != wanted || selected.len() >= MAX_RECORDS {
                 continue;
             }
             let size = encode(record).map_or(0, |e| e.len());
@@ -318,6 +327,28 @@ mod tests {
             event_id: id.to_string(),
             body: body.to_vec(),
         }
+    }
+
+    /// At the byte cap a release-health session goes before a crash report, even a newer session
+    /// before an older crash: the crash is the thing the spool exists to keep.
+    #[test]
+    fn at_the_byte_cap_sessions_are_dropped_before_crash_reports() {
+        let session = rec("sess", Category::Errors, br#"{"attrs":{"release":"r"},"did":"d","sid":"s","started":"t"}"#);
+        // The largest crash body for which four crash reports fit and no session does. A frame is a
+        // fixed overhead (header, JSON fields, an empty body) plus four base64 characters per three
+        // body bytes, so the body is derived from the overhead instead of searched for by framing
+        // a ~100 KB record thousands of times; the two asserts pin the derivation to `encode`.
+        let framed = |n: usize| encode(&rec("c", Category::Errors, &vec![b'x'; n])).unwrap().len();
+        let overhead = framed(0);
+        let n = 3 * ((MAX_BYTES / 4 - overhead) / 4);
+        assert!(4 * framed(n) <= MAX_BYTES, "four crash reports of {n} bytes fit");
+        assert!(4 * framed(n + 3) > MAX_BYTES, "and one base64 group more does not");
+        let crash = |id: &str| rec(id, Category::Errors, &vec![b'x'; n]);
+        let all = vec![crash("c1"), crash("c2"), crash("c3"), crash("c4"), session];
+        let (kept, dropped) = trim(all);
+        let ids: Vec<&str> = kept.iter().map(|r| r.event_id.as_str()).collect();
+        assert_eq!(ids, ["c1", "c2", "c3", "c4"]);
+        assert_eq!(dropped, 1);
     }
 
     fn spool(rs: &[Record]) -> Vec<u8> {

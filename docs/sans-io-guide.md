@@ -1,0 +1,349 @@
+# Writing Sans-IO code: how to do it right while you write it
+
+`docs/sans-io.md` is the design record: what the ledgers freeze and how each migration shrank them.
+This is the other half, for the moment you are writing a store, a screen or a machine step. The
+rule (AGENTS.md, "Logic never performs IO"): a machine's step starts no worker, reads no
+process-global registry and has no `cfg(test)` fork. Its work leaves as a typed effect or job that
+the app's runners execute, and the result returns through the addressed event or job port. Some
+existing store ports land through a gated mailbox rather than the same dispatcher drain; their
+replay and refusal timing are documented in `docs/sans-io.md`, "The store job lane". The reason
+for the rule is that a step then has no seam to fake: a test and a replay feed it the inputs the
+product feeds it.
+
+## Notify stream integration (written; acceptance pending)
+
+Notify uses one captured `NotifyInput { keys, armed }` and the actual store's
+`begin -> prepare_next -> settle_admission -> finish_turn -> end` cursor. Refill
+keys with `refill_roster_with_stream_policy` before begin. For each connection,
+exit data and drain only Notify jobs through the app runner before settlement;
+finish that connection before preparing the next. Map the completed output once,
+then drain the unchanged Browse/Hubs fill list and Notify in StoreId order.
+
+Initial refusal settles at the emission frame before ordinary mail. Accepted-held
+release failure is an ordinary terminal at the observation frame, never a second
+admission. Production streams always run off-frame, including held real release;
+`Bridge::for_test` selects refusal, and finite scripts supply explicit eligibility.
+No stream callback runs inside data or while borrowing Stores across the runner.
+The Notify-only checkpoint had 5 workers / 81 globals /
+62 forks / 11 fxlanes, down from the S4 pre-Notify 6/89/65/11. The source-only
+stale-key test passed in orun-27; runtime tests, capture comparisons and full gates
+remain pending. These contracts are not runtime or replay acceptance; see
+`.empryo/reviews/verdict-notify-integration.md` for the handoff limits.
+
+The combined Session/W2/enforcement/Screens source checkpoint now has actual
+ledger totals **4 workers / 19 globals / 62 forks / 11 fxlanes** after Person and the
+remaining data captures, with exact pins.
+Session uses the strict `state`/`transition`/`from_init` binding and structurally
+proved immutable reads. Watchlist and Screens inputs are captured outside their
+machine windows. Source/Python checks are not Rust/runtime/Clippy acceptance;
+see the combined checkpoint in `docs/sans-io.md` for merge details and filters.
+
+## Person complete capture (source checkpoint; runtime acceptance pending)
+
+Person now takes `PersonInput` before Open and every pump: the host's ONE retained complete
+`ClientKeys` roster, settled session and visible generation, controlled/provider decisions, and
+dev biography/credits seeds. Never infer registered slots from key presence; append the origin
+once even if unregistered. Stable pumps borrow inputs; only emitted jobs copy request strings.
+Inputless Open/pump refuse, while Close, Reset and view edits remain independent. All 11 Person
+global sites are retired: the Person-only checkpoint is **4 workers / 43 globals / 62 forks /
+11 fxlanes**, down from 4/54/62/11. Source/Python checks do not claim Rust/replay acceptance.
+
+## Which code is a machine
+
+Every entry in `ci/machines.ini` must bind its private state field, sole transition and constructor
+with `writer_policy = strict`; none of the ten registered machines has a privacy-only exemption.
+Add the matching module enum policy and an unconditional `deny`/`forbid` header for
+`clippy::wildcard_enum_match_arm`. Local `allow`, `expect` and `warn` (including `cfg_attr` and
+production children/includes) fail the source gate. Numeric/wire-string fallbacks are still valid.
+Shared state reads need structural immutable-payload proof; generic identities need a closed private
+seal, not a broad `Copy` bound. See "Machine shape" in `docs/sans-io.md`.
+
+`ci/check-deps.sh` (the `MACHINES` array) scans these for `workers` and `globals`:
+
+- `rust-modules/data/src`, `session/src`, `screens/src`, `ui/src`, `appkit/src`, `machine/src`;
+- `rust-modules/plex/src/plex/session.rs` (the session owner's state);
+- `rust-modules/media/src/player/{lifecycle,attempt_metrics,attempt_view,readout,backend_startup,backend_metrics,recovery,release}.rs` and
+  `media/src/route/{backend_policy,plan,plan_memory}.rs`;
+- `rust-modules/playback-contract/src` and the extracted pure
+  `play-uri/src/{uriprobe,uri_protocol,uri_lifecycle,register_ladder,acb_bind,picture_gate}.rs` modules;
+- `rust-modules/os/src/tv/plane.rs`, the ACB plane's pure `Plane` (its runner `PlaneOwner` is in
+  the same file, so the scan covers it too).
+
+`forks` reads every machine crate whole (`FORK_SCOPE`): all of `data/`, `plex/`, `media/`,
+`session/`, `screens/`, `ui/`, `appkit/`, `machine/`, `playback-contract/`, `play-uri/`,
+`play-feed/` and `media-codecs/`. `os/` is not in it: it holds forks that are not ledgered, so
+`plane.rs` is scanned for workers and globals only.
+
+The scan is by file; an entry is a site to classify, not proof that its enclosing function is a
+machine. Follow its callers and distinguish the state owner from its runner, job body or fixture.
+See the in-progress `.empryo/reviews/project-ui-architecture-audit-2026-11-13.md`; it is not yet
+a complete project verdict.
+
+The rule is about what a `run`, `pump`, `tick` or `step` body does. These are
+NOT steps, and are where IO belongs: a job's body (`finish_collection_job` in `data/src/collection.rs`,
+which lives in `data/` and runs on the worker the runner started), a function that takes `&OffFrame`
+(`build_stream` in `media/src/route/plan.rs`), the runner (`StoreRunner`,
+`rust-modules/src/app/adapters/stores.rs`), the `Bridge` (`rust-modules/src/app/bridge.rs`), an
+actuator (`ForegroundActuator` in `media/src/player/foreground.rs`) and a seam the job body calls
+(`LiveCatalogIo`, called inside `finish_catalog_job`'s `catch_unwind` in `data/src/stores/catalog.rs`).
+CI still reads a body that sits in a scanned file, so give it what it needs as arguments too.
+
+The old Watchlist `LiveIo` step readers were retired by W2; `WatchlistSnapshot` is the captured
+input, not a model for hiding registry access behind a trait. `build_stream`'s registry reads and
+its fork remain IO-boundary ledger lines (`ci/allow/globals/media.txt`, `ci/allow/forks/media.txt`),
+outside this data-step migration. Do not copy them into a machine.
+
+## What counts as IO in a step
+
+The principle first. Any call that blocks, touches the network or disk, reads the clock, starts a
+thread, or reads process-wide state through a free function is IO, whether or not a CI list names
+it. The ledgers freeze the sites that were found; they are not the definition.
+
+- Starts work: `task::spawn`, `spawn_small*`, `spawn_off_frame*`, `storage_worker::submit*`,
+  `std::thread`, `task::beside` (below).
+- Blocks or touches the world: a curl or LS2 call, a file read, a lock held across a call, `sleep`.
+- Reads the clock: `Instant::now`, `SystemTime::now`, a `today()`.
+- Reads a registry the globals rule matches: `client_for`, `current_server`, `current_snapshot`,
+  `session::peek`, `keypin::revision`, `keypin::blocked_for`, `grant::offers`,
+  `devcaps::caps`, and the ones `docs/sans-io.md` lists as remaining:
+  `plex::server_ids()`, `server_roster_gen()`, `server_facts_gen()`, `server_probe_result()`
+  (re-exports in `plex/src/plex/mod.rs`), `session::peek_settled()` and `session::current_gen()`
+  (both in `plex/src/plex/session.rs`), `tape::active()` (`data/src/stores/tape.rs`) and the subtitle
+  registries' `sidecar::takes_colour()` / `sidecar::selected()` / `ass_source::takes_colour()` /
+  `ass_source::selected()` (`media/src/player/`; the Subtitles menu reads their colour-pick fact as a
+  value of the session's readout, which the app delivers once a tick). A new use of
+  any of these fails `make check` unless a ledger line names it, and is as wrong as a new `client_for`.
+  (`transport::paused` is not a registry read any more: it takes the session and reads its
+  `PlayerReadout`, a `ps`-addressed readout read, and the rule no longer matches it. `transport::viewer_paused`
+  and `preview::paused` take the session too but still read process-global state behind it, the claim hold's
+  slot and the preview machine's phase, so a machine that calls either is a site.)
+- Reads one the rule does not name. The rule matches a closed list of names, so a registry read it
+  does not spell passes CI with no ledger line and is IO all the same. Two are left out on purpose,
+  and the principle above still covers them: `i18n::current` (a display read) and the
+  `plx_media::route::*()` settings getters (the architecture board kept settings getters out of
+  this gate). When you add a registry reader, add its name to the rule in the same change.
+
+## The moves
+
+**(a) The step needs to fetch: emit a job.** The step claims the request and pushes a `Job`
+(`machine/src/job.rs`: an `Addr` and a request that captured everything) with its `Port`. The
+runner starts it; the answer returns through the port. Collection (#987), `maybe_spawn` in
+`data/src/collection.rs`:
+
+```rust
+let generation = self.generation;
+adapter.fetch.claim(generation);
+self.stamp = self.ledger.stamp();
+self.jobs.push(crate::stores::StoreJob::Collection(
+    Job { addr: collection_addr(generation), req: CollectionReq { sid, key, work } },
+    CollectionPort::of(adapter),
+));
+```
+
+The Bridge refills the keys, steps and drains in one call (`Bridge::collection_pump`):
+`refill_client_keys`, then `stores.collection_pump(&self.client_keys)`, then
+`start_store_jobs_of(StoreId::Collection)`. The runner's `launch_collection`
+(`rust-modules/src/app/adapters/stores.rs`) is where the thread starts.
+
+Hubs (#1011) is the same shape for several sources at once, except that it raises its claim at the
+launch and not in the step (`docs/sans-io.md`, "The Hubs lane"). A new store also joins
+`Stores::take_jobs_of`, `has_jobs_of` and the `*_FILLS` list of each fanning call that reaches it
+(`rust-modules/data/src/AGENTS.md`).
+
+**(b) The step needs the session, the profile or a client: the Bridge reads, the step takes the
+value.** #1108 removed the session reads from the Watchlist and catalog stores (the `client_for` and
+roster reads that remain are listed in `docs/sans-io.md`). The Bridge builds the input
+(`Bridge::watchlist_input`) and the step receives it:
+
+```rust
+pub(crate) fn watchlist_input() -> plx_data::watchlist::WatchlistInput {
+    let profile = Self::seated_profile();
+    let credential = profile.user.as_ref().and_then(plx_plex::plex::session::plex_tv_credential);
+    let client_id = plx_plex::plex::session::peek().client_id.clone();
+    plx_data::watchlist::WatchlistInput::new(profile, credential, &client_id)
+}
+```
+
+The Bridge calls the store's `run_with_input(cmd, &WatchlistInput)` (`WatchlistStore` in
+`data/src/stores/watchlist.rs`), and the step compares with `WatchlistAuth::is_current(&CurrentProfile)`
+(`data/src/watchlist.rs`), a pure function. Browse now takes `BrowseRosterInput` through
+`BrowseStore::run_with_input`, pumps and directory capture: the host refills the same `ClientKeys`
+with all registered slots, current, described/machine/probe facts and generation hints before the pass.
+`Bridge::browse_session` observes the pin receipt before capturing session, settled, visible-generation
+and profile-key facts independently. An empty session does not imply settled. No new Browse job or
+admission kind is introduced; directory-only capture emits no jobs. Legacy fixture migration and
+integrated verification are tracked in `.empryo/reviews/verdict-s4-integration.md`.
+Which client a server holds is an
+input too: the Collection step asks `keys.key(sid)` of the `ClientKeys` it is handed (`maybe_spawn`
+in `data/src/collection.rs`), never `client_for`.
+
+A screen gets a session read the same way: the Bridge reads it and folds it into what a store
+publishes (`Bridge::household_ids` into `Stores::search_snapshot`). Screens also consume retained
+host-captured `ScreenInputs` through `Cx`; their former `peek` and `client_for` ledger entries
+are retired, and `ci/allow/globals/screens.txt` is empty.
+
+**(c) A stepped machine: `step` returns effects, a runner executes them.** The player lifecycle
+(#1003) is `step(&mut self, ev, fx: &mut Vec<ForegroundEffect>) -> Handled` (`lifecycle.rs`).
+It reads no global; the pause arrives on the event (`Park { viewer_paused, .. }`). The driver runs
+each effect through an actuator and feeds the answer back as the next event
+(`run_foreground` in `media/src/player/foreground.rs`):
+
+```rust
+while let Some(ev) = next.take() {
+    let handled = lifecycle.step(&ev, &mut fx);
+    for effect in fx.drain(..) {
+        match effect {
+            ForegroundEffect::Prepare { id, resume_ns } => {
+                next = Some(ForegroundEvent::PrepareAnswered {
+                    id,
+                    answer: PrepareAnswer::of_start(actuator.prepare_resume(ps, resume_ns)),
+                });
+            }
+```
+
+A screen is the same kind of machine: it pushes an `AppFx` (`screens/src/registry.rs`).
+Direct deliveries stay in the dispatcher FIFO; external commands yield its head to
+`Bridge::execute_yielded_command`, outside the machine step, then resume the same drain.
+The envelope retains sender and captured return state; budget/carry and terminal refusal
+remain dispatcher obligations. Do not retain requests by family or take a second head in
+another drain. `ci/check-app-command-routing.py` checks explicit classification, runner arms,
+unique head-taking and retained command-vector shapes. It is a source guard, not proof of
+all runtime ordering or of aliases/types not spelled by the guard.
+
+Dev and harness policy that a machine uses is an explicit host-captured input, including in tests
+and controlled replay. Capture it at the appropriate app boundary without silently reading live
+environment during replay; preserve any established latch timing and shipping feature gates. Render
+and IO ports need their own ownership review rather than being classified by filename alone.
+
+`ci/ui_boundaries.py`, invoked by `check-deps.sh`, rejects screen-local filesystem/devtrig
+reads and imports, including helper bodies and import aliases. It tokenizes strings/comments,
+excludes structurally test-only items/files, and scans every possibly-production feature
+combination, including devtriggers. A filename ending in `_tests` is not an exemption.
+Real IO job bodies outside the screen root remain ports, not machines. This bounded guard
+does not resolve calls through other crates, traits, macros or arbitrary aliases; review
+those call paths separately. A green source scan is not the full runtime census or replay
+acceptance; the project audit records the remaining settings, render-policy and call-path census work.
+
+Card-motion admission similarly takes an `AdmissionPolicy` scoped across the app's render walks.
+Each Bridge owns a once-captured cardspeed choice; a controlled draw supplies an explicit neutral
+policy without consulting the ambient reader. The guard restores the enclosing owner's choice,
+so a second host cannot inherit the first host's gate. UI classification and poster admission
+read that same captured value; frame dumps retain their admission bypass. No trigger read or
+production/test-default fork belongs in the card primitive. Capture occurs before the first app
+draw rather than lazily inside its first card; changes to the file after capture remain ignored.
+
+Animation diagnostics illustrate the split: `ui::anim::probe` emits bounded ordered settle facts,
+not file IO. The app report phase takes them outside `StepScope`, and
+`app::anim_diagnostics` admits a batch to the existing storage executor. The worker owns the
+separate sink. Newest overflow is counted; admission refusal drops the batch, and write failure
+stops it without retry. This is best-effort diagnostic output, not guaranteed durable persistence.
+`devtriggers` still gates the records and sink; no diagnostic filesystem work runs in a screen step.
+
+**(d) The step needs time: count the `dt` it is handed.** `Tick` is "the ONLY clock a machine sees"
+(`machine/src/machine.rs`). Search's debounce accumulates whole microseconds, an exact integer
+compare (`data/src/search.rs`):
+
+```rust
+let dt_us = (dt * 1_000_000.0).round() as u32;
+state.settle_us = state.settle_us.saturating_add(dt_us);
+if state.settle_us >= SETTLE_US_TARGET {
+```
+
+Never `Instant::now` or `SystemTime::now` in a step. The `wall` rule (`ci/check-deps.sh`; its
+instruments are listed in `ci/allow/wall.txt`) fails a clock read in most machine scope: `ui/`,
+`screens/`, `data/src/stores/`, the session owner and the migrated store files. Outside it, CI does
+not count the ones that remain (a diagnostic timer in `step_landings_with_scope` in `data/src/pms.rs`,
+one in the fetch body `fetch_full` in `data/src/metadata.rs`); do not add to them. W2 retired
+the Watchlist step's ambient date read: the host captures the UTC date, worker ports return the
+captured value, and the step consumes the snapshot. `WatchlistIo::today` is not a remaining
+ambient step read.
+
+**(e) A test needs different behaviour: a seam or an argument, never a `cfg` branch.** A body takes
+the one call that reaches the world as a parameter. `finish_browse_page_job` passes the real read
+and a test passes one that panics (#1028, `data/src/browse/listing_jobs.rs`):
+
+```rust
+pub fn finish_browse_page_job(port: &BrowsePagePort, addr: Addr, client: &'static Client, req: BrowsePageReq) {
+    finish_page_with(port, addr, client, req, fetch_listing_page);
+}
+fn finish_page_with(port: &BrowsePagePort, addr: Addr, client: &'static Client, req: BrowsePageReq,
+    read: impl FnOnce(&Client, ServerId, &SectionQuery<'_>, bool, Option<&Restore>) -> ListingPage) {
+```
+
+An IO trait works the same way when only the job body calls it (`CatalogIo`, `data/src/catalog.rs`).
+`WatchlistIo` is worker transport over captured facts; W2 retired its former ambient step readers.
+A trait must not hide registry or clock access in a step. The shape to avoid is
+`#[cfg(not(test))]` or `if cfg!(test) { fake } else { real }` in production code:
+`ci/allow/forks/*.txt` list the ones that remain, to be deleted, not copied. An item only
+a test can see (`#[cfg(test)] fn`) is no fork.
+
+**(f) A command arrives without its input: refuse it loudly.** A `run` that holds no input refuses
+the commands that need one, with a debug assertion and a log line, and returns without acting.
+`BrowseStore::run` in `data/src/stores/browse.rs` (the watchlist's twin is `WatchlistStore::run` in
+`data/src/stores/watchlist.rs`):
+
+```rust
+if matches!(cmd, BrowseCmd::ApplyPins(_) | BrowseCmd::Discovery(_)) {
+    debug_assert!(false, "a pin or discovery command reached a step handed no session");
+    plx_base::eventlog::log(
+        "browse: a pin or discovery command reached a step handed no session — dropped");
+    return false;
+}
+```
+
+## `task::beside` and blocking calls
+
+`task::beside` (`base/src/task.rs`) asks for a request on a scoped sibling thread and joins it
+before the scope returns. The `workers` gate does not count it, which is not permission to use it
+in a step: it exists for a worker-side body that has several independent requests (`build_stream`
+in `route/plan.rs`, which takes `&OffFrame`, and the detail chain in `metadata.rs`). Anything that
+blocks belongs in such a body, or in the runner. A step never calls it, and never `allow_blocking`.
+
+## The ledgers
+
+`ci/allow/{workers,globals,forks,fxlanes}/` only shrink. A new line there, a raised `# count:`
+header or a raised `PINNED_LEDGER_TOTALS` entry (`tests/test_harness.py`) is never the fix: CI
+(`ci/check-ledger-ratchet.py`) fails a PR whose ledger counts rise above its base's, so all three
+raised together still fail. If a step truly seems to need IO, stop and say why in the PR or the
+handoff; do not add the exception.
+A one-for-one rename of the fn that already holds a site, the site itself unchanged (#1116 renamed
+`mod.rs::sink` to `mod.rs::raw_sink` in `ci/allow/forks/media.txt`), changes only its key; say so in
+the PR. It never covers a new call. A migration deletes lines (`docs/sans-io.md`, "How a migration
+shrinks a ledger"). The ledgers hold today's numbers; read the files, do not copy totals into prose.
+
+## Integration evidence and Git isolation
+
+Run the pinned toolchain gates against an identified, stable source tree. Keep source/ledger
+checks, compiled feature configurations, renderer-backed replay, inspected captures and native
+verification as separate evidence; none substitutes for a tier it cannot observe. Historical
+recordings must not be rehashed to accept changed behavior or codecs.
+
+Strip **all `GIT_*` variables** from gate/test subprocess environments, not only `GIT_DIR` and
+`GIT_WORK_TREE`: nested Git fixtures must use their own repository. A Windows-linked worktree
+needs independent Git metadata in an isolated verification snapshot, not process-wide path overrides.
+Restrict any original-worktree path arguments to individual read-only Git probes. Record original
+HEAD, raw index hash, logical staged entries and tracked-byte hashes before/after; an index-byte
+change is not automatically a content change, but cannot be silently called byte-identical.
+Use supported Python (3.11 or newer for `tomllib`) and the pinned Rust toolchain without changing
+shared system installations. Preserve failed raw gates when retrying with a corrected environment.
+The nonmutating decoy/fixture oracle and actual isolated replacement outcomes are recorded in
+`.empryo/reviews/step8-recovery-result-2026-11-14.md`. They do not close the incomplete census,
+unexpected gate failures, renderer-backed replay or native acceptance. The earlier incident stays
+in `.empryo/reviews/step8-integration-2026-11-13.md`; no recovery is implied by a later HEAD probe.
+
+## Before you commit machine code
+
+1. The step calls no spawn, submit, curl, file, LS2 or sleep, and no `task::beside`.
+2. It reads no registry, matched or not (the list above); the Bridge passes the value in.
+3. It reads no clock; time is the `dt` or `Tick` it is handed.
+4. Work leaves as a job on the store's outbox or as an effect, and the answer comes back as an
+   event or through the job's `Port` (exactly one `done` or `refused`).
+5. Whoever steps a store drains it in the same call (`start_store_jobs_of`).
+6. No `cfg(test)` or `cfg!(test)` in production code; the test uses a seam or an argument.
+7. A command that needs an input and lacks it is refused (assert plus log), not defaulted.
+8. `git diff ci/allow tests/test_harness.py` shows only deleted lines, lowered counts, or such a
+   one-for-one rename.
+9. A lifecycle is one field with one writer. Before adding a `bool` or an `Option` beside a phase,
+   name the state it adds; before testing `rows.is_empty()` or `!flag` as a stand-in for a state,
+   test the state. `docs/implicit-machines-audit-2026-11-16.md` lists the lifecycles that are still
+   loose flags and the defects that shape produced: read the row of the type you are about to touch.

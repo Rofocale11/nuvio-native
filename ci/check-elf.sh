@@ -5,10 +5,22 @@
 # These exist because the stub-.so link trick (see the Makefile header) makes the LINK succeed
 # whether or not a symbol or library is really on the TV. The first sign of trouble would
 # otherwise be a rejected webosbrew PR, or a television that will not start.
+# Usage: ci/check-elf.sh [binary [both|feed|uri]]. PLAYBACK_BACKENDS supplies the same mode when
+# the second argument is omitted; the historical default is both for ordinary CI release builds.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 BIN="${1:-pkg/plxnative}"
+fail() { echo "::error::$*"; exit 1; }
+ok()   { echo "  ok — $*"; }
+
+[ "$#" -le 2 ] || fail "usage: ci/check-elf.sh [binary [both|feed|uri]]"
+PLAYBACK_MODE="${2-${PLAYBACK_BACKENDS-both}}"
+case "$PLAYBACK_MODE" in
+  both|feed|uri) ;;
+  *) fail "PLAYBACK_BACKENDS must be exactly both, feed or uri for an ELF artifact" ;;
+esac
+
 # macOS ships no readelf; fall back to the NDK's, which is on any machine that can build this.
 NDK_BIN="${WEBOS_SDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}/bin"
 if [ -z "${READELF:-}" ]; then
@@ -23,9 +35,6 @@ if [ -z "${OBJDUMP:-}" ]; then
   else OBJDUMP=llvm-objdump
   fi
 fi
-
-fail() { echo "::error::$*"; exit 1; }
-ok()   { echo "  ok — $*"; }
 
 # Check producers before inspecting output: early grep/head consumers can otherwise turn
 # successful scans into SIGPIPE failures, or hide producer failures in negative assertions.
@@ -43,27 +52,67 @@ ok "ELF32 / ARM / soft-float / ARMv7"
 
 echo "== Starfish callback interposer =="
 # libplayerAPIs' fixed libpf thunk calls this exact C++ symbol through an R_ARM_JUMP_SLOT. A normal
-# executable-private definition is absent from .dynsym and therefore cannot preempt that slot; the
-# link must export exactly this one symbol. Conversely, Load-with-context is resolved and owner-
+# executable-private definition is absent from .dynsym and therefore cannot preempt that slot; a
+# Feed build's link must export this symbol, and a URI build must not (uri mode below). Conversely, Load-with-context is resolved and owner-
 # checked with dlsym so a firmware which lacks the overload refuses playback instead of killing the
 # app in the dynamic loader before main.
 SMP_HOOK='_ZN17StarfishMediaAPIs20callbackFunctionHookEixPKc'
 SMP_LOAD_CTX='_ZN17StarfishMediaAPIs4LoadEPKcPFvixS1_PvES2_'
 DYN_SYMS=$("$READELF" --dyn-syms -W "$BIN") || fail "readelf --dyn-syms failed"
 HOOK_ROWS=$(awk -v symbol="$SMP_HOOK" '$NF == symbol { print }' <<<"$DYN_SYMS")
-[ "$(wc -l <<<"$HOOK_ROWS" | tr -d ' ')" -eq 1 ] \
-  || fail "callbackFunctionHook interposer is not present exactly once in .dynsym"
-awk '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" { ok=1 } \
-     END { exit !ok }' <<<"$HOOK_ROWS" \
-  || fail "callbackFunctionHook interposer is not a GLOBAL/DEFAULT .dynsym function"
+if [ "$PLAYBACK_MODE" = uri ]; then
+  [ -z "$HOOK_ROWS" ] || fail "URI backend exports Feed callbackFunctionHook in .dynsym"
+else
+  [ "$(wc -l <<<"$HOOK_ROWS" | tr -d ' ')" -eq 1 ] \
+    || fail "callbackFunctionHook interposer is not present exactly once in .dynsym"
+  awk '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" { ok=1 } \
+       END { exit !ok }' <<<"$HOOK_ROWS" \
+    || fail "callbackFunctionHook interposer is not a GLOBAL/DEFAULT .dynsym function"
+fi
 if awk -v symbol="$SMP_LOAD_CTX" '$NF == symbol { found=1 } END { exit !found }' <<<"$DYN_SYMS"; then
   fail "Load-with-context is a dynamic symbol dependency; it must be dlsym'd for firmware fallback"
 fi
 RELOCS=$("$READELF" -rW "$BIN") || fail "readelf -rW failed"
+if [ "$PLAYBACK_MODE" = uri ] && grep -Fq "$SMP_HOOK" <<<"$RELOCS"; then
+  fail "URI backend has a Feed callbackFunctionHook relocation"
+fi
 if grep -q "$SMP_LOAD_CTX" <<<"$RELOCS"; then
   fail "Load-with-context has a dynamic relocation; missing firmware would fail before main"
 fi
-ok "exact hook exported GLOBAL/DEFAULT; Load-with-context has no loader dependency"
+if [ "$PLAYBACK_MODE" = uri ]; then
+  ok "no Feed hook or relocation; Load-with-context has no loader dependency"
+else
+  ok "exact hook exported GLOBAL/DEFAULT; Load-with-context has no loader dependency"
+fi
+
+echo "== libc exit interposer =="
+# src/exit.c defines libc's `exit` in the executable so that an `exit()` made by a shared library
+# (SDL's SDLTimer thread made one in PLX-NATIVE-1P) ends the process through plx_exit_record
+# (src/crashtrace.c), which ends it without running the exit handlers. It only binds when the
+# executable's .dynsym defines it: exactly one `exit` row, defined here as FUNC GLOBAL DEFAULT. readelf prints a definition bare
+# and an import with its version (`exit@GLIBC_2.4 (2)`), so an `exit@...` row, or an UND one, means
+# some object still calls libc's own `exit` and src/exit.c did not take over.
+EXIT_ROWS=$(awk '$8 == "exit" || index($8, "exit@") == 1 { n++ } END { print n + 0 }' <<<"$DYN_SYMS")
+EXIT_DEFINED=$(awk '$8 == "exit" && $4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" { n++ } \
+                    END { print n + 0 }' <<<"$DYN_SYMS")
+[ "$EXIT_ROWS" -eq 1 ] && [ "$EXIT_DEFINED" -eq 1 ] \
+  || fail "libc exit interposer: .dynsym must define exit exactly once (FUNC GLOBAL DEFAULT) and import no exit@... (src/exit.c, EXIT_INTERPOSER_LDFLAG)"
+ok "exit exported GLOBAL/DEFAULT and not imported"
+
+echo "== libc access interposer =="
+# src/access.c defines libc's `access` in the executable so that the `access()` the GPU driver makes
+# on four debug-switch paths under /tmp (API_PRINT at the top of every GL call, the other three per
+# draw, swap or glUseProgram; ~8.5 us of kernel time each on the webOS 5.6.2 TV, where they fail)
+# binds to the user-space answer instead of the kernel's. Same rule as
+# `exit` above: it only binds when the executable's .dynsym defines it, exactly one `access` row,
+# FUNC GLOBAL DEFAULT, and no `access@...` import row (readelf prints a definition bare and an import
+# with its version). `faccessat` is a different symbol and is not counted.
+ACCESS_ROWS=$(awk '$8 == "access" || index($8, "access@") == 1 { n++ } END { print n + 0 }' <<<"$DYN_SYMS")
+ACCESS_DEFINED=$(awk '$8 == "access" && $4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" { n++ } \
+                      END { print n + 0 }' <<<"$DYN_SYMS")
+[ "$ACCESS_ROWS" -eq 1 ] && [ "$ACCESS_DEFINED" -eq 1 ] \
+  || fail "libc access interposer: .dynsym must define access exactly once (FUNC GLOBAL DEFAULT) and import no access@... (src/access.c, ACCESS_INTERPOSER_LDFLAG)"
+ok "access exported GLOBAL/DEFAULT and not imported"
 
 echo "== crash-report identity =="
 # Two facts a Sentry crash report is built out of, and BOTH fail silently when wrong: a frame comes
@@ -110,6 +159,44 @@ else
   # nothing", and the check would pass vacuously forever.
   [ "$DMB" -gt 100 ] || fail "only $DMB dmb instructions — the disassembly scan is not working"
   ok "0 CP15 barriers, $DMB dmb (scan verified live)"
+
+  echo "== VFP (the -soft-float codegen flag took effect) =="
+  # `-C target-feature=-soft-float` is what gives OUR crates VFP instructions on the armv7 target,
+  # which defaults to +soft-float (every float op a libcall). On stable rustc it is an UNSTABLE
+  # feature flag (rustc prints "unstable feature specified for -Ctarget-feature: soft-float ...
+  # its behavior can change in the future"), so a rustc release is free to stop honouring it. The
+  # binary then still links and runs, only every float multiply in the app becomes a call to
+  # __aeabi_fmul: nothing fails, the UI just gets slower. ci/check-vfp.py catches the flag
+  # directly with a probe compile; this is the same question asked of the linked binary.
+  # Measured on the stable build (2026-10-16, -lm ahead of the staticlib): 3057 `vmul.f32` against
+  # 2 `bl __aeabi_fmul`, both in core's float PARSING (std is prebuilt, its float code stays soft).
+  # So the test is a ratio, not zero. Both objdumps (GNU, llvm) print `bl\t<addr> <__aeabi_fmul>`.
+  VFPMUL=$(grep -cE '[[:space:]]vmul\.f32[[:space:]]+s[0-9]' <<<"$D" || true)
+  SOFTMUL=$(grep -cE '[[:space:]]bl[[:space:]].*<__aeabi_fmul' <<<"$D" || true)
+  # Positive control, as for dmb: a floor far below the measured count but far above noise, so an
+  # objdump that printed the instructions in another form fails here instead of passing vacuously.
+  [ "$VFPMUL" -gt 100 ] || fail "only $VFPMUL vmul.f32 instructions — our crates are not using VFP (is -C target-feature=-soft-float still in RUST_CODEGEN?) or the disassembly scan is not working"
+  [ $((SOFTMUL * 20)) -lt "$VFPMUL" ] || fail "$SOFTMUL calls to __aeabi_fmul against $VFPMUL vmul.f32 — float math is going through software libcalls"
+  ok "$VFPMUL vmul.f32, $SOFTMUL __aeabi_fmul calls (core's float parsing)"
+
+  echo "== libm calls reach glibc, not compiler_builtins' soft-float copies =="
+  # round/floor/ceil/trunc/fmod/cbrt (and C's sqrtf) are CALLS on ARMv7: there is no VFPv3
+  # instruction for them. The prebuilt armv7 std ships WEAK definitions of those names inside
+  # compiler_builtins, compiled +soft-float (roundf's body is a call to __aeabi_fadd). A weak
+  # definition taken from an archive member is a regular-object definition, which a shared library
+  # later on the command line never overrides, so with `-lm` only at the end of the link every
+  # roundf in the app (119 call sites, text and layout among them) ran soft. The Makefile names -lm
+  # AHEAD of the staticlib so the names are already defined by libm.so and those members are never
+  # extracted. The residue is about 9 soft arithmetic calls in core's prebuilt float parsing (the
+  # bound below is 16), and the i64<->float conversions (__aeabi_d2lz, __aeabi_l2d & co), which are
+  # libcalls on ARMv7 whatever the float ABI, VFPv3 having no instruction for them; the pattern
+  # below leaves those out.
+  LOCALMATH=$(grep -oE '^[0-9a-f]+ <(roundf?|floorf?|ceilf?|truncf?|sqrtf?|fmaf?|cbrtf?|fmodf?)>:$' <<<"$D" \
+    | sed -E 's/.*<(.*)>:/\1/' | tr '\n' ' ' || true)
+  [ -z "$LOCALMATH" ] || fail "local definitions of libm functions ($LOCALMATH) — compiler_builtins' soft-float copies won over glibc's libm; is -lm still ahead of the Rust staticlib on the link?"
+  SOFTARITH=$(grep -cE '[[:space:]]bl[[:space:]].*<__aeabi_[fd](add|sub|rsub|mul|div|cmp[a-z]*|2f|2d)>' <<<"$D" || true)
+  [ "$SOFTARITH" -le 16 ] || fail "$SOFTARITH soft-float arithmetic libcalls (measured 9: core's float parsing) — some float code is running in software"
+  ok "no local libm bodies, $SOFTARITH soft-float arithmetic calls"
 fi
 
 echo "== DT_NEEDED =="
@@ -124,10 +211,19 @@ echo "== DT_NEEDED =="
 # The expectation file is regenerated in C collation to match.
 DYNAMIC=$("$READELF" -d "$BIN") || fail "readelf -d failed"
 sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' <<<"$DYNAMIC" | LC_ALL=C sort > "$AUDIT_TMP/dt-needed.actual"
-if ! diff -u ci/expected-dt-needed.txt "$AUDIT_TMP/dt-needed.actual"; then
-  fail "DT_NEEDED drifted. If intended, confirm with tools/fwcompat.py that it exists on every supported release, then update ci/expected-dt-needed.txt"
+if [ "$PLAYBACK_MODE" = uri ]; then
+  if grep -Fxq 'libplayerAPIs.so.1' "$AUDIT_TMP/dt-needed.actual" \
+      || grep -Fxq 'libpf-1.0.so.1' "$AUDIT_TMP/dt-needed.actual"; then
+    fail "URI backend retains a Feed library in DT_NEEDED"
+  fi
+  EXPECTED_NEEDED=ci/expected-dt-needed-uri.txt
+else
+  EXPECTED_NEEDED=ci/expected-dt-needed.txt
 fi
-ok "$(wc -l < "$AUDIT_TMP/dt-needed.actual" | tr -d ' ') entries, unchanged"
+if ! diff -u "$EXPECTED_NEEDED" "$AUDIT_TMP/dt-needed.actual"; then
+  fail "DT_NEEDED drifted for $PLAYBACK_MODE. If intended, confirm with tools/fwcompat.py that it exists on every supported release, then update $EXPECTED_NEEDED"
+fi
+ok "$(wc -l < "$AUDIT_TMP/dt-needed.actual" | tr -d ' ') entries for $PLAYBACK_MODE, unchanged"
 
 echo "== storage helper =="
 # pkg/plxnative-storage ships to the TV beside the app and links the same way, through the same stub
@@ -170,9 +266,10 @@ echo "== build-host identity =="
 #   (src/app.h's __has_include falls back to YOUR_PMS_HOST only in a clean checkout) — so those
 #   assertions genuinely can only hold in CI;
 #
-#   the HOME DIRECTORY has nothing to do with config.local.h. It arrives through `-Z build-std`
-#   compiling std and every dependency from absolute paths under $RUSTUP_HOME/$CARGO_HOME, and
-#   it is fixed by the Makefile's --remap-path-prefix. That check can and should run everywhere.
+#   the HOME DIRECTORY has nothing to do with config.local.h. It arrives through every dependency being
+#   compiled from absolute paths under $CARGO_HOME (and $HOME for the workspace; the prebuilt std
+#   only carries /rustc/<hash> paths, but under the old `-Z build-std` it was compiled from
+#   $RUSTUP_HOME too), and it is fixed by the Makefile's --remap-path-prefix. That check can and should run everywhere.
 #
 # Skipping the whole section on a dev machine meant the host-path gate had never once executed
 # against a real build. It also cannot be left CI-only now: the remap is the thing that makes the

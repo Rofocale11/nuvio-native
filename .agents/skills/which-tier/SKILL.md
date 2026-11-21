@@ -80,7 +80,7 @@ but a photograph could show it (`gfx.rs`, at the `glBlendFuncSeparate` call).
 
 ### Tier 1 — `make check`
 
-`cargo +$(RUST_NIGHTLY) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens`, preceded by `make lint` (three **named** clippy lints —
+`cargo +$(RUST_TOOLCHAIN) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp`, preceded by `make lint` (three **named** clippy lints —
 `ifs_same_cond`, `same_functions_in_if_condition`, `if_same_then_else` — the shadowed-branch gate),
 and followed by **three** host checks that are easy to forget are in here: `python3 ci/flavor.py
 --selftest` (the flavour transform, whose central assertion is that the STABLE transform is the
@@ -91,12 +91,14 @@ whole of what that tool exposes to the public internet, and the only gate it has
 cargo can see a python file).
 
 **It is not sub-second, and the figure that circulates is one of its five parts.** The ~0.3 s
-everybody quotes is `cargo test --lib` alone, and that part is itself tens of seconds now (the 14 per-crate test binaries run side by side through
+everybody quotes is `cargo test --lib` alone, and that part is itself tens of seconds now (the per-crate test binaries, `UNIT_SUITE` in the Makefile, run side by side through
 `tools/cargo-test-parallel.py`; `make test-crate C=<crate>` runs just the one you touched); end to end the
 gate runs in MINUTES warm. The bulk of it is `python3 tests/test_harness.py`, which shells out to
-`ci/check-deps.sh` (11 s a run) once or more per self-test to prove each structure gate still
-catches a planted violation — 661 s of a 1100 s run, measured 2026-10-01 on a cold lane at load
-~5, before those self-tests moved to private tree copies and a thread pool (175 s after). The lab selftest's **~7 s is mostly two DELIBERATE rate-limit waits** — so
+`ci/check-deps.sh` to prove each structure gate still catches a planted violation: each DepGates
+self-test runs only the rule or rules it plants for (`--only <rules>`), and only the whole-script
+tests, with the one shared run over the real tree, run every rule. That was 661 s of a 1100 s run,
+measured 2026-10-01 on a cold lane at load ~5, before those self-tests moved to private tree
+copies and a thread pool (175 s after). The lab selftest's **~7 s is mostly two DELIBERATE rate-limit waits** — so
 a ten-second-plus pause there is the target working, not a hang. (That step
 also SSDP-probes the LAN to report whether a UPnP gateway is present; still no television, still no
 lock.) Do not write a new number here: measure it if you need one — this file has already carried a
@@ -106,13 +108,14 @@ lock.) Do not write a new number here: measure it if you need one — this file 
 Count it yourself if you need the number:
 
 ```sh
-cd rust-modules && cargo +nightly test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens -- --list | grep -c ': test'
+cd rust-modules && cargo test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp -- --list | grep -c ': test'
 ```
 
-**Run it on nightly.** `make check` uses `cargo +$(RUST_NIGHTLY)`; a bare `cargo test` uses your
-default toolchain and the two have disagreed — `task.rs`'s refused-spawn test passed on stable
-while panicking inside `std` on nightly, which reads as flakiness and is not. Nightly is what
-ships, because `-Z build-std` is what ships.
+**Run it on the pinned toolchain.** `make check` uses `cargo +$(RUST_TOOLCHAIN)`, the `channel` of
+`rust-modules/rust-toolchain.toml` (a bare `cargo` inside `rust-modules/` reads that file; from the
+repository root a bare `cargo test` uses your default toolchain). The two have disagreed —
+`task.rs`'s refused-spawn test passed on stable while panicking inside `std` on nightly — back when
+nightly shipped. One pinned stable release now builds the ARM binary and runs the host gates.
 
 **Three structural limits.** Know them before trusting green:
 
@@ -222,12 +225,13 @@ knows the set is theirs.
 | **pure logic** — `route/plan.rs`, `plex/`, `metadata.rs`, `browse.rs`, `aq.rs`, `stream.rs` parsing, `ff.rs` helpers | `make check` (+ a new test) → `make sim-shot` if a screen reads it | the native libraries; Linux syscall semantics; whether the value reaches a pixel |
 | **UI layout / spacing / colour / a new screen** (`ui/`) | `make check` → `make sim-shot SIM_W=1920 SIM_H=1080` (`ui-sim`) → **one device capture, looked at** | the fps tier is blind to pixels (the 2026-08-13 watched-mark bug); a FITTED sim shot is 960x540 on a 1x display, layout evidence only — which is what `SIM_W`/`SIM_H` exist for |
 | **text rasterization, fonts, the `theme::size` ladder** | `tools/font-hint-audit.py` → device capture | **the simulator is disqualified** — different FreeType; `make check` never rasterizes anything |
+| **Arabic and Hebrew UI text** (shaped runs, `gfx/src/rtl.rs`) | `make check` (coverage, bidi order) → `make check-ass` (shaped ink through libass-plx) → device capture | libass-plx draws these runs with the same pinned FreeType and HarfBuzz in the simulator and on the TV, so their shape and order are evidence there; their weight beside the Inter runs around them stays a device question |
 | **anything ANIMATED, or repainting from a CLOCK** | two host tests (runs / rests) → `--fps` with a real `fps_floor`, plus an `fps_ceiling` if the screen settles | `loop_floor` cannot see a stopped animation at all; the simulator cannot see rate |
 | **frame rate / perf** | `profile-tv`: `./tests/run.py --fps` unarmed, or one scene with `--graphics-profile` for pacing + IRQ + HWCNT | never the simulator; only the profile's production leg has quotable FPS; `drift` is reported, never asserted |
 | **player pipeline, demux, Starfish/ACB, the Load payload, `route/decision.rs`** | `make check` (pure `ff.rs` logic) → `./tests/run.py` (synthetic) → `--server` if selection is involved | the synthetic tier bypasses `metadata → plan → apply_plan` and false-PASSes an unread trigger via `engine`'s `_ =>` arm |
 | **track selection, resume, markers, Up Next, `/:/timeline`** | `./tests/run.py --server` — **only** | the synthetic tier reaches none of these; a bare `./tests/run.py` is not evidence about any of them |
 | **FFI / linkage / `dynlib!`** | `tools/fwcompat.py` → `make check` → **`make sim` or `make macapp`** → device | **there is no link error any more**; and the device cannot see an Apple-ABI variadic bug — see below |
-| **the release feature configuration** | `cargo +nightly check --lib --no-default-features` → `make RELEASE=1` | `make check`, `make` and `make sim` all build DEV features; a broken `RELEASE=1` is invisible to every one of them |
+| **the release feature configuration** | `make check-nodef` (`cargo check --lib --no-default-features --features play-uri,play-feed`, the Makefile's `RUST_BACKEND_FEATURES`) → `make RELEASE=1` | `make check`, `make` and `make sim` all build DEV features; a broken `RELEASE=1` is invisible to every one of them |
 | **the Makefile, packaging, the `.ipk`** | `make check` (flavour selftest) → `make ipk` (runs `ci/check-package.py`) → a real `make FLAVOR=… install` | the dev loop is `make deploy`, which scp's into an already-registered app dir and **never exercises the package** |
 
 ### The rows that carry a trap
@@ -248,7 +252,9 @@ politeness — an over-reporting animator gives back the whole ~38-points-of-a-c
 every `floor` in the suite still passes.
 
 **Anything that animates from a CLOCK rather than a spring** — a millisecond ramp, a phase, a
-countdown — must call `plx_machine::idle::invalidate()` itself. `note_spring` cannot see it, and both
+countdown — must report itself: `plx_machine::idle::invalidate()` when it changes content,
+`plx_machine::idle::note_motion()` when it is a decoration (the tab pulse; damage under a standing
+popover re-captures the frozen host every frame). `note_spring` cannot see it, and both
 `Xfade::tick` (every CONTENT cross-fade) and `Spinner::draw` (every loading read-out) **shipped
 FROZEN** before they were made to report. (`Xfade` drove the ROUTE dip too until restructure phase
 12 lifted that onto `ui::containers::transition::PageDip`, which reports from inside its own
@@ -281,13 +287,14 @@ green. Verified 2026-08-21: inserting a new `#[cfg(feature = "devtriggers")]`-ga
 existing gated pair's attribute and its `fn` orphaned the attribute onto the new function's doc
 comment, and `density_max_sweep`'s two arms collided — `error[E0428]`, only under
 `--no-default-features`, with the whole host suite green throughout. A PostToolUse hook,
-**`.claude/hooks/release-config-check.py`**, now runs exactly that `cargo check` after a Rust edit
+**`.claude/hooks/release-config-check.py`**, now runs that `cargo check` (the bare `--no-default-features`, which also drops `play-uri` and `play-feed`, so `make check-nodef` is still the shipping set) after a Rust edit
 — 0.55 s warm, because cargo keys unit fingerprints by feature set and the two configurations
 coexist in one tree — so the usual case is caught for you. That tree is **`$TMPDIR`**, not the
 crate's own `target/`: this checkout can live on a network mount, and cargo cannot take its
 incremental-session lock there (`os error 45`), which failed EVERY edit with a "RELEASE-CONFIG
 BREAK" that was really a filesystem answer. Set `CARGO_TARGET_DIR` to override. Confirm it is wired in `.claude/settings.json` before relying on it, run
-the command by hand before shipping regardless, and prefer `plx_base::devtrig::latched_flag!` over
+`make check-nodef` by hand before shipping regardless (it builds in the checkout's own `target/`, not
+that `$TMPDIR` tree), and prefer `plx_base::devtrig::latched_flag!` over
 hand-rolling a `#[cfg]`/`#[cfg(not)]` pair.
 
 **Packaging.** Two ipk bugs shipped undetected until 2026-08-02 — a missing

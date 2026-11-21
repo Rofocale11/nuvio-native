@@ -6,18 +6,7 @@ impl LibraryScreen {
     pub(super) fn save_cursor<H: LibraryLike>(&self, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         let listing = H::listing(cx);
         let Some(id) = listing.id() else { return };
-        if self.epoch != Some(id.epoch)
-            || self.query != Some(id.query)
-            || self
-                .section
-                .as_ref()
-                .is_none_or(|section| section.sid != id.sid || section.key != id.section)
-        {
-            return;
-        }
-        let Some(target) = self.address(cx) else {
-            return;
-        };
+        let Some(target) = self.committed_address(cx) else { return };
         if self.grid_reset_pending {
             self.store(
                 target,
@@ -25,7 +14,7 @@ impl LibraryScreen {
                     query: id.query,
                     cursor: plx_data::browse::Cursor {
                         at: plx_data::browse::CursorAt::SlotIndex(0),
-                        scroll: self.target_layout.grid_block_top(),
+                        scroll: self.target_layout.grid_top(),
                     },
                 },
                 fx,
@@ -82,7 +71,7 @@ impl LibraryScreen {
         let Some(cursor) = H::listing(cx).cursor() else {
             return true;
         };
-        if self.pair.detail.elems.is_empty() {
+        if self.pair.detail.total() == 0 {
             return self.readout == Readout::Empty;
         }
         let (identity, slot) = match &cursor.at {
@@ -99,9 +88,8 @@ impl LibraryScreen {
         })
         });
         if let Some(elem) = stable.or_else(|| {
-            self.pair
-                .detail
-                .elem_at(slot.min(self.pair.detail.elems.len().saturating_sub(1)))
+            let slot = slot.min(self.pair.detail.total().saturating_sub(1));
+            self.pair.detail.elem_for(cx, &mut self.keys, slot, self.layout.cols())
         }) {
             fx.remember(group, elem);
             let index = self
@@ -112,14 +100,18 @@ impl LibraryScreen {
             // The remembered row owns its full caption before clamping the saved viewport.
             // Clamping against an all-collapsed document loses the last row's 74px on return.
             self.relayout(Some(self.key(elem)));
-            let scroll = if index == slot {
-                cursor.scroll
-            } else {
-                self.target_layout.row_reveal(index / self.layout.cols())
-            };
-            self.scroll_target = scroll.clamp(0.0, self.target_layout.max_scroll());
-            self.scroll.jump(self.scroll_target);
-            self.restore_scroll = Some(self.scroll_target);
+            // A library chosen with OK keeps the header on screen: the grid cursor is remembered
+            // (DOWN from the header lands on it) but the page does not scroll to it.
+            if !self.switched {
+                let scroll = if index == slot {
+                    cursor.scroll
+                } else {
+                    self.target_layout.row_reveal(index / self.layout.cols())
+                };
+                self.scroll_target = scroll.clamp(0.0, self.target_layout.max_scroll());
+                self.scroll.jump(self.scroll_target);
+                self.restore_scroll = Some(self.scroll_target);
+            }
             self.relayout(Some(self.key(elem)));
         }
         true

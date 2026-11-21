@@ -13,7 +13,7 @@ friend's, not the maintainer's, and they were not a party to any of it.
 
 That is the shape this guards: not malice and not carelessness, but an agent being helpful with a
 value it can read. A memory file is not in the loop at the moment a PR body is composed; a
-PreToolUse hook is. github.com/GLinnik21/plx-native is PUBLIC.
+PreToolUse hook is. github.com/plxnative/plx-native is PUBLIC.
 
 WHAT IT COSTS. Classification is pure string work over the command line, and nothing is opened —
 not the gitignored files, not even the repo root — unless a segment is first graded outbound, so
@@ -52,6 +52,24 @@ repository:
     $(cat .tv-host)"` names the file, reads it and publishes the contents on one visible line.
     Also found on 2026-08-23, and also previously allowed: the substitution's own segment is a
     `cat`, which is not outbound, and the outer token is quoted prose, which the path check skips.
+  * `tools/pr-land.py merge`: its `--subject` and body become the squash commit's message on `main`,
+    so they are scanned like a `git commit -m`. A `--subject` and a `--body-file` the script scans
+    again itself before any `gh`; a `--body-from-pr` body only the script sees (once, after fetching it).
+
+A SECOND QUESTION, UNRELATED TO PRIVATE VALUES: `merge_verdict` refuses a pull request merged by
+hand. A PR lands through `tools/pr-land.py` (the `land-pr` skill), which merges only a head whose
+checks say it may land; `gh pr merge` typed after a watcher, or read off a `gh run list` that said
+"completed" mid-run, is how #387 merged red. Refused: `gh pr merge` (any arguments), a `gh api` call
+to `.../pulls/N/merge` that is not a GET, and a GraphQL `mergePullRequest` written on the command line
+or in a heredoc (`merge_reason` tests only that text, so a query read from a file, `-F query=@f` or
+`--input f`, is not seen; the private-value scan reads those files, this does not). It matches the COMMAND,
+never the words (a grep, an echo, a commit message and a heredoc are prose) and is pure string work.
+Its hatch is its own prefix, `PLX_MERGE_BYPASS=1`, for the owner's manual merge; it does not open
+the private-value scan above and `PLX_PUBLISH_BYPASS=1` does not open it. The refusal never echoes
+the command: a raw merge can carry a `--body` the scan above has not read. Cooperative, like the rest:
+`bash -c`, a script, a query file, curl with a token and the GitHub MCP connector are not seen here (the connector's
+merge tool has a `permissions.deny` rule in `.claude/settings.json`). The tool itself calls `gh pr
+merge` from a subprocess this hook cannot see.
 
 WHY `git push` IS DELIBERATELY NOT THE GATE. By push time the message is already an object in the
 local history and the interesting half of the leak has happened; `git commit` is where the text is
@@ -188,6 +206,7 @@ FAIL-OPEN ON ITS OWN BUGS, fail-closed on the answer: a crash in this file must 
 Bash call in the session, but a match is a refusal. Contract: exit 0 allows, exit 2 blocks and
 feeds stderr back to the model.
 """
+import hashlib
 import json
 import os
 import re
@@ -195,6 +214,7 @@ import subprocess
 import sys
 
 BYPASS = re.compile(r"\bPLX_PUBLISH_BYPASS=1\b")
+MERGE_BYPASS = re.compile(r"\bPLX_MERGE_BYPASS=1\b")
 
 # The gitignored files that hold private values. All eight are named in `.gitignore`, and seven of
 # them carry their own reason in its comments — `src/config.local.h` and `local.env` under "local
@@ -774,6 +794,15 @@ def local_url(u):
     return bool(m) and bool(LOCAL_HOST.match(m.group(1)))
 
 
+def pr_land_merge(base, args):
+    """True for `tools/pr-land.py merge ...`, run directly or as `python3 tools/pr-land.py merge ...`."""
+    subs = subcommands(args)
+    if base == "pr-land.py":
+        return subs[:1] == ["merge"]
+    return (base.startswith("python") and len(subs) > 1
+            and os.path.basename(subs[0]) == "pr-land.py" and subs[1] == "merge")
+
+
 def outbound(seg):
     """Reason string if this segment publishes its text, else None."""
     w = words(seg)
@@ -782,6 +811,9 @@ def outbound(seg):
     cw = command_word(w)
     base = os.path.basename(cw)
     args = w[w.index(cw) + 1:] if cw in w else w[1:]
+
+    if pr_land_merge(base, args):
+        return "pr-land.py merge writes its --subject and body into main's history"
 
     if base == "gh":
         subs = subcommands(args)
@@ -835,6 +867,11 @@ TEXT_FLAGS = {
     "git": {"-m", "--message"},
     "curl": {"--data-raw", "--form-string", "--body-data"},
     "wget": {"--post-data", "--body-data"},
+    # `tools/pr-land.py merge --subject T`: T is a commit subject, not a path. Keyed by the command
+    # word, so it is `python3` for the usual spelling; the other python flags take no text anyway.
+    "python3": {"--subject"},
+    "python": {"--subject"},
+    "pr-land.py": {"--subject"},
 }
 SUBST = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
@@ -850,16 +887,88 @@ def load_alphabet(root):
         return frozenset(), [SYNTHETIC_ID]
 
 
-def synthetic_strings(node, out):
-    """Every string VALUE in a JSON document (keys are the format's, not data)."""
+# Independent public boundary, not an import of the source-only mutator/check tool.
+# Only the producer-verified V13 profile gets typed slots; historical artifacts keep
+# the existing alphabet-only rule. Tests pin the exact producer anchor's raw hash.
+CURRENT_FP = 9159521251572352515  # 0x7f1d_280c_909c_8603: the census with the by-id `Id` resolution row
+CURRENT_MANIFEST_SHAPE = '59120bd99cf7687b732343385c8623508aa21f86e3268fae175987a3f6a773fc'
+CURRENT_ENUMS = {
+    'playback_quality': ('auto', 'original', '1080p_20_mbps', '1080p_8_mbps', '720p_4_mbps', '720p_2_mbps', '480p_720_kbps'),
+    'direct_play_mode': ('auto', 'forced', 'disabled'),
+    'subtitle_tone': ('white', 'yellow', 'grey_85', 'grey_70', 'grey_55', 'grey_40', 'grey_28'),
+    'subtitle_size': ('small', 'medium', 'large', 'extra_large', 'huge'),
+    'subtitle_position': ('low', 'middle', 'high'),
+    'hdr_overlay_brightness': ('full', 'three_quarters', 'half'),
+    'next_episode_mode': ('countdown', 'after_credits', 'off'),
+    'skip_interval': ('5s', '10s', '15s', '30s', '60s'),
+    'instant_dpad_seeking': ('off', 'on'), 'uri_engine': ('off', 'on'),
+    'dolby_vision_mode': ('auto', 'off'), 'deck_press': ('details', 'play'),
+}
+
+
+def current_manifest_paths(doc):
+    """Closed producer shape and enum domains; every other value stays alphabet-scanned."""
+    if not isinstance(doc, dict):
+        return True, set()
+    initial = doc.get('init')
+    data = initial.get('data') if isinstance(initial, dict) else None
+    typed = isinstance(data, dict) and set(data) & {'ui_preferences', 'install_language', 'running_language', 'install_hold_hint'}
+    if doc.get('state_fp') != CURRENT_FP and not typed:
+        return True, set()
+
+    def shape(node):
+        if isinstance(node, dict):
+            return {key: shape(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [shape(value) for value in node]
+        return type(node).__name__
+
+    encoded = json.dumps(shape(dict(doc, anchor=doc.get('anchor', True))), sort_keys=True, separators=(',', ':'))
+    if (type(doc.get('schema')) is not int or doc['schema'] != 3
+            or type(doc.get('state_fp')) is not int or doc['state_fp'] != CURRENT_FP
+            or doc.get('anchor', True) is not True
+            or hashlib.sha256(encoded.encode()).hexdigest() != CURRENT_MANIFEST_SHAPE
+            or doc['init']['probe'] != 'controlled=home version=1'
+            or not _canonical_int(doc['init']['hash'], 0, U64_MAX)
+            or data['version'] != 1):
+        return False, set()
+    base = ('init', 'data')
+    paths = set()
+    languages = ('system', 'en', 'es', 'be', 'ca', 'fr', 'it', 'pt', 'de', 'hu', 'ru', 'pl', 'nl')
+    for key in ('install_language', 'running_language'):
+        if data[key] not in languages:
+            return False, set()
+        paths.add(base + (key,))
+    prefs = data['ui_preferences']
+    for key, variants in CURRENT_ENUMS.items():
+        if prefs[key] not in variants:
+            return False, set()
+        paths.add(base + ('ui_preferences', key))
+    poster = prefs['under_posters']
+    for key in ('details', 'show_details'):
+        if poster[key] not in ('year_length', 'genre', 'video', 'age_rating_score', 'none'):
+            return False, set()
+        paths.add(base + ('ui_preferences', 'under_posters', key))
+    for key, variants in {'detail_parts': ('year', 'length', 'genre', 'video_quality', 'age_rating', 'score'),
+                          'show_detail_parts': ('year', 'seasons', 'genre', 'age_rating', 'score')}.items():
+        parts = poster[key]
+        if any(value not in variants for value in parts) or parts != [value for value in variants if value in parts]:
+            return False, set()
+        paths.update(base + ('ui_preferences', 'under_posters', key, i) for i in range(len(parts)))
+    return True, paths
+
+
+def synthetic_strings(node, out, path=(), structural=frozenset()):
+    """Every string VALUE except independently validated, exact path-typed enum slots."""
     if isinstance(node, str):
-        out.append(node)
+        if path not in structural:
+            out.append(node)
     elif isinstance(node, dict):
-        for v in node.values():
-            synthetic_strings(v, out)
+        for key, value in node.items():
+            synthetic_strings(value, out, path + (key,), structural)
     elif isinstance(node, list):
-        for v in node:
-            synthetic_strings(v, out)
+        for index, value in enumerate(node):
+            synthetic_strings(value, out, path + (index,), structural)
 
 
 def _canonical_int(value, low, high):
@@ -920,7 +1029,7 @@ def metric_strings(doc):
     return False, []
 
 
-def offending_strings(text, alphabet):
+def offending_strings(text, alphabet, manifest=False):
     """The string values of a JSON / JSONL text that are outside the alphabet (never printed)."""
     literals, pats = alphabet
     bad = []
@@ -938,7 +1047,10 @@ def offending_strings(text, alphabet):
                 bad.append(line)
     for d in docs:
         vals = []
-        synthetic_strings(d, vals)
+        structural_ok, paths = current_manifest_paths(d) if manifest else (True, set())
+        if not structural_ok:
+            bad.append(None)
+        synthetic_strings(d, vals, structural=paths)
         metric_ok, metric_vals = metric_strings(d)
         vals.extend(metric_vals)
         if not metric_ok:
@@ -1007,7 +1119,7 @@ def named_private_paths(seg, root, cwd):
                 try:
                     if os.path.getsize(rp) <= MAX_READ:
                         text = open(rp, encoding="utf-8", errors="replace").read()
-                        if offending_strings(text, load_alphabet(root)):
+                        if offending_strings(text, load_alphabet(root), manifest=os.path.basename(rp) == 'manifest.json'):
                             hits.append(("a replay fixture with a string outside the synthetic "
                                          "alphabet (tests/fixtures/replay/ALPHABET.json)", how))
                 except OSError:
@@ -1067,6 +1179,87 @@ def grade(cmd):
     return graded
 
 
+MERGE_ENDPOINT = re.compile(r"/pulls/[^/?#]+/merge(?:[/?#]|$)", re.I)
+
+
+def api_method(args):
+    """The HTTP method `gh api` will send for `args`.
+
+    Explicit `-X M` / `--method M` / `-XM` wins; otherwise gh sends POST as soon as there is a field
+    or an input file and GET when there is none. (`--method GET` with fields makes them a query
+    string, which is why the method is read, not the presence of a field alone.)
+    """
+    named = flag_values(args, {"-X", "--method"})
+    named += [t[2:] for t in args if re.match(r"^-X[^=]", t)]
+    if named:
+        return named[-1].upper()
+    fields = any(re.match(r"^-[fF]", t) or t.split("=", 1)[0] in ("--field", "--raw-field", "--input")
+                 for t in args)
+    return "POST" if fields else "GET"
+
+
+def merge_reason(seg, bodies=""):
+    """Reason string if this segment merges a pull request by hand, else None."""
+    w = words(seg)
+    cw = command_word(w)
+    if os.path.basename(cw) != "gh":
+        return None
+    args = w[w.index(cw) + 1:]
+    subs = subcommands(args)
+    if subs[:2] == ["pr", "merge"]:
+        return "gh pr merge"
+    if subs[:1] == ["api"]:
+        if "graphql" in subs[1:]:
+            if "mergePullRequest" in seg or "mergePullRequest" in bodies:
+                return "a GraphQL mergePullRequest"
+        elif any(MERGE_ENDPOINT.search("/" + s) for s in subs[1:]) and api_method(args) != "GET":
+            return "a gh api write to a pull request's merge endpoint"
+    return None
+
+
+SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")     # the pattern `segments()` recurses on
+
+
+def merge_candidates(text, bodies=""):
+    """[(segment, heredoc bodies)] that `text` would run, for `merge_verdict`.
+
+    `segments()` recurses into `$(...)` for the private-value scan and splits the inside on newlines
+    without `units()`, so the body of a heredoc opened inside a substitution -- how a commit message
+    or a PR body is written, `-m "$(cat <<'EOF' ... EOF)"` -- came back as commands, and a body line
+    that began `gh pr merge` refused the whole command. Here each substitution is cut out of `text`
+    and its inside goes through `units()` like a command of its own, so a heredoc stays a body
+    wherever it was opened. The scan keeps `segments()` as it was: more text scanned, never less.
+    """
+    inners = []
+    while True:                     # innermost first; what is left of an outer one is cut next round
+        found = SUBSTITUTION.findall(text)
+        if not found:
+            break
+        inners += found
+        text = SUBSTITUTION.sub(" ", text)
+    out = [(seg, bodies) for seg in segments(text)]
+    for inner in inners:
+        for inner_text, inner_bodies in units(inner):
+            out.extend((seg, inner_bodies) for seg in segments(inner_text))
+    return out
+
+
+def merge_verdict(cmd):
+    """The reason `cmd` merges a pull request outside tools/pr-land.py, or None.
+
+    Pure string work, and the word test comes first so the 99% of Bash calls that mention no merge
+    never pay for the tokenizer.
+    """
+    if "merge" not in cmd.lower() or MERGE_BYPASS.search(cmd):
+        return None
+    for text, bodies in units(cmd):
+        for seg, seg_bodies in merge_candidates(text, bodies):
+            reason = merge_reason(seg, seg_bodies)
+            if reason:
+                return reason
+    return None
+
+
 def verdict(cmd, root, cwd=None, secrets=None, published=None):
     """(segment, reason, [(what, how, where)], secrets) if the command must be refused, else None.
 
@@ -1099,7 +1292,8 @@ def verdict(cmd, root, cwd=None, secrets=None, published=None):
                 path = where if os.path.isabs(where) else os.path.join(cwd, where)
                 exempt = (where != "the command line" and where != "the heredoc body"
                           and os.path.isfile(path) and under_fixture_dir(path, root)
-                          and not offending_strings(text, load_alphabet(root)))
+                          and not offending_strings(text, load_alphabet(root),
+                                                    manifest=os.path.basename(path) == 'manifest.json'))
                 if not exempt:
                     hits.append(("the recording envelope grammar ({\"f\":…, \"t\":\"st\") — "
                                  "a recording, unless it is a synthetic fixture under "
@@ -1141,6 +1335,22 @@ def main():
     if not isinstance(cwd, str) or not cwd:
         cwd = os.getcwd()
 
+    merging = merge_verdict(cmd)
+    if merging:
+        sys.stderr.write(
+            "BLOCKED: a pull request merged by hand (%s).\n"
+            "\n"
+            "A PR lands through tools/pr-land.py (the `land-pr` skill): it merges only a head whose\n"
+            "checks say it may land, then verifies the merge reached the base branch.\n"
+            "  python3 tools/pr-land.py merge N --sha S --subject T (--body-file F | --body-from-pr)\n"
+            "  python3 tools/pr-land.py gate N | wait N --sha S | restack ...   (see the skill)\n"
+            "It grants no authority to merge: a PR still needs the owner's say-so, and `main` takes\n"
+            "squash merges only.\n"
+            "\n"
+            "For the owner's own manual merge, prefix the command with PLX_MERGE_BYPASS=1. That is\n"
+            "not a way around a missing authorization or a red check.\n" % merging)
+        return 2
+
     # Nothing outbound → answer before paying for a repo root, a file read or a `git grep`.
     if BYPASS.search(cmd) or not grade(cmd):
         return 0
@@ -1159,7 +1369,7 @@ def main():
     lines.append("  (the value itself is not printed — putting it in this transcript is the same "
                  "leak by a shorter route)")
     sys.stderr.write("\n".join(lines) + "\n\n" + (
-        "github.com/GLinnik21/plx-native is PUBLIC. On 2026-08-14 four PR bodies (#28-31) carried a\n"
+        "github.com/plxnative/plx-native is PUBLIC. On 2026-08-14 four PR bodies (#28-31) carried a\n"
         "third party's Plex server address, port, machineIdentifier and handle. All four were\n"
         "redacted, but GitHub keeps PR-body edit history, so those values are permanently public —\n"
         "and they were the FRIEND's, not this project's to publish.\n"

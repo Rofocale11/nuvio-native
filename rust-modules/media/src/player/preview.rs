@@ -34,11 +34,12 @@
 //! `route::note_user_seek_intent`, no `report::note_seek_for(playback_trace_generation())` — a
 //! preview has no trace generation, and the watch-state promise this file opens with covers a
 //! seek exactly like every other write. Pausing has none of this to begin with: it is
-//! `player::pause`/`resume` on a live engine, and `TX.reset()` on a real stop clears the flag, so
+//! `player::pause`/`resume` on a live engine, and a real stop's `stop_transport` clears the flag, so
 //! a collapsed or ended preview cannot strand it.
 //!
-//! Sound stays on. The bound Starfish surface has no mute. The Settings toggle is the only
-//! sound control, and that is a platform limit.
+//! Sound stays on. A preview has no mute control: the per-pipeline `setVolume` the sink exposes is
+//! used for one thing only, the silent paused-seek preroll (`player::mute_for_preroll_on`), and is not
+//! a preview or UI feature. The Settings toggle is the only sound control.
 //!
 //! **Cycle budget is source arithmetic, not a measured leak.** Spike 0a never produced a delta.
 //! `sf_load` keeps a 64 KiB slot (`src/starfish.c`) and the conservative RSS headroom cited by
@@ -46,6 +47,7 @@
 //! admitted Loads, under the ratio rather than on it. Do not quote 14 as a television result.
 
 use plx_plex::plex::ServerId;
+use plx_telemetry::telemetry::classes::PreviewRefusal;
 
 /// Admitted Loads per process, from the source arithmetic above. Not a device measurement.
 pub const CYCLE_BUDGET: u32 = 14;
@@ -436,10 +438,35 @@ pub fn accepts_direct_play(direct_play: bool, part_nonempty: bool, adaptive: boo
     direct_play && part_nonempty && !adaptive
 }
 
-/// Defer the media join while an in-flight Load has not returned. Joining it on the main thread
-/// is the stall Abandoning exists to avoid.
-pub fn defer_media_join(loading: bool, thread_finished: bool) -> bool {
-    loading && !thread_finished
+/// **Which condition refused a preview** (Sentry PLX-NATIVE-23), or `None` when
+/// [`accepts_direct_play`] accepts it. The first failing condition, in this fixed order:
+///
+/// 1. no part: [`PreviewRefusal::NoPart`];
+/// 2. `direct_play_offered` was false: [`PreviewRefusal::NotDirect`];
+/// 3. a direct play WAS on offer and `adaptive` (Auto chose HLS) is what refused it:
+///    [`PreviewRefusal::Adaptive`];
+/// 4. anything else, a late demotion such as an enhancement's remux: [`PreviewRefusal::NotDirect`].
+///
+/// `direct_play_offered` is the route's direct-play answer BEFORE Auto's override, not the
+/// `direct_play` the gate sees: Auto sets that false whenever it picks HLS, so reading the reason
+/// off the gate's own inputs would call every Auto-quality refusal `adaptive`, including a preview
+/// the server would have transcoded anyway.
+pub fn refusal(
+    direct_play: bool,
+    direct_play_offered: bool,
+    part_nonempty: bool,
+    adaptive: bool,
+) -> Option<PreviewRefusal> {
+    if accepts_direct_play(direct_play, part_nonempty, adaptive) {
+        return None;
+    }
+    Some(if !part_nonempty {
+        PreviewRefusal::NoPart
+    } else if direct_play_offered && adaptive {
+        PreviewRefusal::Adaptive
+    } else {
+        PreviewRefusal::NotDirect
+    })
 }
 
 plx_base::devtrig::latched_flag!(
@@ -449,12 +476,29 @@ plx_base::devtrig::latched_flag!(
     fn nopreview_armed = "nopreview";
 );
 
+/// The seated profile's hero trailer autoplay switch (P1c). A [`crate::route::LiveCell`] restored by
+/// `route::restore_profile_rows` (at boot for nobody seated, then at every seat change), and saved
+/// through the one write door (`route::choose`, Settings > System). Seeded ON, the product default,
+/// so a read before anything has restored it is what the install did before the setting existed.
+pub(crate) static TRAILER_AUTOPLAY: crate::route::LiveCell<bool> =
+    crate::route::LiveCell::new("hero trailer autoplay preference");
+
+/// Whether the hero may autoplay its trailer: the switch of the SEATED profile (its own pick, else
+/// the TV's older key, else on), unless the dev trigger disarms it.
+///
+/// Read every frame (via `blocked`) while the detail hero holds focus, so it reads a cell: no
+/// lock, no session read. (Before the switch was per profile it read `session::peek()`, which is
+/// cached; the storage-helper round trip that cache exists to avoid cost ~27 ms/frame on the
+/// television in 2026-09, the detail-page 60->26 fps regression. See `session::IO`/`session::CACHE`.)
 pub fn enabled() -> bool {
-    // `peek()` is safe on this every-frame path (via `blocked`) because it is cached now: a hit
-    // never takes `session::IO`, which on the television guards a `recv(2)` round trip to the
-    // storage helper, measured at ~27 ms/frame here before the cache existed (2026-09-18, the
-    // detail-page 60->26 fps regression). See the doc on `session::IO`/`session::CACHE`.
-    !nopreview_armed() && plx_plex::plex::session::peek().trailer_autoplay()
+    !nopreview_armed() && TRAILER_AUTOPLAY.get()
+}
+
+/// Put the switch where a restore says without saving it: what `route::restore_profile_rows`
+/// does, and what a test uses to stand the cell somewhere known.
+#[cfg(any(test, feature = "test-support"))]
+pub fn restore_trailer_autoplay(on: bool) {
+    TRAILER_AUTOPLAY.set(on);
 }
 
 fn slot() -> &'static std::sync::Mutex<Machine> {
@@ -503,6 +547,14 @@ pub fn blocked(sid: ServerId, rk: &str) -> bool {
         crate::player::log(&format!("preview: blocked rk={rk} reason={reason:?}"));
     }
     told.0.is_some()
+}
+
+/// Has the preview session now running, or the one that last ran, put a picture on the panel?
+/// The machine keeps the fact past its own retirement (`picture_ms` is cleared only by the next
+/// [`Machine::start`]), which is what lets a failure report — observed a frame after the session
+/// retired — say that a trailer which played and then failed did start.
+pub fn picture_shown() -> bool {
+    with_mut(|m| m.picture_ms.is_some())
 }
 
 pub fn occupies() -> bool {
@@ -587,6 +639,29 @@ pub fn set_phase_for_test(phase: Phase) {
     with_mut(|m| m.phase = phase);
 }
 
+/// Test-only: the singleton machine's phase.
+#[cfg(any(test, feature = "test-support"))]
+pub fn phase_for_test() -> Phase {
+    with_mut(|m| m.phase)
+}
+
+/// Test-only: while set, [`retire`] finds the preview's Load not yet returned, as it does for a
+/// real trailer abandoned mid-Load, so a halt leaves the machine `Abandoning` (`occupies()` true)
+/// without an installed engine. Cleared by [`reset_for_test`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn hold_load_for_test(on: bool) {
+    LOAD_STILL_OUT.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static LOAD_STILL_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(any(test, feature = "test-support"))]
+fn load_still_out() -> bool { LOAD_STILL_OUT.load(std::sync::atomic::Ordering::SeqCst) }
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn load_still_out() -> bool { false }
+
 /// Test-only: [`set_phase_for_test`] plus the `picture_ms` half `view()` also checks, skipping
 /// `enabled()`/session plumbing and a real Starfish Load so a screen-level test can exercise
 /// `DetailScreen::full_trailer()`-gated behavior.
@@ -600,6 +675,7 @@ pub fn force_playing_for_test() {
 /// `Machine`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_for_test() {
+    hold_load_for_test(false);
     with_mut(|m| *m = Machine::default());
 }
 
@@ -688,6 +764,10 @@ pub fn after_pump(
         return;
     }
     if abandoning() {
+        // The Load thread returns on its own thread at any instant, after the pump's last sample
+        // (`pump` ends on one): sample again, so this frame's `finished` is the thread's, not the
+        // frame's earlier one. `pump` does not run at all in a frame the player is not started.
+        pa.publish_feed_attempt_view(ps);
         // KNOWN GAP (code review, unresolved): this poll has no timeout. If the native load
         // thread never finishes (the k5lp DirectVoInit hang class this app already has a general
         // budget for on the live path, `pump::NATIVE_LOAD_BUDGET`), `finished` stays false
@@ -699,21 +779,18 @@ pub fn after_pump(
         // resource an OS thread may still be executing against — a real memory-safety question
         // (does the leaked `SfSlot` pattern in `src/starfish.c` make that safe, or does it not)
         // that needs `player/CLAUDE.md`'s device verification + fw-compat review, not a desk fix.
-        let finished = pa
-            .engine()
-            .and_then(|e| e.load_th.as_ref())
-            .is_none_or(|t| t.is_finished());
+        let finished = ps.readout().raw().load.load_thread_finished;
         if finished {
             retire(ps, pa, "abandoned Load returned");
         }
         return;
     }
     let live = pa.is_live();
-    let seen_frame = crate::player::seen_frame();
+    let seen_frame = crate::player::seen_frame(ps) == Some(true);
     if preview && live && occupies() {
         if seen_frame {
             note_picture(now_ms);
-        } else if pa.engine().is_some_and(|eng| eng.stage >= super::shared::Stage::Playing) {
+        } else if ps.readout().raw().load.stage.is_some_and(|stage| stage >= plx_playback_contract::feed::Stage::Playing) {
             transition("bound", Machine::bound);
         }
     }
@@ -722,8 +799,8 @@ pub fn after_pump(
         preview,
         live,
         resolving: crate::route::play_pending(),
-        ended: crate::player::ended(),
-        failed: super::SHARED.load_failed.load(std::sync::atomic::Ordering::Acquire),
+        ended: crate::player::feed_ended(ps),
+        failed: ps.readout().raw().flags.load_failed,
         seen_frame,
     };
     match settle(facts) {
@@ -754,11 +831,11 @@ pub fn after_pump(
     }
 }
 
-/// Is the live preview's transport paused? The engine is shared, so this is the same
-/// `player::TX.paused` the player HUD reads, qualified by a preview actually being what occupies
-/// it — with no session there is nothing paused, whatever the flag last said.
-pub fn paused() -> bool {
-    occupies() && crate::player::TX.paused.load(std::sync::atomic::Ordering::Relaxed)
+/// Is the live preview's transport paused? The engine is shared, so this is the same transport
+/// Pause the session's readout holds for the player HUD, qualified by a preview actually being what
+/// occupies it — with no session there is nothing paused, whatever the readout last said.
+pub fn paused(ps: &crate::route::PlaybackSession) -> bool {
+    occupies() && super::transport::paused(ps)
 }
 
 /// Pause or resume the live preview session — full-trailer mode's OK/PLAY/PAUSE, performed by the
@@ -782,8 +859,8 @@ pub fn transport(
     if !crate::route::is_preview(ps) || !bound_or_playing() || !pa.is_live() {
         return false;
     }
-    let want = super::lifecycle::transport_target(play, super::lifecycle::paused());
-    super::lifecycle::set_transport_paused(pa, want)
+    let want = super::transport::transport_target(play, super::transport::viewer_paused_for(ps, pa));
+    super::transport::set_transport_paused(ps, pa, want)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -872,7 +949,7 @@ pub fn retire(
     if pa.is_live() {
         super::engine::stop_bufferfeed(ps, pa);
     }
-    let still_live = pa.is_live();
+    let still_live = pa.is_live() || load_still_out();
     transition(why, |m| m.halted(still_live));
     if !still_live {
         crate::route::clear_preview(ps);
@@ -1030,13 +1107,13 @@ mod tests {
 
     /// **Requirement 3, the trivial half: `seek` refuses outright, and touches nothing, when there
     /// is no live bound/playing preview to seek within** — the same race [`transport`] refuses for
-    /// the same reason. `TX.seek_reqs` is the counter `player::request_seek` bumps on every call;
-    /// this pins that `preview::seek` never becomes a second path to it, which is the whole of the
+    /// the same reason. The readout's seek epoch is the counter `player::request_seek` bumps on every
+    /// call; this pins that `preview::seek` never becomes a second path to it, which is the whole of the
     /// watch-state promise as it applies to a seek (`route::note_user_seek_intent` and
     /// `report::note_seek_for` live behind that same one call). The `Started`/`StartFailed` arms of
     /// `seek` reach `engine::reload_at`, which needs a live native session this host test cannot
-    /// build without the `hostsim` feature — those remain proven by `arm_seek`'s own body (it only
-    /// touches engine-level `SHARED` atomics) and by device verification, not by this test.
+    /// build without the `hostsim` feature — those remain proven by `ArmOpen`'s own body (it only
+    /// touches engine-level `FEED_SHARED` atomics) and by device verification, not by this test.
     ///
     /// Gated on `hostsim`, like `player::engine`'s own `PlayerAdapter`-constructing tests
     /// (`lifecycle_clock_tests`, `replay_after_stop_tests`): it needs the simulator's video sink
@@ -1047,20 +1124,21 @@ mod tests {
     fn seek_refuses_and_touches_no_user_seek_bookkeeping_with_no_live_preview() {
         let _serial = plx_base::testlock::serial();
         let mut ps = crate::route::PlaybackSession::IDLE;
-        let mut pa = crate::player::adapter::PlayerAdapter::new(unsafe {
+        let mut pa = crate::player::adapter::PlayerAdapter::new_fed(unsafe {
             plx_base::task::MainThread::assume()
         });
         assert!(!pa.is_live(), "test requires an empty native-session slot");
-        let before = crate::player::TX.seek_reqs.load(std::sync::atomic::Ordering::Relaxed);
+        let before = ps.readout().seek_epoch();
 
         let outcome = seek(&mut ps, &mut pa, 5_000_000_000);
 
         assert_eq!(outcome, SeekOutcome::Refused);
         assert_eq!(
-            crate::player::TX.seek_reqs.load(std::sync::atomic::Ordering::Relaxed),
+            ps.readout().seek_epoch(),
             before,
             "preview::seek must never go through player::request_seek's counter"
         );
+        assert_eq!(ps.readout().pending_seek(), None, "and leaves no seek waiting");
     }
 
     #[test]
@@ -1133,11 +1211,36 @@ mod tests {
         assert!(!accepts_direct_play(true, false, false));
     }
 
+    /// Every input combination: the reason exists exactly when the gate refuses, and names the
+    /// first failing condition in the documented order. `adaptive` implies a false `direct_play`
+    /// (Auto's override), which is why only the reachable rows are enumerated for `adaptive`.
     #[test]
-    fn abandon_defers_the_join_until_the_load_thread_has_returned() {
-        assert!(defer_media_join(true, false));
-        assert!(!defer_media_join(true, true));
-        assert!(!defer_media_join(false, false));
+    fn the_refusal_reason_is_the_first_failing_condition_in_a_fixed_order() {
+        use PreviewRefusal::{Adaptive, NoPart, NotDirect};
+        for direct_play in [false, true] {
+            for offered in [false, true] {
+                for part in [false, true] {
+                    for adaptive in [false, true] {
+                        let got = refusal(direct_play, offered, part, adaptive);
+                        assert_eq!(got.is_none(), accepts_direct_play(direct_play, part, adaptive),
+                            "gate and reason disagree: dp={direct_play} offered={offered} part={part} adaptive={adaptive}");
+                    }
+                }
+            }
+        }
+        // 1. A missing part outranks everything, including Auto's HLS and a refused direct play.
+        assert_eq!(refusal(true, true, false, false), Some(NoPart));
+        assert_eq!(refusal(false, true, false, true), Some(NoPart));
+        assert_eq!(refusal(false, false, false, true), Some(NoPart));
+        // 2. No direct play on offer before Auto chose: `not_direct`, even if Auto also went HLS.
+        assert_eq!(refusal(false, false, true, false), Some(NotDirect));
+        assert_eq!(refusal(false, false, true, true), Some(NotDirect));
+        // 3. A direct play was on offer and Auto's bandwidth decision refused it.
+        assert_eq!(refusal(false, true, true, true), Some(Adaptive));
+        // 4. On offer, Auto kept the original, and a later demotion (an enhancement remux) refused it.
+        assert_eq!(refusal(false, true, true, false), Some(NotDirect));
+        // None: the plain direct play a preview takes.
+        assert_eq!(refusal(true, true, true, false), None);
     }
 
     #[test]
@@ -1261,5 +1364,186 @@ mod tests {
         assert_eq!(m.start(sid(), "rk", 0, false), Start::Disabled);
         assert_eq!(m.phase(), Phase::Idle);
         assert_eq!(m.cycles(), 0);
+    }
+}
+
+/// The retire path of a preview whose Load has not returned, against a real Engine and the real
+/// Feed: the join is deferred while the Load thread runs, and the abandoned-Load poll finishes it.
+#[cfg(all(test, feature = "hostsim"))]
+mod abandoned_load_tests {
+    use super::*;
+    use plx_playback_contract::feed::Stage;
+    use plx_play_feed::shared::FEED_SHARED;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            reset_for_test();
+            plx_play_feed::ffi_host::reset_native_lifecycle_for_test();
+            plx_play_feed::ffi_host::force_clocksink_for_test(false);
+            FEED_SHARED.test_force_native_idle();
+            crate::player::reset_session_for_test();
+            crate::route::reset_player_control_for_test(crate::route::idle_session_for_test());
+        }
+    }
+
+    /// A preview Engine on a ready host object, still in its Load stage, whose Load thread parks
+    /// until `release` is set. Bound to the fixture attempt, addressed in `ps`.
+    fn loading_preview(ps: &mut crate::route::PlaybackSession,
+        release: &Arc<AtomicBool>) -> crate::player::adapter::PlayerAdapter {
+        crate::player::reset_session_for_test();
+        crate::route::reset_player_control_for_test(ps);
+        plx_play_feed::ffi_host::reset_native_lifecycle_for_test();
+        plx_play_feed::ffi_host::force_clocksink_for_test(true);
+        let mut pa = crate::player::adapter::PlayerAdapter::new_probed(unsafe { plx_base::task::MainThread::assume() });
+        let epoch = FEED_SHARED.begin_native_session().expect("native session");
+        assert_eq!(unsafe { crate::player::test_physical::sink().load(c"{}".as_ptr(), epoch) }, 1);
+        assert!(FEED_SHARED.mark_native_load_returned(epoch, None).is_some());
+        let mut eng = crate::player::engine::streaming_engine_for_test(epoch);
+        let attempt = crate::route::RouteStartAttempt::fixture();
+        eng.attempt = attempt.contract_id();
+        eng.stage = Stage::Loading;
+        let hold = Arc::clone(release);
+        eng.load_th = plx_base::task::spawn("media", move || {
+            while !hold.load(Ordering::SeqCst) { std::thread::sleep(std::time::Duration::from_millis(1)); }
+        });
+        assert!(eng.load_th.is_some(), "the Load stand-in thread started");
+        pa.install(eng);
+        ps.begin_attempt_view(attempt, crate::player::attempt_view::Backend::Feed);
+        crate::route::mark_preview_for_test(ps);
+        pa
+    }
+
+    /// Wait (bounded) until the Engine's Load thread has returned.
+    fn await_load_return(pa: &mut crate::player::adapter::PlayerAdapter) {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pa.engine().is_none_or(|eng| eng.load_th.as_ref().is_none_or(|th| th.is_finished())) {
+            assert!(std::time::Instant::now() < give_up, "the Load thread never returned");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The Feed answers the join question in the call that acts on it: deferred (and marked
+    /// abandoned) only for a session still in its Load stage whose thread is unfinished.
+    #[test]
+    fn the_feed_defers_a_preview_join_only_for_an_unfinished_load() {
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        let _serial = plx_base::testlock::serial();
+        let _cleanup = Cleanup;
+        let release = Arc::new(AtomicBool::new(false));
+        let mut pa = loading_preview(&mut ps, &release);
+        assert!(!pa.engine().unwrap().preview_abandon);
+        assert!(pa.defer_preview_join(), "Load stage, thread running");
+        assert!(pa.engine().unwrap().preview_abandon, "the deferral marks the preview abandoned");
+
+        pa.engine().unwrap().preview_abandon = false;
+        pa.engine().unwrap().stage = Stage::Playing;
+        assert!(!pa.defer_preview_join(), "past the Load stage the join is the stop's");
+        assert!(!pa.engine().unwrap().preview_abandon, "and nothing is marked");
+
+        pa.engine().unwrap().stage = Stage::Loading;
+        release.store(true, Ordering::SeqCst);
+        await_load_return(&mut pa);
+        assert!(!pa.defer_preview_join(), "the Load thread has returned");
+        assert!(!pa.engine().unwrap().preview_abandon);
+        drop(pa.take());
+    }
+
+    /// **The Load thread returns after the pump's last sample** (`pump`'s S2): the abandoning arm
+    /// of `after_pump` must retire the preview in that same frame, so it re-samples first. Reading
+    /// the frame's last sample would carry `load_thread_finished == false` until the next pump.
+    #[test]
+    fn a_load_that_returns_after_the_pump_is_retired_in_the_same_frame() {
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        let _serial = plx_base::testlock::serial();
+        let _cleanup = Cleanup;
+        let release = Arc::new(AtomicBool::new(false));
+        let mut pa = loading_preview(&mut ps, &release);
+        set_phase_for_test(Phase::Loading);
+
+        halt(&mut ps, &mut pa);
+        assert!(abandoning(), "the halt abandoned the preview");
+        assert!(pa.is_live(), "the Load had not returned: the Engine stays installed");
+
+        // The frame: the pump's last sample (S2) still sees the Load thread running.
+        pa.publish_feed_attempt_view(&mut ps);
+        assert!(!ps.readout().raw().load.load_thread_finished, "PRECONDITION: S2 saw it running");
+        after_pump(&mut ps, &mut pa, 0);
+        assert!(abandoning() && pa.is_live(), "still running: nothing retires yet");
+
+        // The Load returns between S2 and the next `after_pump`, which runs in the same frame.
+        release.store(true, Ordering::SeqCst);
+        await_load_return(&mut pa);
+        after_pump(&mut ps, &mut pa, 1);
+        assert!(!pa.is_live(), "the abandoning arm retires the preview in the frame the Load returned");
+        assert!(!abandoning());
+        crate::player::route_start::finish_release_for_test(&mut pa);
+    }
+
+    /// Lets the Load stand-in return when a test ends, whichever way it ends.
+    struct LetLoadReturn(Arc<AtomicBool>);
+    impl Drop for LetLoadReturn {
+        fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+    }
+
+    /// **The exit waits for a deferred preview's Load.** `app::run::shutdown` stops the playback and
+    /// then asks `exit_native`; a preview whose Load has not returned is left installed by that stop
+    /// (`defer_preview_join`), so the release machine owes nothing and the exit used to answer `Clean`
+    /// over a Load still inside firmware, with no Unload ever issued. A Load that returns inside the
+    /// exit's deadline gets the deferred stop and its Unload, and only then is the display clean.
+    #[test]
+    fn exit_over_a_deferred_preview_waits_for_its_load_and_releases() {
+        use crate::player::route_start::{exit_native_with, stop_bufferfeed, NativeExit};
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        let _serial = plx_base::testlock::serial();
+        let _cleanup = Cleanup;
+        let release = Arc::new(AtomicBool::new(false));
+        let _let_return = LetLoadReturn(Arc::clone(&release));
+        let mut pa = loading_preview(&mut ps, &release);
+        stop_bufferfeed(&mut ps, &mut pa);
+        assert!(pa.is_live() && pa.engine().unwrap().preview_abandon,
+            "PRECONDITION: the stop deferred and left the Engine installed");
+        let unloads = plx_play_feed::ffi_host::unload_calls_for_test();
+        // Each idle step is where the Load stand-in returns, as the real one does between polls.
+        let exit = exit_native_with(&mut ps, &mut pa, std::time::Instant::now, || {
+            release.store(true, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        });
+        assert_eq!(exit, NativeExit::Clean);
+        assert!(!pa.is_live(), "the deferred stop ran: the Engine left the adapter");
+        assert_eq!(plx_play_feed::ffi_host::unload_calls_for_test(), unloads + 1,
+            "the native object was Unloaded before the display was called clean");
+        assert!(!pa.has_pending_release() && !pa.release_busy());
+    }
+
+    /// **A Load that never returns is leaked, never dropped under its thread.** At the exit's
+    /// deadline the installed Engine (the Load payload the thread reads) is taken and forgotten,
+    /// and the display is left to the OS.
+    #[test]
+    fn exit_over_a_deferred_preview_whose_load_never_returns_leaks_the_engine() {
+        use crate::player::route_start::{exit_native_with, stop_bufferfeed, NativeExit};
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        let _serial = plx_base::testlock::serial();
+        let _cleanup = Cleanup;
+        let release = Arc::new(AtomicBool::new(false));
+        let _let_return = LetLoadReturn(Arc::clone(&release));
+        let mut pa = loading_preview(&mut ps, &release);
+        stop_bufferfeed(&mut ps, &mut pa);
+        assert!(pa.is_live() && pa.engine().unwrap().preview_abandon,
+            "PRECONDITION: the stop deferred and left the Engine installed");
+        let unloads = plx_play_feed::ffi_host::unload_calls_for_test();
+        let dropped = plx_play_feed::feed_state::engines_dropped_for_test();
+        let t0 = std::time::Instant::now();
+        let mut ticks = 0u64;
+        let exit = exit_native_with(&mut ps, &mut pa,
+            || { ticks += 1; t0 + std::time::Duration::from_secs(5 * ticks) }, || {});
+        assert_eq!(exit, NativeExit::WorkerInFirmware);
+        assert!(!pa.is_live() && pa.engine().is_none(), "the Engine left the adapter");
+        assert_eq!(plx_play_feed::feed_state::engines_dropped_for_test(), dropped,
+            "leaked, not dropped under the thread that reads its payload");
+        assert_eq!(plx_play_feed::ffi_host::unload_calls_for_test(), unloads,
+            "no Unload is issued over a Load still inside the call");
     }
 }

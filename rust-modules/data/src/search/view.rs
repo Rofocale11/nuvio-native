@@ -101,7 +101,7 @@ mod tests {
     fn publish_fixture() -> (Fixture, SearchSnapshot) {
         let mut fx = Fixture::new();
         fx.set_query("wallace");
-        fx.state.publish_shelves_for_test(vec![Shelf {
+        fx.state.publish_shelves_for_test(vec![Shelf { epoch: 0, window: Default::default(),
             kind: Kind::Movie,
             items: vec![Item::Media(crate::pms::PmsMovie {
                 sid: plx_plex::plex::ServerId::UNSET, rk: "retained-search".into(),
@@ -199,6 +199,8 @@ mod tests {
         answer[0].push(Item::Media(crate::pms::PmsMovie {
             sid, rk: "new-answer".into(), title: "Replacement result".into(), ..Default::default()
         }));
+        let input = crate::search::fixture_input();
+        crate::search::observe_inputs(&mut fx.state, &fx.adapter, &input.input());
         crate::search::record_for_test(&mut fx.state, sid.raw() as usize, Some(answer));
         crate::search::rebuild_for_test(&mut fx.state);
         let next = fx.snapshot();

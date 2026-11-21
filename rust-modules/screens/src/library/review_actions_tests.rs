@@ -42,7 +42,14 @@ impl Host for HostFixture {
     type Init = Arg;
     type Memory = PageMemory;
 }
+impl crate::registry::ScreenInputsLike for HostFixture {
+    fn screen_inputs<'a>(_cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        crate::registry::empty_fixture()
+    }
+}
+
 impl LibraryLike for HostFixture {
+    fn clock_facts<'a>(_cx: &Cx<'a, Self>) -> Option<&'a plx_plex::plex::ClockFacts> { None }
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> {
         cx.views.listing
     }
@@ -116,6 +123,7 @@ impl Fixture {
                 ..Default::default()
             },
             press: PressRead::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             owner: OWNER,
         }
     }
@@ -205,7 +213,7 @@ fn fresh_bookmarks_follow_stable_items_then_slots_and_keep_the_returned_card_vis
         );
         assert_eq!(
             engine.current(OWNER),
-            Some(page.key(page.pair.detail.elems[expected])),
+            Some(page.key(page.pair.detail.elem_at(expected).unwrap())),
             "scenario {scenario}"
         );
         let placed = page
@@ -224,7 +232,7 @@ fn leaving_with_a_foreign_frame_snapshot_cannot_bookmark_that_section() {
     let mut fixture = Fixture::new();
     let mut page = fixture.screen();
     let mut engine = FocusEngine::new();
-    let grid = page.key(page.pair.detail.elems[5]);
+    let grid = page.key(page.pair.detail.elem_at(5).unwrap());
     engine.set(
         OWNER,
         grid,
@@ -273,14 +281,14 @@ fn live_engine_memory_wins_over_a_stale_store_bookmark_and_saves_from_toolbar() 
     });
     let mut page = fixture.screen();
     let mut engine = FocusEngine::new();
-    let grid = page.key(page.pair.detail.elems[5]);
+    let grid = page.key(page.pair.detail.elem_at(5).unwrap());
     engine.set(
         OWNER,
         grid,
         Some(page.pair.groups_config().detail),
         By::Restore,
     );
-    engine.set(OWNER, page.key(SORT), Some(page.toolbar_group()), By::Restore);
+    engine.set(OWNER, page.key(SORTFILTER), Some(page.toolbar_group()), By::Restore);
     let mut cx = fixture.cx(engine.current(OWNER));
     cx.focus = engine.read(OWNER);
     let mut output = Vec::new();
@@ -376,7 +384,7 @@ fn a_late_listing_keeps_its_bookmark_seed_pending_until_the_card_is_placeable() 
             ),
         );
         assert!(!page.initial);
-        assert!(output.iter().any(|effect| matches!(effect.fx, Fx::Remember { elem, .. } if elem == page.pair.detail.elems[17])));
+        assert!(output.iter().any(|effect| matches!(effect.fx, Fx::Remember { elem, .. } if elem == page.pair.detail.elem_at(17).unwrap())));
     }
 }
 
@@ -420,7 +428,7 @@ fn switch_diagnostic_requests_type_sort_filter_and_rail_actions() {
             &mut present,
         ),
     );
-    for (step, kind) in [(2, LibraryMenuKind::Sort), (7, LibraryMenuKind::Filter)] {
+    for (step, kind) in [(2, LibraryMenuKind::SortFilter), (7, LibraryMenuKind::SortFilter)] {
         output.clear();
         page.command(
             LibraryCmd::SwitchStep(step),
@@ -445,7 +453,7 @@ fn switch_diagnostic_requests_type_sort_filter_and_rail_actions() {
             ),
         );
         assert!(output.iter().any(
-            |e| matches!(&e.fx, Fx::Remember {elem,..} if *elem == page.pair.detail.elems[index])
+            |e| matches!(&e.fx, Fx::Remember {elem,..} if *elem == page.pair.detail.elem_at(index).unwrap())
         ));
     }
 }
@@ -457,7 +465,7 @@ fn rail_keyboard_ok_and_back_return_the_exact_engine_remembered_item() {
         let fixture = Fixture::new();
         let mut page = fixture.screen();
         let mut engine = FocusEngine::new();
-        let grid = page.key(page.pair.detail.elems[17]);
+        let grid = page.key(page.pair.detail.elem_at(17).unwrap());
         engine.set(
             OWNER,
             grid,
@@ -536,6 +544,8 @@ fn rapid_filter_activations_invert_the_pending_desired_value() {
                 section: 1,
             },
             anchor: [0; 4],
+            folded: Vec::new(),
+            opener: None,
         },
     );
     let cx = fixture.cx(None);

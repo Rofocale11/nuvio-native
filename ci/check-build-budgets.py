@@ -15,7 +15,7 @@ of the same tree, so a red result is always a real change to the tree.
 * binary_bytes                 the stripped binary `make ipk` stages (measured in the cross-build job)
 * packages_*                   third-party packages the app crate compiles for the ARM target
 * duplicate_versions_*         crate names in more than one version on the normal-edge graph
-* source_lines                 lines of Rust in rust-modules/src and every split-out layer crate (rust-modules/base/src, rust-modules/machine/src, rust-modules/net/src, rust-modules/platform/src, rust-modules/gfx/src, rust-modules/ui/src, rust-modules/plex/src, rust-modules/telemetry/src, rust-modules/data/src, rust-modules/session/src, rust-modules/media/src, rust-modules/appkit/src, rust-modules/screens/src); mode "warn", never fails
+* source_lines                 lines of Rust in rust-modules/src and every split-out layer crate (rust-modules/base/src, rust-modules/machine/src, rust-modules/net/src, rust-modules/os/src, rust-modules/gfx/src, rust-modules/ui/src, rust-modules/plex/src, rust-modules/telemetry/src, rust-modules/data/src, rust-modules/session/src, rust-modules/media/src, rust-modules/playback-contract/src, rust-modules/media-codecs/src, rust-modules/play-feed/src, rust-modules/play-uri/src, rust-modules/appkit/src, rust-modules/screens/src, rust-modules/shell-sdl/src, rust-modules/platform-webos/src, rust-modules/platform-desktop/src, rust-modules/owp/src); mode "warn", never fails
 
 Exit status: 0 all within budget (warn-mode overruns print ::warning::), 1 a fail-mode budget is
 exceeded, 2 the budgets file or an input is unusable.
@@ -30,10 +30,11 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from rust_toolchain import pinned, shipping_featflags
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BUDGETS = ROOT / "ci" / "build-budgets.json"
-TARGET = "arm-unknown-linux-gnueabi"  # the Makefile's RUST_TARGET
+TARGET = "armv7-unknown-linux-gnueabi"  # the Makefile's RUST_TARGET
 REQUIRED_FIELDS = ("what", "unit", "mode", "limit", "measured", "measured_on", "headroom")
 MODES = ("fail", "warn")
 KNOWN = (
@@ -149,21 +150,35 @@ def graph_metrics(trees: dict, workspace: Path) -> dict[str, int]:
     }
 
 
-def run_cargo_tree(no_default_features: bool) -> dict:
-    toolchain = os.environ.get("RUST_NIGHTLY", "nightly")
-    return cargo_trees(ROOT / "rust-modules", toolchain, no_default_features)
+def run_cargo_tree(shipping: bool) -> dict:
+    """The default feature set's trees, or (`shipping`) the shipping build's: the Makefile's `RELEASE=1`
+    flags, asked of make (`shipping_featflags`) because a bare `--no-default-features` is a build with no
+    playback backend, which leaves plx_play_feed's third-party tree out of the count."""
+    try:
+        featflags = shipping_featflags(ROOT) if shipping else []
+    except ValueError as exc:
+        raise BudgetError(str(exc)) from exc
+    return cargo_trees(ROOT / "rust-modules", pinned(), featflags, SHIPPING_PACKAGE)
 
 
-def cargo_trees(manifest_dir: Path, toolchain: str, no_default_features: bool) -> dict:
+# The package the ARM staticlib is built from (Makefile `$(RUST_LIB)`): the graph that ships is ITS graph.
+# It depends on the application crate, so the application's tree is a subset of it, and a third-party
+# dependency added to the platform crate alone would be invisible to a tree rooted at the application.
+SHIPPING_PACKAGE = "plx_platform_webos"
+
+
+def cargo_trees(manifest_dir: Path, toolchain: str, featflags: list[str] = (), package: str | None = None) -> dict:
+    """`cargo tree` of the package at `manifest_dir`, or of workspace member `package` when one is named."""
     env = dict(os.environ, CARGO_INCREMENTAL="0")
     trees = {}
     for key, edges in (("all", "normal,build"), ("normal", "normal")):
         cmd = ["cargo", f"+{toolchain}", "tree", "--prefix", "none", "--edges", edges,
                "--target", TARGET, "--format", "{p}"]
+        if package:
+            cmd.extend(["-p", package])
         if (manifest_dir / "Cargo.lock").exists():
             cmd.append("--locked")  # a drifted lockfile is a failure, never a silent re-resolve
-        if no_default_features:
-            cmd.append("--no-default-features")
+        cmd.extend(featflags)
         try:
             trees[key] = subprocess.run(cmd, cwd=manifest_dir, env=env, check=True,
                                         capture_output=True, text=True, timeout=300).stdout
@@ -214,12 +229,12 @@ def collect(args, budgets: dict) -> dict[str, int]:
     if args.binary:
         measured["binary_bytes"] = binary_size(args.binary)
     if args.graph or args.tree_default or args.tree_no_default:
-        for suffix, canned, no_default in (("default", args.tree_default, False),
-                                           ("no_default_features", args.tree_no_default, True)):
+        for suffix, canned, shipping in (("default", args.tree_default, False),
+                                         ("no_default_features", args.tree_no_default, True)):
             if canned:
                 trees = json.loads(Path(canned).read_text())
             elif args.graph:
-                trees = run_cargo_tree(no_default)
+                trees = run_cargo_tree(shipping)
             else:
                 continue
             m = graph_metrics(trees, ROOT / "rust-modules")
@@ -237,7 +252,7 @@ def main(argv=None) -> int:
     ap.add_argument("--graph", action="store_true")
     ap.add_argument("--tree-default")
     ap.add_argument("--tree-no-default")
-    ap.add_argument("--src", action="append", help="a source directory to count; repeat for each crate (rust-modules/src, rust-modules/base/src, rust-modules/machine/src, rust-modules/net/src, rust-modules/platform/src, rust-modules/gfx/src, rust-modules/ui/src, rust-modules/plex/src, rust-modules/telemetry/src, rust-modules/data/src, rust-modules/session/src, rust-modules/media/src, rust-modules/appkit/src, rust-modules/screens/src)")
+    ap.add_argument("--src", action="append", help="a source directory to count; repeat for each crate (rust-modules/src, rust-modules/base/src, rust-modules/machine/src, rust-modules/net/src, rust-modules/os/src, rust-modules/gfx/src, rust-modules/ui/src, rust-modules/plex/src, rust-modules/telemetry/src, rust-modules/data/src, rust-modules/session/src, rust-modules/media/src, rust-modules/playback-contract/src, rust-modules/media-codecs/src, rust-modules/play-feed/src, rust-modules/play-uri/src, rust-modules/appkit/src, rust-modules/screens/src, rust-modules/shell-sdl/src, rust-modules/platform-webos/src, rust-modules/platform-desktop/src, rust-modules/owp/src)")
     args = ap.parse_args(argv)
     try:
         budgets = load_budgets(Path(args.budgets))

@@ -53,16 +53,29 @@
 # `file` as the only protocol, same `-plx` suffix, same LGPL flags. A second script would drift,
 # and the drift would be invisible — the host would demux something the television cannot, or
 # stop demuxing something it can, and the simulator would be answering about a different FFmpeg
-# while looking identical. The cross block is the only difference, and it is three lines.
+# while looking identical. The cross block is the only difference, and it is a handful of lines.
 #
 # The output is `vendor/ffmpeg-prefix-host` and `libavformat-plx.63.dylib` — Mach-O naming, so
 # nothing here can be confused with the shipped ELF even by basename, and `make ipk`'s
 # `lib*-plx.so.*` glob cannot pick it up.
 set -eu
 
-VERSION=9.0
-SHA256=7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
+# carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.
+DEPS="$ROOT/ci/deps.py"
+# FFMPEG_VERSION + FFMPEG_SHA256 (+ FFMPEG_TARBALL, an absolute or relative path to the tarball) replace the
+# manifest lookup: the copy of this script attached to a release is run from a source checkout or
+# the source bundle with the attached tarball, e.g.
+#   FFMPEG_VERSION=<version> FFMPEG_SHA256=<the sha256 of the tarball> FFMPEG_TARBALL=ffmpeg-<version>.tar.xz ci/build-ffmpeg.sh
+# and needs neither ci/deps.py nor a network. The sha256 is still checked against the tarball.
+if [ -n "${FFMPEG_VERSION-}" ] && [ -n "${FFMPEG_SHA256-}" ]; then
+  VERSION=$FFMPEG_VERSION
+  SHA256=$FFMPEG_SHA256
+else
+  VERSION=$(python3 "$DEPS" get ffmpeg version)
+  SHA256=$(python3 "$DEPS" get ffmpeg sha256)
+fi
 NDK=${WEBOS_SDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 SYSROOT="$NDK/arm-webos-linux-gnueabi/sysroot"
 HOST=${HOST:-}
@@ -93,7 +106,7 @@ HOST=${HOST:-}
 # to, because a runner is ephemeral and caches the prefix rather than the objects.
 #
 # The TARBALL is deliberately NOT in the cache. It is the LGPL corresponding source that
-# `release.yml` publishes beside each release (`ls vendor/ffmpeg-build/ffmpeg-*.tar.xz`), so it
+# `release.yml` publishes beside each release (`python3 ci/deps.py fetch ffmpeg` prints its path), so it
 # belongs with the checkout, it is 10 MB, and both the cross and host builds now share the one
 # copy instead of downloading it twice.
 if [ -n "$HOST" ]; then
@@ -101,7 +114,13 @@ if [ -n "$HOST" ]; then
 else
   PREFIX="$ROOT/vendor/ffmpeg-prefix"
 fi
-TARDIR="$ROOT/vendor/ffmpeg-build"
+if [ -n "${FFMPEG_TARBALL-}" ]; then
+  [ -f "$FFMPEG_TARBALL" ] || { echo "ffmpeg: FFMPEG_TARBALL=$FFMPEG_TARBALL does not exist" >&2; exit 1; }
+  FFMPEG_TARBALL=$(cd "$(dirname "$FFMPEG_TARBALL")" && pwd)/$(basename "$FFMPEG_TARBALL")
+  TARDIR=$(dirname "$FFMPEG_TARBALL")
+else
+  TARDIR=$(python3 "$DEPS" cache-dir)
+fi
 # `--prefix` is the LITERAL /plx, not $PREFIX, and the install is redirected with DESTDIR below.
 #
 # WHY: FFmpeg records its entire configure INVOCATION inside libavutil (`avutil_configuration()`),
@@ -147,8 +166,18 @@ fi
 #              h264/hevc are the raw Annex-B paths (/tmp/sample.h264 and the dev triggers).
 #   parsers    needed by avformat_find_stream_info to fill AVCodecParameters.
 #   bsf        AVCC -> Annex-B for mp4-family video, which the Starfish pipeline requires.
-#   decoders   SUBTITLES ONLY. Video and audio are decoded by the TV's hardware via Starfish;
-#              FFmpeg here never touches a video frame.
+#   decoders   SUBTITLES, and AUDIO decoded in the app. Video is decoded by the TV's hardware via
+#              Starfish; FFmpeg here never touches a video frame. The audio decoders run in two
+#              cases. (1) FLAC, ALAC and LPCM at 1x: libpf has no input for them, so the app decodes
+#              them and feeds the TV PCM (`devcaps::APP_DECODED` names the decoders, and a test
+#              holds that list to this one); DTS (`dca`) joins them in a release build where Force Direct Play
+#              has no native path for it or a refused open falls back to it (its decode is measured),
+#              and MP3, Vorbis and TrueHD only behind the debug-only `appdecodelossy` trigger, until the
+#              TV has measured what each costs. (2) Every audio format, those included, while the viewer has picked a speed
+#              other than 1x: LG's pipeline cannot change rate itself (see
+#              docs/parity-gaps.md, Playback Speed), so the app decodes the sound, time-stretches
+#              it (rust-modules/media/src/speed_audio.rs) and feeds it as PCM. All are LGPL; the
+#              AC-3 patents have expired.
 #   encoder/   mpeg1video + mpegts are the DEV capture stream only, dropped by RELEASE=1 along
 #   muxer      with swscale, which nothing else uses.
 #
@@ -176,9 +205,16 @@ if [ -n "$HOST" ]; then
   # No --arch/--cpu/--target-os: configure detects this Mac, which is the point.
   set -- --prefix=/plx
 else
+  # `--build-id=sha1` gives each shared object the same stable identity the app binary carries
+  # (ci/check-elf.sh), which is what pairs a crash frame inside it with the symbols
+  # `make symbols-libs` extracts. It is an allocated note, so `strip` below leaves it in the shipped
+  # copy; without it the only identity left is a hash of `.text`, and the extracted `.debug`
+  # (`objcopy --only-keep-debug` turns `.text` into NOBITS) could not reproduce it.
+  # Cross builds only: the HOST build links with Apple's ld, which has no such flag.
   set -- --prefix=/plx \
     --enable-cross-compile --cross-prefix="$CROSS" --host-cc=cc --cc=./plx-arm-cc.py \
-    --arch=arm --cpu=cortex-a9 --target-os=linux --sysroot="$SYSROOT"
+    --arch=arm --cpu=cortex-a9 --target-os=linux --sysroot="$SYSROOT" \
+    --extra-ldflags='-Wl,--build-id=sha1'
 fi
 set -- "$@" \
   --build-suffix=-plx \
@@ -191,9 +227,10 @@ set -- "$@" \
   --disable-autodetect \
   --enable-zlib \
   --enable-demuxer=matroska,mov,mpegts,h264,hevc \
-  --enable-parser=h264,hevc,aac,ac3,dvdsub,dvbsub \
+  --enable-parser=h264,hevc,aac,ac3,flac,dvdsub,dvbsub \
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
   --enable-decoder=pgssub,dvdsub,dvbsub,ass,srt,subrip,text,mov_text,webvtt \
+  --enable-decoder=aac,ac3,eac3,dca,mp3,mp2,flac,opus,vorbis,truehd,mlp,alac,pcm_s16le,pcm_s24le,pcm_s16be,pcm_s24be,pcm_s32le,pcm_s32be \
   --enable-protocol=file
 
 if [ "${RELEASE:-}" = "1" ]; then
@@ -346,7 +383,7 @@ fi
 SRC="$WORK/ffmpeg-$VERSION"
 mkdir -p "$WORK" "$TARDIR"
 
-TAR="$TARDIR/ffmpeg-$VERSION.tar.xz"
+TAR=${FFMPEG_TARBALL:-$TARDIR/ffmpeg-$VERSION.tar.xz}
 # The tarball stays in the checkout (release.yml publishes it as the LGPL corresponding source),
 # but it is FETCHED once per machine: a fresh worktree copies the cached one rather than pulling
 # 11 MB over the network again. The sha256 below is checked either way, so a corrupt or
@@ -373,13 +410,16 @@ CACHED_TAR="$CACHE_ROOT/ffmpeg/ffmpeg-$VERSION-$(printf '%s' "$SHA256" | cut -c1
 tarball_ok() { [ -f "$1" ] && [ "$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)" = "$SHA256" ]; }
 ensure_tar() {
   tarball_ok "$TAR" && return 0
+  # A tarball the caller named is never replaced or downloaded over: the check below reports it.
+  [ -z "${FFMPEG_TARBALL-}" ] || return 0
   cand="$TAR.$$.part"
   rm -f "$cand"
   if [ -n "$CACHE_ROOT" ] && [ -f "$CACHED_TAR" ]; then cp "$CACHED_TAR" "$cand" 2>/dev/null || true; fi
   if ! tarball_ok "$cand"; then
     rm -f "$cand"
     echo "ffmpeg: fetching $VERSION"
-    curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$cand"
+    python3 "$DEPS" fetch ffmpeg --into "$TARDIR" >/dev/null
+    cp "$TAR" "$cand"
   fi
   mv "$cand" "$TAR"
 }
@@ -457,6 +497,12 @@ if [ -z "$HOST" ]; then
     case "$elf" in *.link.*) continue ;; esac
     [ -f "$elf" ] && [ ! -L "$elf" ] || continue
     target="$PREFIX/lib/$(basename "$elf")"
+    # Keep the unstripped original beside the stripped one. It is the only copy that still has
+    # `.symtab` (the install above strips it, and so do the two lines below): `make symbols-libs`
+    # turns it into the `.debug` that lets Sentry name a frame inside libavformat & co. Same
+    # basename as the SONAME the Makefile stages, in a directory the library globs do not reach.
+    mkdir -p "$PREFIX/lib/unstripped"
+    cp "$elf" "$PREFIX/lib/unstripped/$(basename "$elf")"
     "${CROSS}strip" --strip-unneeded "$target"
     python3 "$ROOT/ci/stage-link-evidence.py" "$elf" "$target" --stripped
   done

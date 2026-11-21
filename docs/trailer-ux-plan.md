@@ -1,5 +1,12 @@
 # Detail-hero trailer UX: faster autoplay, a shrinking logo, and a full-trailer mode
 
+**Current transport (2026-11-11):** LEFT/RIGHT scrub through the preview's admitted reload
+path; UP toggles the HUD while staying full screen, including while paused. The frame runner
+publishes the playback session for a preview on Detail as well as for Player, so the trailer's
+elapsed/remaining clocks, seek gesture and pause state receive the live session. This supersedes
+the reveal-only and no-seek statements in the historical record below. Controls still auto-hide
+after the shared linger while playing; a paused trailer keeps them until explicitly hidden.
+
 **SUPERSEDED IN PART (2026-09-17): full-trailer mode now draws trailer CONTROLS, and the action
 row is gone.** Everything below about dwell, the logo shrink, the synopsis and the collapse keys
 still stands. What no longer holds, wherever this document says it (§2.4, the state diagram and
@@ -10,7 +17,7 @@ table in §1, §8.3, §8.4, the goal's bullet 4 and the third decision bullet):
   over a title (`trailer::transport_title` — the FILM/SHOW title by default, so a trailer whose own
   PMS title is the boilerplate "Trailer" doesn't repeat the kicker word right under it; the extra's
   own title only when it says something the kicker doesn't), the playbar with elapsed/remaining,
-  and the play/pause state read-out, built from `ui::player_hud`'s own
+  and the play/pause state read-out, built from `appkit::player_hud::classic`'s own
   `draw_scrim`/`draw_title`/`draw_playbar`. There is still no quality, subtitle, audio or Info
   control and no track menu — that part of "there is no HUD" was never about the transport, it was
   about the panels that write session state a preview has none of.
@@ -292,7 +299,7 @@ already a confirmed problem worth a UI surface.
 This needs new geometry — `detail_layout::COMPACT_TITLE_BOT` and `LogoRung::Compact` already exist,
 but for a **different** treatment (the scroll-driven, horizontally **centered** pinned title at
 `mod.rs:1987-2016`, which answers "how far down have I scrolled", not "is a trailer playing"). Reusing
-its rung *sizing* (`COMPACT_AREA`/`COMPACT_H_MIN`/`COMPACT_H_MAX`, `theme.rs:249-263`) is right; reusing
+its rung *sizing* (`COMPACT_AREA`/`COMPACT_BAND_H`/`COMPACT_W_MAX`/`COMPACT_H_MAX` in `theme::logo`) is right; reusing
 its *position* is not — this is a new anchor, top-left, independent of scroll.
 
 **New geometry** (`detail_layout.rs`):
@@ -411,8 +418,7 @@ the title survives, and titles get the full clearLogo/fallback+shadow treatment 
 over an arbitrary, unknown, moving frame than a big display-weight title is. Two concrete
 follow-ups this plan is not allowed to skip:
 
-1. **`widgets::hero_scrim_a`'s anchor table is a graded contract** (`ui/CLAUDE.md`'s `widgets.rs`
-   row, `DESIGN.md:68-71`) and currently has no row for "synopsis text over a bound video plane at
+1. **The Detail shade has a host contrast grader** (`widgets_hero_scrim_tests.rs`). Device verification is still needed for "synopsis text over a bound video plane at
    `field=1.35`". **Scope decision (eng review): this row is a fast-follow verification task, not a
    blocker for this PR** — it needs a real device and real trailer content to mean anything (a host
    test can assert the arithmetic is internally consistent, but "is `field=1.35` actually enough
@@ -668,9 +674,7 @@ gate for anything that moves pixels)**
 
 **Fast-follow (device-only, explicitly NOT blocking this PR — Step 0 scope decision)**
 
-- Add `hero_scrim_a`'s new synopsis-over-video anchor-table row (§2.3) and grade it, plus tune
-  `PROMOTED_FIELD` (§2.4c), against real trailer content on a real device. Both need a TV and real
-  footage to mean anything — a host test can only assert the arithmetic is internally consistent,
+- Grade the Detail synopsis over a bound preview (§2.3) against real trailer content on a TV — a host test can only assert the arithmetic is internally consistent,
   not that it reads as legible against unknown video — so gating the code on this session happening
   first buys nothing but delay. Land the code with the stated default values, capture this
   immediately after on the next device session, and file a fast-follow PR for anything it finds

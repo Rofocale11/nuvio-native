@@ -8,10 +8,13 @@
 //! `pms`'s worker-driven hub catalog); this store pages arbitrarily large sections without blocking the
 //! main loop. Data model: one [`SecItems`] per section — a PAGE-CHUNKED table sized to the
 //! listing's `totalSize`, a page (`PAGE` items) allocated only when it lands (restructure phase
-//! 4's O(result) rule) — filled page-by-page by ONE background fetch at a
-//! time using the season-switch idiom from `metadata.rs` — [`plx_base::task::spawn_small`] + a
-//! `Mutex` mailbox + generation atomics (a re-query supersedes in-flight landings), applied
-//! on the main thread by [`pump`] once a frame while the Library screen is up.
+//! 4's O(result) rule) — filled page-by-page by ONE read at a time: the pump emits it as a
+//! `StoreJob::BrowsePage` ([`listing_jobs`]) that the app's runner starts on a worker, and its
+//! answer waits in a claim-guarded mailbox (`Fetch`) stamped with the request's generation (a
+//! re-query supersedes in-flight landings), applied on the main thread by [`pump`] once a frame
+//! while the Library screen is up. The filter menus' value lists (genres, first letters) leave the
+//! same way, as `StoreJob::BrowseDirectory`, and so do the band counts of a value sort's rail
+//! (`bands.rs`, `letters.rs`).
 //!
 //! The sort/filter MENUS are server-driven: the first page of a section is requested with
 //! `includeMeta=1` and the response's `Meta.Type[]` supplies the Sort entries; the genre
@@ -25,7 +28,7 @@
 //! and only once, in case a future server starts advertising the key itself (issue #146).
 //!
 //! Everything a viewer chose in a library's view is remembered across restarts, per profile, by
-//! (machine id, section key), as ONE record (`plex::session::Session::library_views`, issues #278
+//! (machine id, section key), as ONE record (`plex::session::Preferences::library_views`, issues #278
 //! and #441; [`saved_view`] holds the merge rules): the sort and its direction, the Unwatched
 //! switch, the genre and the listing type. A sort is recorded by its KEY, never its menu
 //! position, and applied on the section's first page only after that page's menu has offered the
@@ -47,8 +50,11 @@
 //! own server's section `1` and the friend's section `1` are different libraries, and each server
 //! answers 401 to the other's token. So the table is a flat `Vec<BrowseSection>` whose every entry
 //! names its [`BrowseSource`], and every fetch is issued through `client_for(source.sid)` captured
-//! AT THE SPAWN SITE — never `client()` read inside a worker, which would dial whichever server
-//! happened to be current when the thread got scheduled.
+//! BEFORE the worker starts — never `client()` read inside a worker, which would dial whichever
+//! server happened to be current when the thread got scheduled. The pins capture it at their spawn
+//! site; the source discovery and the page and directory reads capture the `ClientKey` of the
+//! source or section at the step (from the `ClientKeys` the caller filled) and the runner resolves
+//! it to the client at the launch, refusing a job whose client has moved on.
 //!
 //! **It grows by APPEND and never by rebuild**, which is what keeps the page mailbox sound. A page
 //! landing is blamed on a section INDEX (`PageResult.sec`), so an index that moved under an
@@ -56,18 +62,19 @@
 //! the old synchronous discovery's early-return was the only thing preventing that; appending is the property
 //! that replaces it, and it holds for every source that lands later rather than only for the
 //! second call.
-use plx_plex::plex::{SectionQuery, ServerId};
+use plx_plex::plex::{ClientKeys, SectionQuery, ServerId};
+use letters::LettersKey;
 use saved_view::ViewField;
 use crate::pms::{parse_item, PmsMovie};
-use std::panic::catch_unwind;
+use crate::stores::page_cache::{kept_when_over_budget, Keep, PAGE};
 #[cfg(test)]
-use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
-/// Page size for section listings. Two grid screens' worth (10 rows × 6) — big enough that a
-/// full-screen scroll rarely waits, small enough that a page parse stays invisible on-frame.
-const PAGE: usize = 60;
+/// The sections left most recently that keep the pages of the window they last showed. Every
+/// other section keeps its total and no pages, so a library a viewer has moved on from costs
+/// nothing but its count.
+const RECENT_SECTIONS: usize = 3;
 
 /// Frames between attempts to reach a source whose discovery failed. Far longer than the page
 /// retry (`RETRY_CD`, ~2 s): a page retry is racing a user looking at a spinner, while an
@@ -122,8 +129,7 @@ pub struct BrowseSource {
     pub sid: ServerId,
     /// Exact client lifecycle behind `sid`; slot ids survive repoint and therefore are not enough
     /// to decide whether completed discovery still belongs here.
-    client_addr: usize,
-    token_gen: u32,
+    client_key: Option<plx_plex::plex::ClientKey>,
     /// The server's `machineIdentifier` — the ONLY key a Home selection can be PERSISTED under
     /// (`plex::pins`), because a roster position reshuffles and an address moves. `""` until the
     /// registry has learned it, which is a source whose pins live for this run only.
@@ -245,16 +251,40 @@ fn source_state(outcome: Option<plx_plex::plex::probe::Outcome>) -> SourceState 
     }
 }
 
-fn source_snapshot(sid: ServerId) -> Option<(SourceState, Option<plx_plex::plex::probe::Location>)> {
-    let client = plx_plex::plex::client_for(sid)?;
-    let token_gen = client.token_gen();
-    // Probe publication follows set_link, so read the acquire-backed result before the tier. The
-    // second lookup rejects a re-point or in-place retoken between those two reads.
-    let state = source_state(plx_plex::plex::server_probe_result(sid));
-    let tier = client.link();
-    plx_plex::plex::client_for(sid)
-        .filter(|now| std::ptr::eq(*now, client) && now.token_gen() == token_gen)
-        .map(|_| (state, tier))
+fn source_snapshot(keys: &ClientKeys, sid: ServerId) -> Option<(SourceState, Option<plx_plex::plex::probe::Location>)> {
+    keys.facts(sid)?.source.map(|(probe, tier)| (source_state(probe), tier))
+}
+
+/// One host capture, taken after observing pending pin receipts. Settled is an independent fact.
+/// Incomplete inputs cannot silently obtain the omitted facts from ambient registries:
+/// ```compile_fail
+/// use plx_data::browse::BrowseRosterInput;
+/// use plx_plex::plex::{ClientKeys, session::Session};
+/// let keys = ClientKeys::default();
+/// let session = Session::default();
+/// let input = BrowseRosterInput { keys: &keys, session: &session };
+/// ```
+#[derive(Clone, Copy)]
+pub struct BrowseRosterInput<'a> {
+    pub keys: &'a ClientKeys,
+    pub session: &'a plx_plex::plex::session::Session,
+    pub visible_generation: u64,
+    /// Revocation lease captured beside the session, before the machine window.
+    pub tenure: u64,
+    pub settled: bool,
+    pub profile_key: &'a str,
+}
+
+impl BrowseRosterInput<'_> {
+    fn household(&self, source: &BrowseSource) -> bool {
+        // Session::household_ids allocates. The equivalent membership test borrows the roster.
+        let known = self.session.home_users.iter().any(|user| user.id != 0);
+        let member = self.session.home_users.iter().any(|user| user.id == source.owner_id);
+        // Membership and emptiness are the only questions the owner rule asks of the roster.
+        // A stack witness keeps that single rule authoritative without collecting household_ids.
+        let witness = [if member { source.owner_id } else { 0 }];
+        household_verdict(source, if known { &witness } else { &[] })
+    }
 }
 
 /// [`BrowseSource::household`]'s one derivation: the carried grant evidence, graded against the
@@ -303,8 +333,9 @@ pub struct BrowseSection {
     /// ([`tab_has_favorite`], so a type whose last favourite is switched off is out of the strip),
     /// and the Library's own Sources picker ([`source_rows`]). What still comes from the GRANT and
     /// not from this bit: access itself, the grid, sort and the A–Z rail — all downstream of a
-    /// library you have already chosen — and Search, which stays grant-wide and only RANKS
-    /// favourite-library hits first.
+    /// library you have already chosen — the Library's Sort & Filter menu, which also lists the
+    /// non-favourites on a server the Sources list can open, and Search, which stays grant-wide and
+    /// only RANKS favourite-library hits first.
     ///
     /// Your HOUSEHOLD's libraries start favourite and a friend's start favourite only where the
     /// household has no library of that type ([`plx_plex::plex::pins::default_on`]); the last
@@ -344,16 +375,31 @@ impl LibraryType {
     }
 
     pub fn title(self, kind: SecKind) -> &'static str {
-        self.title_in(kind, plx_platform::i18n::current())
+        self.title_in(kind, plx_os::i18n::current())
     }
 
-    fn title_in(self, kind: SecKind, locale: &plx_platform::i18n::LocaleContext) -> &'static str {
+    /// `n` of what this listing holds, in the same words every other count of it wears: "185
+    /// films", "40 shows", "6 seasons", "12 episodes", "9 items" (a collection listing). The ONE
+    /// source of the noun beside a number, shared by the Sources list's "185 films" line and the
+    /// Library header's "37 of 120 films" read-out, so a count never changes its noun by screen.
+    pub fn count_label(self, kind: SecKind, n: i64) -> String {
+        use plx_os::i18n::msg;
         match (self, kind) {
-            (Self::Primary, SecKind::Movie) => plx_platform::i18n::msg::browse_kind_movies_in(locale),
-            (Self::Primary, SecKind::Show) => plx_platform::i18n::msg::browse_kind_tv_shows_in(locale),
-            (Self::Seasons, _) => plx_platform::i18n::msg::browse_kind_seasons_in(locale),
-            (Self::Episodes, _) => plx_platform::i18n::msg::browse_kind_episodes_in(locale),
-            (Self::Collections, _) => plx_platform::i18n::msg::browse_kind_collections_in(locale),
+            (Self::Primary, SecKind::Movie) => msg::browse_person_films(n),
+            (Self::Primary, SecKind::Show) => msg::browse_person_shows(n),
+            (Self::Seasons, _) => msg::browse_detail_seasons(n),
+            (Self::Episodes, _) => msg::browse_detail_episodes(n),
+            (Self::Collections, _) => msg::browse_search_items(n),
+        }
+    }
+
+    fn title_in(self, kind: SecKind, locale: &plx_os::i18n::LocaleContext) -> &'static str {
+        match (self, kind) {
+            (Self::Primary, SecKind::Movie) => plx_os::i18n::msg::browse_kind_movies_in(locale),
+            (Self::Primary, SecKind::Show) => plx_os::i18n::msg::browse_kind_tv_shows_in(locale),
+            (Self::Seasons, _) => plx_os::i18n::msg::browse_kind_seasons_in(locale),
+            (Self::Episodes, _) => plx_os::i18n::msg::browse_kind_episodes_in(locale),
+            (Self::Collections, _) => plx_os::i18n::msg::browse_kind_collections_in(locale),
         }
     }
 
@@ -362,11 +408,11 @@ impl LibraryType {
     /// order differ by language.
     pub fn empty_readout(self, kind: SecKind, library: &str) -> String {
         match (self, kind) {
-            (Self::Primary, SecKind::Movie) => plx_platform::i18n::msg::browse_library_no_movies(library),
-            (Self::Primary, SecKind::Show) => plx_platform::i18n::msg::browse_library_no_shows(library),
-            (Self::Seasons, _) => plx_platform::i18n::msg::browse_library_no_seasons(library),
-            (Self::Episodes, _) => plx_platform::i18n::msg::browse_library_no_episodes(library),
-            (Self::Collections, _) => plx_platform::i18n::msg::browse_library_no_collections(library),
+            (Self::Primary, SecKind::Movie) => plx_os::i18n::msg::browse_library_no_movies(library),
+            (Self::Primary, SecKind::Show) => plx_os::i18n::msg::browse_library_no_shows(library),
+            (Self::Seasons, _) => plx_os::i18n::msg::browse_library_no_seasons(library),
+            (Self::Episodes, _) => plx_os::i18n::msg::browse_library_no_episodes(library),
+            (Self::Collections, _) => plx_os::i18n::msg::browse_library_no_collections(library),
         }
     }
 
@@ -381,6 +427,13 @@ impl LibraryType {
             (Self::Episodes, _) => Some(4),
             (Self::Collections, _) => Some(18),
         }
+    }
+
+    /// The `type=` term of a listing of this type ([`Self::plex_type`]) as the wire pair a listing
+    /// request carries: empty for the section's own default listing. The first of
+    /// [`SecState::query_filters`]' terms, and the whole of what the genre list is asked with.
+    pub fn type_terms(self, kind: SecKind) -> Vec<(String, String)> {
+        self.plex_type(kind).map(|ty| ("type".to_owned(), ty.to_string())).into_iter().collect()
     }
 
     /// Do the Unwatched and Genre filters apply? A collection has no watch state of its own and
@@ -435,6 +488,49 @@ pub struct SortEntry {
 }
 
 impl SortEntry {
+    /// The name every panel and pill shows for this sort: the shared table's word for a fact it
+    /// knows ([`crate::sortfacts`]), else the server's title.
+    pub fn label(&self) -> &str {
+        match crate::sortfacts::SortFact::of_pms_key(&self.key) {
+            Some(fact) => fact.label(),
+            None => &self.title,
+        }
+    }
+
+    /// Whether [`label`](Self::label) is the app's own text (the table's word, which includes the
+    /// client-side Plays entry) rather than something the server wrote.
+    pub fn label_is_ours(&self) -> bool {
+        crate::sortfacts::SortFact::of_pms_key(&self.key).is_some()
+    }
+
+    /// Is this the entry that orders a `listing` by title, the order the `/firstCharacter` counts sum
+    /// in? The A-Z letters rail needs exactly that order, ascending
+    /// ([`view::ListingView::rail_available`] adds the direction).
+    ///
+    /// The section's own listing and the collections list say `titleSort`. Seasons and episodes do
+    /// NOT: the server declares a COMPOSITE (`show.titleSort,index` for seasons,
+    /// `show.titleSort,season.index:nullsLast,...` for episodes) and counts the letters by the SHOW's
+    /// title, which the prefix sums land on only in that declared order (the default order is the same
+    /// one), never in the literal `titleSort`'s (`docs/pms-api.md`, "Count probes for seasons and
+    /// episodes"). Their Title entry is therefore the one whose FIRST comma-separated term is exactly
+    /// `show.titleSort`, read on the key as the server lists it: not through
+    /// [`crate::sortfacts::SortFact::of_pms_key`], which strips the table prefix and so would take a
+    /// literal `titleSort`, a `title` or an `episode.titleSort,...` key for it too (the letters land
+    /// on none of those orders: 41 of 48 seasons and 125 of 525 episodes over the literal one).
+    pub fn is_title_order(&self, listing: LibraryType) -> bool {
+        // Exhaustive on purpose: a fifth listing must decide here.
+        match listing {
+            LibraryType::Primary | LibraryType::Collections => self.key == "titleSort",
+            LibraryType::Seasons | LibraryType::Episodes => self.key.split(',').next() == Some("show.titleSort"),
+        }
+    }
+
+    /// The word for the order this entry is in when `desc`: "A–Z", "Newest first". `None` for a
+    /// key whose axis is unknown (a random order has no ends).
+    pub fn direction_word(&self, desc: bool) -> Option<&'static str> {
+        crate::sortfacts::Axis::of_pms_key(&self.key).map(|axis| axis.direction_word(desc))
+    }
+
     fn query(&self, desc: bool) -> String {
         if !desc {
             if self.key.contains(',') { self.key.clone() } else { format!("{}:asc", self.key) }
@@ -489,8 +585,13 @@ pub enum SecFetch {
     Failed,
 }
 
+pub mod bands;
+pub mod discovery_job;
+mod letters;
+pub mod listing_jobs;
 pub mod record;
 mod saved_view;
+pub mod preferences_job;
 pub mod section_hubs;
 pub mod view;
 
@@ -512,6 +613,15 @@ pub enum CursorAt {
     SlotIndex(usize),
 }
 
+impl Cursor {
+    /// The item index the bookmark points at.
+    fn slot(&self) -> usize {
+        match &self.at {
+            CursorAt::ItemKey { slot, .. } | CursorAt::SlotIndex(slot) => *slot,
+        }
+    }
+}
+
 /// Per-section browse state: the current query, the server-driven menus, the sparse item
 /// store, the library's own published shelves, and the remembered view (focus/scroll survive
 /// leaving the screen — state amnesia is the official app's loudest complaint).
@@ -526,7 +636,7 @@ struct SecState {
     // menus (kept across re-queries)
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
-    genres_done: bool, // a genre fetch LANDED (even empty) — kick_genres won't re-spawn
+    genres_done: bool, // a genre fetch LANDED (even empty) — kick_genres won't ask again
     /// Is the live sort the viewer's CHOICE rather than merely what a failed restore left? False
     /// only after a first page that was asked to restore the saved sort and could not tell
     /// whether it had (the re-ask failed, or no menu came back): the library then shows the
@@ -537,10 +647,42 @@ struct SecState {
     /// The same for the saved genre: false only while its existence check could not be read, so
     /// the library opened unfiltered but the record still holds the genre.
     genre_resolved: bool,
-    /// per-letter (label, count) in titleSort order, from `/firstCharacter` — the letter rail.
-    /// Counts describe the UNFILTERED title listing, so the rail only shows in that state.
+    /// per-letter (label, count) in the listing's Title order, from `/firstCharacter` (`titleSort` for
+    /// the section's own listing and collections, the declared composite for seasons and episodes:
+    /// `SortEntry::is_title_order`) — the letter rail. They count the listing [`Self::letters_for`]
+    /// names and are shown only while that is the listing the grid shows, or the kept list is
+    /// ([`SecState::shown_letters`], `letters.rs`).
     letters: Arc<Vec<(String, i64)>>,
-    letters_done: bool,
+    /// What `letters` counted; `None` = no list has landed (or it was forgotten).
+    letters_for: Option<LettersKey>,
+    /// The list `letters` replaced, with its key, while that is still worth showing again
+    /// ([`SecState::land_letters`]): turning a filter off must not cost the rail a read.
+    letters_kept: Option<(LettersKey, Arc<Vec<(String, i64)>>)>,
+    /// Moves when the server's membership changed under the section ([`SecState::membership_changed`]).
+    letters_gen: u32,
+    /// Moves when a title of the section's server had its watched state read back
+    /// ([`SecState::viewing_changed`]), whether or not Unwatched is applied: only a key counted
+    /// under Unwatched, or for a bands family that moves with viewing (plays, unplayed), carries it
+    /// ([`SecState::key_gen`]).
+    viewing_gen: u32,
+    /// A failed letters read of this key, and the steps left before it is asked again.
+    letters_backoff: Option<(LettersKey, u32)>,
+    /// The band counts of a value sort's rail, with the key they counted under and the verdict: the
+    /// rail, or `None` for a listing with nothing to band or counts that were not trusted. Shown only
+    /// while the key is the present one ([`SecState::shown_bands`], `letters.rs`), like the letters.
+    bands: Option<(LettersKey, Option<Arc<bands::BandRail>>)>,
+    /// The list `bands` replaced, while it is still worth showing again ([`SecState::land_bands`]).
+    bands_kept: Option<(LettersKey, Option<Arc<bands::BandRail>>)>,
+    /// A failed bands read of this key, and the steps left before it is asked again.
+    bands_backoff: Option<(LettersKey, u32)>,
+    /// Today's date as the Library's last ask handed it in (`LibraryWork::Letters`), the same for every
+    /// section ([`BrowseState::note_today`]): an INPUT, never a clock read. A calendar family's key
+    /// carries it, and none has bands without it.
+    today: Option<bands::Day>,
+    /// The grid's own view (sort, genre, menus), set aside while the section is on the Collections
+    /// listing and put back when it returns to the type it was on ([`LoanedView`]). The letters are
+    /// not loaned: every type change forgets them and the listing it lands on asks again.
+    loaned: Option<LoanedView>,
     /// **The library's OWN shelves** — `Library Recommended`, as its server's owner arranged it.
     /// A field here rather than a store of its own because this struct is already the per-section
     /// aggregate; `section_hubs`' module doc argues it, and `reset()` clearing it on a profile
@@ -551,6 +693,36 @@ struct SecState {
     total: i64,      // -1 = unknown (first fetch of this query still out)
     items: SecItems,
     cursor: Option<Arc<Cursor>>,
+    /// A read-back changed a row this section's QUERY depends on (see
+    /// [`BrowseState::apply_view_local`]): what it lists is out of date though every row on
+    /// screen is right. Cleared by any re-query.
+    membership_stale: bool,
+    /// Items were created or removed on the server ([`BrowseState::listings_changed`]): the rows
+    /// on screen stay until the re-list covers the wanted window, then swap together.
+    relist: bool,
+    /// The replacement listing, unpublished until every wanted page has landed.
+    relist_items: Option<SecItems>,
+    /// More was created or removed while the re-list was out: its answer may predate that, so
+    /// one more re-list follows it rather than dropping it (a long scan never starves the grid).
+    relist_again: bool,
+}
+
+/// What the Collections page borrows the section's single query from: the grid's sort, genre and
+/// the menus that describe them. `set_library_type` resets all of it for the new type, so the page
+/// that listed Films, sorted by Date Added and filtered to Drama, would come back title-sorted and
+/// unfiltered; the loan hands it back whole instead. The letter counts are NOT part of it: what the
+/// section lists can change while Collections is shown, so they are asked again on the way back.
+#[derive(Clone)]
+struct LoanedView {
+    library_type: LibraryType,
+    sort_idx: usize,
+    sort_desc: bool,
+    genre: Option<Arc<GenreEntry>>,
+    sorts: Arc<Vec<SortEntry>>,
+    genres: Arc<Vec<GenreEntry>>,
+    genres_done: bool,
+    sort_resolved: bool,
+    genre_resolved: bool,
 }
 
 /// A section's items, CHUNKED BY PAGE (restructure phase 4, the O(result) rule of spec §5.2 —
@@ -562,6 +734,9 @@ struct SecState {
 /// as the flat vector did; `page_missing` is the fetch scan, over pages.
 /// Cloning retains the page table in O(1). Writes copy only the table of page handles and
 /// changed pages, never the whole loaded catalog. This is the Library read-view backing.
+/// Pages are also dropped again: a landing applies the keep rule ([`SecItems::evict`]) and a
+/// section the grid has left keeps no pages ([`BrowseState::apply_section_rule`]). A dropped page
+/// is a hole, the same as one never fetched, and `len` never changes with it.
 #[derive(Clone, Default)]
 struct SecItems {
     pages: Arc<Vec<Option<Arc<Vec<Option<PmsMovie>>>>>>,
@@ -617,6 +792,47 @@ impl SecItems {
             *cell = Some(m);
         }
     }
+    /// Lands a fetched page at `start`, then applies the keep rule. The only place eviction runs.
+    fn land(&mut self, start: usize, items: Vec<PmsMovie>, keep: &Keep) {
+        for (offset, item) in items.into_iter().enumerate() {
+            self.set(start + offset, item);
+        }
+        self.evict(keep);
+    }
+    /// Drops the pages `keep` does not hold, once more than `MAX_LOADED` are loaded. A dropped page
+    /// is a hole, as if it had never landed: `len` stays, so every index keeps its meaning, and
+    /// the next want for the page fetches it again. Readers that already cloned the table keep
+    /// their rows, the copy-on-write sharing `set` relies on.
+    fn evict(&mut self, keep: &Keep) {
+        let (len, pages) = (self.len, self.pages.len());
+        let loaded = self.pages.iter().filter(|page| page.is_some()).count();
+        let Some(kept) = kept_when_over_budget(loaded, pages, keep, |i| if i < len { i / PAGE } else { pages }) else {
+            return;
+        };
+        self.retain_pages(|p| kept[p]);
+    }
+    /// Keeps only the pages covering `window` (an empty window keeps none). Used for a section the
+    /// grid has left: its total stays, so its indices still mean what they meant.
+    fn retain_window(&mut self, window: std::ops::Range<usize>) {
+        let (lo, hi) = if window.is_empty() {
+            (0, 0)
+        } else {
+            (window.start / PAGE, window.end.div_ceil(PAGE))
+        };
+        self.retain_pages(|p| (lo..hi).contains(&p));
+    }
+    /// Drops the rows of every loaded page `keep` rejects. Copies the page table only when there
+    /// is something to drop, so a read view holding the table is not disturbed for nothing.
+    fn retain_pages(&mut self, keep: impl Fn(usize) -> bool) {
+        if !self.pages.iter().enumerate().any(|(p, page)| page.is_some() && !keep(p)) {
+            return;
+        }
+        for (p, slot) in Arc::make_mut(&mut self.pages).iter_mut().enumerate() {
+            if !keep(p) {
+                *slot = None;
+            }
+        }
+    }
     /// Does page `p` (items `p*PAGE ..`) have a slot not yet filled?
     fn page_missing(&self, p: usize) -> bool {
         match self.pages.get(p) {
@@ -627,15 +843,18 @@ impl SecItems {
             }
         }
     }
-    /// A read scan first: an optimistic edit must not clone unrelated retained pages.
-    fn set_watched(&mut self, sid: ServerId, rk: &str, on: bool) -> bool {
-        let matches = |m: &PmsMovie| plx_plex::plex::same_item((m.sid, &m.rk), (sid, rk));
-        let mut hit = false;
+    /// A read scan first: an optimistic edit must not clone unrelated retained pages. Returns
+    /// `(covered, changed)`: whether any loaded row is one the edit addresses, and whether any
+    /// of them actually changed. A read-back that agrees with the row covers it and changes
+    /// nothing: no page is copied and no notice rises, but the listing still has to learn it.
+    fn apply_view(&mut self, at: &crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit) -> (bool, bool) {
+        let covered = |m: &PmsMovie| at.covers(m);
+        let matches = |m: &PmsMovie| at.covers(m) && edit.changes(m);
+        let (mut any_covered, mut changed) = (false, false);
         for p in 0..self.pages.len() {
-            if !self.pages[p]
-                .as_ref()
-                .is_some_and(|page| page.iter().flatten().any(matches))
-            {
+            let Some(page) = self.pages[p].as_ref() else { continue };
+            any_covered |= page.iter().flatten().any(covered);
+            if !page.iter().flatten().any(matches) {
                 continue;
             }
             let page = Arc::make_mut(&mut self.pages)[p].as_mut().unwrap();
@@ -644,11 +863,11 @@ impl SecItems {
                 .flatten()
                 .filter(|m| matches(m))
             {
-                crate::pms::set_watched(m, on);
-                hit = true;
+                edit.apply(m);
+                changed = true;
             }
         }
-        hit
+        (any_covered, changed)
     }
     #[cfg(any(test, feature = "test-support"))]
     fn from_vec(v: Vec<Option<PmsMovie>>) -> Self {
@@ -677,22 +896,66 @@ impl Default for SecState {
             sort_resolved: true,
             genre_resolved: true,
             letters: Arc::default(),
-            letters_done: false,
+            letters_for: None,
+            letters_kept: None,
+            letters_gen: 0,
+            viewing_gen: 0,
+            letters_backoff: None,
+            bands: None,
+            bands_kept: None,
+            bands_backoff: None,
+            today: None,
+            loaned: None,
             hubs: Default::default(),
             fetch: SecFetch::Loading,
             total: -1,
             items: SecItems::default(),
             cursor: None,
+            membership_stale: false,
+            relist: false,
+            relist_items: None,
+            relist_again: false,
         }
     }
 }
 
 impl SecState {
-    fn query_filters(&self, section_kind: SecKind) -> Vec<(String, String)> {
-        let mut filters = Vec::new();
-        if let Some(kind) = self.library_type.plex_type(section_kind) {
-            filters.push(("type".into(), kind.to_string()));
+    /// Does the server's answer to this section's query change when an item is watched: the
+    /// Unwatched switch drops it, ordering by a value a watch changes moves it ([`orders_by_viewing`])?
+    fn membership_depends_on_viewing(&self) -> bool {
+        (self.unwatched && self.library_type.filters())
+            || self.sorts.get(self.sort_idx).is_some_and(|sort| orders_by_viewing(&sort.key))
+    }
+    /// Forget the listing, as a query edit does: the next visit fetches it afresh.
+    fn reset_listing(&mut self) {
+        self.fetch = SecFetch::Loading;
+        self.total = -1;
+        self.items.clear();
+        self.cursor = None;
+        // A stale flag spent here is what the letters hear of a membership change that was
+        // flagged rather than reset at once (`apply_view_local`, `listings_changed`).
+        if self.membership_stale || self.relist {
+            self.letters_gen = self.letters_gen.wrapping_add(1);
         }
+        self.membership_stale = false;
+        self.relist = false;
+        self.relist_items = None;
+        self.relist_again = false;
+    }
+    /// The next replacement page needed by the reader, including a focus outside the window.
+    /// A shrinking listing first loads its new tail when the old window is past the end.
+    fn relist_next(&self, want: (usize, usize), focus: Option<usize>) -> Option<usize> {
+        let Some(items) = &self.relist_items else { return Some(want.0 / PAGE * PAGE) };
+        if items.len == 0 { return None; }
+        let lo = want.0.min(items.len - 1);
+        let hi = want.1.min(items.len).max(lo + 1);
+        (lo / PAGE..hi.div_ceil(PAGE))
+            .chain(focus.map(|i| i.min(items.len - 1) / PAGE))
+            .find(|&page| items.page_missing(page))
+            .map(|page| page * PAGE)
+    }
+    fn query_filters(&self, section_kind: SecKind) -> Vec<(String, String)> {
+        let mut filters = self.library_type.type_terms(section_kind);
         if !self.library_type.filters() {
             return filters;
         }
@@ -714,7 +977,37 @@ impl SecState {
 /// sibling [`BrowseAdapter`]; everything whose identity belongs to a Browse instance lives here.
 #[derive(Clone)]
 pub struct BrowseState {
+    /// The publish order of view-state edits, shared with every other store
+    /// (`stores::Stores::default`); a standalone state owns a private one.
+    pub(crate) ledger: crate::viewledger::ViewLedger,
+    /// The ledger stamp of the listing page read in flight (single flight: `BrowseAdapter::page`),
+    /// taken when it was requested. Its landing is patched with every edit published since.
+    page_stamp: crate::viewledger::Stamp,
+    /// The request ids of the last listing page read and of the last genre and letters reads: each
+    /// read the step emits takes the next one of its kind, raises its claim for it, and a refusal
+    /// of that id is what the next step settles ([`listing_jobs`]).
+    page_req: u32,
+    genres_req: u32,
+    letters_req: u32,
+    bands_req: u32,
+    /// The request id of the last source discovery the step emitted: each takes the next one and
+    /// raises the discovery claim for it, and a refusal of that id is what the next step settles
+    /// ([`BrowseState::discovery_settle`]).
+    src_req: u32,
+    /// The discovery read the step has out, until it lands or a later step settles its refusal.
+    src_flight: Option<SrcFlight>,
+    /// The same for the section-hubs read in flight (`BrowseAdapter::hubs.fetch` holds its claim).
+    hubs_stamp: crate::viewledger::Stamp,
+    /// The last section-hubs read's request id: each read the step emits takes the next one, and its
+    /// answer is told from a superseded read's by it ([`section_hubs::browse_hubs_addr`]).
+    hubs_gen: u32,
+    /// The section-hubs read the step has out, until it lands or a later step settles its refusal.
+    hubs_flight: Option<section_hubs::HubsFlight>,
     session_generation: u64,
+    current_sid: ServerId,
+    profile_key: String,
+    roster_profile_key: String,
+    session_settled: bool,
     sources: Vec<BrowseSource>,
     sections: Vec<BrowseSection>,
     states: Vec<SecState>,
@@ -722,7 +1015,21 @@ pub struct BrowseState {
     /// Wanted item-index range (inclusive lo, exclusive hi) — set by the grid each frame from its
     /// visible rows + lookahead; [`pump`] fetches the first missing page inside it.
     want: (usize, usize),
+    /// The grid's focused slot, sent with [`Self::want`]; the landing keeps its page.
+    focus: Option<usize>,
+    /// The sections left most recently, newest first, each with the window it last showed (see
+    /// [`RECENT_SECTIONS`]).
+    left: Vec<(usize, (usize, usize))>,
+    /// The FETCH generation: moves on every re-query and every section switch, and a page that
+    /// lands under an older one is dropped. Not what the screen sees — that is [`Self::edit_gen`].
     gen: u32,
+    /// The QUERY identity the screen sees (`ListingId::query`): moves only when the listing is a
+    /// different query (a section switch or a query edit), never on a membership re-query, which
+    /// refreshes the same query under the reader's place.
+    edit_gen: u32,
+    /// The `gen` a membership re-query was started under: while it stands and the first page is
+    /// out, the store is owed a pump even with no Library page on top ([`BrowseState::requery_owed`]).
+    requery_gen: Option<u32>,
     sections_gen: u32,
     epoch: u32,
     src_facts_gen: u32,
@@ -730,44 +1037,60 @@ pub struct BrowseState {
     tab_shape: u32,
     retry_cd: u32,
     remembered: Vec<(SecKind, String, i64)>,
-    /// This profile's remembered library views ([`plx_plex::plex::session::Session::library_views`]):
+    /// Session-local choices include non-favorites without changing the saved favorite.
+    visited: Vec<(SecKind, String, i64)>,
+    visited_user: String,
+    /// This profile's remembered library views ([`plx_plex::plex::session::Preferences::library_views`]):
     /// sort, Unwatched, genre and listing type. Loaded beside [`remembered`](Self::remembered) and
     /// cleared with it on a reset, so a profile switch can never open one person's library in
     /// another's view.
     view_memory: plx_plex::plex::session::LibraryViews,
     recorded: Option<plx_plex::plex::session::HomePins>,
+    preference_writes: preferences_job::Preferences,
     pending_pins: Option<(String, std::sync::Arc<std::sync::Mutex<PinWrite>>)>,
+    /// The outcome of the last editor commit ([`apply_pins_from`](Self::apply_pins_from)),
+    /// published on the directory ([`super::view::DirectoryView::pin_commit`]) so the screen that
+    /// sent it can wait for its answer instead of assuming one.
+    pin_commit: PinCommit,
+}
+
+/// **What the last `ApplyPins` came to**: `seq` counts the commits this store has run (a screen
+/// remembers the value it sent its own commit after, and waits for it to move), `recorded` says
+/// whether that commit produced a record (`false`: the session it was handed had no `client_id`, or
+/// the write queue refused it, so the selection stands for this run only). Not a durability claim:
+/// the write itself lands later.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PinCommit {
+    pub seq: u32,
+    pub recorded: bool,
 }
 
 /// Shared by a cloned Browse snapshot, so consuming a receipt never makes another clone
 /// mistake a successful write for a disconnected worker. Failed writes keep the local choice.
-struct PinWrite {
-    ticket: plx_base::storage_worker::TypedTicket<bool>,
-    saved: Option<bool>,
-}
-impl PinWrite {
-    fn saved(&mut self) -> bool {
-        if self.saved.is_none() {
-            self.saved = match self.ticket.try_recv() {
-                Ok(saved) => Some(saved),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(false),
-            };
-        }
-        self.saved == Some(true)
-    }
-}
+///
+/// Observation and use are split: the host observes the addressed completion BEFORE capturing
+/// the session for the next step. Logic reads only that latch, never a worker's newer completion.
+type PinWrite = preferences_job::Receipt;
 
-/// Worker-facing half of one Browse store. Every spawned job captures this adapter, so a result
-/// can only land in the store that admitted the job even when another Bridge is alive.
+/// Worker-facing half of one Browse store. Every read's port holds this adapter, so a result
+/// can only land in the store that emitted the job even when another Bridge is alive.
 pub struct BrowseAdapter {
-    fetching: AtomicBool,
-    genre_fetching: AtomicBool,
-    letters_fetching: AtomicBool,
-    src_fetching: AtomicBool,
-    page_result: Mutex<Option<PageResult>>,
-    genre_result: Mutex<Option<DirectoryResult<GenreEntry>>>,
-    letter_result: Mutex<Option<DirectoryResult<(String, i64)>>>,
+    /// The listing page read: its claim and mailbox, and the refusal of a read that never started
+    /// ([`listing_jobs`]). The claim is raised by the step that emits the read.
+    page: crate::stores::Fetch<PageResult>,
+    /// The genre and first-letter lists, each with a claim and mailbox of its own.
+    genres: crate::stores::Fetch<DirectoryResult<GenreEntry>>,
+    letters: crate::stores::Fetch<DirectoryResult<(String, i64)>>,
+    /// The band counts of a value sort's rail (`letters`' twin, with a claim and a mailbox of its own).
+    bands: crate::stores::Fetch<DirectoryResult<bands::BandRail>>,
+    /// The source discovery's claim, raised by the step that emits the read ([`discovery_job`]).
+    /// Its mailbox slot is unused: the answer lands in `src_result`, which `record::take_from`
+    /// takes and a controlled run records, and whose claim is lowered at APPLY
+    /// (`apply_discovery`, after its epoch check), not at the take. Moving the answer into the
+    /// slot would change when the claim drops (the dump mode's owed and the take) and what is
+    /// recorded; the shared claim gives the refusal and the generation guard
+    /// ([`crate::stores::Fetch`]) without that.
+    src_fetching: crate::stores::Fetch<()>,
     src_result: Mutex<Option<(u32, usize, SrcLanding)>>,
     hubs: section_hubs::HubAdapter,
 }
@@ -780,13 +1103,11 @@ pub struct RosterSync {
 impl Default for BrowseAdapter {
     fn default() -> Self {
         Self {
-            fetching: AtomicBool::new(false),
-            genre_fetching: AtomicBool::new(false),
-            letters_fetching: AtomicBool::new(false),
-            src_fetching: AtomicBool::new(false),
-            page_result: Mutex::new(None),
-            genre_result: Mutex::new(None),
-            letter_result: Mutex::new(None),
+            page: Default::default(),
+            genres: Default::default(),
+            letters: Default::default(),
+            bands: Default::default(),
+            src_fetching: Default::default(),
             src_result: Mutex::new(None),
             hubs: Default::default(),
         }
@@ -795,27 +1116,40 @@ impl Default for BrowseAdapter {
 
 impl BrowseAdapter {
     fn clear(&self) {
-        *self.page_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.genre_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.letter_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.page.clear();
+        self.genres.clear();
+        self.letters.clear();
+        self.bands.clear();
         *self.src_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.hubs.result.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        for flag in [&self.fetching, &self.genre_fetching, &self.letters_fetching,
-            &self.src_fetching, &self.hubs.fetching] {
-            flag.store(false, Ordering::SeqCst);
-        }
+        self.hubs.fetch.clear();
+        self.src_fetching.clear();
     }
 }
 
 impl Default for BrowseState {
     fn default() -> Self {
         Self {
+            ledger: Default::default(),
+            page_stamp: 0,
+            page_req: 0,
+            genres_req: 0,
+            letters_req: 0,
+            bands_req: 0,
+            src_req: 0,
+            src_flight: None,
+            hubs_stamp: 0,
+            hubs_gen: 0,
+            hubs_flight: None,
             sources: Vec::new(),
             sections: Vec::new(),
             states: Vec::new(),
             cur: 0,
             want: (0, 0),
+            focus: None,
+            left: Vec::new(),
             gen: 0,
+            edit_gen: 0,
+            requery_gen: None,
             sections_gen: 0,
             epoch: 0,
             src_facts_gen: 0,
@@ -823,23 +1157,41 @@ impl Default for BrowseState {
             tab_shape: u32::MAX,
             retry_cd: 0,
             remembered: Vec::new(),
+            visited: Vec::new(),
+            visited_user: String::new(),
             view_memory: Default::default(),
             recorded: None,
             pending_pins: None,
-            session_generation: plx_plex::plex::session::visible_generation(),
+            pin_commit: PinCommit::default(),
+            preference_writes: Default::default(),
+            session_generation: 0,
+            current_sid: ServerId::UNSET,
+            profile_key: String::new(),
+            roster_profile_key: String::new(),
+            session_settled: false,
         }
     }
 }
 
 impl BrowseState {
-    pub fn discovery_needs_pump(&self, adapter: &BrowseAdapter) -> bool {
-        if self.session_generation != plx_plex::plex::session::visible_generation() { return true; }
+    /// Commands use the explicitly captured profile/current even if they do not walk the roster.
+    pub(crate) fn observe_roster_context(&mut self, input: &BrowseRosterInput<'_>) {
+        self.preference_writes.prepare(input.session, input.tenure);
+        if self.profile_key != input.profile_key {
+            self.profile_key.clear();
+            self.profile_key.push_str(input.profile_key);
+        }
+
+    }
+
+    pub fn discovery_needs_pump(&self, adapter: &BrowseAdapter, input: &BrowseRosterInput<'_>) -> bool {
+        if self.session_generation != input.visible_generation || self.current_sid != input.keys.current()
+            || self.roster_profile_key != input.profile_key || self.session_settled != input.settled { return true; }
         if adapter.src_result.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return true;
         }
-        let live: Vec<ServerId> = plx_plex::plex::server_ids().collect();
-        if live.len() != self.sources.len()
-            || self.sources.iter().zip(&live).any(|(source, sid)| source.sid != *sid) {
+        if input.keys.slots().count() != self.sources.len()
+            || self.sources.iter().zip(input.keys.slots()).any(|(source, sid)| source.sid != sid) {
             return true;
         }
         // **The Plex Home roster is the one input to this gate that is not in the registry.**
@@ -847,55 +1199,65 @@ impl BrowseState {
         // every other test below is blind to it — and it is the answer that decides whether a
         // managed profile's family server is the household's or a stranger's. Without this the
         // sync it guards was simply never reached on a roster arrival, and the source stayed
-        // misgraded until something else happened to move a fact. `peek()` is a lock and an `Arc`
-        // clone over a live cache (`plex/CLAUDE.md`), not a file read, which is what makes it
-        // affordable on a per-frame gate.
-        let household = plx_plex::plex::session::peek().household_ids();
+        // misgraded until something else happened to move a fact. Grade the supplied borrowed
+        // session directly; no household Vec or session-cache lookup is needed per frame.
+        let keys = input.keys;
         for source in &self.sources {
-            if source.household != household_verdict(source, &household) {
+            if source.household != input.household(source) {
                 return true;
             }
-            let now = plx_plex::plex::client_for(source.sid);
-            if source.client_addr != now.map_or(0, |client| client as *const _ as usize)
-                || source.token_gen != now.map_or(0, |client| client.token_gen()) {
+            if source.client_key != keys.key(source.sid) {
                 return true;
             }
-            if let Some((state, tier)) = source_snapshot(source.sid) {
+            if let Some((state, tier)) = source_snapshot(keys, source.sid) {
                 if source.state != state || source.tier != tier {
                     return true;
                 }
             }
-            if let Some(facts) = plx_plex::plex::server_facts(source.sid) {
+            if source.machine_id != machine_of(keys, source.sid) { return true; }
+            if let Some(facts) = keys.facts(source.sid).and_then(|facts| facts.described) {
                 if (source.name.is_empty() && !facts.name.is_empty())
                     || source.handle != facts.handle || source.owned != facts.owned
                     || source.home != facts.home || source.owner_id != facts.owner_id {
                     return true;
                 }
+            } else if !source.owned || source.home || source.owner_id != 0 || !source.handle.is_empty() {
+                return true;
             }
-            if source.machine_id.is_empty() || source.retry_cd > 0 {
+            if source.retry_cd > 0 {
                 return true;
             }
         }
-        !adapter.src_fetching.load(Ordering::SeqCst)
+        !adapter.src_fetching.busy()
             && self.sources.iter().any(|source| !source.sections_done || !source.counts_done)
     }
 
-    pub fn pump_needs_work(&self, adapter: &BrowseAdapter) -> bool {
-        if self.discovery_needs_pump(adapter)
+    pub fn pump_needs_work(&self, adapter: &BrowseAdapter, input: &BrowseRosterInput<'_>) -> bool {
+        if self.discovery_needs_pump(adapter, input)
             || self.retry_cd > 0
-            || adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
-            || adapter.genre_result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
-            || adapter.letter_result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
-            || adapter.hubs.result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+            || self.cur_state().is_some_and(SecState::letters_waiting)
+            || self.cur_state().is_some_and(SecState::bands_waiting)
+            || adapter.page.has_mail()
+            || adapter.genres.has_mail()
+            || adapter.letters.has_mail()
+            || adapter.bands.has_mail()
+            || adapter.hubs.fetch.has_mail()
+            // A read the runner refused (or an adapter retired under) leaves its record with the claim
+            // down: the next step settles it ([`BrowseState::hubs_settle`]), and nothing else would
+            // wake it if the section's own timers are not running.
+            || (self.hubs_flight.is_some() && !adapter.hubs.fetch.busy())
             || self.states.iter().any(|state| state.hubs.needs_tick()) {
             return true;
         }
-        if adapter.fetching.load(Ordering::SeqCst) {
+        if adapter.page.busy() {
             return false;
         }
         let current = self.cur();
         let Some(state) = self.states.get(current) else { return false };
         if state.total < 0 {
+            return true;
+        }
+        if state.relist {
             return true;
         }
         let (lo, hi) = self.want;
@@ -904,7 +1266,7 @@ impl BrowseState {
         (first..=last).any(|page| state.items.page_missing(page))
     }
 
-    fn sources(&self) -> &[BrowseSource] {
+    pub(crate) fn sources(&self) -> &[BrowseSource] {
         &self.sources
     }
     fn sections(&self) -> &[BrowseSection] {
@@ -938,6 +1300,11 @@ impl BrowseState {
     fn query_gen(&self) -> u32 {
         self.gen
     }
+    /// The query identity the screen is shown ([`ListingId::query`]) and its saved cursor is
+    /// addressed with; see [`Self::edit_gen`].
+    fn listing_query(&self) -> u32 {
+        self.edit_gen
+    }
     fn sections_gen(&self) -> u32 {
         self.sections_gen
     }
@@ -954,30 +1321,92 @@ impl BrowseState {
     fn bump_source_facts_gen(&mut self) {
         self.src_facts_gen = self.src_facts_gen.wrapping_add(1);
     }
+    /// A different query: both generations move.
     fn bump_gen(&mut self) -> u32 {
+        self.edit_gen = self.edit_gen.wrapping_add(1);
+        self.refetch_gen()
+    }
+    /// The same query fetched again: only the fetch generation moves, so a page still out for the
+    /// old fetch is dropped while the screen sees no query change.
+    fn refetch_gen(&mut self) -> u32 {
         self.gen = self.gen.wrapping_add(1);
         self.gen
     }
     fn requery(&mut self) {
         self.bump_gen();
+        self.reset_current_listing();
+    }
+    fn reset_current_listing(&mut self) {
         let current = self.cur();
         if let Some(state) = self.states.get_mut(current) {
-            state.fetch = SecFetch::Loading;
-            state.total = -1;
-            state.items.clear();
-            state.cursor = None;
+            state.reset_listing();
         }
     }
     fn set_cur(&mut self, i: usize) {
         if i >= self.sections.len() || i == self.cur() {
             return;
         }
+        let left = self.cur();
+        // The section coming back to the screen is no longer "left", and must not use a slot.
+        self.left.retain(|&(section, _)| section != left && section != i);
+        self.left.insert(0, (left, self.want));
+        self.left.truncate(RECENT_SECTIONS);
         self.cur = i;
         self.bump_gen();
+        self.apply_section_rule();
         activate_source_of(i);
     }
-    fn want(&mut self, lo: usize, hi: usize) {
+    /// The grid's memory of the sections it is not showing: the recent few keep their last
+    /// window, the rest keep no pages, and a section left while stale
+    /// ([`SecState::membership_stale`]) keeps none either, so that coming back fetches it afresh
+    /// rather than showing the list it had before the change. Runs on a switch, never per frame.
+    fn apply_section_rule(&mut self) {
+        for (section, state) in self.states.iter_mut().enumerate() {
+            if section == self.cur {
+                continue;
+            }
+            if state.membership_stale || state.relist {
+                state.reset_listing();
+                continue;
+            }
+            match self.left.iter().find(|&&(left, _)| left == section) {
+                Some(&(_, (lo, hi))) => state.items.retain_window(lo..hi),
+                None => state.items.retain_window(0..0),
+            }
+        }
+    }
+    fn want(&mut self, lo: usize, hi: usize, focus: Option<usize>) {
         self.want = (lo, hi);
+        self.focus = focus;
+    }
+    /// The items the Library page addressed by `target` holds on screen: the section's hold-window
+    /// shelves and, when it is the current section, the grid rows in its wanted window. Empty when
+    /// the address no longer names a section (a table epoch moved).
+    pub fn held_keys(&self, target: crate::stores::browse::SectionAddress) -> crate::stores::HeldKeys {
+        let mut keys = crate::stores::HeldKeys::new();
+        let Some(index) = self.resolve_section(target.epoch, target.sid, target.section) else {
+            return keys;
+        };
+        let Some(st) = self.states.get(index) else { return keys };
+        for m in st.hubs.held_items() {
+            crate::stores::push_held(&mut keys, m.sid, &m.rk);
+        }
+        if index == self.cur {
+            let (lo, hi) = self.want;
+            for i in lo..hi.min(st.items.len) {
+                if let Some(m) = st.items.get(i) {
+                    crate::stores::push_held(&mut keys, m.sid, &m.rk);
+                }
+            }
+        }
+        keys
+    }
+    /// Is any shelf of the section addressed by `target` committed (drawn)? A section whose first
+    /// publication has not happened, or whose address no longer names a section, has none.
+    pub fn hubs_committed(&self, target: crate::stores::browse::SectionAddress) -> bool {
+        self.resolve_section(target.epoch, target.sid, target.section)
+            .and_then(|index| self.states.get(index))
+            .is_some_and(|st| !st.hubs.committed.is_empty())
     }
     pub fn resolve_section(&self, epoch: u32, sid: ServerId, key: i64) -> Option<usize> {
         if epoch != self.table_epoch() {
@@ -1055,7 +1484,34 @@ impl BrowseState {
         if state.library_type == library_type {
             return true;
         }
+        let from = state.library_type;
         state.library_type = library_type;
+        // Counts describe one metadata type, and what the section lists can change while the
+        // Collections page is up: every type change drops them, and the listing it lands on asks.
+        state.forget_letters();
+        // The Collections page borrows the listing: the view it borrowed it from comes back as it
+        // was, on the way out, and is set aside on the way in.
+        if library_type == LibraryType::Collections {
+            state.loaned = Some(LoanedView {
+                library_type: from, sort_idx: state.sort_idx, sort_desc: state.sort_desc,
+                genre: state.genre.clone(), sorts: state.sorts.clone(), genres: state.genres.clone(),
+                genres_done: state.genres_done, sort_resolved: state.sort_resolved,
+                genre_resolved: state.genre_resolved,
+            });
+        } else if from == LibraryType::Collections {
+            if let Some(view) = state.loaned.take().filter(|view| view.library_type == library_type) {
+                state.sort_idx = view.sort_idx;
+                state.sort_desc = view.sort_desc;
+                state.genre = view.genre;
+                state.sorts = view.sorts;
+                state.genres = view.genres;
+                state.genres_done = view.genres_done;
+                state.sort_resolved = view.sort_resolved;
+                state.genre_resolved = view.genre_resolved;
+                self.requery();
+                return true;
+            }
+        }
         // Menus and letter counts describe a metadata type. Never reuse the show's menus
         // or offsets for episodes, and never send a sort key the new type hasn't advertised.
         state.sorts = Arc::default();
@@ -1067,8 +1523,6 @@ impl BrowseState {
         // A new listing starts a new restore, and the viewer just chose it.
         state.sort_resolved = true;
         state.genre_resolved = true;
-        state.letters = Arc::default();
-        state.letters_done = false;
         self.requery();
         true
     }
@@ -1102,12 +1556,113 @@ impl BrowseState {
             },
         }
     }
-    fn set_watched_local(&mut self, sid: ServerId, rk: &str, on: bool) -> bool {
+    /// Edit every listing row the change covers, in every section's loaded pages.
+    ///
+    /// A read-back's [`ViewEdit::Facts`] that COVERS a row of a listing whose MEMBERSHIP depends on
+    /// viewing (the Unwatched switch, or ordered by last viewed) also marks that section stale,
+    /// whether or not it changes the row: the server's answer is what marks staleness, and a
+    /// read-back that agrees with the optimistic row is exactly that answer. The row is patched
+    /// where it stands, but the server would now list it elsewhere or not at all.
+    /// A [`ViewEdit::Facts`] also stales every first-letter list counted under Unwatched in every
+    /// section of the item's server ([`SecState::viewing_changed`]), covered row or not.
+    /// Returns true when a row changed, a section was newly marked stale or reset, or the rail on
+    /// screen lost its counts.
+    /// The current section waits for a page to be pushed over the Library page
+    /// ([`BrowseState::requery_stale`]); any other section simply forgets its pages AND its
+    /// cursor (`reset_listing`), which is what a first visit looks like: switching back to it
+    /// fetches afresh and opens at the top.
+    fn apply_view_local(&mut self, at: &crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit) -> bool {
+        let current = self.cur();
+        let facts = matches!(edit,
+            crate::viewstate::ViewEdit::Facts { .. } | crate::viewstate::ViewEdit::Offset { .. });
         let mut hit = false;
-        for state in &mut self.states {
-            hit |= state.items.set_watched(sid, rk, on);
+        for (i, state) in self.states.iter_mut().enumerate() {
+            let (covered, changed) = state.items.apply_view(at, edit);
+            hit |= changed;
+            if let Some(items) = &mut state.relist_items {
+                items.apply_view(at, edit);
+            }
+            if covered && facts && state.membership_depends_on_viewing() {
+                if i == current {
+                    hit |= !state.membership_stale;
+                    state.membership_stale = true;
+                } else {
+                    state.membership_changed();
+                    hit = true;
+                }
+            }
+        }
+        // The rail's counts under Unwatched are the server's word too, whether or not Unwatched is
+        // applied and whether or not the title is in a loaded page: the covered-row path above
+        // cannot see either, and a `ViewAt` names no section, so every section of the server hears.
+        if matches!(edit, crate::viewstate::ViewEdit::Facts { .. }) {
+            for i in 0..self.states.len() {
+                if self.section_sid(i) == Some(at.sid) {
+                    if let Some(state) = self.states.get_mut(i) {
+                        if let Some(kind) = self.sections.get(i).map(|section| section.kind) {
+                            hit |= state.viewing_changed(kind);
+                        }
+                    }
+                }
+            }
         }
         hit
+    }
+    /// Re-fetch the current section's query because a read-back changed what it would list. The
+    /// reader's place survives, unlike a query edit: the cursor is kept and only the FETCH
+    /// generation moves ([`Self::query_gen`], which drops a page still out), not the query
+    /// identity the screen sees ([`Self::listing_query`]). True when a re-fetch was started.
+    fn requery_stale(&mut self) -> bool {
+        let current = self.cur();
+        let Some(state) = self.states.get_mut(current).filter(|s| s.membership_stale) else { return false };
+        let cursor = state.cursor.clone();
+        self.refetch_gen();
+        self.reset_current_listing();
+        if let Some(state) = self.states.get_mut(current) {
+            state.cursor = cursor;
+        }
+        self.requery_gen = Some(self.gen);
+        true
+    }
+    /// Items were created or removed on `sid`: re-list the current section without emptying it
+    /// (its rows stay on screen until the replacement window is ready, so the grid absorbs the
+    /// change in place) and make every other section of the server forget its pages.
+    fn listings_changed(&mut self, sid: ServerId, _library_on_stack: bool) -> bool {
+        let current = self.cur();
+        let mut relist = false;
+        let mut hit = false;
+        for i in 0..self.states.len() {
+            if self.section_sid(i) != Some(sid) {
+                continue;
+            }
+            let Some(state) = self.states.get_mut(i) else { continue };
+            if i != current {
+                state.membership_changed();
+                hit = true;
+            } else if state.relist {
+                // One is owed already: the one out is kept, and one more follows it.
+                state.relist_again = true;
+            } else if state.total >= 0 {
+                state.relist = true;
+                relist = true;
+            } else if state.fetch == SecFetch::Loading {
+                // Keep the initial read, but do not let its pre-notification answer be final.
+                state.relist = true;
+                state.relist_again = true;
+                hit = true;
+            }
+        }
+        if relist {
+            // A page still out for the old listing is dropped when it lands.
+            self.refetch_gen();
+        }
+        relist || hit
+    }
+    /// Is a membership re-query's first page still owed, so that the store must be pumped even
+    /// though no Library page is on top to do it?
+    pub fn requery_owed(&self) -> bool {
+        self.requery_gen == Some(self.gen) && self.cur_state().is_some_and(|s| s.fetch == SecFetch::Loading)
+            || self.cur_state().is_some_and(|s| s.relist)
     }
     fn note_library_choice(&mut self, i: usize) {
         let (Some(kind), Some(section)) = (self.section_kind(i), self.sections.get(i)) else {
@@ -1121,32 +1676,19 @@ impl BrowseState {
             return;
         };
         let key = section.key;
+        let pinned = section.pinned;
+        let user = self.profile_key.clone();
+        if self.visited_user != user { self.visited.clear(); self.visited_user = user.clone(); }
+        self.visited.retain(|(candidate, _, _)| *candidate != kind);
+        self.visited.push((kind, machine.clone(), key));
+        if !pinned { return; }
         self.remembered
             .retain(|(remembered, _, _)| *remembered != kind);
         if !machine.is_empty() {
             self.remembered.push((kind, machine.clone(), key));
         }
-        let user = plx_plex::plex::session::current_profile_key();
-        let wire = kind.wire();
-        plx_plex::plex::session::queue_update(move |current| {
-            let mut next = current.clone();
-            let slot = match next
-                .last_library
-                .iter_mut()
-                .find(|library| library.user == user)
-            {
-                Some(library) => library,
-                None => {
-                    next.last_library.push(plx_plex::plex::session::LastLibrary {
-                        user: user.clone(),
-                        libs: Vec::new(),
-                        extensions: Default::default(),
-                    });
-                    next.last_library.last_mut()?
-                }
-            };
-            slot.set(wire, &machine, key);
-            Some(next)
+        let _ = self.preference_writes.emit(&user, preferences_job::Edit::Library {
+            kind: kind.wire().to_owned(), machine, key,
         });
     }
     /// Remember section `i`'s view across restarts (GitHub #278 the sort, #441 the rest) — the
@@ -1196,21 +1738,8 @@ impl BrowseState {
         let local = saved_view::merge(self.view_memory.get(&machine, key), &machine, key,
             &snapshot, edit);
         self.view_memory.set(local);
-        let user = plx_plex::plex::session::current_profile_key();
-        plx_plex::plex::session::queue_update(move |current| {
-            let stored = current.views_for(&user).and_then(|views| views.get(&machine, key));
-            let next_view = saved_view::merge(stored, &machine, key, &snapshot, edit);
-            let unchanged = match stored {
-                Some(stored) => *stored == next_view,
-                None => next_view.is_default(),
-            };
-            if unchanged {
-                return None;
-            }
-            let mut next = current.clone();
-            next.set_view_for(&user, next_view);
-            Some(next)
-        });
+        let user = self.profile_key.clone();
+        let _ = self.preference_writes.emit(&user, preferences_job::Edit::View { machine, key, snapshot, field: edit });
     }
     /// Apply section `i`'s remembered listing type and Unwatched switch, once, as the section is
     /// created. Neither needs the server to vouch for it — the type is checked against what the
@@ -1261,32 +1790,32 @@ impl BrowseState {
         }
         Some(Restore { kind: section.kind, library_type: state.library_type, sort, genre })
     }
-    fn cur_source_idx(&self) -> Option<usize> {
+    fn cur_source_idx(&self, current: ServerId) -> Option<usize> {
         self.sections
             .get(self.cur())
             .map(|section| section.src)
             .or_else(|| {
-                let sid = plx_plex::plex::current_server();
+                let sid = current;
                 self.sources.iter().position(|source| source.sid == sid)
             })
             .filter(|&index| index < self.sources.len())
     }
-    fn retry_cur_source(&mut self) {
+    fn retry_cur_source(&mut self, current: ServerId) {
         self.retry_cd = 0;
-        if let Some(index) = self.cur_source_idx() {
+        if let Some(index) = self.cur_source_idx(current) {
             if let Some(source) = self.sources.get_mut(index) {
                 source.retry_cd = 0;
             }
         }
     }
-    fn retry_source(&mut self, epoch: u32, sid: ServerId) -> bool {
+    fn retry_source(&mut self, epoch: u32, sid: ServerId, current: ServerId) -> bool {
         if self.table_epoch() != epoch {
             return false;
         }
         let Some(index) = self.sources.iter().position(|source| source.sid == sid) else {
             return false;
         };
-        if self.cur_source_idx() == Some(index) {
+        if self.cur_source_idx(current) == Some(index) {
             self.retry_cd = 0;
         }
         self.sources[index].retry_cd = 0;
@@ -1317,88 +1846,117 @@ impl BrowseState {
             source.retry_cd = 0;
         }
         self.bump_source_facts_gen();
-        plx_machine::idle::invalidate();
+
         true
     }
-    fn kick_directory<T: Send + 'static>(
-        &self,
-        adapter: &Arc<BrowseAdapter>,
-        done: bool,
-        flag: fn(&BrowseAdapter) -> &AtomicBool,
-        mail: fn(&BrowseAdapter) -> &Mutex<Option<DirectoryResult<T>>>,
-        dir: &'static str,
-        project: fn(&plx_plex::plex::LibrarySection) -> Option<T>,
-    ) {
+    /// Ask for one of the current section's value lists, if it is owed and not already out. Nothing
+    /// is started here: the read leaves as a [`crate::stores::StoreJob::BrowseDirectory`] on `jobs`
+    /// and the application's runner starts it, so the registry is read by the host (`keys`), never
+    /// by this step. The directory's claim is raised HERE, at the step, because the screens re-send
+    /// the request every tick and several run before one drain; the runner's refusal gives it back.
+    fn kick_directory(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>, which: listing_jobs::Directory) {
+        self.settle_refused_reads(adapter);
         let current = self.cur();
-        if self.states.get(current).is_none() || done {
+        // Genres are asked once per listing type; the letters are asked whenever the list on hand
+        // does not describe the grid ([`SecState::letters_owed`]), and so are a value sort's bands
+        // ([`SecState::bands_owed`]).
+        let owed = self.cur_state().zip(self.section_kind(current)).map(|(state, kind)| match which {
+            listing_jobs::Directory::Genres => !state.genres_done,
+            listing_jobs::Directory::Letters => state.letters_owed(),
+            listing_jobs::Directory::Bands => state.bands_owed(kind),
+        });
+        if self.states.get(current).is_none() || !owed.unwrap_or(false) {
             return;
         }
         let Some(sid) = self.section_sid(current) else {
             return;
         };
-        let Some(client) = plx_plex::plex::client_for(sid) else {
+        let Some(key) = keys.key(sid) else {
             return;
         };
-        let token_gen = client.token_gen();
-        if flag(&adapter).swap(true, Ordering::SeqCst) {
+        if which.busy(adapter) {
             return;
         }
-        let key = self.sections[current].key;
-        let library_type = self.states[current].library_type;
-        let metadata_type = library_type.plex_type(self.sections[current].kind);
-        let epoch = self.table_epoch();
-        let worker_adapter = Arc::clone(&adapter);
-        let spawned = plx_base::task::spawn_small("directory", move || {
-            let list = catch_unwind(|| {
-                let mut values = Vec::new();
-                if let Some(container) = client.section_directory(key, dir, metadata_type) {
-                    values.extend(container.directory.iter().filter_map(project));
-                }
-                values
-            })
-            .unwrap_or_default();
-            *mail(&worker_adapter).lock().unwrap_or_else(|e| e.into_inner()) = Some(DirectoryResult {
-                epoch,
-                sec: current,
-                client,
-                token_gen,
-                library_type,
-                list,
-            });
-        });
-        if !spawned {
-            flag(&adapter).store(false, Ordering::SeqCst);
+        let section = self.sections[current].key;
+        let kind = self.sections[current].kind;
+        let state = &self.states[current];
+        let library_type = state.library_type;
+        // The letters are asked with the terms the grid's pages are, from the same source, and keyed
+        // by them; the genre list is scoped by the listing's type alone.
+        let (filters, letters) = match which {
+            listing_jobs::Directory::Genres => (library_type.type_terms(kind), None),
+            listing_jobs::Directory::Letters => (state.query_filters(kind), Some(state.letters_key())),
+            // The bands carry the page's terms too; the family is in the key the answer comes back with.
+            listing_jobs::Directory::Bands => {
+                let Some(family) = state.rail_family(kind) else { return };
+                (state.query_filters(kind), Some(state.bands_key(family)))
+            }
+        };
+        let id = match which {
+            listing_jobs::Directory::Genres => &mut self.genres_req,
+            listing_jobs::Directory::Letters => &mut self.letters_req,
+            listing_jobs::Directory::Bands => &mut self.bands_req,
+        };
+        *id = id.wrapping_add(1);
+        let id = *id;
+        which.claim(adapter, id);
+        jobs.push(crate::stores::StoreJob::BrowseDirectory(
+            plx_machine::job::Job {
+                addr: listing_jobs::listing_addr(id),
+                req: listing_jobs::BrowseDirectoryReq::new(
+                    sid, key, self.table_epoch(), current, section, library_type, filters, letters, which),
+            },
+            listing_jobs::BrowseDirectoryPort::of(adapter, which),
+        ));
+    }
+    /// Settle the reads the runner refused since the last step: the claim went back in the call that
+    /// refused (`Port::refused`), so what is left is the refusal's record, which is consumed here
+    /// and never recorded anywhere. A directory read that never started leaves its list owed
+    /// (`genres_done` is only set by a landing, and the letters stay not current until one), a page read that never started
+    /// leaves the first missing page missing, so the state is already the one such a read leaves and
+    /// the next ask is the same step's own. The loop is woken because nothing else would: the
+    /// claim that held the pump quiet is down.
+    fn settle_refused_reads(&mut self, adapter: &BrowseAdapter) {
+        let refused = adapter.page.take_refused(self.page_req)
+            | adapter.genres.take_refused(self.genres_req)
+            | adapter.letters.take_refused(self.letters_req)
+            | adapter.bands.take_refused(self.bands_req);
+        if refused {
+
         }
     }
-    fn kick_genres(&self, adapter: &Arc<BrowseAdapter>) {
-        let done = self
-            .cur_state()
-            .map(|state| state.genres_done)
-            .unwrap_or(true);
-        self.kick_directory(adapter, done, |a| &a.genre_fetching, |a| &a.genre_result, "genre", genre_entry);
+    /// Take the date the Library's ask carries into every section's state, where a calendar family's key
+    /// reads it. A new day is a new key, so the bands counted on yesterday are no longer shown and the
+    /// next ask counts them again.
+    fn note_today(&mut self, today: Option<bands::Day>) {
+        for state in &mut self.states {
+            state.today = today;
+        }
     }
-    fn kick_letters(&self, adapter: &Arc<BrowseAdapter>) {
-        let done = self
-            .cur_state()
-            .map(|state| state.letters_done)
-            .unwrap_or(true);
-        self.kick_directory(
-            adapter,
-            done,
-            |a| &a.letters_fetching,
-            |a| &a.letter_result,
-            "firstCharacter",
-            |directory| {
-                (!directory.key.is_empty() && directory.size > 0)
-                    .then(|| (directory.title.clone(), directory.size))
-            },
-        );
+    fn kick_genres(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>) {
+        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Genres);
+    }
+    fn kick_letters(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>) {
+        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Letters);
+    }
+    /// The rail's data is asked on the one tick the screens send for it: the letters, and the bands
+    /// when the sort has them (a title sort owes none, so its tick is the letters' alone).
+    fn kick_rail(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>, today: Option<bands::Day>) {
+        self.note_today(today);
+        self.kick_letters(adapter, keys, jobs);
+        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Bands);
     }
     pub fn addressed_with_adapter(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
         target: crate::stores::browse::SectionAddress,
         work: crate::stores::browse::LibraryWork,
+        keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>,
     ) -> bool {
         use crate::stores::browse::{LibraryWork, QueryEdit};
         let Some(index) = self.resolve_section(target.epoch, target.sid, target.section) else {
@@ -1406,7 +1964,7 @@ impl BrowseState {
         };
         match work {
             LibraryWork::SaveCursor { query, cursor } => {
-                query == self.query_gen() && self.save_cursor(index, cursor)
+                query == self.listing_query() && self.save_cursor(index, cursor)
             }
             LibraryWork::Commit {
                 select,
@@ -1462,20 +2020,31 @@ impl BrowseState {
                 }
             }
             LibraryWork::Hubs { may_publish } => {
-                self.hubs_kick(index, adapter);
+                self.hubs_kick(index, adapter, keys, jobs);
                 self.hubs_commit_staged(index, may_publish)
             }
+            LibraryWork::HubPage { id, key, before, seen } => {
+                self.hubs_page(index, seen, &id, &key, before, adapter, keys, jobs)
+            }
+            LibraryWork::HubPageCancel { id, key } => self.hubs_cancel_page(index, &id, &key, adapter, keys, jobs),
+            LibraryWork::HubHold { lo, hi } => self.hubs_hold(index, lo, hi, adapter, keys, jobs),
             work => {
                 if self.cur() != index {
                     return false;
                 }
                 match work {
-                    LibraryWork::Want { lo, hi } => self.want(lo, hi),
-                    LibraryWork::Letters => self.kick_letters(adapter),
-                    LibraryWork::Genres => self.kick_genres(adapter),
-                    LibraryWork::Retry => self.retry_cur_source(),
+                    LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
+                    LibraryWork::Letters { today } => self.kick_rail(adapter, keys, jobs, today),
+                    LibraryWork::Genres => self.kick_genres(adapter, keys, jobs),
+                    LibraryWork::Retry => self.retry_cur_source(keys.current()),
+                    LibraryWork::Requery => {
+                        self.requery_stale();
+                    }
                     LibraryWork::Commit { .. }
                     | LibraryWork::Hubs { .. }
+                    | LibraryWork::HubPage { .. }
+                    | LibraryWork::HubPageCancel { .. }
+                    | LibraryWork::HubHold { .. }
                     | LibraryWork::SaveCursor { .. } => unreachable!(),
                 }
                 true
@@ -1502,7 +2071,7 @@ impl BrowseState {
         touched[index] = true;
         self.record_pins(true, &touched);
         self.bump_sections_gen();
-        plx_machine::idle::invalidate();
+
         true
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -1511,9 +2080,10 @@ impl BrowseState {
         adapter: &BrowseAdapter,
         sid: ServerId,
         epoch: u32,
+        input: &BrowseRosterInput<'_>,
     ) {
         self.reset_owned(adapter);
-        self.sync_roster_owned();
+        self.sync_roster_owned(input);
         let source = self.sources.iter_mut().find(|source| source.sid == sid)
             .expect("registered replay source");
         // The replay fixture starts from the same already-known name on both passes. The live
@@ -1523,16 +2093,20 @@ impl BrowseState {
         source.sections_done = false;
         source.counts_done = true;
         self.epoch = epoch;
-        adapter.src_fetching.store(false, Ordering::SeqCst);
+        adapter.src_fetching.release();
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn discovery_policy_for_test(&self, adapter: &BrowseAdapter) -> (bool, u32, bool) {
         let source = self.sources.first().expect("a replay source");
         (
-            adapter.src_fetching.load(Ordering::SeqCst),
+            adapter.src_fetching.busy(),
             source.retry_cd,
             source.sections_done,
         )
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn section_count_for_test(&self) -> usize {
+        self.sections.len()
     }
     fn library_pins(&self) -> Vec<(usize, i64, bool)> {
         let mut out: Vec<(usize, i64, bool)> = self.sections
@@ -1580,10 +2154,10 @@ impl BrowseState {
     }
     /// **Where a tab press lands for a content type**, when the profile has not already chosen.
     ///
-    /// [`remembered_section`](Self::remembered_section) wins first and unconditionally — a person
-    /// who picked a library from the Sources panel gets that library back, and no rule here may
-    /// second-guess it. What follows is only the tiebreak among the *pinned* libraries of the
-    /// type, and it prefers the HOUSEHOLD's over an outsider's.
+    /// The current Library visit wins first, including a non-favorite selected through Library
+    /// options. Once that visit ends, [`remembered_section`](Self::remembered_section) restores
+    /// the last-used favorite. The remaining tiebreak among the *pinned* libraries of the type
+    /// prefers the HOUSEHOLD's over an outsider's.
     ///
     /// The tiebreak is issue #68's mechanism, one household wider. 0.6.x's `tab_section` sorted on
     /// raw `!owned` with no `pinned` filter at all, so two equally-graded libraries tied and the
@@ -1594,6 +2168,14 @@ impl BrowseState {
     /// owned, so everything tied again and the tab could land on a stranger's shelf. Grading on
     /// the household is what makes the tiebreak able to separate them.
     fn section_of_kind(&self, kind: SecKind) -> Option<usize> {
+        if self.tab_has_favorite(kind) {
+            if let Some((_, machine, key)) = self.visited.iter().find(|(candidate, _, _)| *candidate == kind) {
+                if let Some(index) = self.sections.iter().position(|section| section.kind == kind && section.key == *key
+                    && self.sources.get(section.src).is_some_and(|source| source.machine_id == *machine)) {
+                    return Some(index);
+                }
+            }
+        }
         if let Some(section) = self.remembered_section(kind) {
             return Some(section);
         }
@@ -1626,10 +2208,10 @@ impl BrowseState {
             tier: source.tier,
         }).collect()
     }
-    fn rows_where(&self, keep: impl Fn(&BrowseSection) -> bool) -> Vec<SrcRow> {
+    fn rows_where(&self, keep: impl Fn(usize, &BrowseSection) -> bool) -> Vec<SrcRow> {
         let last = self.pinned_count() == 1;
         let current = self.cur();
-        self.sections.iter().enumerate().filter(|(_, section)| keep(section))
+        self.sections.iter().enumerate().filter(|(index, section)| keep(*index, section))
             .map(|(index, section)| SrcRow {
                 src: section.src, section: index, title: section.title.clone(),
                 count_line: count_line(section.count, section.kind), pinned: section.pinned,
@@ -1637,14 +2219,16 @@ impl BrowseState {
             }).collect()
     }
     fn all_source_rows(&self) -> Vec<SrcRow> {
-        self.rows_where(|_| true)
+        self.rows_where(|_, _| true)
     }
+    /// The oracle of [`DirectoryView::rows_for`]: the libraries the Library header names while
+    /// `index` is on view — the favourites of its type, and `index` itself when it is not one.
     #[cfg(test)]
     fn source_rows_for(&self, index: usize) -> Vec<SrcRow> {
         let Some(kind) = self.section_kind(index) else {
             return Vec::new();
         };
-        self.rows_where(|section| section.kind == kind && section.pinned)
+        self.rows_where(|at, section| section.kind == kind && (section.pinned || at == index))
     }
     #[cfg(test)]
     fn rail_available(&self) -> bool {
@@ -1652,10 +2236,21 @@ impl BrowseState {
             return false;
         };
         let title_asc = match state.sorts.get(state.sort_idx) {
-            Some(sort) => sort.key == "titleSort" && !state.sort_desc,
+            Some(sort) => sort.is_title_order(state.library_type) && !state.sort_desc,
             None => true,
         };
-        title_asc && !state.unwatched && state.genre.is_none() && state.letters.len() > 1
+        title_asc && state.shown_letters().is_some_and(|letters| letters.len() > 1)
+    }
+    /// The twin of `ListingView::bands_available`: a value sort whose shown bands have two populated.
+    #[cfg(test)]
+    fn bands_available(&self) -> bool {
+        let (Some(state), Some(kind)) = (self.cur_state(), self.section_kind(self.cur())) else {
+            return false;
+        };
+        state.shown_bands(kind).is_some_and(|rail| rail.listed(state.sort_desc).populated() >= 2)
+    }
+    pub(crate) fn pin_commit(&self) -> PinCommit {
+        self.pin_commit
     }
     fn discovery_state(&self) -> SecFetch {
         if !self.sections.is_empty() || self.sources.iter().all(|source| source.sections_done) {
@@ -1667,8 +2262,8 @@ impl BrowseState {
             SecFetch::Failed
         }
     }
-    fn cur_source_state(&self) -> SecFetch {
-        let Some(source) = self.cur_source_idx().and_then(|index| self.sources.get(index)) else {
+    fn cur_source_state(&self, current: ServerId) -> SecFetch {
+        let Some(source) = self.cur_source_idx(current).and_then(|index| self.sources.get(index)) else {
             return SecFetch::Loading;
         };
         if !source.reachable() {
@@ -1680,7 +2275,13 @@ impl BrowseState {
         }
     }
     fn load_remembered(&mut self, session: &plx_plex::plex::session::Session, user: &str) {
-        self.remembered = session.last_library.iter().find(|library| library.user == user)
+        let overlaid = self.preference_writes.overlay(session, user);
+        let session = &overlaid;
+        if self.visited_user != user {
+            self.visited.clear();
+            self.visited_user = user.to_owned();
+        }
+        self.remembered = session.prefs.last_library.iter().find(|library| library.user == user)
             .map(|library| library.libs.iter().filter_map(|target| {
                 SecKind::from_wire(&target.kind)
                     .map(|kind| (kind, target.machine_id.clone(), target.key))
@@ -1710,9 +2311,19 @@ impl BrowseState {
             }
         }).collect()
     }
-    fn repoint_cur(&mut self) {
+    /// Put the library on view back onto a favourite when it is not one.
+    ///
+    /// `visiting` says the reader opened it WITHOUT its being a favourite (the Library's Sort &
+    /// Filter menu offers every reachable library): it was not pinned before the change that is
+    /// being reconciled either, and a landing did not just put it there. A visit is not undone by
+    /// a pin or a share moving elsewhere, but it ends with the last favourite of its type: the tab
+    /// strip lists only the types that have one, and the page would have no tab.
+    fn repoint_cur(&mut self, visiting: bool) {
         let current = self.cur();
-        if self.sections.get(current).map(|section| section.pinned).unwrap_or(false) {
+        let Some(on_view) = self.sections.get(current) else {
+            return;
+        };
+        if on_view.pinned || (visiting && self.tab_has_favorite(on_view.kind)) {
             return;
         }
         let want = self.section_kind(current).and_then(|kind| self.section_of_kind(kind))
@@ -1721,8 +2332,24 @@ impl BrowseState {
             self.set_cur(index);
         }
     }
+    /// Poll the pending pin write's receipt, once (`PinWrite::observe`). The Bridge calls this
+    /// before it reads the session it hands the step (`Bridge::browse_session`), so a write seen as
+    /// saved is never paired with a session read from before it.
+    pub fn observe_pin_write(&self) {
+        self.preference_writes.observe();
+        if let Some((_, write)) = &self.pending_pins {
+            write.lock().unwrap_or_else(|e| e.into_inner()).observe();
+        }
+    }
+
+    pub(crate) fn take_preference_jobs(&mut self) -> Vec<crate::stores::StoreJob> {
+        self.preference_writes.take_jobs()
+    }
+    pub(crate) fn has_preference_jobs(&self) -> bool { self.preference_writes.has_jobs() }
     /// A directory refresh must not replace the pending (or failed) local choice with the
-    /// older persisted snapshot. Successful receipts recapture the cache after the worker fill.
+    /// older persisted snapshot. A receipt observed before the caller read `session` takes the
+    /// record from `session`, which contains the write; a receipt not yet observed answers with the
+    /// local record, never with a snapshot older than the write.
     fn pin_record_for(&mut self, session: &plx_plex::plex::session::Session, user: &str)
         -> Option<plx_plex::plex::session::HomePins> {
         if let Some((pending_user, write)) = &self.pending_pins {
@@ -1730,7 +2357,6 @@ impl BrowseState {
                 return self.recorded.clone();
             }
             self.pending_pins = None;
-            return plx_plex::plex::session::peek().pins_for(user).cloned();
         }
         session.pins_for(user).cloned()
     }
@@ -1749,6 +2375,7 @@ impl BrowseState {
             plx_plex::plex::pins::resolve(&libraries, record.as_ref())
         };
         self.recorded = record;
+        let was_pinned = self.sections.get(self.cur()).is_some_and(|section| section.pinned);
         let mut moved = false;
         for (index, on) in want.into_iter().enumerate() {
             if let Some(section) = self.sections.get_mut(index) {
@@ -1757,7 +2384,7 @@ impl BrowseState {
             }
         }
         if moved {
-            self.repoint_cur();
+            self.repoint_cur(!was_pinned);
         }
         moved
     }
@@ -1766,16 +2393,16 @@ impl BrowseState {
     ///
     /// Two callers reach it, and they are the two ways that can happen: a Plex Home roster landing
     /// or session-cache recovery refreshes a SOURCE/record (`sync_roster_owned`), and the Home editor's commit replaces this
-    /// profile's RECORD (`apply_pins`). Both end in the same question — what does
+    /// profile's RECORD (`apply_pins_from`). Both end in the same question — what does
     /// `pins::resolve` say about every row now — so they ask it the same way rather than each
     /// keeping a version of the answer. A row that moves without `bump_sections_gen` +
-    /// `plx_machine::idle::invalidate` is a table nothing republishes, which is a pill strip and a set of
+    /// a changed publication outcome is a table nothing republishes, which is a pill strip and a set of
     /// shelves still drawing the previous resolve.
     fn reconcile_pins(&mut self, record: Option<plx_plex::plex::session::HomePins>) -> bool {
         let moved = self.resolve_pins_with(record);
         if moved {
             self.bump_sections_gen();
-            plx_machine::idle::invalidate();
+
         }
         moved
     }
@@ -1789,13 +2416,25 @@ impl BrowseState {
         let record = self.pin_record_for(session, user);
         self.reconcile_pins(record)
     }
+    /// The registry as of now, after the pin write was observed: what the Bridge hands a step.
+    #[cfg(test)]
     fn resolve_pins(&mut self) {
+        self.observe_pin_write();
         let session = plx_plex::plex::session::peek();
         let user = plx_plex::plex::session::current_profile_key();
         self.resolve_pins_from(&session, &user);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    fn append_sections_for_test(&mut self, source: usize, list: Vec<(i64, String, SecKind)>) {
+        self.observe_pin_write();
+        let session = plx_plex::plex::session::peek();
+        self.append_sections_with(source, list, &session, &plx_plex::plex::session::current_profile_key());
+    }
+    /// Append the sections a discovery found, then re-resolve the pins from `session` for `user`: the
+    /// live landing hands the profile key and the session the Bridge read, the controlled one hands its
+    /// `preferences` under the `""` key.
     fn append_sections_with(&mut self, source: usize, list: Vec<(i64, String, SecKind)>,
-        preferences: Option<&plx_plex::plex::session::Session>) {
+        session: &plx_plex::plex::session::Session, user: &str) {
         let fresh: Vec<_> = list.into_iter().filter(|(key, _, _)| {
             !self.sections.iter().any(|section| section.src == source && section.key == *key)
         }).collect();
@@ -1809,17 +2448,28 @@ impl BrowseState {
             });
             self.states.push(SecState::default());
         }
-        if let Some(session) = preferences {
-            self.resolve_pins_from(session, "");
-        } else {
-            self.resolve_pins();
+        self.resolve_pins_from(session, user);
+        // A row that lands with the library on view is a default nobody chose, not a visit.
+        if self.cur() >= first_fresh {
+            self.repoint_cur(false);
         }
         // After the resolve above, which is what (re)loads the profile's saved views.
         for index in first_fresh..self.sections.len() {
             self.seed_saved_view(index);
         }
         self.bump_sections_gen();
-        plx_machine::idle::invalidate();
+
+    }
+    #[cfg(test)]
+    fn record_pins(&mut self, asked: bool, touched: &[bool])
+        -> Option<plx_plex::plex::session::HomePins> {
+        self.observe_pin_write();
+        let snapshot = plx_plex::plex::session::peek();
+        self.preference_writes.prepare(&plx_plex::plex::session::peek(), plx_plex::plex::session::tenure());
+        self.profile_key = plx_plex::plex::session::current_profile_key();
+        let result = self.record_pins_from(asked, touched, &snapshot);
+        test_support::run_preference_jobs(self.take_preference_jobs());
+        result
     }
     /// Write this profile's answer down. `touched` is indexed like the section table and marks
     /// the rows the VIEWER answered — as the editor reported them, never as a comparison against
@@ -1830,12 +2480,15 @@ impl BrowseState {
     /// against the current authority under IO, so unrelated edits made while it was queued
     /// survive. A missing session or a refused queue returns `None`; the visible selection
     /// still stands for this run, without claiming it was saved.
-    fn record_pins(&mut self, asked: bool, touched: &[bool])
+    ///
+    /// `snapshot` is the session the Bridge read (`Bridge::browse_session`): its `client_id` gates the
+    /// write and its record is the fallback for the previous answer. The test shim `record_pins` hands
+    /// the registry as of now.
+    fn record_pins_from(&mut self, asked: bool, touched: &[bool], snapshot: &plx_plex::plex::session::Session)
         -> Option<plx_plex::plex::session::HomePins> {
         let libraries = self.lib_refs();
         let on: Vec<bool> = self.sections.iter().map(|section| section.pinned).collect();
-        let user = plx_plex::plex::session::current_profile_key();
-        let snapshot = plx_plex::plex::session::peek();
+        let user = self.profile_key.clone();
         if snapshot.client_id.is_empty() { return None; }
         let previous = self.recorded.as_ref().or_else(|| snapshot.pins_for(&user));
         let answers = plx_plex::plex::pins::answers(&libraries, &on, touched, previous);
@@ -1845,20 +2498,22 @@ impl BrowseState {
             (lib.machine_id.to_owned(), lib.key, lib.household, lib.household_type)).collect();
         let touched = touched.to_vec();
         let pending_user = user.clone();
-        let ticket = plx_plex::plex::session::queue_update_ticket(move |session| {
-            let libraries: Vec<_> = owned.iter().map(|(machine_id, key, household, household_type)|
-                plx_plex::plex::pins::LibRef { machine_id, key: *key, household: *household, household_type: *household_type }).collect();
-            let previous = session.pins_for(&user);
-            let answers = plx_plex::plex::pins::answers(&libraries, &on, &touched, previous);
-            let fresh = plx_plex::plex::pins::record(&user, asked, &libraries, &answers);
-            let merged = plx_plex::plex::pins::carry_forward(fresh, previous, &libraries);
-            let mut next = session.clone();
-            next.set_pins_for(&user, merged);
-            Some(next)
-        }).ok()?;
-        self.pending_pins = Some((pending_user, std::sync::Arc::new(std::sync::Mutex::new(PinWrite { ticket, saved: None }))));
+        self.preference_writes.prepare_account(snapshot);
+        let receipt = self.preference_writes.emit(&user, preferences_job::Edit::Pins {
+            libraries: owned, on, touched, asked,
+        })?;
+        self.pending_pins = Some((pending_user, receipt));
         self.recorded = Some(record.clone());
         Some(record)
+    }
+    #[cfg(test)]
+    fn apply_pins(&mut self, answers: &[(usize, bool)]) {
+        self.observe_pin_write();
+        let session = plx_plex::plex::session::peek();
+        self.preference_writes.prepare(&plx_plex::plex::session::peek(), plx_plex::plex::session::tenure());
+        self.profile_key = plx_plex::plex::session::current_profile_key();
+        self.apply_pins_from(answers, &session);
+        test_support::run_preference_jobs(self.take_preference_jobs());
     }
     /// The editor's one commit: apply the rows it ANSWERED, and record exactly those.
     ///
@@ -1885,11 +2540,16 @@ impl BrowseState {
     /// says otherwise, and go back down at the next resolve with no user action behind it.
     ///
     /// **A commit that produced no record is not reconciled**, and the difference is the whole of
-    /// it: [`record_pins`](Self::record_pins) answers `None` when `session::update` refused the
-    /// cycle, and the record still standing then is the one this commit meant to replace.
-    fn apply_pins(&mut self, answers: &[(usize, bool)]) {
+    /// it: [`record_pins_from`](Self::record_pins_from) answers `None` when the session it was handed
+    /// has no `client_id` (or the queue refused the cycle), and the record still standing then is the
+    /// one this commit meant to replace.
+    fn apply_pins_from(&mut self, answers: &[(usize, bool)], session: &plx_plex::plex::session::Session) {
         let mut touched = vec![false; self.sections.len()];
         let mut changed = false;
+        // A library the reader opened without its being a favourite (the Library's Sort & Filter
+        // menu offers every reachable library, and its Favorite libraries row opens this very
+        // commit) stays on view; one that was a favourite and is no longer is left.
+        let current_had_pin = self.sections.get(self.cur()).is_some_and(|section| section.pinned);
         for &(index, on) in answers {
             let Some(section) = self.sections.get_mut(index) else {
                 continue;
@@ -1902,12 +2562,13 @@ impl BrowseState {
                 *slot = true;
             }
         }
-        let produced = self.record_pins(true, &touched);
+        let produced = self.record_pins_from(true, &touched, session);
         if changed {
-            self.repoint_cur();
+            self.repoint_cur(!current_had_pin);
             self.bump_sections_gen();
-            plx_machine::idle::invalidate();
+
         }
+        self.pin_commit = PinCommit { seq: self.pin_commit.seq.wrapping_add(1), recorded: produced.is_some() };
         // Reconcile the pending selection immediately. Until its receipt lands, a captured
         // older session must not undo the viewer's edits. This is not a durability claim.
         match produced {
@@ -1927,21 +2588,22 @@ impl BrowseState {
                 source.retry_cd = 0;
             }
         }
-        plx_machine::idle::invalidate();
+
     }
     fn apply_discovery(
         &mut self,
         epoch: u32,
         source_index: usize,
         landing: SrcLanding,
-        preferences: Option<&plx_plex::plex::session::Session>,
+        session: &plx_plex::plex::session::Session,
+        user: &str,
         adapter: &BrowseAdapter,
     ) -> crate::stores::StoreOutcome {
-        plx_machine::idle::invalidate();
+
         if epoch != self.table_epoch() {
             return Default::default();
         }
-        adapter.src_fetching.store(false, Ordering::SeqCst);
+        adapter.src_fetching.release();
         let SrcLanding { client, token_gen, name, what } = landing;
         let ok = match &what {
             SrcWhat::Sections(list) => list.is_some(),
@@ -1963,7 +2625,7 @@ impl BrowseState {
                     SrcWhat::Sections(list) => {
                         let answered = list.is_some();
                         self.append_sections_with(
-                            source_index, list.unwrap_or_default(), preferences);
+                            source_index, list.unwrap_or_default(), session, user);
                         if let Some(source) = self.source_mut(source_index) {
                             source.sections_done = answered;
                             source.retry_cd = if answered { 0 } else { SRC_RETRY_CD };
@@ -2041,24 +2703,36 @@ impl BrowseState {
         self.view_memory = Default::default();
         self.tab_shape = u32::MAX;
         self.cur = 0;
+        self.left = Vec::new();
         self.retry_cd = 0;
+        // The read out belonged to the tables just dropped (its answer is epoch-gated and its
+        // claim was cleared with the adapter's mailbox), so its record goes with them.
+        self.hubs_flight = None;
+        self.src_flight = None;
         self.refresh_tab_shape();
     }
     fn reset_owned(&mut self, adapter: &BrowseAdapter) {
         self.reset_with(|| adapter.clear());
     }
-    pub fn sync_roster_owned(&mut self) -> RosterSync {
-        let generation = plx_plex::plex::session::visible_generation();
-        let session_changed = self.session_generation != generation;
-        self.session_generation = generation;
-        let live: Vec<ServerId> = plx_plex::plex::server_ids().collect();
-        // The Plex Home roster, read ONCE for the whole sync: `peek()` is a write-through cache
-        // over the persisted session (`plex/CLAUDE.md`), so this is a lock and an `Arc` clone
-        // rather than a file read — but it is still per sync and not per source.
-        let session = plx_plex::plex::session::peek();
-        let household = session.household_ids();
-        let retire_adapter = self.sources.iter().any(|source| !live.contains(&source.sid));
-        let mut changed = retire_adapter;
+    pub fn sync_roster_owned(&mut self, input: &BrowseRosterInput<'_>) -> RosterSync {
+        self.preference_writes.prepare(input.session, input.tenure);
+        let keys = input.keys;
+        let session_changed = self.session_generation != input.visible_generation
+            || self.roster_profile_key != input.profile_key || self.session_settled != input.settled;
+        if self.roster_profile_key != input.profile_key {
+            self.roster_profile_key.clear();
+            self.roster_profile_key.push_str(input.profile_key);
+        }
+        self.session_generation = input.visible_generation;
+        let current_changed = self.current_sid != keys.current();
+        self.current_sid = keys.current();
+        if self.profile_key != input.profile_key {
+            self.profile_key.clear();
+            self.profile_key.push_str(input.profile_key);
+        }
+        self.session_settled = input.settled;
+        let retire_adapter = self.sources.iter().any(|source| !keys.slots().any(|sid| sid == source.sid));
+        let mut changed = retire_adapter || current_changed;
         // Did any source change SIDE of the household line in this pass? That, and not a changed
         // `ServerFacts`, is what the pin defaults and the tab destination are derived from.
         let mut reclassified = false;
@@ -2066,65 +2740,70 @@ impl BrowseState {
             self.reset_with(|| {});
         }
         let known = self.sources.len();
-        for sid in live {
+        for sid in keys.slots() {
             match self.sources.iter().position(|source| source.sid == sid) {
                 Some(index) => {
-                    let now = plx_plex::plex::client_for(sid);
-                    let client_addr = now.map_or(0, |client| client as *const _ as usize);
-                    let token_gen = now.map_or(0, |client| client.token_gen());
+                    let client_key = keys.key(sid);
                     let mut changes = 0;
                     let source = &mut self.sources[index];
-                    if source.client_addr != client_addr || source.token_gen != token_gen {
-                        source.client_addr = client_addr;
-                        source.token_gen = token_gen;
+                    if source.client_key != client_key {
+                        source.client_key = client_key;
                         source.sections_done = false;
                         source.counts_done = false;
                         source.retry_cd = 0;
                         changes += 1;
                     }
-                    if let Some((state, tier)) = source_snapshot(sid) {
+                    if let Some((state, tier)) = source_snapshot(keys, sid) {
                         if source.state != state || source.tier != tier {
                             source.state = state;
                             source.tier = tier;
                             changes += 1;
                         }
                     }
-                    if let Some(facts) = plx_plex::plex::server_facts(sid) {
+                    if let Some(facts) = keys.facts(sid).and_then(|facts| facts.described) {
+                        // Preserve M4 policy: credit follows corrections; a machine name only fills once.
                         if source.name.is_empty() && !facts.name.is_empty() {
-                            source.name = facts.name.clone();
+                            source.name.clone_from(&facts.name);
                             changes += 1;
                         }
                         if source.handle != facts.handle || source.owned != facts.owned
                             || source.home != facts.home || source.owner_id != facts.owner_id {
-                            source.handle = facts.handle.clone();
+                            source.handle.clone_from(&facts.handle);
                             source.owned = facts.owned;
                             source.home = facts.home;
                             source.owner_id = facts.owner_id;
                             changes += 1;
                         }
+                    } else if !source.owned || source.home || source.owner_id != 0 || !source.handle.is_empty() {
+                        source.owned = true;
+                        source.home = false;
+                        source.owner_id = 0;
+                        source.handle.clear();
+                        changes += 1;
                     }
                     // Derived AFTER the evidence above lands, and unconditionally: the roster this
                     // is graded against arrives on its own schedule, so an unchanged `ServerFacts`
                     // does not mean an unchanged verdict.
-                    let household_now = household_verdict(source, &household);
+                    let household_now = input.household(source);
                     if source.household != household_now {
                         source.household = household_now;
                         reclassified = true;
                         changes += 1;
                     }
-                    let machine_id = machine_of(sid);
+                    let machine_id = machine_of(keys, sid);
                     if source.machine_id != machine_id {
-                        source.machine_id = machine_id;
+                        source.machine_id.clear();
+                        source.machine_id.push_str(machine_id);
                         changes += 1;
                     }
                     self.src_facts_gen = self.src_facts_gen.wrapping_add(changes);
                     if changes != 0 {
                         changed = true;
-                        plx_machine::idle::invalidate();
+
                     }
                 }
                 None => {
-                    let facts = plx_plex::plex::server_facts(sid);
+                    let facts = keys.facts(sid).and_then(|facts| facts.described);
                     let owned = facts.map(|facts| facts.owned).unwrap_or(true);
                     // An undescribed slot is the session's own server (`servers::describe_name`
                     // says why that is not a guess), so it carries no third-party evidence.
@@ -2133,19 +2812,15 @@ impl BrowseState {
                     let (name, handle) = facts.map(|facts| {
                         (facts.name.clone(), facts.handle.clone())
                     }).unwrap_or_default();
-                    let Some((state, tier)) = source_snapshot(sid) else { continue };
+                    let (state, tier) = source_snapshot(keys, sid).unwrap_or((SourceState::NotProbed, None));
                     self.sources.push(BrowseSource {
                         sid,
-                        client_addr: plx_plex::plex::client_for(sid)
-                            .map_or(0, |client| client as *const _ as usize),
-                        token_gen: plx_plex::plex::client_for(sid)
-                            .map_or(0, |client| client.token_gen()),
-                        machine_id: machine_of(sid),
+                        client_key: keys.key(sid),
+                        machine_id: machine_of(keys, sid).to_owned(),
                         owned, home, owner_id,
-                        household: plx_plex::plex::is_household(
-                            plx_plex::plex::GrantEvidence { owned, home, owner_id }.grant(),
-                            &household,
-                        ),
+                        household: owned
+                            || (home && !input.session.home_users.iter().any(|user| user.id != 0))
+                            || (owner_id != 0 && input.session.home_users.iter().any(|user| user.id == owner_id)),
                         name, handle, state, tier,
                         sections_done: false, counts_done: false, retry_cd: 0,
                     });
@@ -2172,8 +2847,8 @@ impl BrowseState {
             // without a cache of its own. It bumps only when a row actually MOVED — a
             // reclassification that moves none publishes nothing new to the section table, and
             // the source facts it did move have their own generation, bumped above.
-            if plx_plex::plex::session::peek_settled().is_some() {
-                self.reconcile_pins_from(&session, &plx_plex::plex::session::current_profile_key());
+            if input.settled {
+                self.reconcile_pins_from(input.session, input.profile_key);
             }
             changed = true;
         }
@@ -2185,33 +2860,75 @@ impl BrowseState {
             source.sections_done = false;
             source.counts_done = false;
         }
-        plx_machine::idle::invalidate();
+
     }
+    /// Keep admission separate from visible damage. Want/Genres only ask for work; Letters can
+    /// also select a different cached calendar rail when the host's date appears or disappears.
+    pub fn run_owned_outcome(
+        &mut self,
+        adapter: &Arc<BrowseAdapter>,
+        cmd: crate::stores::browse::BrowseCmd,
+        keys: &ClientKeys,
+        session: &plx_plex::plex::session::Session,
+        jobs: &mut Vec<crate::stores::StoreJob>,
+    ) -> crate::stores::browse::CommandOutcome {
+        use crate::stores::browse::{BrowseCmd, CommandOutcome, LibraryWork};
+        let request_only = matches!(&cmd, BrowseCmd::Addressed {
+            work: LibraryWork::Want { .. } | LibraryWork::Genres, ..
+        });
+        let letters = matches!(&cmd, BrowseCmd::Addressed { work: LibraryWork::Letters { .. }, .. });
+        let shown = |owner: &Self| owner.cur_state().zip(owner.section_kind(owner.cur()))
+            .and_then(|(state, kind)| state.shown_bands(kind)).cloned();
+        let before = if letters { shown(self) } else { None };
+        let accepted = self.run_owned(adapter, cmd, keys, session, jobs);
+        let changed = if letters {
+            match (before, shown(self)) {
+                (Some(before), Some(after)) => !Arc::ptr_eq(&before, &after),
+                (None, None) => false,
+                _ => true,
+            }
+        } else {
+            accepted && !request_only
+        };
+        CommandOutcome { accepted, changed }
+    }
+
     pub fn run_owned(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
         cmd: crate::stores::browse::BrowseCmd,
+        keys: &ClientKeys,
+        session: &plx_plex::plex::session::Session,
+        jobs: &mut Vec<crate::stores::StoreJob>,
     ) -> bool {
+        self.preference_writes.prepare_account(session);
         use crate::stores::browse::BrowseCmd;
         match cmd {
             BrowseCmd::Discovery(result) => {
-                record::apply_to(self, adapter, &result, None).changed
+                let profile = self.profile_key.clone();
+                record::apply_to(self, adapter, &result, session, &profile).changed
             }
             BrowseCmd::Addressed { target, work } => {
-                self.addressed_with_adapter(adapter, target, work)
+                self.addressed_with_adapter(adapter, target, work, keys, jobs)
             }
-            BrowseCmd::RetrySource { epoch, sid } => self.retry_source(epoch, sid),
+            BrowseCmd::RetrySource { epoch, sid } => self.retry_source(epoch, sid, keys.current()),
             #[cfg(any(test, feature = "test-support"))]
             BrowseCmd::SetCur(index) => {
                 self.set_cur(index);
                 true
+            }
+            BrowseCmd::EndVisit { epoch, kind } => {
+                if epoch != self.table_epoch() { return false; }
+                let before = self.visited.len();
+                self.visited.retain(|(candidate, _, _)| *candidate != kind);
+                self.visited.len() != before
             }
             BrowseCmd::RecheckShares => {
                 self.recheck_shares();
                 true
             }
             BrowseCmd::ApplyPins(edits) => {
-                self.apply_pins(&edits);
+                self.apply_pins_from(&edits, session);
                 true
             }
             BrowseCmd::RetryDiscovery => {
@@ -2223,29 +2940,49 @@ impl BrowseState {
                 true
             }
             BrowseCmd::HubsInvalidateAll => {
-                self.hubs_invalidate_all(adapter);
+                self.hubs_invalidate_all(adapter, keys, jobs);
                 true
             }
-            BrowseCmd::SetWatchedLocal { sid, rk, on } => {
-                let listing = self.set_watched_local(sid, &rk, on);
-                let hubs = self.hubs_set_watched_local(sid, &rk, on);
-                listing || hubs
+            BrowseCmd::HubsInvalidateServer { sid } => {
+                self.hubs_invalidate_server(sid, adapter, keys, jobs);
+                true
             }
-            BrowseCmd::LeftTheDeck { sid, rk } => self.hubs_left_the_deck(sid, &rk),
+            BrowseCmd::ListingsChanged { sid, library_on_stack } => self.listings_changed(sid, library_on_stack),
+            BrowseCmd::ApplyView { at, edit } => match edit {
+                crate::viewstate::ViewEdit::Watched(on) => {
+                    let listing = self.apply_view_local(&at, edit);
+                    let hubs = self.hubs_set_watched_local(&at, on);
+                    listing || hubs
+                }
+                // The section shelves are re-read whole after every burst (`HubsInvalidateAll`).
+                crate::viewstate::ViewEdit::Facts { .. } | crate::viewstate::ViewEdit::Offset { .. } => {
+                    self.apply_view_local(&at, edit)
+                }
+                crate::viewstate::ViewEdit::LeftDeck => self.hubs_left_the_deck(at.sid, &at.rk),
+            },
         }
     }
+    /// Ask for the next source discovery, if none is out. Nothing is started here: the read leaves
+    /// as a [`crate::stores::StoreJob::BrowseDiscovery`] on `jobs` and the application's runner
+    /// starts it, so the registry is read by the host (`keys`), never by this step. The claim is
+    /// raised HERE, at the step (a second step before the drain cannot emit a duplicate); the
+    /// runner's refusal gives it back, and the step after settles it ([`Self::discovery_settle`]).
+    ///
+    /// A server whose slot holds no client in `keys` is not asked and no claim is raised.
     fn maybe_discover_owned(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
-        launch: &mut dyn FnMut(DiscoveryRequest) -> bool,
+        keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>,
     ) {
+        self.discovery_settle(adapter);
         for source in &mut self.sources {
             source.retry_cd = source.retry_cd.saturating_sub(1);
         }
-        if adapter.src_fetching.load(Ordering::SeqCst) {
+        if adapter.src_fetching.busy() {
             return;
         }
-        let ready = |source: &BrowseSource| source.retry_cd == 0;
+        let ready = |source: &BrowseSource| source.retry_cd == 0 && keys.key(source.sid).is_some();
         let mut pick = self.sources.iter().enumerate().find_map(|(index, source)| {
             (ready(source) && !source.sections_done).then(|| {
                 (index, source.sid, SrcJob::Sections, source.name.is_empty())
@@ -2268,63 +3005,85 @@ impl BrowseState {
             }
         }
         let Some((source, sid, job, want_name)) = pick else { return };
-        let Some(client) = plx_plex::plex::client_for(sid) else { return };
-        let request = DiscoveryRequest {
-            epoch: self.table_epoch(), si: source, client, token_gen: client.token_gen(),
-            job, want_name, adapter: Arc::clone(adapter),
-        };
-        adapter.src_fetching.store(true, Ordering::SeqCst);
-        if !launch(request) {
-            self.discovery_spawn_refused_owned(adapter, source);
-        }
+        let Some(key) = keys.key(sid) else { return };
+        let epoch = self.table_epoch();
+        self.src_req = self.src_req.wrapping_add(1);
+        let id = self.src_req;
+        adapter.src_fetching.claim(id);
+        self.src_flight = Some(SrcFlight { id, epoch, source });
+        jobs.push(crate::stores::StoreJob::BrowseDiscovery(
+            plx_machine::job::Job {
+                addr: listing_jobs::listing_addr(id),
+                req: discovery_job::BrowseDiscoveryReq::new(epoch, source, sid, key, job, want_name),
+            },
+            discovery_job::BrowseDiscoveryPort::of(adapter),
+        ));
     }
-    fn discovery_spawn_refused_owned(&mut self, adapter: &BrowseAdapter, source: usize) {
-        adapter.src_fetching.store(false, Ordering::SeqCst);
-        if let Some(source) = self.source_mut(source) {
-            source.retry_cd = SRC_RETRY_CD;
+    /// Settle the discovery the runner refused since the last step, if one was: its source backs off
+    /// for [`SRC_RETRY_CD`] steps, as a launch that did not happen always did (the pump must not
+    /// ask again at 60 Hz, and `task::spawn` logs every refusal). Nothing was asked of the server,
+    /// so nothing else about the source moves, and nothing is invalidated: the countdown is not
+    /// published. It runs at the head of the step, only when no claim is up, and BEFORE the
+    /// countdown's decrement, so the step after a refusal finds the countdown one short of the full
+    /// backoff, as the step after a refusing launcher always did. A flight with neither a claim nor
+    /// a refusal landed (or belonged to an adapter that has since been cleared) and is dropped.
+    /// `BrowseStore::sync_roster` settles BEFORE it syncs the roster, so a source the sync re-arms
+    /// in the same step (a re-pointed or retokened client) is asked again at once, as it was.
+    /// Never recorded anywhere.
+    pub fn discovery_settle(&mut self, adapter: &BrowseAdapter) {
+        if adapter.src_fetching.busy() {
+            return;
+        }
+        let Some(out) = self.src_flight.take() else { return };
+        if adapter.src_fetching.take_refused(out.id) && out.epoch == self.table_epoch() {
+            if let Some(source) = self.source_mut(out.source) {
+                source.retry_cd = SRC_RETRY_CD;
+            }
         }
     }
     fn land_discovery_owned_with_gate(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
         gate: &plx_machine::landgate::Gate,
+        session: &plx_plex::plex::session::Session,
     ) -> crate::stores::StoreOutcome {
-        // DUMP MODE: owed while the discovery claim (`src_fetching`, set at the spawn and cleared
+        // DUMP MODE: owed while the discovery claim (`src_fetching`, raised by the step that emits the job and cleared
         // in `apply_discovery`, after its epoch check) is held. Per MAILBOX: the claim of the one mailbox taken here.
         let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Browse,
-            || adapter.src_fetching.load(Ordering::SeqCst), || {
+            || adapter.src_fetching.busy(), || {
             adapter.src_result.lock().unwrap_or_else(|e| e.into_inner()).take()
         });
         let Some((epoch, source, landing)) = taken else { return Default::default() };
-        self.apply_discovery(epoch, source, landing, None, adapter)
+        let profile = self.profile_key.clone();
+        self.apply_discovery(epoch, source, landing, session, &profile, adapter)
     }
+    /// `#[track_caller]`: the paced dump keys a landing's claim by CALL SITE, and the genre and
+    /// letters mailboxes both come through here, so the wrapper must hand its caller's site on
+    /// (`plx_machine::landgate::Gate::take_owed`).
+    #[track_caller]
     fn land_directory_owned_with_gate<T>(
         &mut self,
         gate: &plx_machine::landgate::Gate,
-        flag: &AtomicBool,
-        mail: &Mutex<Option<DirectoryResult<T>>>,
-        apply: impl FnOnce(&mut SecState, Vec<T>),
+        fetch: &crate::stores::Fetch<DirectoryResult<T>>,
+        apply: impl FnOnce(&mut SecState, Vec<T>, bool, Option<LettersKey>),
     ) -> bool {
-        // DUMP MODE: owed while this directory's own claim `flag` is held (genre and letters each
-        // have one), per mailbox.
+        // DUMP MODE: owed while this directory's own claim is held (genre and letters each have
+        // one), per mailbox. The take lowers the claim with it.
         let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Browse,
-            || flag.load(Ordering::SeqCst), || {
-            mail.lock().unwrap_or_else(|e| e.into_inner()).take()
-        });
+            || fetch.busy(), || fetch.take());
         let Some(result) = taken else { return false };
-        plx_machine::idle::invalidate();
-        flag.store(false, Ordering::SeqCst);
+
         if result.epoch != self.table_epoch() {
             return false;
         }
-        let DirectoryResult { sec, client, token_gen, library_type, list, .. } = result;
+        let DirectoryResult { sec, client, token_gen, library_type, list, ok, letters, .. } = result;
         plx_plex::plex::commit_if_current(client.id(), client, token_gen, || {
             if self.section_sid(sec) == Some(client.id()) {
                 if let Some(state) = self.state_mut(sec) {
                     if state.library_type != library_type {
                         return false;
                     }
-                    apply(state, list);
+                    apply(state, list, ok, letters);
                     return true;
                 }
             }
@@ -2334,22 +3093,37 @@ impl BrowseState {
     #[cfg(test)]
     fn land_discovery_owned(&mut self, adapter: &Arc<BrowseAdapter>)
         -> crate::stores::StoreOutcome {
-        self.land_discovery_owned_with_gate(adapter, plx_machine::landgate::fixture_gate())
+        self.observe_pin_write();
+        let session = plx_plex::plex::session::peek();
+        self.land_discovery_owned_with_gate(adapter, plx_machine::landgate::fixture_gate(), &session)
     }
     #[cfg(test)]
-    fn land_directory_owned<T>(&mut self, flag: &AtomicBool,
-        mail: &Mutex<Option<DirectoryResult<T>>>, apply: impl FnOnce(&mut SecState, Vec<T>)) -> bool {
-        self.land_directory_owned_with_gate(plx_machine::landgate::fixture_gate(), flag, mail, apply)
+    #[track_caller]
+    fn land_directory_owned<T>(&mut self, fetch: &crate::stores::Fetch<DirectoryResult<T>>,
+        apply: impl FnOnce(&mut SecState, Vec<T>, bool, Option<LettersKey>)) -> bool {
+        self.land_directory_owned_with_gate(plx_machine::landgate::fixture_gate(), fetch, apply)
     }
-    fn maybe_spawn_owned(&mut self, adapter: &Arc<BrowseAdapter>) {
-        if adapter.fetching.load(Ordering::SeqCst) || self.retry_cd > 0 {
+    /// Ask for the first page the wanted window is missing, if no page read is out. Nothing is
+    /// started here: the read leaves as a [`crate::stores::StoreJob::BrowsePage`] on `jobs` and the
+    /// application's runner starts it, so the registry is read by the host (`keys`), never by this
+    /// step. The page claim is raised HERE, at the step (several run before one drain); the
+    /// runner's refusal gives it back, and the pump after asks again for the then-first missing page.
+    fn maybe_spawn_owned(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>) {
+        self.settle_refused_reads(adapter);
+        if adapter.page.busy() || self.retry_cd > 0 {
             return;
         }
         let current = self.cur();
         let Some(state) = self.states.get(current) else { return };
         let Some(section) = self.sections.get(current) else { return };
-        let start = if state.total < 0 {
+        // A staged replacement already knows its total, even if the published initial
+        // listing is still unknown. Continue its window rather than re-reading page zero.
+        let start = if state.total < 0 && state.relist_items.is_none() {
             0
+        } else if state.relist {
+            let Some(page) = state.relist_next(self.want, self.focus) else { return };
+            page
         } else {
             let (lo, hi) = self.want;
             let hi = hi.min(state.total as usize);
@@ -2375,89 +3149,90 @@ impl BrowseState {
         let confirm_sort = state.library_type != LibraryType::Primary;
         let restore = self.restore_for(current);
         let gen = self.query_gen();
-        let key = section.key;
+        let section_key = section.key;
         let Some(sid) = self.section_sid(current) else { return };
-        let Some(client) = plx_plex::plex::client_for(sid) else { return };
-        let token_gen = client.token_gen();
-        adapter.fetching.store(true, Ordering::SeqCst);
-        let worker_adapter = Arc::clone(adapter);
-        let spawned = plx_base::task::spawn_small("page", move || {
-            let page = catch_unwind(|| {
-                let query = SectionQuery {
-                    section_key: key, sort: &sort, filters: &filters,
-                    start: start as i64, size: PAGE as i64, include_meta,
-                };
-                fetch_listing_page(client, sid, &query, confirm_sort, restore.as_ref())
-            }).unwrap_or_else(|_| ListingPage::failed());
-            *worker_adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(PageResult {
-                    client, token_gen, gen, sec: current, start, items: page.items,
-                    total: page.total, sorts: page.sorts, restored: page.restored,
-                    genres: page.genres, genre: page.genre, resolved: page.resolved,
-                });
-        });
-        if !spawned {
-            adapter.fetching.store(false, Ordering::SeqCst);
-        }
+        let Some(key) = keys.key(sid) else { return };
+        self.page_req = self.page_req.wrapping_add(1);
+        let id = self.page_req;
+        adapter.page.claim(id);
+        self.page_stamp = self.ledger.stamp();
+        jobs.push(crate::stores::StoreJob::BrowsePage(
+            plx_machine::job::Job {
+                addr: listing_jobs::listing_addr(id),
+                req: listing_jobs::BrowsePageReq::new(
+                    sid, key, gen, current, start, section_key, sort, filters, include_meta, confirm_sort, restore),
+            },
+            listing_jobs::BrowsePagePort::of(adapter),
+        ));
     }
     pub fn controlled_discover_owned(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
-        launch: &mut dyn FnMut(DiscoveryRequest) -> bool,
+        keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>,
     ) {
-        self.maybe_discover_owned(adapter, launch);
+        self.maybe_discover_owned(adapter, keys, jobs);
     }
     pub fn discover_pump_owned_with_gate(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
         gate: &plx_machine::landgate::Gate,
+        keys: &ClientKeys,
+        session: &plx_plex::plex::session::Session,
+        jobs: &mut Vec<crate::stores::StoreJob>,
     ) -> crate::stores::StoreOutcome {
-        let outcome = self.land_discovery_owned_with_gate(adapter, gate);
-        self.maybe_discover_owned(adapter, &mut execute_discovery);
+        let outcome = self.land_discovery_owned_with_gate(adapter, gate, session);
+        self.maybe_discover_owned(adapter, keys, jobs);
         outcome
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub fn discover_pump_owned(&mut self, adapter: &Arc<BrowseAdapter>)
-        -> crate::stores::StoreOutcome {
-        self.discover_pump_owned_with_gate(adapter, plx_machine::landgate::fixture_gate())
+    pub fn discover_pump_owned(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>) -> crate::stores::StoreOutcome {
+        self.observe_pin_write();
+        let session = plx_plex::plex::session::peek();
+        self.discover_pump_owned_with_gate(adapter, plx_machine::landgate::fixture_gate(), keys, &session, jobs)
     }
     pub fn pump_owned_with_gate(
         &mut self,
         adapter: &Arc<BrowseAdapter>,
         gate: &plx_machine::landgate::Gate,
+        keys: &ClientKeys,
+        session: &plx_plex::plex::session::Session,
+        jobs: &mut Vec<crate::stores::StoreJob>,
     ) -> crate::stores::StoreOutcome {
         let mut changed = false;
         self.retry_cd = self.retry_cd.saturating_sub(1);
-        let discovery = self.land_discovery_owned_with_gate(adapter, gate);
+        let current = self.cur();
+        if let Some(state) = self.states.get_mut(current) {
+            state.tick_letters_backoff();
+            state.tick_bands_backoff();
+        }
+        let discovery = self.land_discovery_owned_with_gate(adapter, gate, session);
         changed |= discovery.changed;
         let endpoints = discovery.endpoints;
-        self.maybe_discover_owned(adapter, &mut execute_discovery);
-        changed |= self.hubs_land(adapter, gate);
-        changed |= self.hubs_tick_all(adapter);
+        self.maybe_discover_owned(adapter, keys, jobs);
+        changed |= self.hubs_land(adapter, gate, keys);
+        changed |= self.hubs_tick_all(adapter, keys, jobs);
         changed |= self.land_directory_owned_with_gate(
             gate,
-            &adapter.genre_fetching, &adapter.genre_result, |state, list| {
+            &adapter.genres, |state, list, _, _| {
             state.genres_done = true;
             if state.genres.is_empty() {
                 state.genres = Arc::new(list);
             }
         });
-        changed |= self.land_directory_owned_with_gate(
-            gate,
-            &adapter.letters_fetching, &adapter.letter_result, |state, list| {
-                state.letters_done = true;
-                if state.letters.is_empty() {
-                    state.letters = Arc::new(list);
-                }
-            });
-        // DUMP MODE: owed while the listing page's claim (`fetching`) is held.
+        changed |= self.land_letters_owned(gate, &adapter.letters);
+        changed |= self.land_bands_owned(gate, &adapter.bands);
+        // DUMP MODE: owed while the listing page's claim is held. The take lowers it with it.
+        // The wanted window, read before the landing borrows the section table: the grid's
+        // visible rows, the focused slot's page and the page a restore lands on.
+        let wanted = self.want;
+        let focus = self.focus;
+        let (ledger, stamp) = (self.ledger.clone(), self.page_stamp);
         let page = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Browse,
-            || adapter.fetching.load(Ordering::SeqCst), || {
-            adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()).take()
-        });
+            || adapter.page.busy(), || adapter.page.take());
         if let Some(result) = page {
-            plx_machine::idle::invalidate();
-            adapter.fetching.store(false, Ordering::SeqCst);
+
             if let Some(source) = self.sections.get(result.sec).map(|section| section.src) {
                 let client = result.client;
                 let token_gen = result.token_gen;
@@ -2470,7 +3245,12 @@ impl BrowseState {
                             self.retry_cd = 120;
                             if result.gen == self.query_gen() {
                                 if let Some(state) = self.state_mut(result.sec) {
-                                    if state.fetch != SecFetch::Failed {
+                                    // A re-list that fails leaves the rows it was replacing on screen,
+                                    // so its failure is not the section's. A FIRST read holds none: with
+                                    // a re-list owed (`listings_changed` during the read) the failure is
+                                    // still the screen's to show, or the grid spins through every retry.
+                                    let relisting_held_rows = state.relist && state.total >= 0;
+                                    if !relisting_held_rows && state.fetch != SecFetch::Failed {
                                         state.fetch = SecFetch::Failed;
                                         changed = true;
                                     }
@@ -2516,12 +3296,35 @@ impl BrowseState {
                                         state.genre_resolved = result.resolved.genre;
                                     }
                                 }
-                                if state.total != result.total {
+                                if !state.relist && state.total != result.total {
                                     state.total = result.total;
                                     state.items.resize(state.total as usize);
                                 }
-                                for (offset, item) in result.items.into_iter().enumerate() {
-                                    state.items.set(result.start + offset, item);
+                                // A pending restore lands on the bookmark's slot: its page stays
+                                // loaded until the restore seats (see `Keep::restore`).
+                                let keep = Keep {
+                                    wanted: wanted.0..wanted.1,
+                                    focus,
+                                    restore: state.cursor.as_deref().map(Cursor::slot),
+                                };
+                                // The read describes the server from when it was requested; an
+                                // edit published since (a press while it was out) is made again.
+                                let mut items = result.items;
+                                ledger.patch(stamp, items.iter_mut());
+                                if state.relist {
+                                    let pending = state.relist_items.get_or_insert_with(SecItems::default);
+                                    pending.resize(result.total as usize);
+                                    pending.land(result.start, items, &keep);
+                                    if state.relist_next(wanted, focus).is_none() {
+                                        state.items = state.relist_items.take().unwrap();
+                                        state.total = result.total;
+                                        state.letters_gen = state.letters_gen.wrapping_add(1);
+                                        state.relist = std::mem::take(&mut state.relist_again);
+                                        plx_base::eventlog::log(&format!(
+                                            "browse: re-list landed total={} again={}", result.total, state.relist));
+                                    }
+                                } else {
+                                    state.items.land(result.start, items, &keep);
                                 }
                                 changed = true;
                             }
@@ -2530,13 +3333,18 @@ impl BrowseState {
                     });
             }
         }
-        self.maybe_spawn_owned(adapter);
+        self.maybe_spawn_owned(adapter, keys, jobs);
         crate::stores::StoreOutcome { changed, endpoints }
     }
+    /// [`BrowseState::pump_owned_with_gate`] on the fixture gate and a registry that holds no client
+    /// (so no section-hubs read leaves): the pump of a test about something else.
     #[cfg(any(test, feature = "test-support"))]
     pub fn pump_owned(&mut self, adapter: &Arc<BrowseAdapter>)
         -> crate::stores::StoreOutcome {
-        self.pump_owned_with_gate(adapter, plx_machine::landgate::fixture_gate())
+        self.observe_pin_write();
+        let session = plx_plex::plex::session::peek();
+        self.pump_owned_with_gate(adapter, plx_machine::landgate::fixture_gate(), &ClientKeys::default(),
+            &session, &mut Vec::new())
     }
 }
 
@@ -2544,7 +3352,8 @@ impl BrowseState {
 
 /// A remembered sort and genre to put the first page in, once the server proves it still offers
 /// them — see [`fetch_listing_page`]. Built by [`BrowseState::restore_for`] from
-/// [`plx_plex::plex::session::Session::library_views`].
+/// [`plx_plex::plex::session::Preferences::library_views`].
+#[derive(Clone, Debug, PartialEq)]
 struct Restore {
     kind: SecKind,
     /// The listing the first page is for, which scopes the genre list the check reads.
@@ -2641,7 +3450,7 @@ fn fetch_listing_page(
     if let (Some(restore), true) = (restore, discovery) {
         if let Some(wanted) = &restore.genre {
             let list = client
-                .section_directory(query.section_key, "genre", restore.library_type.plex_type(restore.kind))
+                .section_directory(query.section_key, "genre", &restore.library_type.type_terms(restore.kind))
                 .map(|container| container.directory.iter().filter_map(genre_entry).collect::<Vec<_>>());
             if let Some(list) = list {
                 if let Some(found) = list.iter().find(|entry| &entry.id == wanted) {
@@ -2716,7 +3525,7 @@ fn fetch_listing_page(
             }
         }
     }
-    let total = if container.total_size > 0 { container.total_size }
+    let total = if container.total_size > 0 || container.metadata.is_empty() { container.total_size }
         else { query.start + container.metadata.len() as i64 };
     let items = container.metadata.iter().map(|item| parse_item(item, sid)).collect();
     ListingPage { items, total, sorts, restored, genres, genre, resolved }
@@ -2732,8 +3541,8 @@ fn fetch_listing_page(
 /// Landings blamed on a section INDEX gate on this rather than on the section-shape generation: an APPEND from
 /// one source must not discard a landing in flight for another, and it cannot invalidate one
 /// either, because appending never moves an existing index.
-/// Frames left before another page fetch may spawn after a FAILED one (main-thread; pump
-/// decrements). Stops a fast-failing network from spawning a worker per frame.
+/// Frames left before another page fetch may be asked for after a FAILED one (main-thread; pump
+/// decrements). Stops a fast-failing network from starting a worker per frame.
 
 struct PageResult {
     /// Exact registry lifecycle the worker dialled. Section/query generations do not move when a
@@ -2765,6 +3574,12 @@ struct DirectoryResult<T> {
     token_gen: u32,
     library_type: LibraryType,
     list: Vec<T>,
+    /// Did the read answer? False for a read that failed or panicked: `list` is then empty because
+    /// there was nothing to project, not because the server listed nothing.
+    ok: bool,
+    /// The key a letters read was asked under ([`LettersKey`]); `None` for the genre list, which the
+    /// grid's terms do not scope.
+    letters: Option<LettersKey>,
 }
 
 /// What a source-discovery worker brings back, per SOURCE — named by its index, which appending
@@ -2793,14 +3608,29 @@ enum SrcWhat {
 }
 
 /// Legacy synchronous harness retained only for lifecycle regression fixtures. Production section
-/// discovery is uniformly `kick → worker → mailbox → commit` via [`discover_pump`].
+/// discovery is uniformly `step → job → worker → mailbox → commit` via [`discover_pump`].
 #[cfg(test)]
 fn ensure_sections_with(
     state: &mut BrowseState,
     fetch: impl FnOnce(&plx_plex::plex::Client) -> Option<Vec<(i64, String, SecKind)>>,
 ) -> usize {
-    state.sync_roster_owned();
-    let cur_sid = plx_plex::plex::current_server();
+    state.observe_pin_write();
+    let mut keys = ClientKeys::default();
+    keys.refill_roster(
+        plx_plex::plex::current_server(), plx_plex::plex::server_roster_gen(),
+        plx_plex::plex::server_facts_gen(), plx_plex::plex::server_ids(),
+        plx_plex::plex::client_for, plx_plex::plex::server_facts,
+        plx_plex::plex::server_probe_result,
+    );
+    let session = plx_plex::plex::session::peek();
+    let profile_key = plx_plex::plex::session::current_profile_key();
+    let input = BrowseRosterInput { tenure: 0,
+        keys: &keys, session: &session,
+        visible_generation: plx_plex::plex::session::visible_generation(),
+        settled: plx_plex::plex::session::peek_settled().is_some(), profile_key: &profile_key,
+    };
+    state.sync_roster_owned(&input);
+    let cur_sid = keys.current();
     let Some(si) = state.sources().iter().position(|s| s.sid == cur_sid) else {
         return state.sections().len();
     };
@@ -2823,7 +3653,7 @@ fn ensure_sections_with(
             if state.sources().get(si).map(|s| s.sid) != Some(client.id()) {
                 return false;
             }
-            state.append_sections_with(si, found.unwrap_or_default(), None);
+            state.append_sections_for_test(si, found.unwrap_or_default());
             if let Some(s) = state.source_mut(si) {
                 s.sections_done = ok;
                 s.set_probe_outcome(outcome);
@@ -2911,8 +3741,8 @@ impl SecKind {
     /// The same thing as a standalone label ("Films"), for a row whose count has not landed yet.
     pub fn plural(self) -> &'static str {
         match self {
-            SecKind::Movie => plx_platform::i18n::msg::browse_kind_films(),
-            SecKind::Show => plx_platform::i18n::msg::browse_kind_tv_shows_sentence(),
+            SecKind::Movie => plx_os::i18n::msg::browse_kind_films(),
+            SecKind::Show => plx_os::i18n::msg::browse_kind_tv_shows_sentence(),
         }
     }
 }
@@ -2923,6 +3753,15 @@ impl SecKind {
 /// 500s the whole listing, which is why [`with_plays_sort`] never sends this for a kind that
 /// hasn't been proven to accept it.
 pub const PLAYS_SORT_KEY: &str = "viewCount";
+
+/// Does a watch move a row under this sort key? Last viewed (`lastViewedAt`), plays
+/// ([`PLAYS_SORT_KEY`]) and the unplayed count (`unviewedLeafCount`) are values a watch changes, so
+/// the loaded pages are out of order as soon as the server's read-back arrives. The rail's band
+/// counts under these keys move with a watch as well ([`bands::BandFamily::moves_with_viewing`]),
+/// and must be counted over the very listing the grid shows, so the grid is asked again.
+fn orders_by_viewing(key: &str) -> bool {
+    matches!(key, "lastViewedAt" | "unviewedLeafCount" | PLAYS_SORT_KEY)
+}
 
 /// Whether the server is proven to honour [`PLAYS_SORT_KEY`] for this section kind. An
 /// exhaustive match rather than a wildcard default: [`SecKind`]'s own doc says a third variant
@@ -2941,7 +3780,7 @@ fn kind_offers_plays_sort(kind: SecKind) -> bool {
 /// feature exists for.
 fn with_plays_sort(mut sorts: Vec<SortEntry>, kind: SecKind) -> Vec<SortEntry> {
     if kind_offers_plays_sort(kind) && !sorts.iter().any(|sort| sort.key == PLAYS_SORT_KEY) {
-        sorts.push(plays_sort_entry(plx_platform::i18n::msg::browse_library_plays().into()));
+        sorts.push(plays_sort_entry(plx_os::i18n::msg::browse_library_plays().into()));
     }
     sorts
 }
@@ -3022,8 +3861,9 @@ pub const TAB_KINDS: [SecKind; 2] = [SecKind::Movie, SecKind::Show];
 // setting affects the whole app. Three browsing surfaces read it now — Home's shelves
 // (`pms::item_pinned`), the top tab STRIP (`tab_has_favorite`: a type with no favourite draws no
 // pill at all) and the Library's own Sources picker (`source_rows`). `all_source_rows` stays
-// unscoped and is the Favorite libraries editor's list, which is the one way a non-favourite comes
-// back. Search deliberately stays GRANT-scoped and only RANKS by this: a browsing preference is not
+// unscoped and is the Favorite libraries editor's list, the only place a library is switched back
+// on (the Library's Sort & Filter menu also lets a reader browse any reachable library, favourite
+// or not). Search deliberately stays GRANT-scoped and only RANKS by this: a browsing preference is not
 // an authorization boundary, and removing results would turn "I don't browse this often" into
 // "this does not exist".
 //
@@ -3034,7 +3874,7 @@ pub const TAB_KINDS: [SecKind; 2] = [SecKind::Movie, SecKind::Show];
 // **Per profile is the whole shape.** The persisted selection used to hang off the `Session`,
 // which is one per INSTALL, so a household could hold exactly one opinion about a friend's films.
 // Owner's ruling, 2026-08-21: "it is separate for each profile." A switch needs no code of its own
-// to honour it — `install_pms` calls [`reset`], discovery re-runs, and [`resolve_pins`] reads the
+// to honour it — `install_pms` calls [`reset`], discovery re-runs, and [`resolve_pins_from`] reads the
 // NEW profile's record — which is exactly why the resolve is a whole-table function rather than a
 // per-row default applied once at append.
 
@@ -3047,14 +3887,12 @@ pub const TAB_KINDS: [SecKind; 2] = [SecKind::Movie, SecKind::Show];
 /// Their answer is on disk keyed by machine, which is exactly the join that settles it.
 ///
 /// `None` means "nothing has been read yet", never "nothing was recorded" — the same distinction
-/// [`library_pins`] and `Session::home_pins` both turn on. Written by [`resolve_pins`] and
-/// [`record_pins`], cleared by [`reset`]; never read from the file per frame.
+/// [`library_pins`] and `Session::home_pins` both turn on. Written by [`resolve_pins_from`] and
+/// [`record_pins_from`], cleared by [`reset`]; never read from the file per frame.
 
 /// One source's `machineIdentifier` as the registry knows it, `""` while nobody has learned it.
-fn machine_of(sid: ServerId) -> String {
-    plx_plex::plex::client_for(sid)
-        .map(|c| c.machine_id().to_string())
-        .unwrap_or_default()
+fn machine_of(keys: &ClientKeys, sid: ServerId) -> &str {
+    keys.facts(sid).map_or("", |facts| facts.machine_id.as_str())
 }
 
 /// The section table as the pin rules see it, in table order.
@@ -3112,10 +3950,7 @@ pub struct SrcRow {
 
 fn count_line(count: i64, kind: SecKind) -> String {
     if count >= 0 {
-        match kind {
-            SecKind::Movie => plx_platform::i18n::msg::browse_person_films(count),
-            SecKind::Show => plx_platform::i18n::msg::browse_person_shows(count),
-        }
+        LibraryType::Primary.count_label(kind, count)
     } else {
         kind.plural().to_string()
     }
@@ -3130,138 +3965,26 @@ fn count_line(count: i64, kind: SecKind) -> String {
 /// instead of after the ten-second backoff.
 // ---- source discovery, off the main thread ---------------------------------------------------
 
-/// What a discovery worker is being asked for. Two phases per source, one worker at a time within
+/// What a discovery read is being asked for. Two phases per source, one read at a time within
 /// the owning BrowseStore: the roster is a handful of servers and none of it is on a user's
 /// critical path.
-enum SrcJob {
+#[derive(Debug, PartialEq)]
+pub(super) enum SrcJob {
     /// its section list
     Sections,
     /// the unfiltered item count of each of its libraries, by section key
     Counts(Vec<i64>),
 }
 
-pub struct DiscoveryRequest {
+/// The discovery read the step has out: recorded by the step that emitted it and read by the next
+/// step, which settles it if the runner refused it ([`BrowseState::discovery_settle`]) and drops it
+/// when it landed. The record is the store's own memory of what it asked and is never recorded or
+/// replayed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SrcFlight {
+    id: u32,
     epoch: u32,
-    si: usize,
-    client: &'static plx_plex::plex::Client,
-    token_gen: u32,
-    job: SrcJob,
-    want_name: bool,
-    adapter: Arc<BrowseAdapter>,
-}
-
-impl DiscoveryRequest {
-    pub fn descriptor(&self) -> serde_json::Value {
-        serde_json::json!({
-            "epoch": self.epoch,
-            "source": self.si,
-            "sid": self.client.id().raw(),
-            "client": self.client.instance_gen(),
-            "token_gen": self.token_gen,
-            "name": self.want_name,
-            "sections": matches!(self.job, SrcJob::Sections),
-            "counts": match &self.job {
-                SrcJob::Sections => Vec::new(),
-                SrcJob::Counts(keys) => keys.clone(),
-            },
-        })
-    }
-}
-
-pub fn execute_discovery(request: DiscoveryRequest) -> bool {
-    let DiscoveryRequest {
-        epoch,
-        si,
-        client,
-        token_gen,
-        job,
-        want_name,
-        adapter,
-    } = request;
-    let is_sections = matches!(job, SrcJob::Sections);
-    spawn_discovery(move || {
-        let landing = catch_unwind(|| {
-            // the server naming ITSELF, so a roster that never reached plex.tv still heads its
-            // group with a machine name. One request, once, per source.
-            let name = if want_name {
-                client.friendly_name().unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let what = match job {
-                SrcJob::Sections => {
-                    SrcWhat::Sections(client.sections().map(|mc| project_sections(&mc)))
-                }
-                SrcJob::Counts(keys) => {
-                    let mut out = Vec::new();
-                    for k in keys {
-                        // size=0: PMS answers with `totalSize` and no items at all, so a
-                        // library's count costs a header rather than a page.
-                        let q = SectionQuery {
-                            section_key: k,
-                            sort: "",
-                            filters: &[],
-                            start: 0,
-                            size: 0,
-                            include_meta: false,
-                        };
-                        if let Some(mc) = client.section_items_query(&q) {
-                            out.push((k, mc.total_size));
-                        }
-                    }
-                    SrcWhat::Counts(out)
-                }
-            };
-            SrcLanding {
-                client,
-                token_gen,
-                name,
-                what,
-            }
-        })
-        .unwrap_or_else(|_| {
-            // a panicking fetch is a FAILURE of the job it was doing, never a success of another:
-            // reporting a panicked count probe as a failed section list would drop the source's
-            // whole library list on the floor.
-            let what = if is_sections {
-                SrcWhat::Sections(None)
-            } else {
-                SrcWhat::Counts(Vec::new())
-            };
-            SrcLanding {
-                client,
-                token_gen,
-                name: String::new(),
-                what,
-            }
-        });
-        *adapter.src_result.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, si, landing));
-    })
-}
-
-fn spawn_discovery(job: impl FnOnce() + Send + 'static) -> bool {
-    #[cfg(any(test, feature = "test-support"))]
-    if REFUSE_DISCOVERY_FOR_TEST.with(|flag| flag.get()) {
-        return false;
-    }
-    plx_base::task::spawn_small("sources", job)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static REFUSE_DISCOVERY_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn with_refused_discovery_for_test<R>(f: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            REFUSE_DISCOVERY_FOR_TEST.with(|flag| flag.set(self.0));
-        }
-    }
-    let _restore = Restore(REFUSE_DISCOVERY_FOR_TEST.with(|flag| flag.replace(true)));
-    f()
+    source: usize,
 }
 
 /// Supply a transport observation, retaining the actual source epoch and captured lifecycle.
@@ -3274,7 +3997,16 @@ pub fn queue_discovery_for_owner_test(
     ok: bool,
 ) {
     plx_base::testlock::assert_held("discovery observation fixture");
-    let _ = state.sync_roster_owned();
+    let mut keys = ClientKeys::default();
+    keys.refill_roster(plx_plex::plex::current_server(), plx_plex::plex::server_roster_gen(),
+        plx_plex::plex::server_facts_gen(), plx_plex::plex::server_ids(),
+        plx_plex::plex::client_for, plx_plex::plex::server_facts, plx_plex::plex::server_probe_result);
+    let session = plx_plex::plex::session::peek();
+    let _ = state.sync_roster_owned(&BrowseRosterInput { tenure: 0,
+        keys: &keys, session: &session, visible_generation: plx_plex::plex::session::visible_generation(),
+        settled: plx_plex::plex::session::peek_settled().is_some(),
+        profile_key: &plx_plex::plex::session::current_profile_key(),
+    });
     let si = state.sources.iter().position(|source| source.sid == client.id()).unwrap();
     let what = SrcWhat::Sections(ok.then(Vec::new));
     *adapter.src_result.lock().unwrap_or_else(|e| e.into_inner()) = Some((
@@ -3289,26 +4021,93 @@ pub fn queue_discovery_for_owner_test(
     ));
 }
 
+/// Take the single-flight flag the listing's page fetch waits on, and never give it back: no page is
+/// asked for, so the listing stays `Loading` (`BrowseStore::hold_listing_for_test`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn hold_listing_for_owner_test(adapter: &BrowseAdapter) {
+    adapter.page.claim(0);
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn seed_items_for_owner_test(state: &mut BrowseState, n: usize) {
     plx_base::testlock::assert_held("browse's section table (seed_items_for_test)");
+    seed_listing_for_owner_test(state, n, |sid, i| crate::pms::PmsMovie {
+        sid,
+        rk: format!("{}", i + 1),
+        title: format!("Item {i}"),
+        thumb: format!("/t/{i}"),
+        ..Default::default()
+    });
+}
+
+/// [`seed_items_for_owner_test`]'s listing as the section lists on `type=18`: `n` collections,
+/// each with a ratingKey of its own (`5000<i>`, none of the films'), a title and a child count.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_collections_for_owner_test(state: &mut BrowseState, n: usize) {
+    plx_base::testlock::assert_held("browse's section table (seed_collections_for_test)");
+    seed_listing_for_owner_test(state, n, |sid, i| crate::pms::PmsMovie {
+        sid,
+        rk: format!("5000{i}"),
+        title: format!("Collection {i}"),
+        thumb: format!("/t/c{i}"),
+        kind: crate::pms::KIND_COLLECTION,
+        child_count: i as i64 + 2,
+        ..Default::default()
+    });
+}
+
+/// [`seed_items_for_owner_test`]'s listing as a show section lists its EPISODES (`type=4`): `n`
+/// numbered episodes of one show, each with a title, an air date and a still, the section's library
+/// type set to [`LibraryType::Episodes`] so the Library page lays the landscape grid out.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_episodes_for_owner_test(state: &mut BrowseState, n: usize) {
+    plx_base::testlock::assert_held("browse's section table (seed_episodes_for_test)");
+    seed_listing_for_owner_test(state, n, |sid, i| crate::pms::PmsMovie {
+        sid,
+        rk: format!("{}", i + 1),
+        title: format!("Episode title {i}"),
+        show_title: "Synthetic show".to_owned(),
+        still: format!("/s/{i}"),
+        kind: 3,
+        season_index: 1,
+        ep_index: i as i32 + 1,
+        aired: "2019-01-03".to_owned(),
+        year: 2019,
+        ..Default::default()
+    });
+    let c = state.cur();
+    if let Some(st) = state.state_mut(c) { st.library_type = LibraryType::Episodes; }
+}
+
+/// [`seed_collections_for_owner_test`] with each collection's `(title, thumb)` stated, for a test
+/// that needs a name a tile's face cuts (a long title over a server composite).
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_named_collections_for_owner_test(state: &mut BrowseState, rows: &[(&str, &str)]) {
+    plx_base::testlock::assert_held("browse's section table (seed_named_collections_for_test)");
+    seed_listing_for_owner_test(state, rows.len(), |sid, i| crate::pms::PmsMovie {
+        sid,
+        rk: format!("5000{i}"),
+        title: rows[i].0.to_owned(),
+        thumb: rows[i].1.to_owned(),
+        kind: crate::pms::KIND_COLLECTION,
+        subtype: Some("movie".to_owned()),
+        child_count: i as i64 + 2,
+        ..Default::default()
+    });
+}
+
+/// A seeded listing is "the server answered this query", so a page still out for it is superseded
+/// the way a query edit supersedes it ([`BrowseState::refetch_gen`]): the store retries a failed
+/// first page on a frame-counted cooldown, and a worker released a frame before the seed lands its
+/// failure AFTER it, at the current generation, flipping the seeded listing to `Failed`.
+#[cfg(any(test, feature = "test-support"))]
+fn seed_listing_for_owner_test(state: &mut BrowseState, n: usize, make: impl Fn(ServerId, usize) -> crate::pms::PmsMovie) {
+    state.refetch_gen();
     let c = state.cur();
     let sid = state.section_sid(c).unwrap_or_default();
     if let Some(st) = state.state_mut(c) {
         st.total = n as i64;
-        st.items = SecItems::from_vec(
-            (0..n)
-                .map(|i| {
-                    Some(crate::pms::PmsMovie {
-                        sid,
-                        rk: format!("{}", i + 1),
-                        title: format!("Item {i}"),
-                        thumb: format!("/t/{i}"),
-                        ..Default::default()
-                    })
-                })
-                .collect(),
-        );
+        st.items = SecItems::from_vec((0..n).map(|i| Some(make(sid, i))).collect());
         st.fetch = SecFetch::Ready;
     }
 }
@@ -3329,8 +4128,7 @@ pub fn seed_sources_for_owner_test(
             } else {
                 ServerId::from_raw(index as u16)
             },
-            client_addr: 0,
-            token_gen: 0,
+            client_key: None,
             machine_id: format!("mach-{index}"),
             owned: index == 0,
             home: false,
@@ -3365,8 +4163,7 @@ pub fn seed_pins_for_owner_test(state: &mut BrowseState, pinned: &[bool]) {
     state.reset_with(|| {});
     state.sources = vec![BrowseSource {
         sid: plx_plex::plex::current_server(),
-        client_addr: 0,
-        token_gen: 0,
+        client_key: None,
         machine_id: "mach-test".into(),
         owned: true,
         home: false,
@@ -3426,8 +4223,7 @@ pub fn land_pin_for_owner_test(state: &mut BrowseState, pinned: bool) {
 pub fn a_source(name: &str, handle: &str, reachable: bool) -> BrowseSource {
     BrowseSource {
         sid: ServerId::UNSET,
-        client_addr: 0,
-        token_gen: 0,
+        client_key: None,
         // the machine id doubles as the fixture's identity, and OWNERSHIP follows the handle
         // here (a fixture, not the product rule — `sync_roster` takes `owned` from the roster,
         // because a share whose `sourceTitle` plex.tv did not send is still a share)
@@ -3462,21 +4258,19 @@ pub fn seed_two_source_table_for_owner_test(state: &mut BrowseState) {
         a_source("mac-mini", "", true),
         a_source("nas-home", "friend", true),
     ];
-    state.append_sections_with(
+    state.append_sections_for_test(
         0,
         vec![
             (1, "Movies".into(), SecKind::Movie),
             (2, "TV Shows".into(), SecKind::Show),
         ],
-        None,
     );
-    state.append_sections_with(
+    state.append_sections_for_test(
         1,
         vec![
             (1, "Film Club".into(), SecKind::Movie),
             (2, "Film Club".into(), SecKind::Show),
         ],
-        None,
     );
 }
 
@@ -3492,15 +4286,15 @@ pub fn seed_registered_table_for_owner_test(
         let source = state.source_mut(index).unwrap();
         source.sid = sid;
         source.machine_id = client.machine_id().to_owned();
-        source.client_addr = client as *const _ as usize;
-        source.token_gen = client.token_gen();
+        source.client_key = Some(plx_plex::plex::ClientKey::of(client));
         plx_plex::plex::describe_server(sid, &source.name, &source.handle,
             plx_plex::plex::GrantEvidence {
                 owned: source.owned, home: source.home, owner_id: source.owner_id,
             });
     }
     for section in &mut state.states {
-        section.letters_done = true;
+        let key = section.letters_key();
+        section.land_letters(key, Vec::new());
     }
 }
 
@@ -3513,7 +4307,7 @@ pub fn append_section_for_owner_test(
     kind: SecKind,
 ) {
     plx_base::testlock::assert_held("an owned browse section table (append_section_for_test)");
-    state.append_sections_with(source, vec![(key, title.into(), kind)], None);
+    state.append_sections_for_test(source, vec![(key, title.into(), kind)]);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3524,13 +4318,44 @@ pub fn seed_letter_counts_for_owner_test(
     plx_base::testlock::assert_held("an owned browse section table (seed_letter_counts_for_test)");
     let current = state.cur();
     if let Some(section) = state.state_mut(current) {
-        section.letters = Arc::new(
+        let key = section.letters_key();
+        section.land_letters(
+            key,
             letters
                 .iter()
                 .map(|(label, count)| ((*label).into(), *count))
                 .collect(),
         );
-        section.letters_done = true;
+    }
+}
+
+/// Seed a cached calendar rail, optionally hidden while the host has no date.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_calendar_bands_for_owner_test(state: &mut BrowseState, counted: bands::Day, today: Option<bands::Day>) {
+    plx_base::testlock::assert_held("an owned calendar rail");
+    let current = state.cur();
+    let section = state.state_mut(current).expect("a current section");
+    section.sorts = Arc::new(vec![SortEntry {
+        key: "addedAt".into(), desc_key: String::new(), title: "Date added".into(), default_desc: true,
+    }]);
+    section.sort_idx = 0;
+    section.sort_desc = true;
+    section.today = Some(counted);
+    let key = section.bands_key(bands::BandFamily::DateAdded);
+    let ladder = bands::plan(bands::BandFamily::DateAdded, counted, counted[0]);
+    let counts: Vec<u32> = (1..=ladder.len() as u32).collect();
+    let rail = bands::BandRail::new(&ladder, &counts, 400).expect("trusted calendar bands");
+    section.land_bands(key, Some(rail));
+    section.today = today;
+}
+
+/// The current section's A-Z counts are owed again (the registered fixture table lands them done).
+#[cfg(any(test, feature = "test-support"))]
+pub fn owe_letters_for_owner_test(state: &mut BrowseState) {
+    plx_base::testlock::assert_held("an owned browse section table (owe_letters_for_test)");
+    let current = state.cur();
+    if let Some(section) = state.state_mut(current) {
+        section.forget_letters();
     }
 }
 
@@ -3575,40 +4400,80 @@ pub fn queue_genre_for_owner_test(
     prepare_page_for_owner_test(state, client.id());
     let sec = state.cur();
     state.state_mut(sec).unwrap().total = 0;
-    adapter.genre_fetching.store(true, Ordering::SeqCst);
-    *adapter.genre_result.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(DirectoryResult {
-            epoch: state.table_epoch(), sec, client, token_gen: client.token_gen(),
-            library_type: state.states[sec].library_type,
-            list: vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
-        });
+    adapter.genres.claim(0);
+    adapter.genres.post(DirectoryResult {
+        epoch: state.table_epoch(), sec, client, token_gen: client.token_gen(),
+        library_type: state.states[sec].library_type,
+        list: vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
+        ok: true, letters: None,
+    }, |_| true);
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn adapter_has_page_for_test(adapter: &BrowseAdapter) -> bool {
-    adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    adapter.page.has_mail()
+}
+
+/// TEST ONLY: has a directory worker (genres or letters) answered on this adapter, the answer
+/// still waiting for the pump?
+#[cfg(any(test, feature = "test-support"))]
+pub fn directory_answered_for_test(adapter: &BrowseAdapter) -> bool {
+    adapter.genres.has_mail() || adapter.letters.has_mail() || adapter.bands.has_mail()
+}
+
+/// TEST ONLY: is a directory claim (genres or letters) up on this adapter?
+#[cfg(any(test, feature = "test-support"))]
+pub fn directory_claim_up_for_test(adapter: &BrowseAdapter) -> bool {
+    adapter.genres.busy() || adapter.letters.busy() || adapter.bands.busy()
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn adapter_fetching_for_test(adapter: &BrowseAdapter) -> bool {
-    adapter.fetching.load(Ordering::SeqCst)
+    adapter.page.busy()
 }
 
-/// Is a discovery request this adapter spawned still unanswered or unapplied? `src_fetching` is
-/// raised when the request is handed to its launcher and cleared when the answer is APPLIED, so a
-/// take that finds the mailbox empty while it reads true is waiting for a worker that is out.
+/// Is a discovery request this adapter emitted still unanswered or unapplied? `src_fetching` is
+/// raised by the step that emits the job and cleared when the answer is APPLIED (or the runner
+/// refuses the job), so a take that finds the mailbox empty while it reads true is waiting for a
+/// read that is out.
 pub fn discovery_owed(adapter: &BrowseAdapter) -> bool {
-    adapter.src_fetching.load(Ordering::SeqCst)
+    adapter.src_fetching.busy()
+}
+
+/// TEST ONLY: is the section hubs' one shared claim up on this adapter (a read is out, parked, or
+/// answered and not yet taken by the pump)?
+#[cfg(any(test, feature = "test-support"))]
+pub fn hubs_claim_up_for_test(adapter: &BrowseAdapter) -> bool {
+    adapter.hubs.fetch.busy()
+}
+
+/// TEST ONLY: has a section-hubs worker answered on this adapter, the answer still waiting for the
+/// pump?
+#[cfg(any(test, feature = "test-support"))]
+pub fn hubs_answer_waiting_for_test(adapter: &BrowseAdapter) -> bool {
+    adapter.hubs.fetch.has_mail()
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_adapter_src_fetching_for_test(adapter: &BrowseAdapter, fetching: bool) {
-    adapter.src_fetching.store(fetching, Ordering::SeqCst);
+    if fetching {
+        adapter.src_fetching.claim(0);
+    } else {
+        adapter.src_fetching.release();
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn adapter_src_fetching_for_test(adapter: &BrowseAdapter) -> bool {
-    adapter.src_fetching.load(Ordering::SeqCst)
+    adapter.src_fetching.busy()
+}
+
+/// TEST ONLY: has a discovery answer landed on this adapter, still waiting for the pump? The
+/// `"sources"` worker is not counted by `drain_workers_for_test`, so a test that runs one waits on
+/// this instead.
+#[cfg(any(test, feature = "test-support"))]
+pub fn discovery_answer_waiting_for_test(adapter: &BrowseAdapter) -> bool {
+    adapter.src_result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3619,17 +4484,21 @@ pub fn queue_page_failure_for_owner_test(
 ) {
     prepare_page_for_owner_test(state, client.id());
     let sec = state.cur();
-    adapter.fetching.store(true, Ordering::SeqCst);
-    *adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(PageResult {
+    adapter.page.claim(0);
+    adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: 0,
         items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
         resolved: Default::default(),
-    });
+    }, |_| true);
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_adapter_fetching_for_test(adapter: &BrowseAdapter, fetching: bool) {
-    adapter.fetching.store(fetching, Ordering::SeqCst);
+    if fetching {
+        adapter.page.claim(0);
+    } else {
+        adapter.page.release();
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3648,16 +4517,15 @@ pub fn spawn_owned_page_for_test(
     let worker_adapter = Arc::clone(adapter);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
-    adapter.fetching.store(true, Ordering::SeqCst);
+    adapter.page.claim(0);
     assert!(plx_base::task::spawn_small("browse-owner-test", move || {
         release_rx.recv().expect("test releases worker");
-        *worker_adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(PageResult {
-                client, token_gen, gen, sec, start: 0,
-                items: vec![PmsMovie { sid, title, ..Default::default() }],
-                total: 1, sorts: None, restored: None, genres: None, genre: None,
-                resolved: Default::default(),
-            });
+        worker_adapter.page.post(PageResult {
+            client, token_gen, gen, sec, start: 0,
+            items: vec![PmsMovie { sid, title, ..Default::default() }],
+            total: 1, sorts: None, restored: None, genres: None, genre: None,
+            resolved: Default::default(),
+        }, |_| true);
         done_tx.send(()).expect("test receives worker completion");
     }));
     (release_tx, done_rx)
@@ -3688,11 +4556,22 @@ mod fetch_state_tests;
 mod home_and_tabs_tests;
 
 #[cfg(test)]
+#[path = "browse_pins_input_tests.rs"]
+mod pins_input_tests;
+
+#[cfg(test)]
+#[path = "browse_eviction_tests.rs"]
+mod eviction_tests;
+
+#[cfg(test)]
 #[path = "browse_reachability_tests.rs"]
 mod reachability_tests;
 
 #[cfg(test)]
 mod library_type_tests;
+
+#[cfg(test)]
+mod listing_job_tests;
 
 #[cfg(test)]
 #[path = "browse_view_memory_tests.rs"]
@@ -3704,11 +4583,14 @@ mod localized_type_tests {
 
     #[test]
     fn library_type_titles_translate_without_changing_the_pms_query_type() {
-        use plx_platform::i18n::{LocaleContext, Preference};
+        use plx_os::i18n::{LocaleContext, Preference};
         for (preference, expected) in [
             (Preference::En, ["Movies", "Collections", "TV Shows", "Seasons", "Episodes", "Collections"]),
             (Preference::Es, ["Películas", "Colecciones", "Series", "Temporadas", "Episodios", "Colecciones"]),
             (Preference::Be, ["Фільмы", "Калекцыі", "Серыялы", "Сезоны", "Серыі", "Калекцыі"]),
+            (Preference::Fr, ["Films", "Collections", "Séries", "Saisons", "Épisodes", "Collections"]),
+            (Preference::De, ["Filme", "Sammlungen", "Serien", "Staffeln", "Episoden", "Sammlungen"]),
+            (Preference::Hu, ["Filmek", "Gyűjtemények", "Sorozatok", "Évadok", "Epizódok", "Gyűjtemények"]),
         ] {
             let locale = LocaleContext::resolve(preference, None, None, None, None);
             let rows = LibraryType::offered(SecKind::Movie).iter().map(|&t| (t, SecKind::Movie))
@@ -3721,3 +4603,14 @@ mod localized_type_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "browse_view_ledger_tests.rs"]
+mod view_ledger_tests;
+
+#[cfg(test)]
+#[path = "browse_membership_tests.rs"]
+mod membership_tests;
+
+#[cfg(test)]
+mod roster_input_tests;

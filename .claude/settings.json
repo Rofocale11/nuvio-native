@@ -16,6 +16,11 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/outbound-guard.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/watchlist-live-guard.py",
+            "timeout": 15
           }
         ]
       }
@@ -28,6 +33,33 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/release-config-check.py",
             "timeout": 120
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/tv-lock-notify.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/disk-low-notify.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/disk-low-notify.py",
+            "timeout": 15
           }
         ]
       }
@@ -58,13 +90,16 @@
   },
   "permissions": {
     "allow": [
-      "Bash(CARGO_INCREMENTAL=0 cargo +nightly check --manifest-path rust-modules/Cargo.toml --lib --no-default-features)",
+      "Bash(CARGO_INCREMENTAL=0 cargo +* check --manifest-path rust-modules/Cargo.toml --lib --no-default-features)",
       "Bash(make check)",
       "Bash(tools/build-gc.sh -n *)",
       "Bash(tools/tv-lock.sh status *)",
       "Bash(tools/tv-lock.sh status)",
       "Bash(tools/tv-session.sh log)",
       "Bash(tools/tv-session.sh status)"
+    ],
+    "deny": [
+      "mcp__claude_ai_GitHub_MCP__merge_pull_request"
     ]
   }
 }

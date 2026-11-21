@@ -1,7 +1,7 @@
 //! Language persistence is install-wide; selection must not change this launch's locale.
 use super::*;
 use super::test_support::*;
-use plx_platform::i18n::Preference;
+use plx_os::i18n::Preference;
 use plx_ui::form::FormId;
 use plx_machine::machine::{Edge, InputEvent, InputKind, Source};
 use plx_machine::present::Present;
@@ -20,10 +20,10 @@ fn contribute() -> u32 { LangId::Contribute.key().0 }
 
 struct SavedLanguage(Preference);
 impl SavedLanguage {
-    fn new(value: Preference) -> Self { Self(plx_platform::i18n::saved_preference_for_test(value)) }
+    fn new(value: Preference) -> Self { Self(plx_os::i18n::saved_preference_for_test(value)) }
 }
 impl Drop for SavedLanguage {
-    fn drop(&mut self) { plx_platform::i18n::saved_preference_for_test(self.0); }
+    fn drop(&mut self) { plx_os::i18n::saved_preference_for_test(self.0); }
 }
 
 fn save_request(effects: Vec<Stamped<InnerHost>>) -> (Preference, std::sync::mpsc::Sender<bool>) {
@@ -40,8 +40,8 @@ fn save_request(effects: Vec<Stamped<InnerHost>>) -> (Preference, std::sync::mps
 fn language_selection_waits_for_durable_receipt_and_keeps_running_locale() {
     let _guard = plx_base::testlock::serial();
     let _saved = SavedLanguage::new(Preference::System);
-    let running = plx_platform::i18n::current().language().tag();
-    let mut page = LanguagePage::new(EntryId(0));
+    let running = plx_os::i18n::current().language().tag();
+    let mut page = LanguagePage::new(EntryId(0), &crate::registry::capture_fixture());
     let before = page.state.hash();
     let (requested, reply) = save_request(activate(&mut page, lang(Preference::Be)));
     assert_eq!(requested, Preference::Be);
@@ -54,15 +54,15 @@ fn language_selection_waits_for_durable_receipt_and_keeps_running_locale() {
     assert!(page.poll_save());
     assert_eq!(page.state.selected, Preference::Be);
     assert!(!page.state.busy && !page.state.failed);
-    assert_eq!(plx_platform::i18n::current().language().tag(), running);
-    assert_eq!(page.pending(), Preference::Be != plx_platform::i18n::current().preference());
+    assert_eq!(plx_os::i18n::current().language().tag(), running);
+    assert_eq!(page.pending(), Preference::Be != plx_os::i18n::current().preference());
 }
 
 #[test]
 fn choosing_system_default_saves_the_preference_instead_of_resolved_language() {
     let _guard = plx_base::testlock::serial();
     let _saved = SavedLanguage::new(Preference::Be);
-    let mut page = LanguagePage::new(EntryId(0));
+    let mut page = LanguagePage::new(EntryId(0), &crate::registry::capture_fixture());
     let (requested, reply) = save_request(activate(&mut page, lang(Preference::System)));
     assert_eq!(requested, Preference::System);
     assert_eq!(page.state.selected, Preference::Be);
@@ -79,7 +79,7 @@ fn language_entry_seats_the_engine_on_the_saved_preference() {
         let _saved = SavedLanguage::new(preference);
         let entry = EntryId(7);
         let mut surface = RouteSurface::new(
-            entry, InstanceId(0), Family::Settings, SettingsPage::Language, plx_data::pms::HubsSnapshot::empty_for_test().view(),
+            entry, InstanceId(0), Family::Settings, SettingsPage::Language
         );
         let effects = step(&mut surface, ScreenEvent::Mount, None);
         let mut engine = plx_ui::focus::FocusEngine::new();
@@ -106,7 +106,7 @@ fn failed_or_disconnected_language_save_keeps_confirmed_selection_and_can_retry(
     let _guard = plx_base::testlock::serial();
     let _saved = SavedLanguage::new(Preference::En);
     for disconnected in [false, true] {
-        let mut page = LanguagePage::new(EntryId(0));
+        let mut page = LanguagePage::new(EntryId(0), &crate::registry::capture_fixture());
         let (_, reply) = save_request(activate(&mut page, lang(Preference::Es)));
         if !disconnected { reply.send(false).unwrap(); }
         drop(reply);
@@ -126,26 +126,26 @@ fn failed_or_disconnected_language_save_keeps_confirmed_selection_and_can_retry(
 fn contribution_is_focusable_and_right_opens_the_guide() {
     let _guard = plx_base::testlock::serial();
     let _session = scratch_session("language-contribution");
-    let mut page = LanguagePage::new(EntryId(0));
+    let mut page = LanguagePage::new(EntryId(0), &crate::registry::capture_fixture());
     let key = FocusKey { entry: EntryId(0), elem: contribute() };
     let cx = cx(Some(key));
     assert!(<LanguagePage as Focusable<InnerHost>>::place(&page, &key.elem, &cx, At::SpringTarget).is_some());
     assert!(matches!(<LanguagePage as Focusable<InnerHost>>::neighbour(&page,
-        FocusKey { entry: key.entry, elem: lang(Preference::Be) }, Dir::Down, &cx), Step::Move(next) if next == key));
+        FocusKey { entry: key.entry, elem: lang(*Preference::SHIPPED.last().unwrap()) }, Dir::Down, &cx), Step::Move(next) if next == key));
     let mut out = Vec::new();
     let mut present = Present::new();
     let mut fx = Effects::new(&mut out, MachineId::Instance(InstanceId(0)), &mut present);
     page.step(&ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
         kind: InputKind::Key { key: Key::Right, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true } }), &cx, &mut fx);
     assert!(out.iter().any(|effect| matches!(effect.fx, Fx::Nav(NavOp::Push(SettingsPage::Contribute)))));
-    assert!(plx_ui::qr::QrCode::new(plx_platform::i18n::CONTRIBUTE_URL).is_ok());
+    assert!(plx_ui::qr::QrCode::new(plx_os::i18n::CONTRIBUTE_URL).is_ok());
 }
 
 #[test]
 fn signed_out_settings_reaches_language_and_back_restores_it_after_contribution() {
     let _guard = plx_base::testlock::serial();
     let _session = scratch_session("language-back");
-    let mut surface = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root, plx_data::pms::HubsSnapshot::empty_for_test().view());
+    let mut surface = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root);
     step(&mut surface, ScreenEvent::Mount, None);
     step(&mut surface, ScreenEvent::Activate(root_key(RootId::Language)), None);
     assert_eq!(surface.inner.top().unwrap().arg, SettingsPage::Language);
@@ -160,4 +160,46 @@ fn signed_out_settings_reaches_language_and_back_restores_it_after_contribution(
         Fx::Deliver(_, Delivery::Screen(ScreenEvent::Enter(Enter::Fresh {
             focus: FocusTarget::Elem(key),
         }))) if key == contribution)), "Back restores the contribution row, not the initial language seat");
+}
+
+#[test]
+fn language_page_row_keys_are_distinct_and_pinned_languages_keep_theirs() {
+    let mut keys: Vec<u32> = LANGUAGES.iter().map(|p| LangId::Choice(*p).key().0).collect();
+    keys.push(LangId::Contribute.key().0);
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), keys.len(), "two Language rows share a key: {keys:?}");
+    assert_eq!(LangId::Choice(Preference::System).key().0, 0);
+    assert_eq!(LangId::Contribute.key().0, 1000);
+    for (p, key) in [(Preference::En, 1), (Preference::Es, 2), (Preference::Be, 3), (Preference::Fr, 5)] {
+        assert_eq!(LangId::Choice(p).key().0, key, "{p:?}: a shipped language's row identity moved");
+    }
+}
+
+#[test]
+fn adjacent_language_restart_decision_uses_owned_running_and_next_launch_facts() {
+    let _serial = plx_base::testlock::serial();
+    let a = crate::registry::ScreenInputs { install_language: Preference::Be, running_language: Preference::En, ..Default::default() };
+    let b = crate::registry::ScreenInputs { running_language: Preference::Be, ..a.clone() };
+    let _step = plx_base::step::StepScope::enter();
+    let mut first = LanguagePage::new(EntryId(1), &a);
+    let second = LanguagePage::new(EntryId(2), &b);
+    assert!(first.pending());
+    assert!(!second.pending(), "another owner's boot preference must not leak in");
+    let (_, reply) = save_request(activate(&mut first, lang(Preference::En)));
+    assert!(first.pending(), "queue admission is not the confirmed next-launch choice");
+    reply.send(true).unwrap();
+    assert!(first.poll_save());
+    assert!(!first.pending(), "the confirmed pick now equals this owner's running boot");
+}
+
+/// **The guide row names itself and the language rows are named by position**: one row per language, so no
+/// one static name fits them (`row.<i>`).
+#[test]
+fn the_language_rows_are_named_by_position_and_the_guide_by_name() {
+    assert_eq!(LangId::Contribute.a11y(), Some("contribute"));
+    for p in LANGUAGES {
+        assert_eq!(LangId::Choice(p).a11y(), None, "{p:?}");
+    }
 }

@@ -71,6 +71,11 @@ use std::sync::RwLock;
 // there is no version-4 answer in the world to expand — only the maintainer's own debug installs,
 // which are re-answered by hand. The first release that ships the question ships it with the
 // identifier already in it. The rule above stands for every bump after that one.
+//
+// The release-health session record (`telemetry::session`, 2026-10-22) is covered by the SAME
+// crash-report switch and did NOT bump this either, by owner decision: the crash-report question
+// and the Privacy page now name it (start, length, how it ended, with the Crash report ID, no
+// content), and nobody is re-asked.
 pub const POLICY_VERSION: u32 = 4;
 
 /// The stored decision. Serde-serialised to the telemetry file; every field is read and written, so
@@ -195,7 +200,6 @@ pub fn migrate_loaded(mut c: Consent) -> Consent {
     c
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))), test, feature = "test-support"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CanonicalDecision {
@@ -207,7 +211,6 @@ struct CanonicalDecision {
     extensions: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))), test, feature = "test-support"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CanonicalScopes {
@@ -215,7 +218,6 @@ struct CanonicalScopes {
     usage: u32,
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))), test, feature = "test-support"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CanonicalIds {
@@ -223,10 +225,9 @@ struct CanonicalIds {
     errors: Option<String>,
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))), test, feature = "test-support"))]
 /// Split consent into the three DB8-public slots the canonical state clears atomically on logout.
-pub fn split_canonical(consent: &Consent) -> Result<plx_platform::storage::state::ConsentPayload, ()> {
-    Ok(plx_platform::storage::state::ConsentPayload {
+pub fn split_canonical(consent: &Consent) -> Result<plx_os::storage::state::ConsentPayload, ()> {
+    Ok(plx_os::storage::state::ConsentPayload {
         consent: serde_json::to_value(CanonicalDecision {
             asked_version: consent.asked_version,
             errors: consent.errors,
@@ -249,8 +250,7 @@ pub fn split_canonical(consent: &Consent) -> Result<plx_platform::storage::state
     })
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))), test, feature = "test-support"))]
-pub fn join_canonical(payload: &plx_platform::storage::state::ConsentPayload) -> Result<Consent, ()> {
+pub fn join_canonical(payload: &plx_os::storage::state::ConsentPayload) -> Result<Consent, ()> {
     let decision: CanonicalDecision = serde_json::from_value(payload.consent.clone()).map_err(|_| ())?;
     let scopes: CanonicalScopes = serde_json::from_value(payload.scopes.clone()).map_err(|_| ())?;
     let ids: CanonicalIds = serde_json::from_value(payload.ids.clone()).map_err(|_| ())?;

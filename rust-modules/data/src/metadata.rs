@@ -4,11 +4,16 @@
 //! CURRENT item. Idiomatic Rust (String/Vec), like the browse catalog (pms.rs) — the fixed C
 //! buffers from the C port are gone.
 use std::os::raw::c_int;
+pub mod episode_list;
 pub mod record;
 pub mod sub_layout;
 pub mod track_label;
 pub mod track_names;
 use std::panic::catch_unwind;
+#[cfg(test)]
+#[path = "metadata_alt_sources_job_tests.rs"]
+mod metadata_alt_sources_job_tests;
+pub use episode_list::{EpisodeList, PAGE as EPISODE_PAGE};
 
 /// **Stage B of the store-ownership migration** (`docs/stores-as-machines.md`, D4): a borrowed
 /// handle onto this layer's read surface, shaped like `crate::person::PersonView`. Every method
@@ -29,6 +34,31 @@ impl<'a> MetadataView<'a> {
     }
     pub fn current(&self) -> Option<&'a Detail> {
         self.state.current.as_ref()
+    }
+    /// The episodes the loaded Detail lists in its current season window, when the loaded item IS
+    /// `(sid, rk)`. The store is single-current, so the identity check keeps a covered Detail page
+    /// from naming the episodes of the one that replaced it. An episode's change moves the season's
+    /// and the show's counts and the hero's on-deck episode, none of which can be patched from a
+    /// facts row, so the page owes itself a re-read for each.
+    pub fn held_episodes(&self, sid: plx_plex::plex::ServerId, rk: &str) -> crate::stores::HeldKeys {
+        let mut keys = crate::stores::HeldKeys::new();
+        let Some(d) = self.current().filter(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, rk))) else { return keys };
+        for (_, episode) in d.episodes.iter_loaded() {
+            crate::stores::push_held(&mut keys, d.sid, &episode.rk);
+        }
+        keys
+    }
+
+    /// The Related tiles and collection-member tiles the loaded Detail shows, when it IS
+    /// `(sid, rk)`. Their rows are patched from a facts row, so a read-back of them is quiet.
+    pub fn held_tiles(&self, sid: plx_plex::plex::ServerId, rk: &str) -> crate::stores::HeldKeys {
+        let mut keys = crate::stores::HeldKeys::new();
+        let Some(d) = self.current().filter(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, rk))) else { return keys };
+        let members = d.collection.iter().flat_map(|c| c.members.iter());
+        for tile in d.related.iter().chain(members) {
+            crate::stores::push_held(&mut keys, tile.sid, &tile.rk);
+        }
+        keys
     }
     pub fn now_playing(&self) -> Option<&'a NowPlaying> {
         self.state.now.as_ref()
@@ -67,12 +97,18 @@ impl<'a> MetadataView<'a> {
     pub fn cached_playing(&self, sid: plx_plex::plex::ServerId, rk: &str) -> Option<PlayingItem> {
         cached_playing(self.state, sid, rk)
     }
+    /// Has the viewer already put this exact segment behind them? Keyed on the segment, not the
+    /// marker value (the server can re-send the same marker with another end), and shared by the
+    /// server-marker and synthesized-tail paths so neither can re-offer a dismissed segment.
+    fn skipped(&self, m: &Marker) -> bool {
+        self.state.skipped.contains(&(m.kind, m.start_ms))
+    }
     pub fn active_marker(&self, head: Playhead) -> Option<Marker> {
         if !head.playing {
             return None;
         }
         let m = marker_at(self.playing_markers(), head.pos_ns / 1_000_000)?;
-        (!self.state.skipped.contains(&(m.kind, m.start_ms))).then_some(m)
+        (!self.skipped(&m)).then_some(m)
     }
     pub fn synthesized_tail_marker(&self, head: Playhead, has_next: bool) -> Option<Marker> {
         if !has_next || !head.playing {
@@ -83,7 +119,7 @@ impl<'a> MetadataView<'a> {
         }
         let dur_ms = head.dur_ns / 1_000_000;
         let pos_ms = head.pos_ns / 1_000_000;
-        tail_marker(pos_ms, dur_ms)
+        tail_marker(pos_ms, dur_ms).filter(|m| !self.skipped(m))
     }
     pub fn alt_copies(&self, sid: plx_plex::plex::ServerId, rk: &str) -> &'a [AltCopy] {
         alt_copies(self.state, sid, rk)
@@ -113,6 +149,10 @@ pub struct Playhead {
 /// [`MetadataAdapter`].
 #[derive(Default)]
 pub struct MetadataState {
+    /// The publish order of view-state edits, shared by `stores::Stores`.
+    pub(crate) ledger: crate::viewledger::ViewLedger,
+    /// Where in that order the detail read now out was issued ([`MetadataCmd::RequestDetail`]).
+    detail_stamp: crate::viewledger::Stamp,
     current: Option<Detail>,
     now: Option<NowPlaying>,
     playing: Option<PlayingItem>,
@@ -125,6 +165,15 @@ pub struct MetadataState {
     /// [`cached_playing`] refuses it for this item until a page read after the playback lands.
     played_since_load: Option<(plx_plex::plex::ServerId, String)>,
     alt: AltStore,
+    /// The IO this owner has asked the application to start and the application has not yet taken
+    /// (`MetadataStore::take_jobs`): one [`crate::stores::StoreJob::Detail`] per accepted detail
+    /// request, one [`crate::stores::StoreJob::MetaSeason`] per season switch, one
+    /// [`crate::stores::StoreJob::MetaEpisodes`] per episode-page window and one
+    /// [`crate::stores::StoreJob::MetaRelated`] per Related tail window. The owner never starts
+    /// the work itself, so no thread, clock or network read happens in the step that asks. A job
+    /// taken is a job owed to its runner: the application's `Bridge` starts each one in the same
+    /// call that stepped the store (`app::adapters::stores`).
+    pub(crate) jobs: Vec<crate::stores::StoreJob>,
 }
 
 /// The `Arc`'d worker half of one Metadata owner: the detail/season/alt-sources landing mailboxes,
@@ -147,11 +196,11 @@ pub struct MetadataAdapter {
     season_gen: std::sync::atomic::AtomicU32,
     season_done: std::sync::atomic::AtomicU32,
     season_result: std::sync::Mutex<Option<SeasonResult>>,
+    /// The long-season episode pages in flight and landed ([`want_episodes`]).
+    ep_pages: std::sync::Mutex<EpPages>,
+    /// The Related tail window read in flight and landed ([`want_related`]).
+    rel_pages: std::sync::Mutex<RelPages>,
     tracker: std::sync::Mutex<record::Tracker>,
-    /// TEST ONLY: the detail fetches [`request_detail`] admitted, parked here instead of on a
-    /// worker thread — see [`MetadataAdapter::run_held_detail_fetches_for_test`].
-    #[cfg(any(test, feature = "test-support"))]
-    held_detail: std::sync::Mutex<Vec<(plx_plex::plex::ServerId, String, u32)>>,
 }
 
 impl Default for MetadataAdapter {
@@ -169,53 +218,10 @@ impl Default for MetadataAdapter {
             season_gen: std::sync::atomic::AtomicU32::new(0),
             season_done: std::sync::atomic::AtomicU32::new(0),
             season_result: std::sync::Mutex::new(None),
+            ep_pages: std::sync::Mutex::new(EpPages::default()),
+            rel_pages: std::sync::Mutex::new(RelPages::default()),
             tracker: std::sync::Mutex::new(record::Tracker::new(false)),
-            #[cfg(any(test, feature = "test-support"))]
-            held_detail: std::sync::Mutex::new(Vec::new()),
         }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl MetadataAdapter {
-    /// Run every detail fetch [`request_detail`] admitted and has not yet run, on THIS thread,
-    /// through the production completion path (`finish_detail_fetch` over `fetch_full`); return
-    /// how many ran. Their landings are queued for the next `pump_detail`.
-    ///
-    /// Under `cfg(test)` a detail request never starts a worker thread. It did until 2026-09-19,
-    /// and every test that drove a request through a real `Bridge` raced that thread: a fetch
-    /// for an unknown server returns in microseconds, so a fast run settled the request before
-    /// an "in flight" assertion (`Some(false)` where `Some(true)` was pinned), while a loaded CI
-    /// runner had not settled it after the hundred `yield_now`s a drain helper spun
-    /// (`Some(true)` where `Some(false)` was pinned). Both halves failed intermittently in
-    /// `app::content::library_publication_tests`. Holding the CURRENT fetch until a test asks
-    /// makes "in flight" and "settled" states the test chooses rather than the scheduler.
-    pub fn run_held_detail_fetches_for_test(&self) -> usize {
-        self.run_held_detail_fetches(|_| true)
-    }
-
-    /// The superseded half only: fetches whose generation is no longer current, whose landings
-    /// `pump_detail` discards anyway. [`begin_detail_request`] runs these right after it
-    /// supersedes them, BEFORE admitting the new request, so a superseded fetch hands back its
-    /// admission reservation — as the thread it replaces did, well inside a test's next step —
-    /// instead of holding one of the landing's four in-flight slots until a test drains it.
-    fn run_superseded_detail_fetches(&self) -> usize {
-        let current = self.detail_gen.load(std::sync::atomic::Ordering::SeqCst);
-        self.run_held_detail_fetches(|gen| gen != current)
-    }
-
-    fn run_held_detail_fetches(&self, pick: impl Fn(u32) -> bool) -> usize {
-        let run: Vec<_> = {
-            let mut held = self.held_detail.lock().unwrap_or_else(|e| e.into_inner());
-            let (run, keep) = std::mem::take(&mut *held).into_iter().partition(|(_, _, gen)| pick(*gen));
-            *held = keep;
-            run
-        };
-        let n = run.len();
-        for (sid, rk, gen) in run {
-            finish_detail_fetch(self, sid, &rk, gen, || fetch_full(sid, &rk));
-        }
-        n
     }
 }
 
@@ -266,6 +272,24 @@ pub struct Spot {
     pub saved_col: [c_int; SPOT_SECTION_SLOTS],
     /// the selected season's NUMBER, or `None` for an item with no seasons
     pub season: Option<i64>,
+}
+
+impl Spot {
+    /// The Related section's number in [`Spot::section`].
+    pub const RELATED: c_int = 3;
+
+    /// The place of a Related card read from the tail window, as a `col`. The head's cards keep
+    /// their index (`col >= 0`); a tail card is named by the tail position it was read at, which
+    /// holds whichever way the window has slid and whichever window the page comes back with.
+    /// Negative, so the two never meet and the head's `col` is the one every reader already knows.
+    pub fn tail_col(position: usize) -> c_int {
+        c_int::try_from(position).map_or(c_int::MIN, |p| -2 - p)
+    }
+
+    /// The tail position a Related spot names, or `None` for a head card or another section.
+    pub fn tail_position(&self) -> Option<usize> {
+        (self.section == Self::RELATED && self.col <= -2).then(|| (-2 - i64::from(self.col)) as usize)
+    }
 }
 
 /// Plex's resume rule, in ONE place (home Continue-Watching, the detail Play button, and the
@@ -339,11 +363,11 @@ impl CrewRole {
         }
     }
 
-    fn display(self, locale: &plx_platform::i18n::LocaleContext) -> &'static str {
+    fn display(self, locale: &plx_os::i18n::LocaleContext) -> &'static str {
         match self {
-            Self::Director => plx_platform::i18n::msg::browse_crew_director_in(locale),
-            Self::Writer => plx_platform::i18n::msg::browse_crew_writer_in(locale),
-            Self::DirectorWriter => plx_platform::i18n::msg::browse_crew_director_writer_in(locale),
+            Self::Director => plx_os::i18n::msg::browse_crew_director_in(locale),
+            Self::Writer => plx_os::i18n::msg::browse_crew_writer_in(locale),
+            Self::DirectorWriter => plx_os::i18n::msg::browse_crew_director_writer_in(locale),
         }
     }
 }
@@ -372,8 +396,10 @@ impl Cast {
 /// IS an HDR10 stream — ignoring the RPU costs the dynamic metadata and nothing else. It is not
 /// fine for **Profile 5**, which is single-layer IPT-PQ with no HDR10 fallback: decoded as
 /// ordinary HEVC it is not a dimmer picture but a WRONG one, with the washed, pink-green cast of
-/// IPT read as YCbCr. And it cannot work at all for **Profile 7**, whose picture is split across
-/// two layers we cannot interleave.
+/// IPT read as YCbCr. **Profile 7** splits its picture across two layers we cannot interleave,
+/// and is played only because the feed path converts it: a Profile 7 whose base layer is
+/// cross-compatible becomes a single-layer Profile 8.1 on the way to the pipeline (see
+/// [`Dovi::converts_to_p81`]); any other dual layer cannot work at all.
 ///
 /// All zero is "the server said nothing", which is also what a non-DV stream produces — see
 /// [`Dovi::base_layer_unusable`] for why silence must never convict.
@@ -428,6 +454,19 @@ impl Dovi {
         rpu_present: false,
     };
 
+    pub fn of_stream(s: &plx_plex::plex::Stream) -> Option<Dovi> {
+        (s.dovi_present != 0).then(|| Dovi {
+            present: true,
+            profile: s.dovi_profile,
+            bl_compat: s.dovi_bl_compat_id,
+            el_present: s.dovi_el_present != 0,
+            level: s.dovi_level,
+            version: Dovi::parse_version(&s.dovi_version),
+            bl_present: s.dovi_bl_present != 0,
+            rpu_present: s.dovi_rpu_present != 0,
+        })
+    }
+
     /// [`Self::version`] back as the dotted string the server sent (`"1.0"`), or `None` when it
     /// sent none. `None` and `Some("0.0")` are different answers and the panel draws only the
     /// former's absence — a server that really reported version 0 would still get a row.
@@ -468,17 +507,21 @@ impl Dovi {
     /// - the direct-play gate **when no node will be sent** (`presentation` is written in terms of
     ///   this, so the two can never contradict each other), and
     /// - the server's permission to **COPY** the video — a remux or a `directStream` transcode
-    ///   hands us the identical elementary stream one container down, and the Load payload built
-    ///   for that path declares nothing. `route::build_stream` reads it for both
-    ///   ([`plx_plex::plex::TranscodeSpec::no_video_copy`] and the `remux` gate) and that is why a
-    ///   declared Profile 5 still refuses a copy: the declaration rides the DIRECT PLAY, not the
-    ///   file, so the same pixels arriving by another route are as wrong as they ever were.
+    ///   hands us the identical elementary stream one container down. A copy of a usable base
+    ///   layer keeps the file's declaration (the DOVI record travels in the stream, so the Load
+    ///   payload describes it as a direct play's would), but a copy of an unusable one (Profile 5)
+    ///   is refused and never declared. `route::build_stream` reads it for both
+    ///   ([`plx_plex::plex::TranscodeSpec::no_video_copy`] and the `remux` gate): the same pixels
+    ///   arriving by another route are as wrong as they ever were.
     ///
     /// Two disqualifiers, and they are found by different fields:
-    /// - **an enhancement layer** (`el_present`, Profile 7) — one elementary stream is all the
-    ///   pipeline feeds, so the other layer simply never arrives. This is the only test that
-    ///   catches P7: measured live 2026-08-21, the dev server's P7 item reports `bl_compat = 6`,
-    ///   which sails through any `== 0` check.
+    /// - **an enhancement layer** (`el_present`) — one elementary stream is all the pipeline
+    ///   feeds, so the other layer simply never arrives. This is the only test that catches a dual
+    ///   layer: measured live 2026-08-21, the dev server's P7 item reports `bl_compat = 6`, which
+    ///   sails through any `== 0` check. The one exception is a Profile 7 the feed path converts
+    ///   ([`converts_to_p81`](Self::converts_to_p81)): what reaches the decoder is its base layer,
+    ///   which is the HDR10 picture it always was, so a copy of it is a copy of a displayable
+    ///   stream.
     /// - **no cross-compatible base layer** (Profile 5 / `bl_compat == 0`) — IPT-PQ, which an
     ///   HEVC decoder will happily decode and a panel will happily show, incorrectly.
     ///
@@ -504,7 +547,26 @@ impl Dovi {
         if !self.present {
             return false;
         }
+        if self.converts_to_p81() {
+            return false;
+        }
         self.el_present || self.profile == 5 || (self.profile > 0 && self.bl_compat == 0)
+    }
+
+    /// PURE: **a Profile 7 the feed path converts to Profile 8.1** — dual-layer (`el_present`)
+    /// with a cross-compatible base layer (`bl_compat != 0`; a UHD Blu-ray remux reports 6, the
+    /// only value the Dolby profile table assigns to profile 7). `plx_media`'s
+    /// `ff::packet_to_annexb` performs the conversion `dovi_tool -m 2` does: the enhancement
+    /// layer's NALs are dropped and each RPU is rewritten to 8.1, so the pipeline is fed exactly
+    /// the single-layer shape a Profile 8.1 file has. What is lost is the enhancement layer's own
+    /// contribution — a full enhancement layer's residual detail above the base layer — and
+    /// nothing else: the base layer and the dynamic metadata reach the panel.
+    ///
+    /// Profile 5 is untouched by this (no enhancement layer, `bl_compat` 0), and so is a Profile 7
+    /// whose base layer is not cross-compatible: there is no picture the conversion could leave,
+    /// so that one is still refused as `dual-layer`.
+    pub fn converts_to_p81(&self) -> bool {
+        self.present && self.el_present && self.profile == 7 && self.bl_compat != 0
     }
 
     /// PURE: **how this stream will be presented** — the ONE predicate behind both halves of the
@@ -513,22 +575,25 @@ impl Dovi {
     ///
     /// `signal` retains `nodv`'s diagnostic asymmetry: it withholds a Profile-5-style declaration,
     /// but does not suppress a compatible Profile 8 on a supported set. `capability` must be a
-    /// definite [`Supported`](plx_platform::devcaps::dv::DvCapability::Supported), and
-    /// `video_is_hevc` closes the old Profile 9 disagreement where the gate declared AVC and the
-    /// payload's H265 guard silently discarded the node.
+    /// definite [`Supported`](plx_os::devcaps::dv::DvCapability::Supported), and
+    /// `video_carries_dv` ([`dv_video_codec`]) closes the old Profile 9 disagreement where the gate
+    /// declared AVC and the payload's codec guard silently discarded the node.
     ///
     /// The four arms, and why each is where it is:
     ///
     /// - **not `present`** → [`DvPresentation::NotDv`]. No Dolby Vision, nothing to say, and
     ///   nothing to refuse. This is every ordinary file in the library.
-    /// - **`el_present`** → refuse, always, `signal` or not. Profile 7 splits its picture across a
-    ///   base and an enhancement layer; the pipeline feeds ONE elementary stream and cannot
-    ///   interleave the other, so no payload key makes it displayable. (This is also the only
-    ///   thing that identifies a dual-layer file: the dev server's P7 reports `bl_compat = 6`.)
-    ///   It is deliberately checked BEFORE the declaration arm — which is what keeps the emitted
-    ///   node's `trackType` at `"single"` and, with `encryptionType` fixed at `"clear"`, makes the
-    ///   pipeline's `dv-dual-svp` secure-video-path flag unreachable. We cannot satisfy that flag.
-    /// - **no node will be sent** (capability absent/unknown, non-HEVC output, a profile the
+    /// - **`el_present`** → refuse, always, `signal` or not — unless the feed path converts it
+    ///   ([`converts_to_p81`](Self::converts_to_p81)), in which case it continues to the arms
+    ///   below as the single-layer Profile 8.1 that is actually fed, and is declared as profile 8.
+    ///   Any other dual layer splits its picture across a base and an enhancement layer; the
+    ///   pipeline feeds ONE elementary stream and cannot interleave the other, so no payload key
+    ///   makes it displayable. (This is also the only thing that identifies a dual-layer file:
+    ///   the dev server's P7 reports `bl_compat = 6`.) It is deliberately checked BEFORE the
+    ///   declaration arm — which is what keeps the emitted node's `trackType` at `"single"` and,
+    ///   with `encryptionType` fixed at `"clear"`, makes the pipeline's `dv-dual-svp`
+    ///   secure-video-path flag unreachable. We cannot satisfy that flag.
+    /// - **no node will be sent** (capability absent/unknown, output that is neither HEVC nor AV1, a profile the
     ///   server never named, or Profile 5 with the trigger armed) → fall back to
     ///   exactly the pre-declaration rule: refuse iff [`base_layer_unusable`](Self::base_layer_unusable).
     ///   That is what makes "keep the refusal for any case where we would not send the node" a
@@ -543,23 +608,31 @@ impl Dovi {
     ///   hint) to the `video/x-h265` caps it was already going to build. The codec string does not
     ///   change; the node is the entire difference between an IPT-PQ stream shown in wrong colours
     ///   and one the panel puts in Dolby Vision mode.
+    ///
+    ///   AV1 (Profile 10) is declared the same way, on a set whose codec table lists an AV1 decoder
+    ///   (the direct-play gate's own condition). That half is NOT from a decompile: it was measured
+    ///   on a webOS 6 set (LG C1, 2026-10-18), where an AV1 Profile 10.1 direct play put the panel
+    ///   in Dolby Vision, and is unmeasured on any other firmware.
     pub fn presentation(
         &self,
         signal: bool,
-        capability: plx_platform::devcaps::dv::DvCapability,
-        video_is_hevc: bool,
+        capability: plx_os::devcaps::dv::DvCapability,
+        video_carries_dv: bool,
     ) -> DvPresentation {
         if !self.present {
             return DvPresentation::NotDv;
         }
-        if self.el_present {
+        // A converted Profile 7 is a single layer by the time it is fed, so only a dual layer the
+        // feed path cannot convert is refused here.
+        let converted = self.converts_to_p81();
+        if self.el_present && !converted {
             return DvPresentation::Refuse("dual-layer");
         }
         // Presence of our node enables libpf's DV path even on a television which cannot display
         // it. libplayerAPIs' own platform metadata does not protect that seam, so only this app's
         // affirmative configd result may make the declaration eligible.
-        let declare = capability == plx_platform::devcaps::dv::DvCapability::Supported
-            && video_is_hevc
+        let declare = capability == plx_os::devcaps::dv::DvCapability::Supported
+            && video_carries_dv
             && (signal || !self.base_layer_unusable());
         if !declare || self.profile <= 0 {
             return if self.base_layer_unusable() {
@@ -569,33 +642,17 @@ impl Dovi {
             };
         }
         DvPresentation::Declare(DolbyHdrInfo {
-            profile_id: self.profile,
+            // A converted Profile 7 declares what is fed: profile 8, one layer.
+            profile_id: if converted { 8 } else { self.profile },
             // Honest derivation, and unreachable as `"dual"` while the `el_present` arm above
-            // returns first — written this way so that the day an interleaver exists, the payload
-            // follows the refusal being relaxed instead of quietly lying about the track.
-            track_type: if self.el_present { "dual" } else { "single" },
+            // returns first for every dual layer that is not converted — written this way so that
+            // the day an interleaver exists, the payload follows the refusal being relaxed instead
+            // of quietly lying about the track.
+            track_type: if self.el_present && !converted { "dual" } else { "single" },
             // Never `"all"`: paired with `trackType: "dual"` that is what sets `dv-dual-svp`, the
             // secure-video-path flag, which this app cannot satisfy.
             encryption_type: "clear",
         })
-    }
-
-    /// Resolve a fresh decision from the cached platform answer and the boot-latched diagnostic
-    /// signal. Call once at a route boundary; installed playback must retain the returned value.
-    pub fn presentation_now(&self, video_is_hevc: bool) -> DvPresentation {
-        self.presentation(
-            !dv_withheld(),
-            plx_platform::devcaps::dv::capability(),
-            video_is_hevc,
-        )
-    }
-
-    pub fn decision_now(&self, video_is_hevc: bool) -> DvDecision {
-        let capability = plx_platform::devcaps::dv::capability();
-        DvDecision {
-            capability,
-            presentation: self.presentation(!dv_withheld(), capability, video_is_hevc),
-        }
     }
 }
 
@@ -636,17 +693,23 @@ pub enum DvPresentation {
     Refuse(&'static str),
 }
 
-/// The platform answer and the presentation derived from it at one route boundary. Both are
-/// copyable so reload, recovery and rollback preserve the installed decision exactly.
+/// The television's Dolby Vision answer a route planned from and the presentation derived from it at
+/// one route boundary. The capability is the probe's own answer, exactly what `devcaps::dv::capability()`
+/// held when the route was planned, and it is for READING OUT only (Diagnostics and the `dv:` log
+/// lines print it): nothing decides behaviour from it. The seated profile's `DolbyVisionMode` is
+/// applied to the presentation alone, so an Off profile on a set that reports support carries
+/// `Supported` with `NotDv` (the base layer) and a quoted line can tell it from a failed probe or a
+/// set without Dolby Vision. Both are copyable so reload, recovery and rollback preserve the
+/// installed decision exactly.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DvDecision {
-    pub capability: plx_platform::devcaps::dv::DvCapability,
+    pub capability: plx_os::devcaps::dv::DvCapability,
     pub presentation: DvPresentation,
 }
 
 impl DvDecision {
     pub const NONE: Self = Self {
-        capability: plx_platform::devcaps::dv::DvCapability::Unknown,
+        capability: plx_os::devcaps::dv::DvCapability::Unknown,
         presentation: DvPresentation::NotDv,
     };
 }
@@ -663,15 +726,6 @@ impl DvPresentation {
             Self::NotDv => "base-layer",
             Self::Declare(_) => "declare",
             Self::Refuse(_) => "refuse",
-        }
-    }
-
-    /// [`Self::label`] in the UI language, for the diagnostics read-out. Logs keep `label`.
-    pub fn display(&self) -> &'static str {
-        match self {
-            Self::NotDv => plx_platform::i18n::msg::browse_diagnostics_dv_base_layer(),
-            Self::Declare(_) => plx_platform::i18n::msg::browse_diagnostics_dv_declare(),
-            Self::Refuse(_) => plx_platform::i18n::msg::browse_diagnostics_dv_refuse(),
         }
     }
 
@@ -741,6 +795,14 @@ plx_base::devtrig::latched_flag!(
     pub fn dv_withheld = "nodv";
 );
 
+/// Can a Dolby Vision declaration ride on this video codec (the source's own spelling, `"hevc"`,
+/// `"av1"`)? HEVC carries Profiles 5, 7 and 8; AV1 carries Profile 10. Anything else (an AVC
+/// Profile 9, VP9) is never declared, because the Load payload names the codec the node is read
+/// against and the pipeline has no Dolby Vision path for it.
+pub fn dv_video_codec(vcodec: &str) -> bool {
+    vcodec.eq_ignore_ascii_case("hevc") || vcodec.eq_ignore_ascii_case("av1")
+}
+
 /// Prewarm both payload diagnostics before the first frame scope. Their getters are subsequently
 /// filesystem-free even when preview or payload construction first reaches them during a frame.
 pub fn prewarm_dv_latches() {
@@ -778,8 +840,13 @@ pub struct Stream {
     /// is** — `"dolby digital plus + dolby atmos"` (probed live 2026-08-21); on the video track it
     /// is `"main 10"`. See [`Stream::has_atmos`].
     pub profile: String,
-    /// Video track only: bits per component (10 for Main 10); 0 = not said.
+    /// Bits per component on a video track (10 for Main 10), bits per sample on an audio track
+    /// (PMS sends `bitDepth` on both, e.g. 24 on a FLAC); 0 = not said.
     pub bit_depth: i64,
+    /// Audio track only: PMS `samplingRate` in Hz; 0 = not said. What the PCM Load declares for
+    /// an app-decoded FLAC. Same round-trip rule as `language_tag`: absent stays absent.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sampling_rate: i64,
     /// Video track only: chroma subsampling as PMS spells it, e.g. `"4:2:0"`.
     pub chroma: String,
     pub title: String,
@@ -815,6 +882,10 @@ pub struct Stream {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+pub(crate) fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 impl Stream {
@@ -897,6 +968,9 @@ pub struct Episode {
     pub rating: String,
     pub vcodec: String, // Media[0].videoCodec (for the direct-play/transcode decision)
     pub acodec: String, // Media[0].audioCodec
+    /// Every version, when the episode has more than one (`pms::versions_of`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<crate::pms::MediaVersion>,
 }
 
 /// One slot per [`Spot`] section id. Section 6 is extras, 7 the collection shelf. Do not shrink
@@ -936,7 +1010,7 @@ impl Extra {
     /// Human subtype for the extras shelf caption, in the UI language. Unknown subtypes read as
     /// the generic extra. The match is on PMS's own subtype names, which are never drawn.
     pub fn caption(&self) -> &'static str {
-        use plx_platform::i18n::msg;
+        use plx_os::i18n::msg;
         match self.subtype.as_str() {
             "trailer" => msg::browse_detail_trailer(),
             "behindTheScenes" => msg::browse_extra_behind_the_scenes(),
@@ -991,8 +1065,8 @@ impl ExtraContext {
     /// The HUD's word for this kind, in the UI language.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Trailer => plx_platform::i18n::msg::browse_detail_trailer(),
-            Self::Extra => plx_platform::i18n::msg::browse_extra_extra(),
+            Self::Trailer => plx_os::i18n::msg::browse_detail_trailer(),
+            Self::Extra => plx_os::i18n::msg::browse_extra_extra(),
         }
     }
 }
@@ -1088,8 +1162,9 @@ impl Season {
 /// asking the next caller to remember `plex::current_server()` is the wrong answer here.
 pub type Related = crate::pms::PmsMovie;
 
-/// The collection shelf holds at most this many members — the Related shelf's own bound.
-pub const COLLECTION_MAX: usize = RELATED_MAX;
+/// The collection shelf's preview length. Its heading opens the full Collection page, so this is
+/// a shelf length, not a limit on what the collection can show.
+pub const COLLECTION_PREVIEW: usize = 20;
 
 /// A member movie's collection, split out of `/related`. PMS answers a member with a
 /// `collection.related.*` hub that lists the WHOLE collection in the collection's own order, the
@@ -1105,7 +1180,7 @@ pub struct CollectionShelf {
     pub title: String,
     pub section: i64,
     pub tag: i64,
-    /// Server order, the page's own item included and unmarked, capped at [`COLLECTION_MAX`].
+    /// Server order, the page's own item included and unmarked, capped at [`COLLECTION_PREVIEW`].
     pub members: Vec<Related>,
     /// Every member the collection holds — the heading's "· N" — which `members` may cap.
     #[serde(default)]
@@ -1126,6 +1201,65 @@ impl CollectionShelf {
 pub struct RelatedRows {
     pub collection: Option<CollectionShelf>,
     pub related: Vec<Related>,
+    pub tail: RelatedTail,
+}
+
+/// One related hub with more behind its preview, read by [`RelatedTail`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct TailHub {
+    /// The hub's own listing key, one `is_pageable_hub_key` admits.
+    pub key: String,
+    /// The preview's length as the server sent it: the listing offset the tail starts at.
+    pub preview: usize,
+    /// Items the listing holds past the preview. `None` until the server says (a hub flagged `more`
+    /// that sent no total), learned from the first page read of it.
+    pub len: Option<usize>,
+}
+
+/// The Related row beyond the merged `/related` previews: `Detail::related[..head]` is the head,
+/// every preview whole, and the rest is a window of at most [`crate::pms::MAX_SHELF_ITEMS`] cards of
+/// the hubs' own listings, chained in response order. A tail position counts the hubs' listings
+/// past their previews end to end, so a card keeps the position it was read at whichever way the
+/// window moves. Empty (and absent from the encoding) when no hub holds more than its preview.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RelatedTail {
+    pub hubs: Vec<TailHub>,
+    /// Keys the tail must not show whatever the head holds: the page's own item and its
+    /// collection's members.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// How many of `Detail::related` are the head.
+    #[serde(default)]
+    pub head: usize,
+    /// The tail position of each card after the head.
+    #[serde(default)]
+    pub positions: Vec<usize>,
+    /// The window as the server last reported it, as `stores::paging::PageInfo` says it.
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub end: usize,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub more: bool,
+    /// Hubs with more behind them whose key the pager does not admit; they keep their preview.
+    #[serde(default)]
+    pub unadmitted: usize,
+    /// What the window remembers beyond itself: the ledger of keys it has shown, which takes over
+    /// when the hubs' listings stop agreeing between reads ([`crate::stores::paging::read_row`]).
+    /// Keys only, so its bound is the listing's length at eight bytes a numeric key; the cards
+    /// held stay the head and one window.
+    #[serde(default, skip_serializing_if = "crate::stores::paging::RowState::is_default")]
+    pub row: crate::stores::paging::RowState,
+}
+
+impl RelatedTail {
+    pub fn is_empty(&self) -> bool {
+        self.hubs.is_empty() && self.unadmitted == 0
+    }
 }
 
 /// Clone because the playing-item store keeps the played leaf's OWN chapters (see [`PlayingItem`]) —
@@ -1440,6 +1574,21 @@ fn convert_ratings(it: &plx_plex::plex::Metadata) -> Vec<Rating> {
     out
 }
 
+/// Ownership of the episode stream facts stored on a show detail page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EpisodeStreams {
+    #[default]
+    Unavailable,
+    Loaded(String),
+    /// Old recordings fetched the on-deck episode when one existed and omitted the owner.
+    LegacyOnDeck,
+}
+
+impl EpisodeStreams {
+    fn legacy() -> Self { Self::LegacyOnDeck }
+    fn is_legacy(&self) -> bool { matches!(self, Self::LegacyOnDeck) }
+}
+
 #[derive(Default, Clone)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Detail {
@@ -1451,6 +1600,11 @@ pub struct Detail {
     #[serde(with = "record::server_id")]
     pub sid: plx_plex::plex::ServerId,
     pub rk: String,
+    /// Host-captured dev input; never recorded and neutral on decode. Some(empty) forces no credit.
+    #[serde(skip, default)]
+    pub source_override: Option<String>,
+    #[serde(skip, default)]
+    pub source_credit: String,
     /// Which SERVER this item was fetched from, as the OWNER'S HANDLE ("friend") — empty whenever
     /// it came from the signed-in user's own server, which is every item today.
     ///
@@ -1465,9 +1619,24 @@ pub struct Detail {
     pub kind: String, // this item's own type: movie | episode | show | season
     pub show_title: String, // grandparentTitle — the show name, when this item is an episode
     pub show_rk: String, // grandparentRatingKey — the show's rk (episode → its show)
+    /// A SEASON's show (`parentRatingKey`), else empty. Separate from [`Detail::show_rk`], which is
+    /// the GRAND-parent key and so stays empty for a season: its readers (the resolve's language
+    /// settings, the episode-row matching in `set_watched_local`) mean "my show, via my season".
+    ///
+    /// Not serialized while empty, so the committed replay recordings (which predate it, and carry
+    /// no season page) still round-trip canonically (`record::validate`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_rk: String,
     pub season: i64,  // parentIndex — season number, when an episode
     pub index: i64,   // index — episode number, when an episode
     pub title: String,
+    /// Edition identity, presented in the hero's metadata rather than appended to its title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub edition: String,
+    /// The stamped clearLogo, or empty when the image list contains no usable logo.
+    /// Absent from older responses and recordings, which use the legacy lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
     pub year: i64,
     pub rating: String, // contentRating
     pub summary: String,
@@ -1493,9 +1662,12 @@ pub struct Detail {
     pub acodec: String, // Media[0].audioCodec
     #[serde(with = "record::float_bits")]
     pub video_fps: f64, // video Stream frameRate (0 = unknown); feeds the Load esInfo
-    // ---- the PRIMARY version's technical fields (plex::Metadata::primary_media = Media[0], NOT a
-    // best-of pick — a multi-version item has more, and choosing among them needs a version picker
-    // that does not exist yet). For a SHOW these are borrowed from its first episode, like the
+    /// Episode whose streams were loaded into a show page. Its displayed season may since have changed.
+    #[serde(default = "EpisodeStreams::legacy", skip_serializing_if = "EpisodeStreams::is_legacy")]
+    pub episode_streams: EpisodeStreams,
+    // ---- the PRIMARY version's technical fields (plex::Metadata::media_version(None) = Media[0], NOT a
+    // best-of pick — a multi-version item has more, and the user chooses among them in the Play Version
+    // picker, by `MediaId`). For a SHOW these are borrowed from its hero episode, like the
     // About footer's audio/subtitle lists. `bitrate`/`width`/`height` are unused by the UI today
     // and carried for the video-quality ladder ("26.1 Mbps 4K (Original)").
     pub video_resolution: String, // "4k" | "1080" | "720" | "sd" — the hero's media badge
@@ -1561,15 +1733,22 @@ pub struct Detail {
     pub audio: Vec<Stream>,
     pub subs: Vec<Stream>,
     pub seasons: Vec<Season>,   // shows only
-    pub episodes: Vec<Episode>, // the currently-selected season
+    pub episodes: EpisodeList, // the currently-selected season
     /// SHOWS: the episode the SERVER says is next to watch (`OnDeck`, one request, no extra round
     /// trip). Show-level and therefore **independent of the selected season tab**, which is the whole
     /// reason it is here: `episodes` above holds one season, so a next-episode the client worked out
     /// itself changed every time you browsed to another tab. `None` for a movie, for a show with
     /// nothing on deck (never started, or finished), and on any server that omitted the hub.
     pub on_deck: Option<Episode>,
+    /// SHOWS: the selected season's POSITION in `seasons` (`episodes` holds its episodes). The
+    /// fetch opens a show on its `on_deck` episode's season, else the first; a re-read of the page
+    /// already loaded keeps the season selected on it ([`initial_season`]). A tab switch moves it
+    /// ([`load_season`]).
     pub cur_season: usize,
     pub related: Vec<Related>,
+    /// What lies past the previews in `related` ([`RelatedTail`]); empty for most pages.
+    #[serde(default, skip_serializing_if = "RelatedTail::is_empty")]
+    pub related_tail: RelatedTail,
     /// The item's collection shelf ([`CollectionShelf`]); `None` for a non-member, a lone member
     /// and every show/episode page.
     #[serde(default)]
@@ -1585,6 +1764,12 @@ pub struct Detail {
     /// Rating key of the picker winner inside [`Self::extras`]. Empty when there is none.
     #[serde(default)]
     pub trailer_rk: String,
+    /// Every version of a movie or episode that has more than one (`pms::versions_of`), for the
+    /// hero's Play Version disc; empty for a single-version item and for a show or season.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<crate::pms::MediaVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_parts: Vec<VersionPart>,
 }
 impl Detail {
     /// Choose at presentation time so cached details reflect a changed preference immediately.
@@ -1606,12 +1791,51 @@ impl Detail {
 
 
 impl Detail {
+    pub fn show_started(&self) -> bool {
+        self.on_deck.as_ref().is_some_and(|ep| ep.resume_ms > 0 || ep.watched)
+            || self.seasons.iter().any(|s| s.viewed_leaf_count > 0)
+    }
+
+    pub fn resume_episode(&self) -> Option<&Episode> {
+        self.on_deck.as_ref().filter(|_| self.show_started())
+    }
+
+    /// The show hero resumes its underway episode, otherwise it starts the displayed season.
+    pub fn play_episode(&self) -> Option<&Episode> {
+        self.resume_episode().or_else(|| self.episodes.first())
+    }
+
+    /// Older recordings predate the explicit owner and loaded the on-deck episode if present.
+    pub fn stream_episode_key(&self) -> Option<&str> {
+        match &self.episode_streams {
+            EpisodeStreams::Unavailable => None,
+            EpisodeStreams::Loaded(rk) => Some(rk),
+            EpisodeStreams::LegacyOnDeck => self.on_deck.as_ref().map(|e| e.rk.as_str()),
+        }
+    }
+
+    /// **The show an episode played from this page belongs to**, which the play queue is built
+    /// from so the episodes BEFORE it are in the queue: a show page's own key, a season page's
+    /// parent, an episode page's grandparent, empty for anything else (a movie). The `show_rk` field
+    /// alone is the grandparent key and stays empty on a show page and on a season page.
+    pub fn episodes_show_rk(&self) -> &str {
+        if self.is_show {
+            &self.rk
+        } else if self.kind == "season" {
+            &self.parent_rk
+        } else if self.kind == "episode" {
+            &self.show_rk
+        } else {
+            ""
+        }
+    }
+
     /// **Does this item have a FILE of its own?** — the rule behind the *Track information* sheet
     /// (`screens::tracks_panel`) and the Languages column's press gate on the detail page.
     ///
     /// It is `part` rather than `is_show` on purpose. A SHOW container carries no `Media` of its
-    /// own — `parse_streams` backfills its audio/subtitle lists from episode 1 for the About footer
-    /// — so on a show page a track sheet would print episode 1's path, size and bitrate under the
+    /// own — `parse_streams` backfills its audio/subtitle lists from the hero episode for the About footer
+    /// — so on a show page a track sheet would print that episode's path, size and bitrate under the
     /// show's name. That is not a truncation of the truth, it is a different file, and `part` is
     /// exactly the field that is empty when the item has no file of its own ("Media[0].Part[0].key
     /// for a leaf (movie/episode); empty for a show").
@@ -1662,20 +1886,17 @@ impl Detail {
     ///
     /// dev: **`/tmp/plxnative-shared` WINS WHEN ARMED** — the precedence every trigger in this app
     /// has (`crate::dev`'s module doc: `plxnative-token` beats the signed-in session), and the
-    /// phrase to grep for, because the same stand-in is read by the owned Home's hero run and
-    /// the two must agree. (The owned `screens::search::render`'s owner annotation reads the real
-    /// registry unconditionally and does not consult this trigger — a gap the cutover left open,
-    /// not a third agreement point.) A trigger exists to FORCE
+    /// phrase to grep for. (Home's hero draws no credit since board CW-13 v2, so the Detail page's
+    /// facts row is the one presentation of the phrase; the owned `screens::search::render`'s owner
+    /// annotation reads the real registry unconditionally and does not consult this trigger — a gap
+    /// the cutover left open.) A trigger exists to FORCE
     /// a state, so an armed one outranks the real answer, and an armed EMPTY file forces the
     /// absence of a handle rather than doing nothing. It stamps one handle onto every item this
-    /// session loads, which is what a fully-borrowed library looks like. Read ONCE (see
-    /// [`dev_source`]) — the trigger surface is boot state, and this is reached from a draw.
+    /// session loads, which is what a fully-borrowed library looks like. M4 captures that optional
+    /// value at live launch/held execution in the host, not at draw time. Controlled host entry
+    /// creates a fresh owner and controlled installation neutralizes the retained override.
     pub fn source(&self) -> String {
-        dev_source().map(str::to_owned).unwrap_or_else(|| {
-            plx_plex::plex::server_facts(self.sid)
-                .map(|f| f.handle.clone())
-                .unwrap_or_default()
-        })
+        self.source_override.as_ref().unwrap_or(&self.source_credit).clone()
     }
 
     /// How many tiles the Cast & Crew shelf holds: every actor, then every crew credit.
@@ -1695,10 +1916,10 @@ impl Detail {
     /// Only the crew array owns job identities. An actor whose server-provided character is
     /// named "Director" must retain that exact character name in every locale.
     pub fn credit_role(&self, i: usize) -> Option<&str> {
-        self.credit_role_in(i, plx_platform::i18n::current())
+        self.credit_role_in(i, plx_os::i18n::current())
     }
 
-    fn credit_role_in(&self, i: usize, locale: &plx_platform::i18n::LocaleContext) -> Option<&str> {
+    fn credit_role_in(&self, i: usize, locale: &plx_os::i18n::LocaleContext) -> Option<&str> {
         let credit = self.credit(i)?;
         if i < self.cast.len() {
             return Some(&credit.role);
@@ -1732,10 +1953,11 @@ pub fn install_for_test(state: &mut MetadataState, d: Option<Detail>) {
 /// THREE things can be about the item, and all three are updated:
 /// * **the loaded item itself** — a movie, or the show whose hero toggle was pressed;
 /// * **one EPISODE of the loaded season** — the filmstrip's context menu, whose rk is a leaf of the
-///   show `CURRENT` holds. Its season's `viewedLeafCount` moves with it, because the season tab's
-///   tick is derived from that count ([`Season::watched`]) and a tick that disagreed with the
-///   episode row beneath it is precisely the "two surfaces describing one item two ways" this page
-///   already refuses elsewhere.
+///   show `CURRENT` holds. Its season's `viewedLeafCount` steps by one with a real flip, because the
+///   season tab's tick is derived from that count ([`Season::watched`]) and a tick that disagreed
+///   with the episode row beneath it is the "two surfaces describing one item two ways" this page
+///   refuses elsewhere. The step is a guess: the re-read the read-back asks for replaces it with
+///   the server's number.
 /// * **a tile of the RELATED shelf** — a different item entirely, which is what makes it the odd
 ///   one out: it is matched on its OWN `sid` (each row carries one, see [`Related`]) rather than on
 ///   the page's, and it is checked unconditionally rather than as one arm of a chain. Since
@@ -1748,64 +1970,145 @@ pub fn install_for_test(state: &mut MetadataState, d: Option<Detail>) {
 /// episode keeping its old `viewOffset` would still draw its resume bar and no check.
 ///
 /// The landed refresh is the truth and silently corrects any of this; see [`crate::viewstate`].
-fn set_watched_local(state: &mut MetadataState, sid: plx_plex::plex::ServerId, rk: &str, on: bool) -> bool {
-    {
-        let Some(d) = state.current.as_mut() else {
-            return false;
-        };
-        // The RELATED shelf first, and unconditionally — it is the one store here whose rows are
-        // OTHER items, so it is neither the loaded item nor one of its episodes and must not be
-        // reached through either of their early returns below. A related tile is also the one the
-        // press most often came FROM (its context menu is why this page can mark a third item
-        // watched at all), and left out, the tile kept its old tick and bar until a refetch.
-        //
-        // Not `else`-chained with the two arms under it for a subtler reason as well: the same
-        // title can legitimately be BOTH the loaded item and a row of some other page's shelf, and
-        // a hub that lists an item alongside itself is not something this function should trust
-        // itself to rule out.
-        let mut hit = false;
-        // The collection shelf's members are other items' tiles too (the loaded item's own tile
-        // among them), so they move with the same pass.
-        let members = d.collection.iter_mut().flat_map(|c| c.members.iter_mut());
-        for m in d.related.iter_mut().chain(members) {
-            if plx_plex::plex::same_item((m.sid, &m.rk), (sid, rk)) {
-                // the shared three-field flip (`watched`/`unwatched`/`resume_ms` move together, or
-                // the tile wears the progress bar it had before and shows no tick at all)
-                crate::pms::set_watched(m, on);
-                hit = true;
-            }
+fn set_watched_local(state: &mut MetadataState, at: &crate::viewstate::ViewAt, on: bool) -> bool {
+    let edit = crate::viewstate::ViewEdit::Watched(on);
+    let Some(d) = state.current.as_mut() else {
+        return false;
+    };
+    // The RELATED shelf first, and unconditionally — it is the one store here whose rows are
+    // OTHER items, so it is neither the loaded item nor one of its episodes and must not be
+    // reached through either of their early returns below. A related tile is also the one the
+    // press most often came FROM (its context menu is why this page can mark a third item
+    // watched at all), and left out, the tile kept its old tick and bar until a refetch.
+    //
+    // Not `else`-chained with the arms under it for a subtler reason as well: the same title can
+    // legitimately be BOTH the loaded item and a row of some other page's shelf, and a hub that
+    // lists an item alongside itself is not something this function should trust itself to rule
+    // out.
+    let mut hit = false;
+    // The collection shelf's members are other items' tiles too (the loaded item's own tile
+    // among them), so they move with the same pass.
+    let members = d.collection.iter_mut().flat_map(|c| c.members.iter_mut());
+    for m in d.related.iter_mut().chain(members) {
+        if at.covers(m) {
+            // the shared three-field flip (`watched`/`unwatched`/`resume_ms` move together, or
+            // the tile wears the progress bar it had before and shows no tick at all)
+            edit.apply(m);
+            hit = true;
         }
-        if plx_plex::plex::same_item((d.sid, &d.rk), (sid, rk)) {
-            d.watched = on;
-            d.resume_ms = 0;
-            return true;
-        }
-        // An episode is only ever a leaf of the loaded show, so it is matched on the PAGE's server —
-        // `Episode` carries no `sid` of its own precisely because it cannot come from anywhere else.
-        // Both misses below return `hit` rather than `false`: the Related pass above may already
-        // have changed this page, and reporting "nothing here was about that item" after editing a
-        // tile would be this function contradicting itself. (`viewstate` only logs the verdict, but
-        // a false negative is the kind that goes unnoticed until something starts trusting it.)
-        if d.sid != sid {
-            return hit;
-        }
-        let Some(i) = d.episodes.iter().position(|e| e.rk == rk) else {
-            return hit;
-        };
-        let was = d.episodes[i].watched;
-        d.episodes[i].watched = on;
-        d.episodes[i].resume_ms = 0;
-        if was != on {
-            let cur = d.cur_season;
-            if let Some(s) = d.seasons.get_mut(cur) {
-                // clamped to the season's own leaf count: a server that sent none leaves this 0, and
-                // `Season::watched` reads `leaf_count > 0` first, so an unknown season stays unknown
-                let step = if on { 1 } else { -1 };
-                s.viewed_leaf_count = (s.viewed_leaf_count + step).clamp(0, s.leaf_count.max(0));
-            }
-        }
-        true
     }
+    // The loaded item itself: the addressed item, or an episode the show/season scope reaches
+    // (a page opened on one episode while its show is marked from a card elsewhere).
+    let kind = match d.kind.as_str() {
+        "show" => 1,
+        "season" => 2,
+        "episode" => 3,
+        _ => 0,
+    };
+    if at.covers_parts(d.sid, &d.rk, kind, &d.show_rk, d.season) {
+        d.watched = on;
+        d.resume_ms = 0;
+        hit = true;
+    }
+    // Everything below is about the loaded SHOW's episodes, which are matched on the PAGE's server
+    // — `Episode` carries no `sid` of its own precisely because it cannot come from anywhere else.
+    // Both early returns hand back `hit` rather than `false`: the passes above may already have
+    // changed this page, and reporting "nothing here was about that item" after editing a tile
+    // would be this function contradicting itself.
+    if d.sid != at.sid {
+        return hit;
+    }
+    // OnDeck is another mounted copy of an episode, independent of the season window below.
+    // Keep its toggle and resume point in step even when that episode is not loaded in the strip.
+    if let Some(ep) = d.on_deck.as_mut().filter(|ep|
+        at.covers_parts(d.sid, &ep.rk, 3, &d.rk, ep.season)) {
+        ep.watched = on;
+        ep.resume_ms = 0;
+        hit = true;
+    }
+    // A show- or season-scoped change that names THIS show reaches its episodes and the season
+    // tabs' counts as a whole: the server scrobbles every leaf, so the strip must not keep ticks
+    // the user just cleared (or lack ones they just set).
+    let whole = match &at.scope {
+        crate::viewstate::Scope::Show if at.rk == d.rk => Some(None),
+        crate::viewstate::Scope::Season { show_rk, index } if *show_rk == d.rk => Some(Some(*index)),
+        _ => None,
+    };
+    if let Some(season) = whole {
+        // A show page whose one season was just unmarked is no longer "all watched"; marking one
+        // season watched proves nothing about the others, so only the clearing direction moves it.
+        if !on {
+            d.watched = false;
+            hit = true;
+        }
+        let rks: Vec<String> = d.episodes.iter_loaded()
+            .filter(|(_, e)| season.is_none_or(|i| e.season == i))
+            .map(|(_, e)| e.rk.clone())
+            .collect();
+        for rk in &rks {
+            d.episodes.edit(rk, |e| {
+                e.watched = on;
+                e.resume_ms = 0;
+            });
+        }
+        for s in d.seasons.iter_mut().filter(|s| season.is_none_or(|i| s.index == i)) {
+            s.viewed_leaf_count = if on { s.leaf_count } else { 0 };
+        }
+        return hit || !rks.is_empty();
+    }
+    let Some(was) = d.episodes.position(&at.rk).and_then(|i| d.episodes.get(i)).map(|e| e.watched) else {
+        return hit;
+    };
+    d.episodes.edit(&at.rk, |e| {
+        e.watched = on;
+        e.resume_ms = 0;
+    });
+    // The OPTIMISTIC layer of the season tab's count, so the tab and the hero read the press before
+    // any answer: stepped only on a real FLIP (a repeat or a replay of the same press moves
+    // nothing) and clamped to the season's own leaf count. A server that sent none leaves that 0,
+    // and `Season::watched` reads `leaf_count > 0` first, so an unknown season stays unknown. It is
+    // a guess about one season: the read-back's re-read of this page (`app::content::
+    // reconcile_details`) lands the server's number over it.
+    if was != on {
+        let cur = d.cur_season;
+        if let Some(s) = d.seasons.get_mut(cur) {
+            let step = if on { 1 } else { -1 };
+            s.viewed_leaf_count = (s.viewed_leaf_count + step).clamp(0, s.leaf_count.max(0));
+        }
+    }
+    true
+}
+
+/// The server's `Facts`/`Offset` for the Related shelf and the collection shelf's members: other
+/// items' tiles, edited in place. Only a row the edit would CHANGE counts, so a read-back that
+/// agrees with what is drawn raises no notice; the shelves keep their order and length, so nothing
+/// moves under the cursor. Returns whether any tile changed. **MAIN THREAD.**
+fn patch_tiles(state: &mut MetadataState, at: &crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit) -> bool {
+    let Some(d) = state.current.as_mut() else { return false };
+    let members = d.collection.iter_mut().flat_map(|c| c.members.iter_mut());
+    let mut hit = false;
+    for m in d.related.iter_mut().chain(members) {
+        if at.covers(m) && edit.changes(m) {
+            edit.apply(m);
+            hit = true;
+        }
+    }
+    hit
+}
+
+/// A stop's resume point on the LOADED item, or on the loaded show's episode, whose (server, key)
+/// is exactly the edit's. Only a value that differs counts, so a read-back that agrees raises no
+/// notice. Episodes are matched on the page's server (`Episode` carries no `sid`). **MAIN THREAD.**
+fn patch_loaded_offset(state: &mut MetadataState, at: &crate::viewstate::ViewAt, ms: i64) -> bool {
+    let Some(d) = state.current.as_mut() else { return false };
+    if plx_plex::plex::same_item((d.sid, &d.rk), (at.sid, &at.rk)) {
+        return std::mem::replace(&mut d.resume_ms, ms) != ms;
+    }
+    if d.sid != at.sid || d.episodes.position(&at.rk).and_then(|i| d.episodes.get(i)).is_none_or(|e| e.resume_ms == ms) {
+        return false;
+    }
+    d.episodes.edit(&at.rk, |e| e.resume_ms = ms);
+    true
 }
 
 /// drop the loaded detail (on leaving the detail page). Also supersedes any in-flight async
@@ -1891,13 +2194,32 @@ pub fn set_current_for_test(state: &mut MetadataState, d: Option<Detail>) {
     state.current = d;
 }
 
+/// TEST-ONLY in-place edit of the loaded item, for a test that lands an episode page or drops one
+/// the way the pump does, without replacing the whole `Detail`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn edit_current_for_test(state: &mut MetadataState, f: impl FnOnce(&mut Detail)) {
+    plx_base::testlock::assert_held("the detail store (edit_current_for_test)");
+    if let Some(d) = state.current.as_mut() {
+        f(d);
+    }
+}
+
 /// TEST-ONLY installer for the playing item's markers: lets a rig put a segment under the playhead
 /// so the REAL `player_hud::slot` (not a hand-built slot) decides the control row. Crate-global,
 /// so callers hold [`plx_base::testlock::serial`].
-#[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_playing_markers_for_test(state: &mut MetadataState, markers: Vec<Marker>) {
     plx_base::testlock::assert_held("the playing store (set_playing_markers_for_test)");
     state.playing = Some(PlayingItem { markers, ..PlayingItem::with_subs(Vec::new()) });
+}
+
+/// TEST-ONLY installer for the playing item's chapters: lets a rig put a Chapters strip under the HUD (the
+/// PLAYING leaf's `Chapter[]`, which `playing_chapters` reads) without a fetch. Crate-global, so callers hold
+/// [`plx_base::testlock::serial`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_playing_chapters_for_test(state: &mut MetadataState, chapters: Vec<Chapter>) {
+    plx_base::testlock::assert_held("the playing store (set_playing_chapters_for_test)");
+    state.playing = Some(PlayingItem { chapters, ..PlayingItem::with_subs(Vec::new()) });
 }
 
 /// A compact descriptor of the item currently *playing*, for the in-player Info card. Unlike
@@ -1919,6 +2241,8 @@ pub struct NowPlaying {
     /// not. Gates the player HUD's `S# · E#` kicker line: filtering on `is_episode` there rendered
     /// `S0 · E0` under a show trailer, since a show trailer has no episode address to print.
     pub is_real_episode: bool,
+    /// True only for the movie leaf itself; false for trailers/extras even when their parent is a movie.
+    pub is_movie: bool,
     pub title: String, // big title: show title (episode) or movie title
     pub ep_title: String, // episode name (episode only)
     pub season: i64,
@@ -1940,6 +2264,7 @@ fn sync_now_playing(state: &mut MetadataState) {
         "episode" => Some(NowPlaying {
             is_episode: true,
             is_real_episode: true,
+            is_movie: false,
             title: d.show_title.clone(),
             ep_title: d.title.clone(),
             season: d.season,
@@ -1954,6 +2279,7 @@ fn sync_now_playing(state: &mut MetadataState) {
         "movie" => Some(NowPlaying {
             is_episode: false,
             is_real_episode: false,
+            is_movie: true,
             title: d.title.clone(),
             ep_title: String::new(),
             season: 0,
@@ -1993,6 +2319,7 @@ pub fn trailer_now_playing(
         // An extra is never a real episode leaf, whatever kind its parent is — `season`/`index`
         // below are placeholder zeros, not an address, so the HUD kicker must not read them.
         is_real_episode: false,
+        is_movie: false,
         title: d.title.clone(),
         ep_title: extra.hud_title(&d.title).to_string(),
         season: 0,
@@ -2012,39 +2339,25 @@ pub fn trailer_now_playing(
 
 // ---- fetches (all via the typed plx_plex::plex client; serde DTOs, no Value scraping) ----
 //
-// Every one of them takes the `ServerId` rather than reaching for `plex::client()`: they run on the
-// detail/season workers, and the house rule is that a worker reads no statics (`pms::parse_item`
-// carries the same note). It is also what stamps the row — an item fetched from slot 1 must be
-// recorded as slot 1's whatever `client()` answers with by the time the fetch returns.
-/// The stand-in handle, read ONCE. The trigger surface is boot state, and [`Detail::source`] is
-/// reached from a draw — a `stat` per frame inside one is exactly what `crate::dev`'s doc forbids.
-/// Compiled out with the `devtriggers` feature, like every other trigger, so a release build folds
-/// this to `None` and the whole call to the registry read below it.
-#[cfg(not(any(test, feature = "test-support")))]
-fn dev_source() -> Option<&'static str> {
-    if crate::stores::tape::active() { return None; }
-    // Function-local, not process-wide mutable state: one dev-trigger stat per process, kept off
-    // the per-frame draw path the doc above forbids. Without `devtriggers`, `plx_base::devtrig::read`
-    // is a `None`-returning stub, so a release build pays one cheap `get_or_init` for a value
-    // that is always `None` — not worth a cfg to avoid.
-    static SEEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    SEEN.get_or_init(|| plx_base::devtrig::read("shared")).as_deref()
-}
-/// The host suite must not depend on what this dev Mac happens to have under `/tmp`: an armed
-/// `plxnative-shared` would outrank the registry and make every credit assertion here read the
-/// trigger's handle instead. [`alt_dev_stand_in`] states the same rule the same way.
-#[cfg(any(test, feature = "test-support"))]
-fn dev_source() -> Option<&'static str> {
-    None
-}
+// None of them reaches for `plex::client()`: they run on the detail/season workers, and the house
+// rule is that a worker reads no statics (`pms::parse_item` carries the same note). The detail
+// chain's fetches are handed the `&'static Client` the runner resolved when it admitted the job,
+// plus the `ServerId` where they stamp the row (`fetch_detail`, `fetch_related`); the season
+// worker's (`fetch_episodes`, `fetch_episode_page`) are handed the one the runner resolved when it
+// started that job. Either way the row is stamped with its slot — an item fetched from slot 1
+// must be recorded as slot 1's whatever `client()` answers with by the time the fetch returns.
+// Dev trigger reads/source latch live in the application's scenarios host; fetches accept values.
 
-fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, String)> {
-    let it = plx_plex::plex::client_for(sid)?.metadata(rk)?;
-    let media0 = it.primary_media();
+
+fn fetch_detail(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, String)> {
+    let it = client.metadata(rk)?;
+    let media0 = it.media_version(None).map(|(_, m)| m);
     // one read, both fields (see `Detail::blur`)
     let blur = it.ultra_blur_colors.and_then(|u| u.corners());
     let mut d = Detail {
         sid,
+        source_override: None,
+        source_credit: String::new(),
         rk: rk.to_string(),
         // the portable identity — what "Also available" resolves across the other sources
         guid: it.guid.clone(),
@@ -2052,9 +2365,12 @@ fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, Stri
         kind: it.kind.clone(),
         show_title: it.grandparent_title.clone(),
         show_rk: it.grandparent_rating_key.clone(),
-        season: it.parent_index,
+        parent_rk: if it.kind == "season" { it.parent_rating_key.clone() } else { String::new() },
+        season: it.parent_index.unwrap_or(0),
         index: it.index,
         title: it.title.clone(),
+        edition: it.edition_title.clone(),
+        logo: it.clear_logo().map(str::to_owned),
         year: it.year,
         rating: it.content_rating.clone(),
         summary: it.summary.clone(),
@@ -2068,12 +2384,13 @@ fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, Stri
             it.view_count > 0
         },
         // empty for a show (no Media on the show container)
-        part: it.first_part().map(|p| p.key.clone()).unwrap_or_default(),
+        part: it.default_part().map(|p| p.key.clone()).unwrap_or_default(),
         vcodec: media0.map(|m| m.video_codec.clone()).unwrap_or_default(),
         acodec: media0.map(|m| m.audio_codec.clone()).unwrap_or_default(),
         video_fps: 0.0, // set from the video Stream by parse_streams below
         // likewise set by parse_streams (one assignment point), which for a SHOW runs a second
-        // time over its first episode — the show container carries no Media of its own
+        // time over its hero episode — the show container carries no Media of its own
+        episode_streams: EpisodeStreams::Unavailable,
         video_resolution: String::new(),
         width: 0,
         height: 0,
@@ -2111,7 +2428,7 @@ fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, Stri
         audio: Vec::new(),
         subs: Vec::new(),
         seasons: Vec::new(),
-        episodes: Vec::new(),
+        episodes: EpisodeList::default(),
         on_deck: it
             .on_deck
             .as_ref()
@@ -2119,15 +2436,18 @@ fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, Stri
             .map(convert_episode),
         cur_season: 0,
         related: Vec::new(),
+        related_tail: RelatedTail::default(),
         collection: None,
         chapters: convert_chapters(&it.chapter),
         markers: convert_markers(&it.marker, it.duration),
         ratings: convert_ratings(&it),
         extras: Vec::new(),
         trailer_rk: String::new(),
+        versions: if it.kind == "movie" || it.kind == "episode" { crate::pms::versions_of(&it) } else { Vec::new() },
+        version_parts: Vec::new(),
     };
     // audio/subtitle streams (movies carry Media/Part/Stream; a show does not — its
-    // episodes do, so load_detail backfills a show's streams from its first episode).
+    // episodes do, so load_detail backfills a show's streams from its hero episode).
     parse_streams(&it, &mut d);
     Some((d, it.primary_extra_key.clone()))
 }
@@ -2206,6 +2526,25 @@ pub struct Streams {
     pub dovi: Dovi,
 }
 
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct VersionPart {
+    pub id: plx_plex::plex::MediaId,
+    pub part: String,
+    pub audio: Vec<Stream>,
+    pub subs: Vec<Stream>,
+}
+
+fn version_parts_of(it: &plx_plex::plex::Metadata) -> Vec<VersionPart> {
+    it.media
+        .iter()
+        .filter_map(|m| {
+            let p = m.part.first()?;
+            let s = convert_streams(&p.stream);
+            Some(VersionPart { id: m.id, part: p.key.clone(), audio: s.audio, subs: s.subs })
+        })
+        .collect()
+}
+
 fn convert_streams(streams: &[plx_plex::plex::Stream]) -> Streams {
     let (mut audio, mut subs, mut fps) = (Vec::new(), Vec::new(), 0.0);
     let mut hdr = false;
@@ -2224,6 +2563,7 @@ fn convert_streams(streams: &[plx_plex::plex::Stream]) -> Streams {
             bitrate: s.bitrate,
             profile: s.profile.clone(),
             bit_depth: s.bit_depth,
+            sampling_rate: s.sampling_rate,
             chroma: s.chroma_subsampling.clone(),
             sdh: s.hearing_impaired != 0,
             ad: s.audio_description != 0 || s.title.to_lowercase().contains("descri"),
@@ -2260,17 +2600,8 @@ fn convert_streams(streams: &[plx_plex::plex::Stream]) -> Streams {
                 // so this costs nothing and is not a change to any measured behaviour — it is the
                 // one assignment here whose failure is silent and wrong rather than silent and
                 // cosmetic.
-                if s.dovi_present != 0 {
-                    dovi = Dovi {
-                        present: true,
-                        profile: s.dovi_profile,
-                        bl_compat: s.dovi_bl_compat_id,
-                        el_present: s.dovi_el_present != 0,
-                        level: s.dovi_level,
-                        version: Dovi::parse_version(&s.dovi_version),
-                        bl_present: s.dovi_bl_present != 0,
-                        rpu_present: s.dovi_rpu_present != 0,
-                    };
+                if let Some(record) = Dovi::of_stream(s) {
+                    dovi = record;
                 }
                 // The video track ITSELF, kept rather than reduced to `fps`/`hdr`/`dovi`. It is the
                 // only place the stream's own bitrate, profile, bit depth and chroma survive, and
@@ -2328,14 +2659,63 @@ mod convert_streams_tests {
         assert!(!s.audio[1].can_normalize_loudness);
         assert!(!s.video.expect("video track").can_normalize_loudness);
     }
+
+    #[test]
+    fn each_version_keeps_its_own_part_and_tracks() {
+        fn media(id: i64, key: &str, acodec: &str, sub_lang: &str) -> plx_plex::plex::Media {
+            plx_plex::plex::Media {
+                id: plx_plex::plex::MediaId(id),
+                part: vec![plx_plex::plex::MediaPart {
+                    key: key.into(),
+                    stream: vec![
+                        plx_plex::plex::Stream { stream_type: 1, codec: "hevc".into(), ..Default::default() },
+                        plx_plex::plex::Stream { stream_type: 2, codec: acodec.into(), ..Default::default() },
+                        plx_plex::plex::Stream { stream_type: 3, language_code: sub_lang.into(), ..Default::default() },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+        let it = plx_plex::plex::Metadata {
+            media: vec![
+                media(11, "/library/parts/21/1/uhd.mkv", "truehd", "ita"),
+                media(12, "/library/parts/22/1/fhd.mkv", "ac3", "eng"),
+                plx_plex::plex::Media { id: plx_plex::plex::MediaId(13), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let parts = version_parts_of(&it);
+        let seen: Vec<_> = parts
+            .iter()
+            .map(|p| (p.id.0, p.part.as_str(), p.audio.iter().map(|a| a.codec.as_str()).collect::<Vec<_>>(), p.subs.iter().map(|s| s.lang_code.as_str()).collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (11, "/library/parts/21/1/uhd.mkv", vec!["truehd"], vec!["ita"]),
+                (12, "/library/parts/22/1/fhd.mkv", vec!["ac3"], vec!["eng"]),
+            ]
+        );
+        let mut d = Detail::default();
+        parse_streams(&it, &mut d);
+        assert_eq!(d.version_parts.len(), 2, "the backfill a show page takes from its episode keeps them too");
+        let single = plx_plex::plex::Metadata {
+            media: vec![media(11, "/library/parts/21/1/uhd.mkv", "truehd", "ita")],
+            ..Default::default()
+        };
+        parse_streams(&single, &mut d);
+        assert!(d.version_parts.is_empty(), "a single version keeps none");
+    }
 }
 
 /// parse an item's Media[0].Part[0].Stream[] into d.audio / d.subs (the About footer), plus that
 /// same version's technical fields (resolution/size/bitrate — the hero's media badge). Both ride
-/// the ONE version (see `plex::Metadata::primary_media`), and both are borrowed from a show's
-/// first episode by the same call in `fetch_item_streams`, so they can't describe different files.
+/// the ONE version (see `plex::Metadata::media_version`), and both are borrowed from a show's
+/// hero episode by the same call in `backfill_episode`, so they can't describe different files.
 fn parse_streams(it: &plx_plex::plex::Metadata, d: &mut Detail) {
-    if let Some(m) = it.primary_media() {
+    d.version_parts = if crate::pms::versions_of(it).is_empty() { Vec::new() } else { version_parts_of(it) };
+    if let Some(m) = it.media_version(None).map(|(_, m)| m) {
         d.video_resolution = m.video_resolution.clone();
         d.width = m.width;
         d.height = m.height;
@@ -2343,7 +2723,7 @@ fn parse_streams(it: &plx_plex::plex::Metadata, d: &mut Detail) {
         d.container = m.container.clone();
         d.aspect_ratio = m.aspect_ratio;
     }
-    if let Some(p) = it.first_part() {
+    if let Some(p) = it.default_part() {
         d.file = p.file.clone();
         d.size = p.size;
         // The PART's container wins where it has one — a version can hold parts in different
@@ -2387,6 +2767,11 @@ pub struct PlayingItem {
     /// The show's ratingKey when this is an episode (`grandparentRatingKey`), else empty — what
     /// the resolve asks the show's own language settings of (`route::plan::build_stream`).
     pub show_rk: String,
+    /// The played item's own Plex type (`movie` | `episode` | `track` | `clip` | ...), empty when
+    /// the server sent none. Read from the same `type` the detail page's [`Detail::kind`] reads.
+    pub kind: String,
+    /// Positive PMS item duration for the selected leaf, in milliseconds. Missing stays unknown.
+    pub duration_ms: Option<u64>,
     pub audio: Vec<Stream>,
     pub subs: Vec<Stream>,
     pub video_fps: f64, // the played leaf's video fps (0 = unknown) — feeds the Load esInfo
@@ -2397,22 +2782,24 @@ pub struct PlayingItem {
     /// `/decision` (issue #22's over-claim class — docs/plex-pass-audit.md, closing section).
     pub width: i64,
     pub height: i64,
-    /// Whole-file bitrate in kbps (`Media[0].bitrate`). Auto uses this—not merely the video
+    /// Whole-file bitrate in kbps of the version that plays (`Media[0]`'s unless another version was
+    /// fetched). Auto uses this—not merely the video
     /// stream's rate—when deciding whether a remote connection has enough headroom to carry the
     /// original file, because the transport also has to carry audio and container overhead.
     pub bitrate: i64,
+    pub video_kbps: i64,
     /// The played leaf's Dolby Vision layering — the direct-play gate's other refusal, beside the
     /// frame size above and for the same reason: the local fallback never asks PMS, so a file
-    /// whose base layer we cannot display correctly (Profile 5, or a dual-layer Profile 7) would
-    /// otherwise be fed to the decoder verbatim and shown in the wrong colours. See [`Dovi`].
+    /// whose base layer we cannot display correctly (Profile 5, or a dual layer the feed path does
+    /// not convert to Profile 8.1) would otherwise be fed to the decoder verbatim and shown in the
+    /// wrong colours. See [`Dovi`].
     pub dovi: Dovi,
     pub markers: Vec<Marker>, // intro / credits segments — the in-player Skip prompt
     pub chapters: Vec<Chapter>, // chapter boundaries — the in-player Chapters tab/strip
-    /// The played leaf's own `UltraBlurColors` corners (tl, tr, br, bl), or `None` when the server
-    /// sent no usable envelope. What the player's panels dim WITH: GL cannot read the video plane,
-    /// so this is the one honest source of "the light under the panel" there
-    /// (`screen::Scrim::over_video`).
-    pub blur: Option<[[f32; 3]; 4]>,
+    /// The played leaf's video stream is HDR: a PQ or HLG transfer, or Dolby Vision
+    /// (`convert_streams`' `hdr`). The SOURCE's fact, not the picture's: a server re-encode to SDR
+    /// keeps it true, so the HDR overlay dim also asks the route (`route::overlay_gain`).
+    pub hdr: bool,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2424,16 +2811,19 @@ impl PlayingItem {
             sid: plx_plex::plex::ServerId::from_raw(0),
             rk: "rk".into(),
             show_rk: String::new(),
+            kind: String::new(),
+            duration_ms: None,
             audio: Vec::new(),
             subs,
             video_fps: 0.0,
             width: 0,
             height: 0,
             bitrate: 0,
+            video_kbps: 0,
             dovi: Default::default(),
             markers: Vec::new(),
             chapters: Vec::new(),
-            blur: None,
+            hdr: false,
         }
     }
 }
@@ -2471,32 +2861,116 @@ fn cached_playing(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str
             sid,
             rk: rk.to_string(),
             show_rk: d.show_rk.clone(),
+            kind: d.kind.clone(),
+            duration_ms: u64::try_from(d.dur_ms).ok().filter(|ms| *ms > 0),
             audio: d.audio.clone(),
             subs: d.subs.clone(),
             video_fps: d.video_fps,
             width: d.width,
             height: d.height,
             bitrate: d.bitrate,
+            video_kbps: d.video.as_ref().map_or(0, |v| v.bitrate),
             dovi: d.dovi,
             markers: d.markers.clone(),
             chapters: d.chapters.clone(),
-            blur: d.has_blur.then_some(d.blur),
+            hdr: d.hdr,
         })
 }
 
-/// `sid` names the server `rk` is a key on. It runs on the resolve worker, so the server must
-/// arrive by value: `client_opt()` here would fetch whichever server is CURRENT, and a ratingKey
-/// that also exists there would come back with a different film's stream list.
-pub fn fetch_playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> Option<PlayingItem> {
+/// `client` is the caller's own client for `sid`, the server `rk` is a key on. It runs on the
+/// resolve worker, so the server must arrive by value: `client_opt()` here would fetch whichever
+/// server is CURRENT, and a ratingKey that also exists there would come back with a different
+/// film's stream list. `sid` rides along for the identity the parsed rows carry.
+///
+/// `want` is the version the viewer picked (`None`: the default). The store is built from THAT
+/// version's part, and the [`PlayedVersion`] beside it names the part key, codecs and
+/// `mediaIndex` the route must use with it, so no reader mixes version 0's part with version N's
+/// streams. A picked version the answer no longer lists falls back to the default with no
+/// `PlayedVersion`, and the caller logs it.
+pub fn fetch_playing_item(
+    client: &'static plx_plex::plex::Client,
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    want: Option<plx_plex::plex::MediaId>,
+) -> Option<(PlayingItem, Option<PlayedVersion>)> {
+    fetch_playing_item_choosing(client, sid, rk, |_| want)
+}
+
+pub fn fetch_playing_item_choosing(
+    client: &'static plx_plex::plex::Client,
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    choose: impl FnOnce(&plx_plex::plex::Metadata) -> Option<plx_plex::plex::MediaId>,
+) -> Option<(PlayingItem, Option<PlayedVersion>)> {
     if rk.is_empty() {
         return None;
     }
-    let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk));
-    playing_item_from_metadata(sid, rk, it.as_ref())
+    let it = client.metadata(rk);
+    let want = it.as_ref().and_then(choose);
+    Some(playing_version_from(sid, rk, it.as_ref(), want))
 }
 
-/// Interpret the same metadata shape from an authoritative playback decision.
-pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_plex::plex::Metadata>) -> Option<PlayingItem> {
+/// The version a play resolved to: its position in `Media[]` (the transcoder's `mediaIndex`), its
+/// identity and the part and codecs a play of it is built from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayedVersion {
+    pub index: usize,
+    pub id: plx_plex::plex::MediaId,
+    pub part: String,
+    pub vcodec: String,
+    pub acodec: String,
+}
+
+/// [`fetch_playing_item`]'s pure half.
+pub fn playing_version_from(
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    it: Option<&plx_plex::plex::Metadata>,
+    want: Option<plx_plex::plex::MediaId>,
+) -> (PlayingItem, Option<PlayedVersion>) {
+    let picked = want.and_then(|id| it.and_then(|it| it.media_version(Some(id))));
+    let media = picked.map(|(_, m)| m).or_else(|| it.and_then(|it| it.media_version(None)).map(|(_, m)| m));
+    let played = picked.map(|(index, m)| PlayedVersion {
+        index,
+        id: m.id,
+        part: m.part.first().map(|p| p.key.clone()).unwrap_or_default(),
+        vcodec: m.video_codec.clone(),
+        acodec: m.audio_codec.clone(),
+    });
+    (playing_item_of(sid, rk, it, media), played)
+}
+
+#[cfg(test)]
+#[test]
+fn selected_part_duration_precedes_item_duration_and_unknown_stays_unknown() {
+    let item: plx_plex::plex::Metadata = serde_json::from_str(
+        r#"{"duration":600000,"Media":[{"id":1,"Part":[{"key":"/first","duration":500000}]},{"id":2,"Part":[{"key":"/second","duration":450000}]}]}"#,
+    ).expect("PMS item fixture");
+    let sid = plx_plex::plex::ServerId::from_raw(0);
+    let (selected, _) = playing_version_from(sid, "item", Some(&item), Some(plx_plex::plex::MediaId(2)));
+    assert_eq!(selected.duration_ms, Some(450_000));
+    let unknown: plx_plex::plex::Metadata = serde_json::from_str(
+        r#"{"Media":[{"id":2,"Part":[{"key":"/second"}]}]}"#,
+    ).expect("PMS item without duration");
+    let (selected, _) = playing_version_from(sid, "item", Some(&unknown), Some(plx_plex::plex::MediaId(2)));
+    assert_eq!(selected.duration_ms, None);
+}
+
+/// The conversion half of [`fetch_playing_item`] for the default version, pure so the parse is
+/// testable without a server.
+#[cfg(test)]
+fn playing_item_from(sid: plx_plex::plex::ServerId, rk: &str, it: Option<&plx_plex::plex::Metadata>) -> PlayingItem {
+    playing_version_from(sid, rk, it, None).0
+}
+
+/// The played item's streams, markers, chapters, frame size and type, given the server's item
+/// and the version being played.
+fn playing_item_of(
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    it: Option<&plx_plex::plex::Metadata>,
+    media: Option<&plx_plex::plex::Media>,
+) -> PlayingItem {
     // Markers and chapters hang off the ITEM, streams off its first Part — so a part-less response
     // still yields both of those instead of discarding all three. `Client::metadata` already sends
     // `includeChapters=1` (plex/library.rs), so the Chapter[] is on the wire either way: taking it
@@ -2509,40 +2983,39 @@ pub fn playing_item_from_metadata(sid: plx_plex::plex::ServerId, rk: &str, it: O
         .as_ref()
         .map(|it| convert_chapters(&it.chapter))
         .unwrap_or_default();
-    let st = it
-        .as_ref()
-        .and_then(|it| it.first_part().map(|p| convert_streams(&p.stream)))
+    let st = media
+        .and_then(|m| m.part.first().map(|p| convert_streams(&p.stream)))
         .unwrap_or_default();
-    let (audio, subs, video_fps, dovi) = (st.audio, st.subs, st.fps, st.dovi);
+    let video_kbps = st.video.as_ref().map_or(0, |v| v.bitrate);
+    let (audio, subs, video_fps, dovi, hdr) = (st.audio, st.subs, st.fps, st.dovi, st.hdr);
     let show_rk = it
         .as_ref()
         .map(|it| it.grandparent_rating_key.clone())
         .unwrap_or_default();
-    // the frame size rides the same PRIMARY version the streams come from (route.rs's
+    // the frame size rides the same version the streams come from (route.rs's
     // direct-play gate tests it against the device bound — see the field doc)
-    let (width, height, bitrate) = it
-        .as_ref()
-        .and_then(|it| it.primary_media().map(|m| (m.width, m.height, m.bitrate)))
-        .unwrap_or((0, 0, 0));
-    let blur = it
-        .as_ref()
-        .and_then(|it| it.ultra_blur_colors)
-        .and_then(|u| u.corners());
-    Some(PlayingItem {
+    let (width, height, bitrate) = media.map_or((0, 0, 0), |m| (m.width, m.height, m.bitrate));
+    let kind = it.map(|it| it.kind.clone()).unwrap_or_default();
+    PlayingItem {
         sid,
         rk: rk.to_string(),
         show_rk,
+        kind,
+        duration_ms: media.and_then(|m| m.part.first())
+            .and_then(|part| u64::try_from(part.duration).ok()).filter(|ms| *ms > 0)
+            .or_else(|| it.and_then(|it| u64::try_from(it.duration).ok()).filter(|ms| *ms > 0)),
         audio,
         subs,
         video_fps,
         width,
         height,
         bitrate,
+        video_kbps,
         dovi,
         markers,
         chapters,
-        blur,
-    })
+        hdr,
+    }
 }
 
 /// Retire BOTH descriptions of the item that was playing, together.
@@ -2636,7 +3109,7 @@ pub fn audio_ordinal(audio: &[Stream], i: usize) -> i32 {
 }
 
 /// The external subtitle the SERVER already has selected for this part and that this client can
-/// draw itself — the one `player::sidecar::restore_server_selection` switches on at a direct-play
+/// draw itself — the one `player::sidecar::restore_selection` switches on at a direct-play
 /// landing. ONE definition, because two readers must agree on it: the restore that turns it on,
 /// and `route::subtitle_effect_of`, which the Plex Pass audio enhancement (issue #266 I6) reads to
 /// tell an unaffected sidecar apart from an embedded subtitle a remux would drop (M4/M7). A route
@@ -2988,23 +3461,26 @@ mod lang_matches_tests {
     }
 }
 
-/// fetch one item's full metadata and parse its streams into `d` — used to borrow a
-/// show's first-episode audio/subtitle tracks (the show container carries none).
-fn fetch_item_streams(sid: plx_plex::plex::ServerId, rk: &str, d: &mut Detail) {
-    if let Some(it) = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk)) {
-        parse_streams(&it, d);
+/// Install the hero episode's primary stream facts and the complete list of alternate versions.
+fn backfill_episode(d: &mut Detail, rk: String, it: &plx_plex::plex::Metadata) {
+    if it.default_part().is_none() { return; }
+    parse_streams(it, d);
+    let versions = crate::pms::versions_of(it);
+    if d.episodes.position(&rk).and_then(|i| d.episodes.get(i)).is_some_and(|ep| ep.versions != versions) {
+        d.episodes.edit(&rk, |ep| ep.versions = versions);
     }
+    d.episode_streams = EpisodeStreams::Loaded(rk);
 }
 
-fn fetch_seasons(sid: plx_plex::plex::ServerId, rk: &str) -> Vec<Season> {
-    let mc = match plx_plex::plex::client_for(sid).and_then(|c| c.children(rk)) {
+fn fetch_seasons(client: &'static plx_plex::plex::Client, rk: &str) -> Vec<Season> {
+    let mc = match client.children(rk) {
         Some(m) => m,
         None => {
             // The empty Vec is the deliberate degrade (see `fetch_episodes`'s note), but by the
             // time `fetch_full` prints `seasons=` the refusal and a show that genuinely has no
             // seasons are the same zero — so the refusal has to say so HERE, or the log records a
             // failed GET as a fact about the library.
-            plx_base::eventlog::log(&format!("detail: rk={rk} — no season list (server unresolved, or it refused); the seasons= below is that, not a count"));
+            plx_base::eventlog::log(&format!("detail: rk={rk} — no season list (the server refused or did not answer); the seasons= below is that, not a count"));
             return Vec::new();
         }
     };
@@ -3030,9 +3506,37 @@ fn fetch_seasons(sid: plx_plex::plex::ServerId, rk: &str) -> Vec<Season> {
 /// NB its siblings `fetch_seasons`/`fetch_related` deliberately KEEP the degrade-to-empty: both are
 /// only ever called from `fetch_full`, which builds a Detail from nothing — there is no previous
 /// list there to protect, and neither is worth failing the whole page over.
-fn fetch_episodes(sid: plx_plex::plex::ServerId, season_rk: &str) -> Option<Vec<Episode>> {
-    let mc = plx_plex::plex::client_for(sid)?.children(season_rk)?;
-    Some(mc.metadata.iter().map(convert_episode).collect())
+///
+/// Page 0 of a season only: a short season is that one request and a complete list (which encodes
+/// as the plain array it always did); a long one lands with its other pages as holes, and
+/// [`MetadataCmd::WantEpisodes`] fetches them as the screen reaches them.
+///
+/// `client` is the one the runner resolved for the job (`StoreRunner`), or the one the detail chain
+/// was handed: this read asks no registry.
+fn fetch_episodes(client: &'static plx_plex::plex::Client, season_rk: &str) -> Option<EpisodeList> {
+    let mc = client.children_paged(season_rk, 0, EPISODE_PAGE as i64)?;
+    let rows = episode_window(&mc, 0);
+    let mut list = EpisodeList::with_total((mc.total_size.max(0) as usize).max(rows.len()));
+    list.set_page(0, rows);
+    Some(list)
+}
+
+/// One window of a season, or **None when the GET failed**.
+fn fetch_episode_page(client: &'static plx_plex::plex::Client, season_rk: &str, page: usize) -> Option<Vec<Episode>> {
+    let start = page * EPISODE_PAGE;
+    let mc = client.children_paged(season_rk, start as i64, EPISODE_PAGE as i64)?;
+    Some(episode_window(&mc, start))
+}
+
+/// The rows of the window asked for at `start`. A server that ignores `X-Plex-Container-Start/Size`
+/// answers with the whole season from index 0: keep the page that was asked for and drop the rest.
+fn episode_window(mc: &plx_plex::plex::MediaContainer, start: usize) -> Vec<Episode> {
+    let rows = mc.metadata.iter().map(convert_episode);
+    if mc.metadata.len() > EPISODE_PAGE {
+        rows.skip(start).take(EPISODE_PAGE).collect()
+    } else {
+        rows.collect()
+    }
 }
 
 /// One `/children` row → an [`Episode`]. Split out of [`fetch_episodes`] so the wire → model
@@ -3040,11 +3544,11 @@ fn fetch_episodes(sid: plx_plex::plex::ServerId, season_rk: &str) -> Option<Vec<
 /// derivation nothing can exercise is how `viewCount` came to be parsed at
 /// `plex/models.rs` and then dropped on the floor here for the whole life of the episode row.
 fn convert_episode(x: &plx_plex::plex::Metadata) -> Episode {
-    let media0 = x.media.first();
+    let media0 = x.media_version(None).map(|(_, m)| m);
     Episode {
         rk: x.rating_key.clone(),
         index: x.index,
-        season: x.parent_index,
+        season: x.parent_index.unwrap_or(0),
         title: x.title.clone(),
         summary: x.summary.clone(),
         aired: x.originally_available_at.clone(),
@@ -3055,10 +3559,11 @@ fn convert_episode(x: &plx_plex::plex::Metadata) -> Episode {
         // the same rule `fetch_detail` applies to a movie. (A show/season instead compares
         // `viewedLeafCount` to `leafCount`; an episode is a leaf and has neither.)
         watched: x.view_count > 0,
-        part: x.first_part().map(|p| p.key.clone()).unwrap_or_default(),
+        part: x.default_part().map(|p| p.key.clone()).unwrap_or_default(),
         rating: x.content_rating.clone(),
         vcodec: media0.map(|m| m.video_codec.clone()).unwrap_or_default(),
         acodec: media0.map(|m| m.audio_codec.clone()).unwrap_or_default(),
+        versions: crate::pms::versions_of(x),
     }
 }
 
@@ -3068,11 +3573,11 @@ fn convert_extra(x: &plx_plex::plex::Metadata) -> Extra {
         title: x.title.clone(),
         subtype: x.subtype.clone(),
         extra_type: x.extra_type,
-        part: x.first_part().map(|p| p.key.clone()).unwrap_or_default(),
-        vcodec: x.primary_media().map(|m| m.video_codec.clone()).unwrap_or_default(),
-        acodec: x.primary_media().map(|m| m.audio_codec.clone()).unwrap_or_default(),
+        part: x.default_part().map(|p| p.key.clone()).unwrap_or_default(),
+        vcodec: x.media_version(None).map(|(_, m)| m.video_codec.clone()).unwrap_or_default(),
+        acodec: x.media_version(None).map(|(_, m)| m.audio_codec.clone()).unwrap_or_default(),
         dur_ms: x.duration,
-        bitrate: x.primary_media().map(|m| m.bitrate).unwrap_or(0),
+        bitrate: x.media_version(None).map(|(_, m)| m.bitrate).unwrap_or(0),
         thumb: x.thumb.clone(),
     }
 }
@@ -3092,7 +3597,7 @@ fn is_trailer_meta(x: &plx_plex::plex::Metadata) -> bool {
 }
 
 fn playable_trailer_meta(x: &plx_plex::plex::Metadata) -> bool {
-    is_trailer_meta(x) && x.first_part().is_some_and(|p| !p.key.is_empty())
+    is_trailer_meta(x) && x.default_part().is_some_and(|p| !p.key.is_empty())
 }
 
 /// Picker winner: a playable trailer, preferring `primaryExtraKey`, else first in server order.
@@ -3129,17 +3634,17 @@ fn trailer_from_item(it: &plx_plex::plex::Metadata) -> Option<Extra> {
     playable_trailer_meta(it).then(|| convert_extra(it))
 }
 
-fn fetch_primary_trailer(sid: plx_plex::plex::ServerId, primary: &str) -> Option<Extra> {
+fn fetch_primary_trailer(client: &'static plx_plex::plex::Client, primary: &str) -> Option<Extra> {
     let rk = extra_key_tail(primary);
     if rk.is_empty() {
         return None;
     }
-    let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk))?;
+    let it = client.metadata(rk)?;
     trailer_from_item(&it)
 }
 
-fn fetch_extras_rows(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Vec<plx_plex::plex::Metadata>> {
-    match plx_plex::plex::client_for(sid).and_then(|c| c.extras(rk)) {
+fn fetch_extras_rows(client: &'static plx_plex::plex::Client, rk: &str) -> Option<Vec<plx_plex::plex::Metadata>> {
+    match client.extras(rk) {
         Some(mc) => Some(mc.metadata),
         None => {
             plx_base::eventlog::log(&format!(
@@ -3153,7 +3658,7 @@ fn fetch_extras_rows(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Vec<plx_
 /// Resolve the Trailer control's extra. At most one follow-up `metadata()` when every trailer
 /// row arrived without a Part; never N+1 over the rest of the list.
 fn resolve_trailer(
-    sid: plx_plex::plex::ServerId,
+    client: &'static plx_plex::plex::Client,
     rows: &[plx_plex::plex::Metadata],
     primary: &str,
 ) -> Option<Extra> {
@@ -3161,19 +3666,16 @@ fn resolve_trailer(
         return Some(e);
     }
     let candidate = trailer_fill_candidate(rows, primary)?;
-    let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(&candidate.rating_key))?;
+    let it = client.metadata(&candidate.rating_key)?;
     let e = convert_extra(&it);
     e.playable().then_some(e)
 }
 
-/// Shelf cap. The extras element range is the same number, so a dropped tail is never a tile
-/// the page promised and then could not focus.
-const EXTRAS_MAX: usize = 32;
-
+/// Every extras row with a key, in server order. The shelf is the whole list: a tile the server
+/// sent is a tile the page shows, and the trailer picker reads the same list.
 fn extras_from_rows(rows: &[plx_plex::plex::Metadata]) -> Vec<Extra> {
     rows.iter()
         .filter(|x| !x.rating_key.is_empty())
-        .take(EXTRAS_MAX)
         .map(convert_extra)
         .collect()
 }
@@ -3182,12 +3684,12 @@ fn extras_from_rows(rows: &[plx_plex::plex::Metadata]) -> Vec<Extra> {
 /// fills a missing Part replaces that row so the shelf tile and the Trailer disc agree.
 fn project_extras(
     d: &mut Detail,
-    sid: plx_plex::plex::ServerId,
+    client: &'static plx_plex::plex::Client,
     rows: &[plx_plex::plex::Metadata],
     primary: &str,
 ) {
     d.extras = extras_from_rows(rows);
-    let Some(winner) = resolve_trailer(sid, rows, primary) else {
+    let Some(winner) = resolve_trailer(client, rows, primary) else {
         d.trailer_rk.clear();
         return;
     };
@@ -3195,40 +3697,21 @@ fn project_extras(
         if !slot.playable() {
             *slot = winner.clone();
         }
-    } else if d.extras.len() < EXTRAS_MAX {
-        d.extras.insert(0, winner.clone());
     } else {
-        // The winner can be ANY row in server order — `extras_from_rows` already capped the
-        // shelf to `EXTRAS_MAX` before this ran, so a `primaryExtraKey` past that cut would
-        // otherwise leave `trailer_rk` naming a key `d.extras` never carries. `Detail::trailer()`
-        // would then silently fall back to the first playable trailer among the 32 KEPT rows
-        // (or find none), which is not the server's own answer. The winner earns a guaranteed
-        // slot; the shelf's own last tile pays for it instead of the picker's contract.
-        d.extras.pop();
+        // The winner is one of `rows`, so it is normally on the shelf already. Only a row the
+        // shelf filters out (an empty key) can be missing, and `trailer_rk` must still name a
+        // key `d.extras` carries, or `Detail::trailer()` falls back to another trailer.
         d.extras.insert(0, winner.clone());
     }
     d.trailer_rk = winner.rk;
 }
 
-fn fetch_related(sid: plx_plex::plex::ServerId, rk: &str) -> RelatedRows {
-    let mc = match plx_plex::plex::client_for(sid).and_then(|c| c.related(rk)) {
-        Some(m) => m,
-        None => {
-            // Same shape as `fetch_seasons` above: the degrade is deliberate, the silence is not —
-            // an item with no related hub and a refused GET both reach `fetch_full`'s `related=0`.
-            plx_base::eventlog::log(&format!(
-                "detail: rk={rk} /related did not answer — the related= below is that refusal"
-            ));
-            return RelatedRows::default();
-        }
-    };
-    related_rows(&mc, sid, rk)
+/// `None` when the GET did not answer: the caller words that refusal ([`fetch_full`]), because it
+/// runs beside the item's own GET and only the caller knows whether the item exists.
+fn fetch_related(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::ServerId, rk: &str) -> Option<RelatedRows> {
+    let mc = client.related(rk)?;
+    Some(related_rows(&mc, sid, rk))
 }
-
-/// Related tiles this shelf holds at most. PMS answers `/related` with several titled hubs and we
-/// concatenate them, so without a cap a well-connected film can carry a hundred rows into a strip
-/// that shows six.
-const RELATED_MAX: usize = 20;
 
 /// `/related`'s response for item `rk` → the page's collection shelf and Related row. **PURE**,
 /// split out of [`fetch_related`] so the things that can be wrong here are host-testable: which
@@ -3252,6 +3735,7 @@ fn related_rows(mc: &plx_plex::plex::MediaContainer, sid: plx_plex::plex::Server
         seen.extend(h.metadata.iter().map(|x| x.rating_key.clone()));
     }
     let collection = own.and_then(|i| collection_shelf(&mc.hub[i], sid, rk));
+    let mut tail = RelatedTail { exclude: seen.iter().cloned().collect(), ..Default::default() };
     let mut out = Vec::new();
     for (i, h) in mc.hub.iter().enumerate() {
         if Some(i) == own {
@@ -3268,17 +3752,42 @@ fn related_rows(mc: &plx_plex::plex::MediaContainer, sid: plx_plex::plex::Server
             // worker reads no statics, because "the current server" can change while a fetch is in
             // flight and the rows in hand belong to the machine that was asked.
             out.push(crate::pms::parse_item(x, sid));
-            if out.len() >= RELATED_MAX {
-                return RelatedRows { collection, related: out };
-            }
+        }
+        // What lies behind the preview. The preview is the exact head of the listing (probed), so
+        // the tail starts at its length, counted raw: filtering does not move listing offsets.
+        let preview = h.metadata.len();
+        if !(h.more || h.total() > preview) {
+            continue;
+        }
+        if plx_plex::plex::is_pageable_hub_key(&h.key) {
+            let len = (h.total() > preview).then(|| h.total() - preview);
+            tail.hubs.push(TailHub { key: h.key.clone(), preview, len });
+        } else {
+            // A shape the pager does not read: the hub keeps its preview. Logged by shape, so a new
+            // kind of key is noticed.
+            tail.unadmitted += 1;
+            plx_base::eventlog::log(&format!(
+                "detail: related hub key not pageable, keeping its preview: {}", key_shape(&h.key)
+            ));
         }
     }
-    RelatedRows { collection, related: out }
+    tail.head = out.len();
+    tail.more = !tail.hubs.is_empty();
+    RelatedRows { collection, related: out, tail }
+}
+
+/// A hub key with its ids and query removed, for the log: `/library/metadata/N/extras`.
+fn key_shape(key: &str) -> String {
+    let path = key.split_once('?').map_or(key, |(path, _)| path);
+    path.split('/')
+        .map(|part| if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) { "N" } else { part })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// One `collection.related.*` hub → the collection shelf, or `None` when the item is the
 /// collection's only listed member: a shelf of the page's own poster is no way to a collection.
-/// Members keep server order, the item's own tile included, capped at [`COLLECTION_MAX`].
+/// Members keep server order, the item's own tile included, capped at [`COLLECTION_PREVIEW`].
 fn collection_shelf(
     h: &plx_plex::plex::Hub,
     sid: plx_plex::plex::ServerId,
@@ -3298,7 +3807,7 @@ fn collection_shelf(
     // sent one, else every member it listed — both before the shelf's cap.
     let count = h.total().max(listed.len());
     let members: Vec<Related> = listed.into_iter()
-        .take(COLLECTION_MAX)
+        .take(COLLECTION_PREVIEW)
         .map(|x| crate::pms::parse_item(x, sid))
         .collect();
     if members.iter().all(|m| m.rk == rk) {
@@ -3309,20 +3818,77 @@ fn collection_shelf(
     Some(CollectionShelf { title: h.title.clone(), section, tag, members, count })
 }
 
+/// A show's season list and the episodes of the season the page opens on (`Detail::cur_season`).
+///
+/// The season is chosen HERE, in the fetch, and its episodes are loaded in the same pass: picking
+/// it later (a `LoadSeason` once the page landed) would flash season 1's row first and spend a
+/// round trip fetching episodes nobody looks at.
+fn load_show_seasons(client: &'static plx_plex::plex::Client, rk: &str, d: &mut Detail, prefer: Option<i64>) {
+    d.seasons = fetch_seasons(client, rk);
+    d.cur_season = initial_season(&d.seasons, d.on_deck.as_ref(), prefer);
+    if let Some(season) = d.seasons.get(d.cur_season) {
+        // a season failure is not worth failing the whole page over — the hero, cast
+        // and Related still load, and there is no previous list here to protect. It is still
+        // named, because the `eps=` in the summary line cannot tell it from a season with no episodes.
+        d.episodes = fetch_episodes(client, &season.rk).unwrap_or_else(|| {
+            plx_base::eventlog::log(&format!(
+                "detail: rk={rk} season rk={} /children did not answer — the eps= below is that refusal",
+                season.rk));
+            EpisodeList::default()
+        });
+    }
+}
+
+/// Which season (a POSITION in `seasons`) a freshly read show opens on: the season whose number
+/// `prefer` names, else the season of the server's on-deck episode (where the viewer left off),
+/// else the first. Matched by `Season::index`, the season NUMBER — never by list position: the
+/// list can start at a Specials season 0 or skip a number. A number the list does not hold falls
+/// through to the next rule, so a stale preference or an on-deck from a season the server no
+/// longer lists degrades to the first season, as a show with no on-deck always did.
+///
+/// `prefer` is the season the viewer has selected on THIS show's page when the read is a refresh
+/// of it (see [`selected_season_number`]); it outranks the on-deck so a re-read — a watched toggle,
+/// a return from the player — never moves the tab out from under someone browsing season 4.
+fn initial_season(seasons: &[Season], on_deck: Option<&Episode>, prefer: Option<i64>) -> usize {
+    let position_of = |number: i64| seasons.iter().position(|s| s.index == number);
+    prefer
+        .and_then(position_of)
+        .or_else(|| on_deck.and_then(|e| position_of(e.season)))
+        .unwrap_or(0)
+}
+
+/// The number of the season selected on the loaded page, when that page is `(sid, rk)` itself.
+///
+/// Read on the MAIN thread at request time and handed to the worker: the worker must not read
+/// `state` (see the fetch block's note). `None` for any other item — a first open takes the
+/// on-deck season, and the old page's season says nothing about this show.
+fn selected_season_number(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str) -> Option<i64> {
+    let d = state.current.as_ref().filter(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, rk)))?;
+    d.seasons.get(d.cur_season).map(|s| s.index)
+}
+
 /// The full detail fetch for `rk` (movie or show): item metadata + cast + streams, plus — for
-/// shows — seasons, the first season's episodes and its stream backfill, plus the related hub.
-/// 2 PMS round-trips for a movie, 5 for a show.
+/// shows — seasons, the opening season's episodes ([`initial_season`]) and a stream backfill, plus
+/// the related hub.
+/// Round trips one after another: 2 for a movie (the item, with Related beside it; then extras,
+/// beside what is left of Related); for a show the item, then its seasons, then the opening
+/// season's episodes, with Related, the on-deck episode and extras beside them (a show nobody has
+/// started reads its first episode after those).
+///
+/// Every GET goes through `client`, the one the runner resolved for the job
+/// ([`finish_detail_fetch`]), the opening season's episodes included.
 ///
 /// PURE NETWORK + PARSING — it touches no `static mut`, which is what let it run either on the
-/// main thread or on a worker ([`request_detail`]) while a synchronous caller still existed
-/// (phase 12/D7 deleted the last one, `load_detail_now`; see that deletion's note below). Keep it
+/// main thread or on a worker (the app's `StoreRunner`, from the job [`request_detail`] emits)
+/// while a synchronous caller still existed (phase 12/D7 deleted the last one, `load_detail_now`;
+/// see that deletion's note below). Keep it
 /// that way: installing the result is the caller's job, and on the async path that must happen on
 /// the main thread (see the `DETAIL_LANDING`/`land_detail` note).
-fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Detail> {
+pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>, source_override: Option<String>) -> Option<Detail> {
     // `ms=` is the whole chain's wall clock. It is the exact cost `request_detail` moves off the
     // SDL loop, so it is the number to read when judging whether a call site can afford to block
     // — note the framedrop breakdown CANNOT show it (fd_pc0 starts after event handling).
-    let t0 = std::time::Instant::now();
+    let t0 = crate::instruments::start();
     // The ONE line that says a detail page was asked for and got nothing — the summary at the end
     // of this function prints on success only, and nothing downstream can speak for the failure.
     // Its worst shape is the page opened through `detail::open_rk`, which clears before requesting:
@@ -3332,38 +3898,54 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Detail> {
     // but all four are equally silent in the log without this, and byte-identical to the user
     // never having pressed OK.
     //
-    // Worded as "no metadata" rather than "the GET failed": `fetch_detail` is
-    // `client_for(sid)?.metadata(rk)?`, so this arm is also taken when the server id resolves to no
-    // client at all and no request was ever issued. One line for both is right — the page is equally
-    // empty either way — but it must not assert a round trip that may not have happened.
-    let Some((mut d, primary_extra_key)) = fetch_detail(sid, rk) else {
-        plx_base::eventlog::log(&format!(
-            "detail: rk={rk} sid={sid:?} — no metadata (server unresolved, or it refused)"
-        ));
-        return None;
-    };
-    if d.is_show {
-        d.seasons = fetch_seasons(sid, rk);
-        if let Some(s0) = d.seasons.first() {
-            // a first-season failure is not worth failing the whole page over — the hero, cast
-            // and Related still load, and there is no previous list here to protect. It is still
-            // named, because the `eps=` below cannot tell it from a season with no episodes.
-            d.episodes = fetch_episodes(sid, &s0.rk).unwrap_or_else(|| {
-                plx_base::eventlog::log(&format!(
-                    "detail: rk={rk} season rk={} /children did not answer — the eps= below is that refusal",
-                    s0.rk));
-                Vec::new()
-            });
-        }
+    // Worded as "no metadata" rather than "the GET failed": `fetch_detail` is `client.metadata(rk)?`,
+    // and `metadata` answers `None` for a transport failure, a non-2xx and an unparseable body alike.
+    // One line for all of them is right — the page is equally empty — but it must not assert which.
+    //
+    // Everything that needs nothing from the rest is asked beside it, on sibling threads of ONE
+    // scope (`plx_base::task::beside`), so the page waits for the slowest chain, not their sum:
+    // Related needs only the key, so it goes beside the item; extras and a show's on-deck episode
+    // need the item (its kind, its on-deck key) and go beside the seasons. The scope joins every
+    // sibling on every exit, the item-refused one included.
+    let (mut d, primary_extra_key, related, extras) = std::thread::scope(|s| {
+        let related = plx_base::task::beside(s, "detail-related", move || fetch_related(client, sid, rk));
+        let Some((mut d, primary_extra_key)) = fetch_detail(client, sid, rk) else {
+            plx_base::eventlog::log(&format!("detail: rk={rk} sid={sid:?} — no metadata (the server refused or did not answer)"));
+            // The Related request was asked before this was known; its answer is dropped unread —
+            // and so is its `/related did not answer` line (`fetch_related` returns the refusal
+            // instead of logging it), which would read as a fact about an item that never loaded.
+            return None;
+        };
+        d.source_override = source_override;
+        // Movie/show: the extras GET. Episode/season pages never show the Trailer control, so
+        // they must not pay extras I/O.
+        let extras = extras_wanted(&d.kind)
+            .then(|| plx_base::task::beside(s, "detail-extras", move || fetch_extras_rows(client, rk)));
         // A show carries no streams itself — backfill from ONE episode: the one the hero is
         // about, which is the one Play starts (`on_deck` when the show has been started, else
         // its first). Everything downstream reads this as "the show's" media, so borrowing from
         // a different episode than the button plays would have the chips, the About footer and
-        // "how this plays" describing a file the user is not about to watch.
-        let hero_ep = d.on_deck.as_ref().map(|e| e.rk.clone());
-        let ep = hero_ep.or_else(|| d.episodes.first().map(|e| e.rk.clone()));
-        if let Some(ep_rk) = ep {
-            fetch_item_streams(sid, &ep_rk, &mut d);
+        // "how this plays" describing a file the user is not about to watch. The on-deck episode is
+        // known from the item, so it is read beside the seasons; the first episode is known only
+        // once they land.
+        let on_deck = d.is_show.then(|| d.on_deck.as_ref().map(|e| e.rk.clone())).flatten()
+            .map(|ep| plx_base::task::beside(s, "detail-hero", move || client.metadata(&ep)));
+        if d.is_show {
+            load_show_seasons(client, rk, &mut d, prefer);
+            let deck_item = on_deck.and_then(|job| job.finish());
+            if let (Some(ep), Some(it)) = (&mut d.on_deck, &deck_item) {
+                ep.versions = crate::pms::versions_of(it);
+            }
+            if let Some(target) = d.play_episode().map(|e| e.rk.clone()) {
+                let streams = if d.on_deck.as_ref().is_some_and(|ep| ep.rk == target) {
+                    deck_item
+                } else {
+                    client.metadata(&target)
+                };
+                if let Some(it) = streams {
+                    backfill_episode(&mut d, target, &it);
+                }
+            }
             // NB `part`/`vcodec`/`acodec` are deliberately NOT backfilled. They are the item's OWN
             // playable file, and "a show has an empty part" is load-bearing elsewhere — `app.rs`'s
             // play trigger reads it as "this is a show, take the episode's resume point instead",
@@ -3372,36 +3954,30 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Detail> {
             // (`ui::detail::draw_play_mode`), which is also the only place that knows which
             // episode the button would start.
         }
-    }
-    // Movie/show: extras GET overlaps `/related` on a sibling thread so serial depth stays 2 / 5.
-    // Episode/season pages never show the Trailer control, so they must not pay extras I/O.
-    // Spawn failure omits the trailer rather than adding a serial extras hop behind related.
+        Some((d, primary_extra_key, related.finish(), extras.map(|e| e.finish())))
+    })?;
+    // Same shape as `fetch_seasons`: the degrade is deliberate, the silence is not — an item with
+    // no related hub and a refused GET both reach `related=0` below.
+    let related = related.unwrap_or_else(|| {
+        plx_base::eventlog::log(&format!("detail: rk={rk} /related did not answer — the related= below is that refusal"));
+        RelatedRows::default()
+    });
+    d.related = related.related;
+    d.related_tail = related.tail;
+    d.collection = related.collection;
     let extras_src: &'static str;
-    if extras_wanted(&d.kind) {
-        let (related, extras) = std::thread::scope(|s| {
-            let extras_h = std::thread::Builder::new()
-                .name("detail-extras".into())
-                .spawn_scoped(s, || fetch_extras_rows(sid, rk));
-            let related = fetch_related(sid, rk);
-            let extras = match extras_h {
-                Ok(h) => h.join().ok().flatten(),
-                Err(_) => None,
-            };
-            (related, extras)
-        });
-        d.related = related.related;
-        d.collection = related.collection;
+    if let Some(extras) = extras {
         match extras {
             Some(rows) => {
                 extras_src = "extras";
-                project_extras(&mut d, sid, &rows, &primary_extra_key);
+                project_extras(&mut d, client, &rows, &primary_extra_key);
             }
             None => {
                 // Refused extras GET: still try the parent's `primaryExtraKey` (one metadata GET)
                 // so a blip on `/extras` does not hide a trailer the parent already named.
                 // An empty extras *list* is a real answer and must not do this. The filled
                 // trailer is also the shelf's one tile.
-                if let Some(e) = fetch_primary_trailer(sid, &primary_extra_key) {
+                if let Some(e) = fetch_primary_trailer(client, &primary_extra_key) {
                     d.trailer_rk = e.rk.clone();
                     d.extras = vec![e];
                     extras_src = "primary";
@@ -3412,9 +3988,6 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Detail> {
         }
     } else {
         extras_src = "skip";
-        let related = fetch_related(sid, rk);
-        d.related = related.related;
-        d.collection = related.collection;
     }
     // The item's IDENTITY and the SHAPE of what came back — never its title. `scrub_local` runs
     // on every line in every build, but nothing in a line distinguishes a programme title from
@@ -3425,7 +3998,7 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Detail> {
     plx_base::eventlog::log(&format!(
         "detail: sid={} rk={} show={} genres={} cast={} crew={} seasons={} eps={} related={} collection={} audio={} subs={} trailer={} extras={} ms={}",
         d.sid.raw(), d.rk, d.is_show, d.genres.len(), d.cast.len(), d.crew.len(), d.seasons.len(), d.episodes.len(),
-        d.related.len(), d.collection.as_ref().map_or(0, |c| c.members.len()), d.audio.len(), d.subs.len(), u8::from(d.trailer().is_some()), extras_src, t0.elapsed().as_millis()
+        d.related.len(), d.collection.as_ref().map_or(0, |c| c.members.len()), d.audio.len(), d.subs.len(), u8::from(d.trailer().is_some()), extras_src, crate::instruments::elapsed(t0).as_millis()
     ));
     Some(d)
 }
@@ -3445,9 +4018,9 @@ fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Detail> {
 
 // ---- async detail load ---------------------------------------------------------------------
 // Opening a detail page used to block the SDL loop on 2 (movie) to 5 (show) sequential PMS
-// round-trips, straight off the key handler. `request_detail` spawns the fetch and `pump_detail`
-// installs the result — the page mounts THIS frame on the catalog row's art/title/summary and
-// fills in a beat later. Same shape as the season mailbox below and route.rs's play resolve.
+// round-trips, straight off the key handler. `request_detail` emits the fetch as a job (the app's
+// `StoreRunner` starts it) and `pump_detail` installs the result — the page mounts THIS frame on
+// the catalog row's art/title/summary and fills in a beat later. Same shape as the season mailbox below and route.rs's play resolve.
 //
 // The worker MUST NOT write CURRENT. `current()` (via `MetadataView`) hands out a `&'a Detail`,
 // borrowed from the owner, that ~25 draw sites read within a frame, so a background store would
@@ -3481,16 +4054,48 @@ pub fn begin_detail_for_test(adapter: &MetadataAdapter, sid: plx_plex::plex::Ser
     gen
 }
 
+/// Put the season fetch in flight (`season_loading()` true) with no worker behind it, or settle it
+/// again: the state a tab press leaves between `LoadSeason` and the landing, for a test that needs
+/// the loading half of a screen's behaviour without a network fetch.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_season_loading_for_test(adapter: &MetadataAdapter, loading: bool) {
+    use std::sync::atomic::Ordering;
+    if loading {
+        adapter.season_gen.fetch_add(1, Ordering::SeqCst);
+    } else {
+        supersede_season(adapter);
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn detail_generation_for_test(adapter: &MetadataAdapter) -> u32 {
     adapter.detail_gen.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// How many detail reservations the adapter's landing holds: every request admitted and not yet
+/// answered and taken, a superseded one included (it keeps its slot until its fetch returns). A
+/// test that drives a runner reads it to prove a request's one answer handed its slot back.
 #[cfg(any(test, feature = "test-support"))]
-pub fn land_detail_for_test(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::ServerId, rk: &str, gen: u32, detail: Option<Detail>) -> bool {
+pub fn detail_inflight_for_test(adapter: &MetadataAdapter) -> u32 {
+    adapter.detail_landing_ref().inflight(detail_addr(0).to)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn land_detail_for_test(keys: &plx_plex::plex::ClientKeys, controlled: bool,
+    state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::ServerId, rk: &str, gen: u32, detail: Option<Detail>) -> bool {
     plx_base::testlock::assert_held("the detail store (land_detail_for_test)");
     land_detail(adapter, sid, rk, gen, detail);
-    pump_detail(state, adapter)
+    pump_detail(state, adapter, keys, controlled)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn alt_sources_owed_for_test(adapter: &MetadataAdapter) -> bool {
+    use std::sync::atomic::Ordering;
+    adapter.alt_gen.load(Ordering::SeqCst) != adapter.alt_done.load(Ordering::SeqCst)
+}
+#[cfg(any(test, feature = "test-support"))]
+pub fn alt_sources_ready_for_test(adapter: &MetadataAdapter) -> bool {
+    adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 fn detail_addr(gen: u32) -> plx_machine::machine::Addr {
@@ -3524,7 +4129,8 @@ fn land_detail(adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId, rk: &st
 }
 
 /// Mint the request: supersede the season, bump the generation, record what the page awaits
-/// and admit the request. The spawn is the caller's; a refused one is `refused` back.
+/// and admit the request. Starting the fetch is not this function's: [`request_detail`] emits it
+/// as a job, and a launch that then starts nothing is `DetailPort::refused` back.
 fn begin_detail_request(adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId, rk: &str) -> (
     u32, plx_machine::machine::Addr, Result<(), plx_machine::landing::AdmissionError>,
 ) {
@@ -3535,8 +4141,6 @@ fn begin_detail_request(adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId
     // DETAIL_DONE must stay behind so `detail_loading()` reports this fetch as in flight
     let gen = adapter.detail_gen.fetch_add(1, Ordering::SeqCst) + 1;
     record::cancel_all(adapter);
-    #[cfg(any(test, feature = "test-support"))]
-    adapter.run_superseded_detail_fetches();
     *adapter.detail_want.lock().unwrap_or_else(|e| e.into_inner()) = Some((sid, rk.to_string()));
     let addr = detail_addr(gen);
     let admission = record::admit(adapter, addr);
@@ -3549,35 +4153,83 @@ fn begin_detail_request(adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId
     (gen, addr, admission)
 }
 
-/// MAIN THREAD, NON-BLOCKING. Supersedes any in-flight load and spawns the fetch; the result
-/// lands via [`pump_detail`]. The caller mounts the detail page this same frame.
-///
-/// `sid` names the server to ask and is captured by the CALLER, on the main thread — the worker
-/// must not read the current server (see the fetch block's note), and the page being opened may
-/// belong to a machine that is not the current one at all.
-fn request_detail(adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::ServerId, rk: &str) {
-    request_detail_with_spawn(adapter, sid, rk, |gen| {
-        let rk = rk.to_string();
-        let adapter = std::sync::Arc::clone(adapter);
-        crate::stores::tape::admit(serde_json::json!({"store":"metadata",
-            "sid":sid.raw(),"rk":rk,"gen":gen,
-            "client":plx_plex::plex::client_for(sid).map(|c| c.instance_gen())}), || {
-            // See `MetadataAdapter::run_held_detail_fetches_for_test`: a test runs the fetch
-            // when it chooses, never on a thread racing its assertions.
-            #[cfg(any(test, feature = "test-support"))]
-            {
-                adapter.held_detail.lock().unwrap_or_else(|e| e.into_inner()).push((sid, rk, gen));
-                true
-            }
-            #[cfg(not(any(test, feature = "test-support")))]
-            plx_base::task::spawn_small("detail", move || {
-                finish_detail_fetch(&adapter, sid, &rk, gen, || fetch_full(sid, &rk));
-            })
-        })
-    });
+/// The detail fetch one `RequestDetail` asks for: everything the worker needs, captured on the
+/// main thread. `sid` names the server to ask and `prefer` is the season the page opens on (read
+/// from the store at request time, [`selected_season_number`]); the worker must not read either
+/// from the current server or the store (see the fetch block's note), and the page being opened
+/// may belong to a machine that is not the current one at all. The runner resolves `sid` to its
+/// client once, at the admission, and the whole chain runs through that client
+/// ([`finish_detail_fetch`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailReq {
+    pub sid: plx_plex::plex::ServerId,
+    pub rk: String,
+    pub prefer: Option<i64>,
 }
 
-/// Shared admission/spawn path; tests inject a spawn outcome without starting network workers.
+/// Where a detail fetch's ONE answer goes: the owner's landing, captured with the job when it was
+/// emitted. An owner that has since been `Reset` holds a new adapter, and this port still lands
+/// into the one the request was made from, the retired one nobody pumps. Two ports are equal when
+/// they reach the same adapter.
+#[derive(Clone)]
+pub struct DetailPort(std::sync::Arc<MetadataAdapter>);
+
+impl DetailPort {
+    pub(crate) fn of(adapter: &std::sync::Arc<MetadataAdapter>) -> Self {
+        Self(std::sync::Arc::clone(adapter))
+    }
+}
+
+impl PartialEq for DetailPort {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for DetailPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DetailPort({:p})", std::sync::Arc::as_ptr(&self.0))
+    }
+}
+
+impl plx_machine::job::Port<(DetailKey, Option<Detail>)> for DetailPort {
+    /// The fetch's answer (`None`: it failed). An answer for a superseded request only hands its
+    /// reservation back; [`pump_detail`]'s generation check discards it.
+    fn done(&self, addr: plx_machine::machine::Addr, (key, detail): (DetailKey, Option<Detail>)) {
+        land_detail(&self.0, key.0, &key.1, addr.req.0, detail);
+    }
+
+    /// The fetch was never started: the refusal record is what settles the spinner
+    /// ([`pump_detail`]), exactly one event for the request (§5.2).
+    fn refused(&self, addr: plx_machine::machine::Addr) {
+        record::refused(&self.0, addr);
+    }
+}
+
+/// MAIN THREAD, NON-BLOCKING. Supersedes any in-flight load and emits the fetch as a
+/// [`crate::stores::StoreJob::Detail`] on `state`'s outbox; the application starts it, and the
+/// result lands via [`pump_detail`]. The caller mounts the detail page this same frame.
+///
+/// `sid` names the server to ask and is captured by the CALLER, on the main thread: it travels in
+/// the job (see [`DetailReq`]).
+fn request_detail(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) {
+    let (_, addr, admission) = begin_detail_request(adapter, sid, rk);
+    // A request refused for capacity owns no worker and emits no job: `begin_detail_request` has
+    // already settled it synchronously, and nothing will ever answer it.
+    if admission.is_err() { return; }
+    state.jobs.push(crate::stores::StoreJob::Detail(
+        plx_machine::job::Job { addr, req: DetailReq { sid, rk: rk.to_string(), prefer } },
+        DetailPort::of(adapter),
+    ));
+}
+
+/// TEST ONLY: [`request_detail`] with the hand-off injected. `spawn` stands for the runner's
+/// launch of an admitted request and says whether anything was started; `false` takes the
+/// refusal path a runner takes when the tape does not admit a launch (`DetailPort::refused`).
+/// Production does not come through here: it emits the job and the app's runner owns the launch
+/// and the refusal, so this exists to let the data layer's mailbox tests inject either outcome
+/// without a thread.
+#[cfg(test)]
 fn request_detail_with_spawn(adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId, rk: &str, spawn: impl FnOnce(u32) -> bool) {
     let (gen, addr, admission) = begin_detail_request(adapter, sid, rk);
     if admission.is_err() { return; }
@@ -3588,13 +4240,48 @@ fn request_detail_with_spawn(adapter: &MetadataAdapter, sid: plx_plex::plex::Ser
     }
 }
 
-fn finish_detail_fetch(
-    adapter: &MetadataAdapter, sid: plx_plex::plex::ServerId, rk: &str, gen: u32,
-    fetch: impl FnOnce() -> Option<Detail> + std::panic::UnwindSafe,
+/// The fetch's IO body's completion: run `fetch` through `client` and post its answer, or its
+/// failure, to `port`. A fetch that unwinds still answers (with `None`), so its reservation is
+/// always handed back.
+///
+/// `client` is the one the runner resolved for the job, once, when it admitted it
+/// (`StoreRunner::start_detail`), and `fetch` is handed it for the GETs of the chain
+/// ([`fetch_full`]): the chain asks no registry, the opening season's episodes included. The capture
+/// changes what a sign-out or a re-point halfway through does to a page. The old chain
+/// re-resolved its client before each sub-fetch, so after a sign-out its later GETs found no
+/// client (`None`) and after a re-point they went to the slot's new client. This one keeps the
+/// client it was handed (the registry leaks its clients, so the reference stays valid), which is
+/// `pms::kick_with`'s capture-at-the-step rule. (The Related window job keeps one client for its
+/// whole window the same way: the runner resolves it at the launch and hands it to
+/// [`finish_related_job`].) The registry blanks that client's token on both events (`revoke_all`,
+/// and the re-point arm of `register_lazy`), so the rest of the chain asks tokenless and lands
+/// `None`. For a sign-out that is the old outcome, with the requests now sent and refused where
+/// they used to be skipped. For a re-point it is a page with its hero but empty seasons, streams,
+/// extras, trailer and related, where the old chain went on to the slot's new client and finished.
+///
+/// `None` is a server the registry held no client for when the job was admitted: there is nothing
+/// to ask, so `fetch` is not called and the answer is the failure, as it was when the first
+/// sub-fetch found no client.
+pub fn finish_detail_fetch(
+    port: &DetailPort, addr: plx_machine::machine::Addr, key: DetailKey,
+    client: Option<&'static plx_plex::plex::Client>,
+    fetch: impl FnOnce(&'static plx_plex::plex::Client) -> Option<Detail> + std::panic::UnwindSafe,
 ) {
-    // Publish outside the catch so fetch failure/unwind still acknowledges this reservation.
-    let d = catch_unwind(fetch).unwrap_or(None);
-    land_detail(adapter, sid, rk, gen, d);
+    use plx_machine::job::Port;
+    let d = match client {
+        // The ONE line that says a detail page was asked for and got nothing when no request was
+        // made (`fetch_full` speaks for the ones that were).
+        None => {
+            plx_base::eventlog::log(&format!(
+                "detail: rk={} sid={:?} — no metadata (the registry held no client for the server; nothing was asked)",
+                key.1, key.0
+            ));
+            None
+        }
+        // Publish outside the catch so fetch failure/unwind still acknowledges this reservation.
+        Some(client) => catch_unwind(move || fetch(client)).unwrap_or(None),
+    };
+    port.done(addr, (key, d));
 }
 
 /// `stores::metadata`'s one door onto every [`MetadataCmd`](crate::stores::metadata::MetadataCmd)
@@ -3603,11 +4290,18 @@ fn finish_detail_fetch(
 /// `#[cfg(test)]` arms (`AltInstall`, `AltRestampOwners`) exist only so tests can seed the
 /// alt-sources store the way a landed resolve or a facts-epoch move would — production reaches
 /// both through `pump_alt_sources`, a same-file call, never as a dispatched `Cmd`.
+#[cfg(any(test, feature = "test-support"))]
 pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, cmd: crate::stores::metadata::MetadataCmd) -> bool {
+    run_with_keys(state, adapter, cmd, Some(&crate::pms::registry_keys_for_test()))
+}
+pub fn run_with_keys(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, cmd: crate::stores::metadata::MetadataCmd, keys: Option<&plx_plex::plex::ClientKeys>) -> bool {
     use crate::stores::metadata::MetadataCmd;
+    let _ = keys;
     match cmd {
         MetadataCmd::RequestDetail { sid, rk } => {
-            request_detail(adapter, sid, &rk);
+            let prefer = selected_season_number(state, sid, &rk);
+            state.detail_stamp = state.ledger.stamp();
+            request_detail(state, adapter, sid, &rk, prefer);
             true
         }
         MetadataCmd::Clear => {
@@ -3627,11 +4321,33 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
             load_season(state, adapter, i);
             true
         }
+        MetadataCmd::WantEpisodes { lo, hi, focus, restore } => {
+            let keep = crate::stores::page_cache::Keep { wanted: lo..hi, focus, restore };
+            want_episodes(state, adapter, keep)
+        }
+        MetadataCmd::WantRelated { before, seen } => want_related(state, adapter, before, seen),
+        MetadataCmd::SeekRelated { at, seen } => ask_related(state, adapter, RelatedAsk::Seek(at), seen),
+        MetadataCmd::CancelRelated => cancel_related(adapter),
         MetadataCmd::SetNowPlaying(np) => {
             set_now_playing(state, np);
             true
         }
-        MetadataCmd::SetWatchedLocal { sid, rk, on } => set_watched_local(state, sid, &rk, on),
+        MetadataCmd::ApplyView { at, edit } => match edit {
+            crate::viewstate::ViewEdit::Watched(on) => set_watched_local(state, &at, on),
+            // the loaded item has no deck to leave
+            crate::viewstate::ViewEdit::LeftDeck => false,
+            // The server's word reaches the other items' tiles on this page (Related, the
+            // collection shelf). The loaded item, its episodes and seasons are re-read whole by
+            // the application when the read-back lands (`app::content::reconcile_details`); only
+            // a stop's Offset (below) also lands on the item and episode itself.
+            crate::viewstate::ViewEdit::Facts { .. } => patch_tiles(state, &at, edit),
+            // A stop's position also reaches the loaded item and its episode, matched exactly:
+            // whether the server took the stop or not, the page must not wait for a read.
+            crate::viewstate::ViewEdit::Offset { ms } => {
+                let tiles = patch_tiles(state, &at, edit);
+                patch_loaded_offset(state, &at, ms) | tiles
+            }
+        },
         MetadataCmd::InstallPlaying(p) => {
             install_playing(state, p);
             true
@@ -3650,9 +4366,15 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
             true
         }
         #[cfg(any(test, feature = "test-support"))]
-        MetadataCmd::AltInstall { sid, rk, copies } => alt_install(state, sid, &rk, copies),
+        MetadataCmd::AltInstall { sid, rk, copies } => {
+            let Some(keys) = keys else { debug_assert!(false, "Metadata AltInstall requires captured keys"); return false; };
+            alt_install(state, sid, &rk, copies, keys)
+        },
         #[cfg(any(test, feature = "test-support"))]
-        MetadataCmd::AltRestampOwners => alt_restamp_owners(state),
+        MetadataCmd::AltRestampOwners => {
+            let Some(keys) = keys else { debug_assert!(false, "Metadata AltRestampOwners requires captured keys"); return false; };
+            alt_restamp_owners(state, keys)
+        },
     }
 }
 
@@ -3662,6 +4384,7 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
 /// superseded by a newer request, by a blocking load, or by `clear()` when the page closed — is
 /// dropped.
 pub fn pump_detail_with_gate(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
+    keys: &plx_plex::plex::ClientKeys, controlled: bool,
     gate: &plx_machine::landgate::Gate) -> bool {
     use plx_machine::landing::Lane;
     use std::sync::atomic::Ordering;
@@ -3669,7 +4392,7 @@ pub fn pump_detail_with_gate(state: &mut MetadataState, adapter: &std::sync::Arc
     // Under a replay this drains on the frame the recording drained it on (§3.3 step 3,
     // `plx_machine::landgate`); off one it is the same call. The gate wraps the QUEUE drain and not the
     // supersede/install below, so a held frame leaves the record in the landing untouched.
-    let out = if crate::stores::tape::active() {
+    let out = if controlled {
         crate::stores::take_landings(gate, crate::stores::StoreId::Metadata, || {
             crate::stores::tape::poll_apply("metadata", 0,
                 || record::drain_live(adapter, &want), |replies| record::supply(adapter, replies, &want))
@@ -3692,7 +4415,7 @@ pub fn pump_detail_with_gate(state: &mut MetadataState, adapter: &std::sync::Arc
             out
         })
     };
-    let mut fresh = false;
+    let mut fresh = restamp_detail_source(state, keys);
     for rec in out {
         let gen = rec.addr.req.0;
         if gen != adapter.detail_gen.load(Ordering::SeqCst) {
@@ -3704,15 +4427,15 @@ pub fn pump_detail_with_gate(state: &mut MetadataState, adapter: &std::sync::Arc
             // nothing arrived and nothing will: the spinner is settled, the page keeps its item
             Lane::Dropped(_) | Lane::Refused(_) => None,
         };
-        fresh |= install_landed_detail(state, adapter, d);
+        fresh |= install_landed_detail(state, adapter, d, keys, controlled);
     }
     fresh
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn pump_detail(state: &mut MetadataState,
-    adapter: &std::sync::Arc<MetadataAdapter>) -> bool {
-    pump_detail_with_gate(state, adapter, plx_machine::landgate::fixture_gate())
+    adapter: &std::sync::Arc<MetadataAdapter>, keys: &plx_plex::plex::ClientKeys, controlled: bool) -> bool {
+    pump_detail_with_gate(state, adapter, keys, controlled, plx_machine::landgate::fixture_gate())
 }
 
 /// Install a landed fetch: a `None` (the fetch failed or panicked) keeps the previously loaded
@@ -3722,8 +4445,21 @@ pub fn pump_detail(state: &mut MetadataState,
 /// reached `fetch_full`'s line. `task`'s panic logger names the thread and the source location,
 /// so the failure is in the log — it just is not in these words, and a `None` here with no
 /// `detail:` line above it is that case.
-fn install_landed_detail(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, d: Option<Detail>) -> bool {
-    let Some(d) = d else { return false };
+fn restamp_detail_source(state: &mut MetadataState, keys: &plx_plex::plex::ClientKeys) -> bool {
+    let Some(detail) = state.current.as_mut() else { return false };
+    let credit = keys.facts(detail.sid).and_then(|facts| facts.described)
+        .map_or("", |facts| facts.handle.as_str());
+    if detail.source_credit == credit { return false; }
+    detail.source_credit.clear();
+    detail.source_credit.push_str(credit);
+    true
+}
+fn install_landed_detail(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, d: Option<Detail>,
+    keys: &plx_plex::plex::ClientKeys, controlled: bool) -> bool {
+    let Some(mut d) = d else { return false };
+    if controlled { d.source_override = None; }
+    d.source_credit = keys.facts(d.sid).and_then(|facts| facts.described)
+        .map(|facts| facts.handle.clone()).unwrap_or_default();
     // The LANDING is what defines which show's episodes are current, so the season supersede has
     // to happen here as well as at request time: a tab hop issued while this load was in flight
     // spawned a fetch against the OLD item, and its landing would patch these fresh episodes.
@@ -3731,15 +4467,78 @@ fn install_landed_detail(state: &mut MetadataState, adapter: &std::sync::Arc<Met
     // Ask the other sources about this item BEFORE the move: the resolve needs the item's own
     // server and its portable guid, and this is the one place both are known on the main thread.
     // A page with no guid, or a one-server install, spawns nothing.
-    request_alt_sources(state, adapter, d.sid, &d.rk, &d.guid);
+    request_alt_sources(state, adapter, d.sid, &d.rk, &d.guid, keys);
     // a page read now is read after any playback that has landed: its streams are the server's
     if state.played_since_load.as_ref().is_some_and(|(s, r)| plx_plex::plex::same_item((*s, r), (d.sid, &d.rk))) {
         state.played_since_load = None;
     }
+    let mut d = d;
+    if let Some(old) = state.current.as_ref() {
+        carry_related_window(old, &mut d);
+        carry_episode_window(old, &mut d);
+    }
     state.current = Some(d);
+    // The read describes the server from when it was requested: the edits published since are
+    // made again on the page it installed (`crate::viewledger`).
+    replay_views(state, state.detail_stamp);
     // if this load is a playing leaf (episode/movie), refresh the Info card's descriptor from it
     sync_now_playing(state);
     true
+}
+
+/// Make every watched edit published after `since` again on the loaded page, through the same
+/// [`set_watched_local`] the press itself used.
+fn replay_views(state: &mut MetadataState, since: crate::viewledger::Stamp) {
+    for (at, edit) in state.ledger.since(since) {
+        if let crate::viewstate::ViewEdit::Watched(on) = edit {
+            set_watched_local(state, &at, on);
+        }
+    }
+}
+
+/// A re-read of the page already loaded (a return from the player, a watched toggle) lands with
+/// only the Related head, while the row the user stands in may have slid far past it. The old
+/// window moves onto the fresh page — cards, positions, edge and ledger — so the card under the
+/// focus is still in the row at the place it was. Held only when it is the same item AND the same
+/// hubs at the same preview lengths, the one case where a tail position names the same listing
+/// place; anything else starts at the head, and the screen's focus falls to the nearest surviving
+/// card. The window keeps its size: one window is carried, never added to. The cards carried are
+/// the ones last read; the next slide reads the listing afresh through the ledger as it always does.
+fn carry_related_window(old: &Detail, d: &mut Detail) {
+    if !plx_plex::plex::same_item((old.sid, &old.rk), (d.sid, &d.rk)) { return; }
+    let (was, now) = (&old.related_tail, &d.related_tail);
+    if was.positions.is_empty() || was.head > old.related.len() || now.head > d.related.len()
+        || was.hubs.len() != now.hubs.len()
+        || was.hubs.iter().zip(&now.hubs).any(|(a, b)| a.key != b.key || a.preview != b.preview) {
+        return;
+    }
+    let head: std::collections::HashSet<&str> = d.related[..now.head].iter().map(|m| m.rk.as_str()).collect();
+    let (mut positions, mut cards) = (Vec::new(), Vec::new());
+    for (position, card) in was.positions.iter().zip(&old.related[was.head..]) {
+        // a card the fresh head now shows, or that the page must not show, is not shown twice
+        if head.contains(card.rk.as_str()) || now.exclude.contains(&card.rk) { continue; }
+        positions.push(*position);
+        cards.push(card.clone());
+    }
+    let t = &mut d.related_tail;
+    (t.positions, t.hubs, t.row) = (positions, was.hubs.clone(), was.row.clone());
+    (t.offset, t.end, t.total, t.more) = (was.offset, was.end, was.total, was.more);
+    d.related.extend(cards);
+}
+
+/// The EPISODE twin of [`carry_related_window`]: a long season keeps only the 60-row pages the
+/// strip reached, and a re-read of the page lands with page 0 alone, so the episode the viewer
+/// stands on (page 1 and beyond) would lose its row, and the focus its key, until that page is
+/// asked for and lands again. Held only for the same item AND the same season (same rk, same
+/// length); anything else starts at page 0 as a first load does. The rows carried are the ones last
+/// read: the watched edits published since are made again on them by [`replay_views`], a stop's
+/// position reaches them as an `Offset`, and the next slide of the strip evicts and re-reads what it
+/// no longer needs.
+fn carry_episode_window(old: &Detail, d: &mut Detail) {
+    if !plx_plex::plex::same_item((old.sid, &old.rk), (d.sid, &d.rk)) { return; }
+    let season = |x: &Detail| x.seasons.get(x.cur_season).map(|s| s.rk.clone());
+    if season(old).is_none() || season(old) != season(d) { return; }
+    d.episodes.carry_pages_from(&old.episodes);
 }
 
 // ---- "Also available": the same film on the OTHER sources ------------------------------------
@@ -3809,8 +4608,10 @@ pub struct AltCopy {
     /// That server's ratingKey for the item — per-server, and the whole reason the identity above
     /// it is a guid. Where OK navigates.
     pub rk: String,
-    /// Runtime in ms, for the row's sub-line. 0 = unknown, and then the sub-line is the owner
-    /// alone rather than "0 min".
+    /// Runtime in ms, for the row's read-out. 0 = none, and then the slot is left empty rather
+    /// than "0 min". Only a leaf copy has one ([`has_runtime`]): a show or season copy is 0
+    /// whatever its container's `duration` says, because that is the agent's nominal per-episode
+    /// figure and no episode's.
     pub dur_ms: i64,
     /// `Media.videoResolution` ("4k" / "1080" / "sd"), plus the stored frame size as its fallback —
     /// exactly the trio `ui::fmt::resolution` takes, so the badge in the panel and the hero's media
@@ -3843,12 +4644,13 @@ struct AltStore {
     sid: plx_plex::plex::ServerId,
     rk: String,
     copies: Vec<AltCopy>,
-    /// Does the headless stand-in own `copies`? Set where [`alt_dev_stand_in`] writes them, cleared
+    /// Does the headless stand-in own `copies`? Set by the explicit host answer, cleared
     /// by a real landing. Always `false` in a release build, where the stand-in is compiled out.
     stand_in: bool,
     /// Which item the stand-in has already had its one chance at, so it is built ONCE per item
     /// rather than on every frame.
     stand_in_rk: String,
+    clients: plx_plex::plex::ClientKeys,
 }
 
 /// The copies held for `(sid, rk)` — EMPTY for any other item, and for an item nothing has landed
@@ -3890,13 +4692,14 @@ fn alt_install(
     item_sid: plx_plex::plex::ServerId,
     item_rk: &str,
     list: Vec<AltCopy>,
+    keys: &plx_plex::plex::ClientKeys,
 ) -> bool {
     let mut list = list;
     // **The worker's stamp is not trusted.** `resolve_alt_sources` reads the credit on a background
     // thread, and a resolve dispatched before a roster refresh re-grades that credit lands after
     // it — past `pump_alt_sources`' facts epoch, which it has already consumed. Regrading here is
     // the only point that sees both the list and the current answer.
-    alt_regrade(&mut list, false);
+    alt_regrade(&mut list, false, keys);
     let held = &mut state.alt;
     let same = plx_plex::plex::same_item((held.sid, held.rk.as_str()), (item_sid, item_rk))
         && held.copies == list
@@ -3924,10 +4727,10 @@ fn alt_install(
 /// **MAIN THREAD**, like every other reader and writer of this store — [`pump_alt_sources`] is its
 /// only caller and runs on the SDL loop. The workers in this chain touch the mutex-protected
 /// result slot and never the store.
-fn alt_restamp_owners(state: &mut MetadataState) -> bool {
+fn alt_restamp_owners(state: &mut MetadataState, keys: &plx_plex::plex::ClientKeys) -> bool {
     let held = &mut state.alt;
     let stand_in = held.stand_in;
-    alt_regrade(&mut held.copies, stand_in)
+    alt_regrade(&mut held.copies, stand_in, keys)
 }
 
 /// **Re-read a copy list's CREDITS from the registry**, `true` when any of them moved.
@@ -3939,7 +4742,7 @@ fn alt_restamp_owners(state: &mut MetadataState) -> bool {
 /// Stamping it on the worker as well would be a third opinion; the worker's value is simply
 /// overwritten here.
 ///
-/// **Skipped entirely while the headless stand-in owns the list** — see [`alt_dev_stand_in`], whose
+/// **Skipped entirely while the headless stand-in owns the list** — the explicit host stand-in's
 /// whole purpose is to FABRICATE a borrowed copy on a slot the registry describes as ours. The
 /// trigger outranks the real answer everywhere else in this app for the same reason.
 ///
@@ -3947,13 +4750,13 @@ fn alt_restamp_owners(state: &mut MetadataState) -> bool {
 /// what it was for one round, and is a different statement. A real resolve can land over a stand-in
 /// list, and an armed-but-EMPTY trigger builds no stand-in at all; on both, "armed" would have gone
 /// on suppressing the regrade for a list the stand-in does not own.
-fn alt_regrade(list: &mut [AltCopy], stand_in_owns: bool) -> bool {
+fn alt_regrade(list: &mut [AltCopy], stand_in_owns: bool, keys: &plx_plex::plex::ClientKeys) -> bool {
     if stand_in_owns {
         return false;
     }
     let mut moved = false;
     for c in list.iter_mut() {
-        let credit = plx_plex::plex::server_facts(c.sid)
+        let credit = keys.facts(c.sid).and_then(|facts| facts.described)
             .map(|f| f.handle.clone())
             .unwrap_or_default();
         // `None` is the absence of an owner and must not become `Some("")` — the same guard
@@ -3969,11 +4772,10 @@ fn alt_regrade(list: &mut [AltCopy], stand_in_owns: bool) -> bool {
 
 /// Drop copies whose grant left the live registry while the page holding them stayed mounted.
 /// Called only when the registry generation moves, so the ordinary per-frame path pays nothing.
-fn alt_prune_inactive(state: &mut MetadataState) -> bool {
+fn alt_prune_inactive(state: &mut MetadataState, keys: &plx_plex::plex::ClientKeys) -> bool {
     let held = &mut state.alt;
     let before = held.copies.len();
-    held.copies
-        .retain(|c| plx_plex::plex::client_for(c.sid).is_some());
+    held.copies.retain(|c| keys.key(c.sid).is_some());
     held.copies.len() != before
 }
 
@@ -3998,106 +4800,180 @@ fn alt_clear(state: &mut MetadataState) {
 /// function skipped `sid` on its first outing and the button stayed absent on a device with two
 /// copies of the same guid.)
 ///
-/// Sources are captured here, on the main thread, as a plain list of ids — the worker resolves each
-/// through `client_for` and never asks what is current.
+/// Sources are captured on the main thread as an ordered list including origin. The worker
+/// resolves each through the supplied snapshot-fenced KeyedClients, never an ambient client lookup.
 ///
 /// `sid` is the ITEM's own server, captured with `rk` at the call site because the two are one
 /// identity: it rides through [`AltResult`] to [`alt_install`], which files the landing under it rather than
 /// under the rk alone. Without it a resolve parked on a dead share's `connect(2)` timeout lands on
 /// whatever page holds the same ratingKey when it finally answers, which across two servers is the
 /// ordinary case rather than an exotic one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetaAltSourcesReq {
+    pub sid: plx_plex::plex::ServerId,
+    pub rk: String,
+    pub guid: String,
+    pub roster_gen: u32,
+    pub others: Vec<plx_plex::plex::ServerId>,
+    pub keys: plx_plex::plex::ClientKeys,
+}
+
+#[derive(Clone)]
+pub struct MetaAltSourcesPort {
+    adapter: std::sync::Arc<MetadataAdapter>,
+    addr: plx_machine::machine::Addr,
+    sid: plx_plex::plex::ServerId,
+    rk: String,
+    roster_gen: u32,
+}
+impl std::fmt::Debug for MetaAltSourcesPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("MetaAltSourcesPort").field(&std::sync::Arc::as_ptr(&self.adapter)).finish()
+    }
+}
+impl PartialEq for MetaAltSourcesPort {
+    fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.adapter, &other.adapter) }
+}
+impl Eq for MetaAltSourcesPort {}
+impl plx_machine::job::Port<Vec<AltCopy>> for MetaAltSourcesPort {
+    fn done(&self, addr: plx_machine::machine::Addr, list: Vec<AltCopy>) {
+        use std::sync::atomic::Ordering;
+        // Lock order: alt_slot first, then generation load/increment/clear. Every generation
+        // writer uses this same lock, so an old publisher cannot overwrite a newer slot.
+        let mut slot = self.adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner());
+        if addr != self.addr || addr != alt_addr(self.adapter.alt_gen.load(Ordering::SeqCst)) { return; }
+        *slot = Some(AltResult { gen: addr.req.0, roster_gen: self.roster_gen,
+            sid: self.sid, rk: self.rk.clone(), list });
+        // Posting is not settlement: the gated by-value take still owes this generation.
+    }
+    fn refused(&self, addr: plx_machine::machine::Addr) {
+        if addr != self.addr { return; }
+        self.adapter.alt_done.fetch_max(addr.req.0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn alt_addr(gen: u32) -> plx_machine::machine::Addr { detail_addr(gen) }
+
 fn request_alt_sources(
-    _state: &mut MetadataState,
+    state: &mut MetadataState,
     adapter: &std::sync::Arc<MetadataAdapter>,
     sid: plx_plex::plex::ServerId,
     rk: &str,
     guid: &str,
+    keys: &plx_plex::plex::ClientKeys,
 ) {
     use std::sync::atomic::Ordering;
+    let mut slot = adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner());
     let gen = adapter.alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let roster_gen = plx_plex::plex::server_roster_gen();
+    let roster_gen = keys.roster_gen();
+    if state.alt.clients != *keys { state.alt.clients.clone_from(keys); }
     adapter.alt_roster_gen.store(roster_gen, Ordering::SeqCst);
-    *adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    // A request that never goes out owes no answer: `alt_done` catches up on every early return
-    // (and on a refused spawn below), and only a spawned worker leaves it behind `alt_gen`.
+    *slot = None;
     if guid.is_empty() {
-        adapter.alt_done.store(gen, Ordering::SeqCst);
-        return; // nothing portable to match on; the panel stays absent
+        adapter.alt_done.fetch_max(gen, Ordering::SeqCst);
+        return;
     }
-    let others: Vec<plx_plex::plex::ServerId> = plx_plex::plex::server_ids().collect();
+    let others: Vec<plx_plex::plex::ServerId> = keys.slots().collect();
     if others.len() < 2 {
-        adapter.alt_done.store(gen, Ordering::SeqCst);
-        return; // a one-server install pays nothing: no worker, no query, no control
+        adapter.alt_done.fetch_max(gen, Ordering::SeqCst);
+        return;
     }
-    let (rk, guid) = (rk.to_string(), guid.to_string());
-    let n = others.len();
-    let adapter = std::sync::Arc::clone(adapter);
-    let refused = std::sync::Arc::clone(&adapter);
-    let spawned = plx_base::task::spawn_small("altsrc", move || {
-        let list = catch_unwind(|| resolve_alt_sources(&others, &guid)).unwrap_or_default();
-        // The one line that makes this chain debuggable from a device log. A guid is a public
-        // metadata id — not an address, a token or a machine. It was filed as "safe to log" on
-        // exactly that reasoning, and the reasoning is incomplete: a Plex GUID names the WORK,
-        // globally and stably, which is LG's "Content Viewing Information" and the one category
-        // this app's Data Safety declaration answers "Not collected" to. It stays here because it
-        // is the only string that says WHICH lookup this was, and `eventlog::scrub::scrub_viewing`
-        // rewrites it to `plex://<guid>` before the line reaches the disk.
-        plx_base::eventlog::log(&format!(
-            "altsrc: asked {n} source(s) for {guid} -> {} copy(ies)",
-            list.len()
-        ));
-        *adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(AltResult {
-            gen,
-            roster_gen,
-            sid,
-            rk,
-            list,
-        });
-    });
-    if !spawned {
-        refused.alt_done.store(gen, Ordering::SeqCst);
-    }
+    state.jobs.push(crate::stores::StoreJob::MetaAltSources(
+        plx_machine::job::Job { addr: alt_addr(gen), req: MetaAltSourcesReq {
+            sid, rk: rk.to_owned(), guid: guid.to_owned(), roster_gen, others, keys: keys.clone(),
+        } },
+        MetaAltSourcesPort { adapter: adapter.clone(), addr: alt_addr(gen), sid, rk: rk.to_owned(), roster_gen },
+    ));
 }
 
-/// WORKER. One `find_by_guid` per source, projected into rows. Pure of app state apart from the
-/// registry (an atomic read whose clients are never freed), so it is gradeable against a fixture.
+pub fn finish_alt_sources_job(port: &MetaAltSourcesPort, addr: plx_machine::machine::Addr,
+    lookup: fn(plx_plex::plex::ServerId) -> Option<&'static plx_plex::plex::Client>,
+    req: MetaAltSourcesReq) {
+    finish_alt_sources_with(port, addr, req, |req| {
+        resolve_alt_sources(&req.others, &req.guid, plx_plex::plex::KeyedClients::new(&req.keys, lookup))
+    });
+}
+
+fn finish_alt_sources_with(port: &MetaAltSourcesPort, addr: plx_machine::machine::Addr,
+    req: MetaAltSourcesReq, resolve: impl FnOnce(&MetaAltSourcesReq) -> Vec<AltCopy> + std::panic::UnwindSafe) {
+    use plx_machine::job::Port;
+    let list = catch_unwind(|| resolve(&req)).unwrap_or_default();
+    // GUIDs are viewing information; eventlog's scrub_viewing retains the scrubbed diagnostic.
+    plx_base::eventlog::log(&format!("altsrc: asked {} source(s) for {} -> {} copy(ies)",
+        req.others.len(), req.guid, list.len()));
+    port.done(addr, list);
+}
+
+/// WORKER. One `find_by_guid` per source, through explicit snapshot-fenced clients. Owner facts
+/// projection remains a registry read; the injected network seam makes the resolution gradeable.
 fn resolve_alt_sources(
     others: &[plx_plex::plex::ServerId],
     guid: &str,
+    clients: plx_plex::plex::KeyedClients<'_>,
+) -> Vec<AltCopy> {
+    resolve_alt_sources_with(others, guid, clients, |_, c, guid| c.find_by_guid(guid))
+}
+
+fn resolve_alt_sources_with(
+    others: &[plx_plex::plex::ServerId], guid: &str,
+    clients: plx_plex::plex::KeyedClients<'_>,
+    mut read: impl FnMut(plx_plex::plex::ServerId, &'static plx_plex::plex::Client, &str) -> Option<plx_plex::plex::MediaContainer>,
 ) -> Vec<AltCopy> {
     let mut out = Vec::new();
     for &id in others {
-        let Some(c) = plx_plex::plex::client_for(id) else {
+        let Some(c) = clients.client(id) else {
             continue;
         };
         // `None` here is "did not answer" and `Some(empty)` is "does not have it" — both contribute
         // no row, but only the second is a fact about the library. They are not collapsed at the
         // client (see `find_by_guid`) so a later revision can say "not reachable" in the panel.
-        let Some(mc) = c.find_by_guid(guid) else {
+        let Some(mc) = read(id, c, guid) else {
             continue;
         };
-        let handle = plx_plex::plex::server_facts(id)
+        let handle = clients.facts(id).and_then(|facts| facts.described)
             .map(|f| f.handle.clone())
             .unwrap_or_default();
-        for m in mc.metadata.iter() {
-            let media0 = m.media.first();
-            out.push(AltCopy {
+        out.extend(alt_copies_from(id, &handle, &mc));
+    }
+    out
+}
+
+/// Does an item of this PMS `type` have a runtime of its own? A leaf does (movie, episode, clip,
+/// and any other playable file); a container (show, season, and the music/collection kinds) does
+/// not, because its `Metadata.duration` is the metadata agent's nominal per-episode figure, which
+/// matches no episode and differs per server (#814). The one predicate behind both the
+/// *Also available* rows and the About footer's Runtime.
+pub fn has_runtime(kind: &str) -> bool {
+    !matches!(kind, "show" | "season" | "artist" | "album" | "collection" | "playlist")
+}
+
+/// PURE. One source's `find_by_guid` answer projected into *Also available* rows: `handle` is the
+/// source's credit (empty = nobody to credit, so the row reads "This account").
+fn alt_copies_from(
+    id: plx_plex::plex::ServerId,
+    handle: &str,
+    mc: &plx_plex::plex::MediaContainer,
+) -> Vec<AltCopy> {
+    mc.metadata
+        .iter()
+        .map(|m| {
+            let media0 = m.media_version(None).map(|(_, m)| m);
+            AltCopy {
                 sid: id,
                 library: m.library_section_title.clone(),
                 // `None` is the ABSENCE of an owner, which is what the row spells "This account";
                 // an empty handle must not become `Some("")`.
-                owner: (!handle.is_empty()).then(|| handle.clone()),
+                owner: (!handle.is_empty()).then(|| handle.to_string()),
                 rk: m.rating_key.clone(),
-                dur_ms: m.duration,
+                dur_ms: if has_runtime(&m.kind) { m.duration } else { 0 },
                 res: media0
                     .map(|x| x.video_resolution.clone())
                     .unwrap_or_default(),
                 width: media0.map(|x| x.width).unwrap_or_default(),
                 height: media0.map(|x| x.height).unwrap_or_default(),
-            });
-        }
-    }
-    out
+            }
+        })
+        .collect()
 }
 
 /// MAIN THREAD, once a frame. Runs the store's whole per-frame half — the two registry epochs, the
@@ -4110,215 +4986,152 @@ fn resolve_alt_sources(
 /// repaints from its own arm. `alt_sources::install` used to call `idle::invalidate()` from inside
 /// the data layer instead, which is the shape phase 4 replaced.
 pub fn pump_alt_sources_with_gate(state: &mut MetadataState, adapter: &MetadataAdapter,
+    keys: &plx_plex::plex::ClientKeys, controlled: bool, stand_in: Option<Vec<AltCopy>>,
     gate: &plx_machine::landgate::Gate) -> bool {
-    pump_alt_sources_with_library(state, adapter, None, gate)
+    let mut pass = begin_alt_sources(state, adapter, keys, controlled);
+    let answer = pass.take_request().map(|request| request.answer(stand_in));
+    pass.finish(answer, gate)
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn pump_alt_sources(state: &mut MetadataState, adapter: &MetadataAdapter) -> bool {
-    pump_alt_sources_with_gate(state, adapter, plx_machine::landgate::fixture_gate())
+pub fn pump_alt_sources(state: &mut MetadataState, adapter: &MetadataAdapter,
+    keys: &plx_plex::plex::ClientKeys, controlled: bool, stand_in: Option<Vec<AltCopy>>) -> bool {
+    pump_alt_sources_with_gate(state, adapter, keys, controlled, stand_in, plx_machine::landgate::fixture_gate())
 }
 
-pub fn pump_alt_sources_with_directory_and_gate(
-    state: &mut MetadataState,
-    adapter: &MetadataAdapter,
-    directory: crate::stores::browse::DirectoryView<'_>,
-    gate: &plx_machine::landgate::Gate,
-) -> bool {
-    let library = directory.current()
-        .and_then(|section| directory.sections().get(section))
-        .map(|section| section.row.title.as_str())
-        .unwrap_or("");
-    pump_alt_sources_with_library(state, adapter, Some(library), gate)
+/// Compatibility callers supply neutral/scripted answers through the same ordered phases.
+pub fn begin_alt_sources<'a>(state: &'a mut MetadataState, adapter: &'a MetadataAdapter,
+    keys: &'a plx_plex::plex::ClientKeys, controlled: bool) -> AltSourcesPass<'a> {
+    pump_alt_sources_with_library(state, adapter, keys, controlled)
 }
 
-fn pump_alt_sources_with_library(
-    state: &mut MetadataState,
-    adapter: &MetadataAdapter,
-    library: Option<&str>,
-    gate: &plx_machine::landgate::Gate,
-) -> bool {
+/// Only a due noncontrolled chance produces this owned minimal host request.
+pub struct AltStandInReq {
+    pub rk: String,
+    pub res: String,
+    pub dur_ms: i64,
+    identity: std::sync::Arc<()>,
+}
+pub struct AltStandInAnswer {
+    identity: std::sync::Arc<()>,
+    list: Option<Vec<AltCopy>>,
+}
+impl AltStandInReq {
+    pub fn answer(self, list: Option<Vec<AltCopy>>) -> AltStandInAnswer {
+        AltStandInAnswer { identity: self.identity, list }
+    }
+}
+
+/// A single-use same-call capability. The exclusive state borrow prohibits clear/reset,
+/// away-and-back, another step, or publication until finish. The shared keys borrow forbids
+/// refill during host registration. There is no owned stale token or separate transaction runtime.
+///
+/// Clear/reset and away-and-back cannot interleave with a live pass:
+/// ```compile_fail
+/// use plx_data::stores::metadata::{MetadataStore, MetadataCmd};
+/// let mut store = MetadataStore::default();
+/// let keys = plx_plex::plex::ClientKeys::default();
+/// let pass = store.begin_alt_sources(&keys, false);
+/// store.run(MetadataCmd::Reset);
+/// pass.finish(None, &plx_machine::landgate::Gate::default());
+/// ```
+/// Consuming finish forbids reuse:
+/// ```compile_fail
+/// let mut store = plx_data::stores::metadata::MetadataStore::default();
+/// let keys = plx_plex::plex::ClientKeys::default();
+/// let pass = store.begin_alt_sources(&keys, false);
+/// let gate = plx_machine::landgate::Gate::default();
+/// pass.finish(None, &gate);
+/// pass.finish(None, &gate);
+/// ```
+#[must_use]
+pub struct AltSourcesPass<'a> {
+    state: &'a mut MetadataState,
+    adapter: &'a MetadataAdapter,
+    _keys: &'a plx_plex::plex::ClientKeys,
+    roster_gen: u32,
+    gen: u32,
+    changed: bool,
+    identity: Option<std::sync::Arc<()>>,
+    request: Option<AltStandInReq>,
+}
+impl AltSourcesPass<'_> {
+    pub fn take_request(&mut self) -> Option<AltStandInReq> { self.request.take() }
+    pub fn finish(self, answer: Option<AltStandInAnswer>, gate: &plx_machine::landgate::Gate) -> bool {
+        use std::sync::atomic::Ordering;
+        let Self { state, adapter, _keys: keys, roster_gen, gen, mut changed, identity, .. } = self;
+        if gen != adapter.alt_gen.load(Ordering::SeqCst) { return false; }
+        if let Some(answer) = answer {
+            if !identity.as_ref().is_some_and(|id| std::sync::Arc::ptr_eq(id, &answer.identity)) { return false; }
+            if let (Some(list), Some(d)) = (answer.list, state.current.as_ref()) {
+                state.alt.sid = d.sid;
+                state.alt.rk = d.rk.clone();
+                state.alt.copies = list;
+                state.alt.stand_in = true;
+                changed = true;
+            }
+        }
+        // Real wins AFTER the stand-in, using the PRE-registration roster captured by begin.
+        let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Metadata,
+            || adapter.alt_gen.load(Ordering::SeqCst) != adapter.alt_done.load(Ordering::SeqCst), || {
+            let mut slot = adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.take() {
+                Some(r) if r.gen != adapter.alt_gen.load(Ordering::SeqCst) => None,
+                other => other,
+            }
+        });
+        let Some(r) = taken else { return changed };
+        adapter.alt_done.fetch_max(r.gen, Ordering::SeqCst);
+        if r.gen != adapter.alt_gen.load(Ordering::SeqCst) || r.roster_gen != roster_gen { return changed; }
+        changed | alt_install(state, r.sid, &r.rk, r.list, keys)
+    }
+}
+
+fn pump_alt_sources_with_library<'a>(
+    state: &'a mut MetadataState,
+    adapter: &'a MetadataAdapter,
+    keys: &'a plx_plex::plex::ClientKeys,
+    controlled: bool,
+) -> AltSourcesPass<'a> {
     use std::sync::atomic::Ordering;
     let mut changed = false;
-    let roster_gen = plx_plex::plex::server_roster_gen();
-    if adapter.alt_roster_gen.swap(roster_gen, Ordering::SeqCst) != roster_gen {
-        // the in-flight answer is now stale and nothing replaces it, so the request is SETTLED
-        // here (`alt_done` caught up), or a dump-mode take would wait for it forever
-        let gen = adapter.alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        adapter.alt_done.store(gen, Ordering::SeqCst);
-        *adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        changed |= alt_prune_inactive(state);
-    }
-    // A source being RE-DESCRIBED is not the server set changing, and answering it the same way
-    // would be wrong twice: the copies are still the right copies (a re-graded "Shared by …" credit
-    // says nothing about which servers hold the item), and invalidating a resolve in flight would
-    // leave the control absent until the page was remounted, since nothing here re-asks. So the
-    // two epochs are read separately and this one only re-stamps what the rows SAY.
-    let facts_gen = plx_plex::plex::server_facts_gen();
-    if adapter.alt_facts_gen.swap(facts_gen, Ordering::SeqCst) != facts_gen {
-        changed |= alt_restamp_owners(state);
-    }
-    changed |= alt_pump_stand_in(state, library);
-    // the landing GATE (§3.3 step 3): a replay takes this on its recorded frame. The roster and
-    // facts re-stamps above are NOT gated — they follow other stores' landings, which are gated
-    // where those land.
-    // DUMP MODE: owed while the current generation is unsettled. A superseded request's late
-    // answer is dropped INSIDE the take, so it neither ends the wait nor settles the new request.
-    let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Metadata,
-        || adapter.alt_gen.load(Ordering::SeqCst) != adapter.alt_done.load(Ordering::SeqCst), || {
+    let roster_gen = keys.roster_gen();
+    if adapter.alt_roster_gen.swap(roster_gen, Ordering::SeqCst) != roster_gen
+        || !state.alt.clients.slots().eq(keys.slots()) || !state.alt.clients.iter().eq(keys.iter()) {
+        // Same lock protocol as request generation/clear and port publication.
         let mut slot = adapter.alt_slot.lock().unwrap_or_else(|e| e.into_inner());
-        match slot.take() {
-            Some(r) if r.gen != adapter.alt_gen.load(Ordering::SeqCst) => None,
-            other => other,
-        }
-    });
-    let Some(r) = taken else { return changed };
-    adapter.alt_done.store(r.gen, Ordering::SeqCst);
-    if r.gen != adapter.alt_gen.load(Ordering::SeqCst) || r.roster_gen != roster_gen {
-        return changed; // superseded: the page moved on while this was in flight
+        let gen = adapter.alt_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        adapter.alt_done.fetch_max(gen, Ordering::SeqCst);
+        *slot = None;
+        changed |= alt_prune_inactive(state, keys);
     }
-    // The store is ADDRESSED, so this landing is filed under the PAIR it was asked for and a reader
-    // on another page sees nothing — the generation test alone cannot see a page that was opened,
-    // left and re-opened between spawn and landing, and the rk alone cannot see the two servers'
-    // keys colliding, which they do by default.
-    changed | alt_install(state, r.sid, &r.rk, r.list)
-}
-
-// ---- the headless stand-in ---------------------------------------------------------------------
-//
-// Reached through `devtrig::read`, so the whole of it is absent from a `RELEASE=1` build at compile
-// time along with the rest of the `/tmp` surface. The trigger literal is
-// `/tmp/plxnative-shared`, spelled here for the catalog grep in `docs/agent-reference.md`.
-
-/// Build the headless stand-in once the item has LANDED — called every frame by
-/// [`pump_alt_sources`], and doing nothing at all in the ordinary case (two string compares, no
-/// allocation).
-///
-/// It cannot be built when the fetch is dispatched: a mount deliberately clears [`current`] for the
-/// whole 2-5 round-trip window, so at that moment there is no runtime, no resolution class and no
-/// title to build a copy of the item FROM.
-fn alt_pump_stand_in(state: &mut MetadataState, library: Option<&str>) -> bool {
-    if crate::stores::tape::active() { return false; }
-    let Some(d) = state.current.as_ref() else { return false };
-    if d.rk == state.alt.stand_in_rk {
-        return false; // this item has already had its chance — one string compare
+    let facts_gen = keys.facts_gen();
+    if adapter.alt_facts_gen.swap(facts_gen, Ordering::SeqCst) != facts_gen || state.alt.clients != *keys {
+        changed |= alt_restamp_owners(state, keys);
     }
-    // Marked whatever the outcome, so the ordinary build — where the trigger is not armed at all —
-    // opens the `/tmp` file ONCE per item rather than on every frame of it.
-    state.alt.stand_in_rk = d.rk.clone();
-    let d = state.current.as_ref().unwrap();
-    let Some(list) = alt_dev_stand_in(d, library) else { return false };
-    let d = state.current.as_ref().unwrap();
-    let held = &mut state.alt;
-    held.sid = d.sid;
-    held.rk = d.rk.clone();
-    held.copies = list;
-    held.stand_in = true;
-    true
+    if state.alt.clients != *keys { state.alt.clients.clone_from(keys); }
+    changed |= restamp_detail_source(state, keys);
+    // Allocate pass identity only for a due request; ordinary/not-due frames allocate nothing.
+    // Controlled suppression precedes chance consumption and ALL host IO/cache access.
+    let request = if controlled { None } else {
+        state.current.as_ref().filter(|d| d.rk != state.alt.stand_in_rk).map(|d| {
+            state.alt.stand_in_rk = d.rk.clone();
+            AltStandInReq { rk: d.rk.clone(), res: d.video_resolution.clone(), dur_ms: d.dur_ms,
+                identity: std::sync::Arc::new(()) }
+        })
+    };
+    let identity = request.as_ref().map(|request| request.identity.clone());
+    AltSourcesPass { state, adapter, _keys: keys, roster_gen,
+        gen: adapter.alt_gen.load(Ordering::SeqCst), changed, identity, request }
 }
 
-/// A DRAW-ONLY copy list for `/tmp/plxnative-shared=<handle>`, so the *Also available* panel and
-/// the control that opens it can be judged on a television before the multi-server data layer
-/// exists.
-///
-/// **It reuses the trigger the hero's own "Shared by …" run is judged through** rather than adding
-/// a second one for the same deliverable: that trigger already means "pretend this item came from
-/// `<handle>`", and a second copy of the film on `<handle>`'s source is the other half of the same
-/// pretence.
-///
-/// What it stands in for, exactly:
-///
-/// * **your copy** is the real one — the page's own ratingKey, on the current server, with the
-///   loaded item's own runtime and resolution class, in the library the browse store says you are
-///   in. Nothing about it is invented, which is what makes the TICK meaningful.
-/// * **their copy** is that same film on a SECOND REGISTRY SLOT ([`alt_stand_in_slot`]). It is a
-///   real slot with a real client, so OK on it performs the real source switch and opens a real
-///   page — the one behaviour of the panel that cannot be judged from a still.
-/// * its resolution is **one class better than yours**, and that is the stand-in's ONE invention.
-///   It exists because the ordering rule is otherwise unobservable: the design's own example is a
-///   1080p copy you are standing on sorting above a friend's 4K one, which is the case that
-///   separates "the copy that plays" from "the best copy". With two equal badges the panel cannot
-///   show that it got the rule right.
-///
-/// `None` (and no stand-in) when the trigger is not armed.
-///
-/// NB this is **not** one of the two "WINS WHEN ARMED" precedence sites ([`fetch_detail`],
-/// `screens::home`'s `dev_source`), which pick between the trigger and a real answer. There is no
-/// real answer here to outrank: an unarmed trigger means no panel content at all, and an
-/// armed-but-EMPTY file means the same, because a copy list has to be attributed to somebody.
-#[cfg(not(any(test, feature = "test-support")))]
-fn alt_dev_stand_in(d: &Detail, library: Option<&str>) -> Option<Vec<AltCopy>> {
-    let handle = plx_base::devtrig::read("shared").filter(|h| !h.is_empty())?;
-    // The application supplies the retained owner publication on every production pump. A
-    // compatibility caller with no directory cannot honestly name the library, so it cannot arm
-    // this visual stand-in.
-    let library = library?;
-    let here = plx_plex::plex::current_server();
-    let theirs = alt_stand_in_slot()?;
-    let v = alt_stand_in(
-        &handle,
-        library,
-        &d.rk,
-        &d.video_resolution,
-        d.dur_ms,
-        here,
-        theirs,
-    );
-    plx_base::eventlog::log(&format!(
-        "altsources: stand-in for rk={} on slot {} (dev)",
-        d.rk,
-        theirs.raw()
-    ));
-    Some(v)
-}
-#[cfg(any(test, feature = "test-support"))]
-fn alt_dev_stand_in(_d: &Detail, _library: Option<&str>) -> Option<Vec<AltCopy>> {
-    None // the host suite must not depend on what this dev Mac happens to have under /tmp
-}
+// ---- the pure half of the headless stand-in ---------------------------------------------------
 
-/// The registry slot the stand-in's borrowed copy lives on — a REAL one, because the point of the
-/// stand-in is to exercise the switch.
-///
-/// A genuinely different server if one is registered. Otherwise the current server registered a
-/// SECOND time under a synthetic machine id: from everything this feature does — counting sources,
-/// resolving a client, switching, refetching — that is a second source, and because it is the same
-/// machine the ratingKey it carries is honestly the same film. What it cannot stand in for is a
-/// server going offline, or a library and a resolution that differ for real.
-///
-/// The token comes from the harness's own `/tmp/plxnative-token`, which is the only place a session
-/// token is available to a dev path; with no token there is nothing to build a working client from,
-/// so there is no stand-in at all rather than one that 401s.
-#[cfg(not(any(test, feature = "test-support")))]
-fn alt_stand_in_slot() -> Option<plx_plex::plex::ServerId> {
-    let here = plx_plex::plex::current_server();
-    // `server_ids`, never `0..server_count()`: slot numbers are permanent and a sign-out retires
-    // the ones below the registry's floor, so the live roster is a window and not a prefix.
-    let other =
-        plx_plex::plex::server_ids().find(|&id| id != here && plx_plex::plex::client_for(id).is_some());
-    if let Some(id) = other {
-        return Some(id); // a real second server is already registered — use it
-    }
-    let c = plx_plex::plex::client_opt()?;
-    let token = plx_base::devtrig::read("token").filter(|t| !t.is_empty())?;
-    // …and a registry with no room left answers `UNSET`, which is no stand-in at all rather than
-    // one that resolves to whatever happens to be current.
-    Some(plx_plex::plex::register(
-        &format!("standin-{}", c.machine_id()),
-        c.host(),
-        c.port(),
-        &token,
-    ))
-    .filter(|id| id.is_set())
-}
-
-/// [`alt_dev_stand_in`]'s pure half — the two copies it describes, so the shape of what a device
-/// capture is looking at is itself host-graded.
-///
-/// **D3 note**: the census flagged this as "MUTATOR-adjacent" by name alone; it is not — it
-/// touches no crate-global state at all, just builds and returns a `Vec<AltCopy>` from its
-/// arguments. `screens/alt_sources_tests.rs` calls it directly to grade that shape, which is
-/// exactly what the doc above says it exists for; kept `pub` rather than routed through a
-/// `Cmd`, since it is a pure reader/builder, not a mutator the gate has any reason to restrict.
+/// Build two visual copies from explicit host inputs, without IO or registry reads. The host
+/// owns shared/token reads and second-slot selection/registration in `src/dev/scenarios/metadata.rs`.
+/// The current-server copy retains runtime/resolution/library; the borrowed copy has one invented
+/// improvement, its resolution class. Both target real navigable slots. A gated real landing
+/// replaces this list; an armed trigger does not suppress real credit regrading.
 pub fn alt_stand_in(
     handle: &str,
     library: &str,
@@ -4348,7 +5161,7 @@ pub fn alt_stand_in(
 }
 
 /// The resolution class one rung above `res`, in `screens::alt_sources`' `scan_lines` vocabulary —
-/// the stand-in's single invention (see [`alt_dev_stand_in`]). Anything already at the top, or
+/// the stand-in's single invention (see [`alt_stand_in`]). Anything already at the top, or
 /// unrecognised, is returned unchanged rather than promoted into a class that does not exist.
 fn alt_one_class_better(res: &str) -> String {
     match res.trim().to_ascii_lowercase().as_str() {
@@ -4368,9 +5181,10 @@ pub fn detail_loading(adapter: &MetadataAdapter) -> bool {
 
 // ---- season switching ----------------------------------------------------------------------
 // The tab UI's season switch is ASYNC: `load_season` flips `cur_season` optimistically (the tab
-// highlight moves at once), fetches the episodes on a worker thread, and `pump_season` (called by
-// the detail page once a frame) applies the landed list on the main thread. The blocking
-// `/children` GET used to run on the main loop, freezing the UI for every rapid season hop.
+// highlight moves at once), emits the episodes' fetch as a job the application starts on a worker
+// thread (`MetaSeasonReq`), and `pump_season` (called by the detail page once a frame) applies the
+// landed list on the main thread. The blocking `/children` GET used to run on the main loop,
+// freezing the UI for every rapid season hop.
 // Generations guard against out-of-order landings; results for a different item are discarded.
 struct SeasonResult {
     gen: u32,
@@ -4382,7 +5196,9 @@ struct SeasonResult {
     rk: String,                // the show the fetch was for
     idx: usize,                // the season it was for
     prev: usize, // the season `cur_season` held before the optimistic flip — restored on failure
-    eps: Option<Vec<Episode>>, // None = the fetch failed or panicked — the row keeps its episodes
+    eps: Option<EpisodeList>, // None = the fetch failed or panicked — the row keeps its episodes
+    /// Where in the view-state publish order this fetch was requested ([`crate::viewledger`]).
+    stamp: crate::viewledger::Stamp,
 }
 
 /// Post a finished season fetch to the mailbox. MONOTONE: an older fetch landing late must never
@@ -4397,7 +5213,8 @@ fn land_season(
     rk: String,
     idx: usize,
     prev: usize,
-    eps: Option<Vec<Episode>>,
+    eps: Option<EpisodeList>,
+    stamp: crate::viewledger::Stamp,
 ) {
     let mut slot = adapter.season_result.lock().unwrap_or_else(|e| e.into_inner());
     if slot.as_ref().map(|r| r.gen < gen).unwrap_or(true) {
@@ -4408,6 +5225,7 @@ fn land_season(
             idx,
             prev,
             eps,
+            stamp,
         });
     }
 }
@@ -4448,21 +5266,755 @@ fn load_season(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapt
     if let Some(d) = state.current.as_mut() {
         d.cur_season = idx;
     }
+    // Stamped at THIS request, not at the page's install: the season may be asked for long after.
+    let stamp = state.ledger.stamp();
     let gen = adapter.season_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let adapter_worker = std::sync::Arc::clone(adapter);
-    let spawned = plx_base::task::spawn_small("season", move || {
-        // the mailbox is filled OUTSIDE the guard so a panicking fetch still lands — as a
-        // FAILURE (None), not as an empty season: a panic is not "this season has no episodes",
-        // and otherwise season_loading() would report an in-flight fetch forever
-        let eps = catch_unwind(|| fetch_episodes(sid, &season_rk)).unwrap_or(None);
-        land_season(&adapter_worker, gen, sid, rk, idx, prev, eps);
-    });
-    if !spawned {
-        // no worker means nothing will ever land: catch DONE up or the episode row keeps its
-        // loading dim + spinner for the rest of the session. `cur_season` already moved, so the
-        // tab highlight stays where the user put it and the old episodes stay listed.
-        adapter.season_done.store(gen, Ordering::SeqCst);
+    // The fetch is the application's to start: the request leaves as a job and the answer lands
+    // through `MetaSeasonPort` (a failed fetch, or a panicking one, lands as `eps: None`, not as an
+    // empty season: a panic is not "this season has no episodes", and otherwise `season_loading()`
+    // would report an in-flight fetch forever). A launch that starts nothing is
+    // `MetaSeasonPort::refused`, which catches DONE up so the episode row does not keep its loading
+    // dim + spinner; `cur_season` already moved, so the tab highlight stays where the user put it
+    // and the old episodes stay listed.
+    state.jobs.push(crate::stores::StoreJob::MetaSeason(
+        plx_machine::job::Job { addr: season_addr(gen), req: MetaSeasonReq { sid, show: rk, season: season_rk, idx, prev, stamp } },
+        MetaSeasonPort::of(adapter),
+    ));
+}
+
+// ---- long-season episode pages ---------------------------------------------------------------
+// A season lands as page 0 of 60; the screen names the range it needs ([`MetadataCmd::WantEpisodes`])
+// and the other pages are fetched off-thread and installed by [`pump_episode_pages`]. These are
+// background reads of the SAME season, so they do not move `season_gen`/`season_loading` (the tab
+// spinner and the play gate), and a landing is checked against the page's own (server, show,
+// season) before it touches the list.
+
+/// Most pages one request job fetches. The wanted range is the screen's plus a lead, a few pages
+/// at most; this bounds what a job does if it is ever wider.
+const EP_JOB_PAGES: usize = 4;
+
+#[derive(Default)]
+struct EpPages {
+    /// `(server, season rk, page)` asked for and not yet answered. A page is fetched once at a time.
+    inflight: Vec<(plx_plex::plex::ServerId, String, usize)>,
+    landed: Vec<EpLanded>,
+    /// What the screen wants right now; eviction after a landing keeps exactly this.
+    keep: Option<crate::stores::page_cache::Keep>,
+    /// Page jobs emitted so far: the next job's address.
+    sent: u32,
+}
+
+struct EpLanded {
+    sid: plx_plex::plex::ServerId,
+    show: String,
+    season: String,
+    page: usize,
+    /// `None` = the GET failed or panicked: nothing installs, and the page is asked for again by
+    /// the next [`want_episodes`].
+    rows: Option<Vec<Episode>>,
+    /// Where in the view-state publish order the job that fetched this page was requested.
+    stamp: crate::viewledger::Stamp,
+}
+
+/// Record what the screen needs of the selected season's episodes and fetch the pages of it that
+/// are holes. Idempotent: a page already in flight is not asked for twice, so the screen may say
+/// the same range again (that is also how a failed page is retried). Main-thread only.
+fn want_episodes(
+    state: &mut MetadataState,
+    adapter: &std::sync::Arc<MetadataAdapter>,
+    keep: crate::stores::page_cache::Keep,
+) -> bool {
+    let Some(d) = state.current.as_ref() else { return false };
+    let Some(season) = d.seasons.get(d.cur_season).map(|s| s.rk.clone()) else { return false };
+    let (sid, show) = (d.sid, d.rk.clone());
+    // A season switch is in flight: its list replaces this one, so a page of the old list is a
+    // wasted request.
+    if season_loading(adapter) {
+        return false;
     }
+    // The pages the screen cannot do without first (a restore target, the focus), then the range.
+    let page_of = |i: usize| i / EPISODE_PAGE;
+    let mut order: Vec<usize> = keep.restore.into_iter().chain(keep.focus).map(page_of).collect();
+    order.extend(d.episodes.missing(keep.wanted.start, keep.wanted.end));
+    let mut want = Vec::new();
+    let mut keys = Vec::new();
+    let seq = {
+        let mut ep = adapter.ep_pages.lock().unwrap_or_else(|e| e.into_inner());
+        for p in order {
+            let hole = d.episodes.missing(p * EPISODE_PAGE, p * EPISODE_PAGE + 1).next() == Some(p);
+            let key = (sid, season.clone(), p);
+            if hole && !want.contains(&p) && !ep.inflight.contains(&key) && want.len() < EP_JOB_PAGES {
+                want.push(p);
+                keys.push(key);
+            }
+        }
+        ep.inflight.extend(keys.iter().cloned());
+        ep.keep = Some(keep);
+        // The job's own sequence, minted only for a job that is sent.
+        if !want.is_empty() {
+            ep.sent += 1;
+        }
+        ep.sent
+    };
+    if want.is_empty() {
+        return false;
+    }
+    let stamp = state.ledger.stamp(); // at the request, before any page of the job is read
+    // The reads are the application's to start. A launch that starts nothing is
+    // `MetaEpisodesPort::refused`, which drops the keys held above, so the next `WantEpisodes`
+    // asks for the pages again.
+    state.jobs.push(crate::stores::StoreJob::MetaEpisodes(
+        plx_machine::job::Job { addr: pages_addr(seq), req: MetaEpisodesReq { sid, show, season, pages: want, stamp } },
+        MetaEpisodesPort::new(adapter, keys),
+    ));
+    true
+}
+
+/// Main-thread pump: install the episode pages that landed on the list they were asked for, then
+/// evict what the screen no longer needs. True when the list changed.
+pub fn pump_episode_pages(state: &mut MetadataState, adapter: &MetadataAdapter) -> bool {
+    let (landed, keep) = {
+        let mut ep = adapter.ep_pages.lock().unwrap_or_else(|e| e.into_inner());
+        if ep.landed.is_empty() {
+            return false;
+        }
+        (std::mem::take(&mut ep.landed), ep.keep.clone())
+    };
+    let Some(d) = state.current.as_mut() else { return false };
+    let mut changed = false;
+    // the oldest request among the pages installed: every edit after it is made again
+    let mut since = crate::viewledger::Stamp::MAX;
+    for page in landed {
+        let ours = plx_plex::plex::same_item((d.sid, &d.rk), (page.sid, &page.show))
+            && d.seasons.get(d.cur_season).is_some_and(|s| s.rk == page.season);
+        if let (true, Some(rows)) = (ours, page.rows) {
+            d.episodes.set_page(page.page, rows);
+            since = since.min(page.stamp);
+            changed = true;
+        }
+    }
+    if let (true, Some(keep)) = (changed, keep) {
+        d.episodes.evict(&keep);
+    }
+    if changed {
+        replay_views(state, since);
+    }
+    changed
+}
+
+// ---- the season and episode-page jobs --------------------------------------------------------
+// Neither read starts a worker here. `load_season` and `want_episodes` leave a typed job on the
+// outbox (`StoreJob::MetaSeason`, `StoreJob::MetaEpisodes`, both `Direct`: none is on the tape) and
+// the application's runner starts it with the client it resolved for the server at the launch
+// (`finish_season_job`, `finish_episodes_job`). The answer comes back through the job's port into
+// the mailboxes the pumps already read (`season_result`, `ep_pages`). The season landing is gated,
+// as before (`pump_season_with_gate` takes it through the landing gate, and a replay takes it on
+// its recorded frame); only the page landing (`pump_episode_pages`) is an ungated take.
+
+fn season_addr(gen: u32) -> plx_machine::machine::Addr {
+    plx_machine::machine::Addr {
+        to: plx_machine::machine::MachineId::Store(crate::stores::StoreId::Metadata.ord()),
+        req: plx_machine::machine::RequestId(gen),
+    }
+}
+
+/// A page job's address: the sequence of its own (`EpPages.sent`). It shares the id space of
+/// [`season_addr`] and of the Detail job's address (`Addr { to: Store(Metadata), req }`), so a page
+/// job, a season job, a Related window job ([`related_addr`]) and a detail job can carry an
+/// identical `Addr`. Nothing routes by `Addr` alone (each typed port keeps its answers apart);
+/// anything that later keys by it has to add the kind, or give the kinds disjoint ranges.
+fn pages_addr(seq: u32) -> plx_machine::machine::Addr {
+    season_addr(seq)
+}
+
+/// The season switch one `LoadSeason` asks for, everything the worker needs captured on the main
+/// thread. The generation is the job's address. `sid` is the loaded show's own server (never
+/// `current_server()`), `prev` the season `cur_season` held before the optimistic flip (restored
+/// on a failed fetch by [`pump_season_with_gate`]), `stamp` the view-state publish order at the
+/// request. The runner resolves `sid` to its client at the launch; a server it holds none for
+/// answers the failure without a GET.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetaSeasonReq {
+    pub sid: plx_plex::plex::ServerId,
+    pub show: String,
+    pub season: String,
+    pub idx: usize,
+    pub prev: usize,
+    pub stamp: crate::viewledger::Stamp,
+}
+
+/// Where a season fetch's ONE answer goes: the mailbox of the adapter the request was made from
+/// (an owner that has since been `Reset` holds a new one; this port still lands into the retired
+/// one nobody pumps). Two ports are equal when they reach the same adapter.
+#[derive(Clone)]
+pub struct MetaSeasonPort(std::sync::Arc<MetadataAdapter>);
+
+impl MetaSeasonPort {
+    pub(crate) fn of(adapter: &std::sync::Arc<MetadataAdapter>) -> Self {
+        Self(std::sync::Arc::clone(adapter))
+    }
+}
+
+impl PartialEq for MetaSeasonPort {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for MetaSeasonPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MetaSeasonPort({:p})", std::sync::Arc::as_ptr(&self.0))
+    }
+}
+
+/// A season fetch's answer, opaque to the runner: `eps` is `None` for a FAILED fetch.
+pub struct SeasonAnswer {
+    sid: plx_plex::plex::ServerId,
+    rk: String,
+    idx: usize,
+    prev: usize,
+    eps: Option<EpisodeList>,
+    stamp: crate::viewledger::Stamp,
+}
+
+impl plx_machine::job::Port<SeasonAnswer> for MetaSeasonPort {
+    /// The answer, posted to the monotone mailbox ([`land_season`]); the pump discards one for a
+    /// generation it has since superseded.
+    fn done(&self, addr: plx_machine::machine::Addr, a: SeasonAnswer) {
+        land_season(&self.0, addr.req.0, a.sid, a.rk, a.idx, a.prev, a.eps, a.stamp);
+    }
+
+    /// The fetch was never started: catch DONE up to the job's generation, or the episode row keeps
+    /// its loading dim + spinner for the rest of the session. Settled here, in the call that
+    /// refused it, because that is where the inline spawn's `!spawned` arm settled it. Never down
+    /// (`fetch_max`): a refusal that arrives after a newer request landed must not make
+    /// `season_loading()` true again.
+    fn refused(&self, addr: plx_machine::machine::Addr) {
+        self.0.season_done.fetch_max(addr.req.0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// One read of a season, page or Related window job through the client the runner resolved: `None`
+/// when it held none for the server (no GET is made), and `None` when the read failed or panicked.
+/// The panic is caught HERE, so a caller posts its answer outside the guard and a panicking read
+/// still lands, as a failure.
+fn read_through<T>(
+    client: Option<&'static plx_plex::plex::Client>,
+    read: impl FnOnce(&'static plx_plex::plex::Client) -> Option<T>,
+) -> Option<T> {
+    client.and_then(|client| catch_unwind(std::panic::AssertUnwindSafe(|| read(client))).unwrap_or(None))
+}
+
+/// The season fetch's IO body and its completion: read the episodes through `client` and post the
+/// answer to `port`. `client` is the one the runner resolved at the launch; `None` is a server it
+/// held none for, which answers the failure without a GET. The answer is posted OUTSIDE the guard,
+/// so a fetch that panics still lands, as a FAILURE.
+///
+/// WORKER THREAD.
+pub fn finish_season_job(
+    port: &MetaSeasonPort, addr: plx_machine::machine::Addr,
+    client: Option<&'static plx_plex::plex::Client>, req: MetaSeasonReq,
+) {
+    finish_season_with(port, addr, client, req, fetch_episodes);
+}
+
+fn finish_season_with(
+    port: &MetaSeasonPort, addr: plx_machine::machine::Addr,
+    client: Option<&'static plx_plex::plex::Client>, req: MetaSeasonReq,
+    fetch: impl FnOnce(&'static plx_plex::plex::Client, &str) -> Option<EpisodeList>,
+) {
+    use plx_machine::job::Port;
+    let MetaSeasonReq { sid, show, season, idx, prev, stamp } = req;
+    let eps = read_through(client, |client| fetch(client, &season));
+    port.done(addr, SeasonAnswer { sid, rk: show, idx, prev, eps, stamp });
+}
+
+/// The pages one `WantEpisodes` window asks for (at most [`EP_JOB_PAGES`]) of one season of one
+/// show, with the publish order at the request. Pages are keyed by `(server, season, page)`, not by
+/// a generation: the job's address is a sequence of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetaEpisodesReq {
+    pub sid: plx_plex::plex::ServerId,
+    pub show: String,
+    pub season: String,
+    pub pages: Vec<usize>,
+    pub stamp: crate::viewledger::Stamp,
+}
+
+/// Where a page job's answer goes, and the inflight keys the job holds (a refusal is told only the
+/// address). Two ports are equal when they reach the same adapter and hold the same keys.
+#[derive(Clone)]
+pub struct MetaEpisodesPort {
+    adapter: std::sync::Arc<MetadataAdapter>,
+    keys: Vec<(plx_plex::plex::ServerId, String, usize)>,
+}
+
+impl MetaEpisodesPort {
+    fn new(adapter: &std::sync::Arc<MetadataAdapter>, keys: Vec<(plx_plex::plex::ServerId, String, usize)>) -> Self {
+        Self { adapter: std::sync::Arc::clone(adapter), keys }
+    }
+
+    /// One page of the job was read: land it and give its inflight key back now, ahead of the
+    /// job's later pages. The pages are posted as they arrive, the way the inline worker pushed
+    /// them (the window asks for the restore page first, and the strip waits on it), and the job's
+    /// one `done` is only the end.
+    fn page(&self, page: EpLanded) {
+        let mut ep = self.adapter.ep_pages.lock().unwrap_or_else(|e| e.into_inner());
+        ep.inflight.retain(|(sid, season, p)| !(*sid == page.sid && *season == page.season && *p == page.page));
+        ep.landed.push(page);
+    }
+}
+
+impl PartialEq for MetaEpisodesPort {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.adapter, &other.adapter) && self.keys == other.keys
+    }
+}
+
+impl std::fmt::Debug for MetaEpisodesPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MetaEpisodesPort({:p}, {} page(s))", std::sync::Arc::as_ptr(&self.adapter), self.keys.len())
+    }
+}
+
+/// A page job's end, opaque to the runner. It carries nothing: each page, `rows: None` for a FAILED
+/// read, was posted through [`MetaEpisodesPort::page`] as it was read.
+pub struct EpisodePagesDone;
+
+impl plx_machine::job::Port<EpisodePagesDone> for MetaEpisodesPort {
+    /// The terminal of the job's posts: every page has landed and released its own key, so there is
+    /// nothing left to give back. A key is not released here by the job's list, because a later
+    /// window may have asked for the same page again since it landed.
+    fn done(&self, _addr: plx_machine::machine::Addr, _end: EpisodePagesDone) {}
+
+    /// The job was never started: drop the keys it holds, so the next `WantEpisodes` asks again.
+    fn refused(&self, _addr: plx_machine::machine::Addr) {
+        let mut ep = self.adapter.ep_pages.lock().unwrap_or_else(|e| e.into_inner());
+        ep.inflight.retain(|k| !self.keys.contains(k));
+    }
+}
+
+/// The page job's IO body and its completion: read each page through `client` in order and post
+/// each to `port` as it is read, then end the job. `None` is a server the runner held no client
+/// for: every page answers the failure without a GET. A read that panics lands as a failure,
+/// outside the guard.
+///
+/// WORKER THREAD.
+pub fn finish_episodes_job(
+    port: &MetaEpisodesPort, addr: plx_machine::machine::Addr,
+    client: Option<&'static plx_plex::plex::Client>, req: MetaEpisodesReq,
+) {
+    finish_episodes_with(port, addr, client, req, fetch_episode_page);
+}
+
+fn finish_episodes_with(
+    port: &MetaEpisodesPort, addr: plx_machine::machine::Addr,
+    client: Option<&'static plx_plex::plex::Client>, req: MetaEpisodesReq,
+    fetch: impl Fn(&'static plx_plex::plex::Client, &str, usize) -> Option<Vec<Episode>>,
+) {
+    use plx_machine::job::Port;
+    let MetaEpisodesReq { sid, show, season, pages, stamp } = req;
+    for page in pages {
+        let rows = read_through(client, |client| fetch(client, &season, page));
+        port.page(EpLanded { sid, show: show.clone(), season: season.clone(), page, rows, stamp });
+    }
+    port.done(addr, EpisodePagesDone);
+}
+
+// ---- Related tail window ----------------------------------------------------------------------
+// The Related row is its head (every preview of `/related`) and a window of the hubs' own listings
+// past their previews ([`RelatedTail`]). The screen names an edge ([`MetadataCmd::WantRelated`]),
+// the window is read by a typed job the application's runner starts (`StoreJob::MetaRelated`,
+// `Direct`: it is not on the tape) through the shared sliding window, and [`pump_related_pages`]
+// installs it on the page it was read for. The step starts no thread and reads no registry: the
+// runner resolves the server's client at the launch and hands it to [`finish_related_job`].
+
+#[derive(Default)]
+struct RelPages {
+    /// A window read is out; the next edge is asked for once it lands. Held until the job has
+    /// answered or been refused, withdrawn or not: a read cannot be stopped, and a second one
+    /// beside it would read the same hubs twice for a reader rocking across the edge. A job the
+    /// runner parks holds it too, as a worker that has not answered does.
+    inflight: bool,
+    /// The reader withdrew the read that is out: its answer is discarded when it lands.
+    withdrawn: bool,
+    /// What the read out is for (item, window it starts from, direction, and the tail position a
+    /// seek opens at), so an ask for the same thing meanwhile adopts it and no other does.
+    out: Option<(plx_plex::plex::ServerId, String, (usize, usize), bool, Option<usize>)>,
+    landed: Vec<RelLanded>,
+    /// Window jobs emitted so far: the next job's address.
+    sent: u32,
+}
+
+struct RelLanded {
+    sid: plx_plex::plex::ServerId,
+    rk: String,
+    /// The window the read started from. A landing on any other window is stale.
+    from: (usize, usize),
+    /// `None` = the read failed: nothing installs, and the asker repeats it on its ladder while the need
+    /// stands (the shelf at either edge; `pump_seek` in the detail screen for a restore).
+    window: Option<RelatedWindow>,
+    /// Where in the view-state publish order this read was requested ([`crate::viewledger`]).
+    stamp: crate::viewledger::Stamp,
+}
+
+/// One page of the tail positions `start..start+size`: the hubs' listings past their previews end
+/// to end, a page spanning two hubs reading both. `get(key, offset, size)` is one listing page.
+/// What a hub says about its own total is learned into `hubs`. Items in `skip` are returned with no
+/// type, which the window skips while keeping their positions. `None` when a page failed or came
+/// back from another offset.
+fn tail_page(
+    hubs: &mut [TailHub],
+    skip: &std::collections::HashSet<String>,
+    start: usize,
+    size: usize,
+    get: &mut impl FnMut(&str, usize, usize) -> Option<plx_plex::plex::MediaContainer>,
+) -> Option<plx_plex::plex::MediaContainer> {
+    let mut out = Vec::new();
+    let (mut at, mut base, mut k) = (start, 0usize, 0usize);
+    while k < hubs.len() && out.len() < size {
+        if let Some(len) = hubs[k].len.filter(|len| at >= base + len) {
+            base += len;
+            k += 1;
+            continue;
+        }
+        let local = at - base;
+        let want = (size - out.len()).min(hubs[k].len.map_or(usize::MAX, |len| len - local));
+        let listed = hubs[k].preview + local;
+        let mc = get(&hubs[k].key, listed, want)?;
+        if mc.offset != listed as i64 { return None; }
+        if mc.total_size > 0 { hubs[k].len = Some((mc.total_size as usize).saturating_sub(hubs[k].preview)); }
+        let got = mc.metadata.len().min(want);
+        for mut item in mc.metadata.into_iter().take(got) {
+            if skip.contains(crate::pms::clean(&item.rating_key).as_str()) { item.kind.clear(); }
+            out.push(item);
+        }
+        at += got;
+        if got < want {
+            // A short page ends a hub whose length was unknown; a hub that said its length and
+            // answered short has not ended, and the window keeps what arrived.
+            if hubs[k].len.is_none() { hubs[k].len = Some(local + got); }
+            if hubs[k].len.is_some_and(|len| local + got >= len) { base += local + got; k += 1; continue; }
+            break;
+        }
+    }
+    let total = hubs.iter().map(|h| h.len).sum::<Option<usize>>().unwrap_or(0);
+    Some(plx_plex::plex::MediaContainer { offset: start as i64, total_size: total as i64, metadata: out, ..Default::default() })
+}
+
+/// What a Related window read is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelatedAsk {
+    /// The window slides one step: the previous (`before`) or the next.
+    Edge { before: bool },
+    /// The window is opened where tail position `at` lies, whatever it held before: a page read
+    /// afresh whose focus was last seen deep in the row.
+    Seek(usize),
+}
+
+/// Ask for the previous or next window of the Related tail. False when there is nothing to ask:
+/// no tail, no more in that direction, or a read already out. True when the read's job was left on
+/// the outbox ([`ask_related`]). Main thread only.
+fn want_related(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, before: bool,
+    seen: (usize, usize)) -> bool {
+    ask_related(state, adapter, RelatedAsk::Edge { before }, seen)
+}
+
+/// [`want_related`], or a window opened at a tail position ([`MetadataCmd::SeekRelated`]).
+///
+/// The step takes the single-flight claim in `rel_pages` and leaves the read on the outbox as a
+/// [`MetaRelatedReq`] job; it starts no thread and reads no registry. True means the job was
+/// emitted: the claim is up until the job's port gives it back, by its answer or by a refusal
+/// ([`MetaRelatedPort`]), so a true for a read the OS then refuses is followed by the claim lowered
+/// and the next edge asking again, exactly as a spawn that failed left it.
+fn ask_related(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>, ask: RelatedAsk,
+    seen: (usize, usize)) -> bool {
+    use crate::stores::paging::{PageInfo, Row};
+    let Some(d) = state.current.as_ref() else { return false };
+    let t = &d.related_tail;
+    // The asker read a window that a landing has since replaced: where its focus stood in the old
+    // one says nothing about the new one. The landing's publication re-arms the shelf, which asks
+    // again from the window that stands.
+    if seen != (t.offset, t.end) { return false; }
+    let before = matches!(ask, RelatedAsk::Edge { before: true });
+    let seek = matches!(ask, RelatedAsk::Seek(_));
+    let seek_at = if let RelatedAsk::Seek(at) = ask { Some(at) } else { None };
+    if t.hubs.is_empty() || t.head > d.related.len() || (before && t.offset == 0)
+        || (matches!(ask, RelatedAsk::Edge { before: false }) && !t.more)
+        // A position past a hub whose length is not yet known cannot be addressed: the hubs'
+        // listings are chained by their lengths, which a slide learns on its way and a seek skips.
+        || (seek && t.hubs.split_last().is_some_and(|(_, earlier)| earlier.iter().any(|h| h.len.is_none()))) {
+        return false;
+    }
+    let seq = {
+        let mut rel = adapter.rel_pages.lock().unwrap_or_else(|e| e.into_inner());
+        if rel.inflight {
+            if rel.withdrawn && rel.out.as_ref().is_some_and(|(sid, rk, from, was_before, was_seek)|
+                *from == seen && *was_before == before && *was_seek == seek_at && plx_plex::plex::same_item((d.sid, &d.rk), (*sid, rk))) {
+                // The read the reader walked away from is the one asked for again, from the window
+                // that still stands, so it answers this ask too.
+                rel.withdrawn = false;
+            }
+            return false;
+        }
+        // A window read from this one has answered and waits for the pump: the edge is already
+        // served, and reading it again would only land on a window that is gone by then.
+        let served = rel.landed.iter().any(|l| l.window.is_some() && l.from == seen
+            && plx_plex::plex::same_item((d.sid, &d.rk), (l.sid, &l.rk)));
+        if served { return false; }
+        rel.inflight = true;
+        rel.withdrawn = false;
+        rel.out = Some((d.sid, d.rk.clone(), seen, before, seek_at));
+        // The job's own sequence, minted only for a job that is sent.
+        rel.sent += 1;
+        rel.sent
+    };
+    let stamp = state.ledger.stamp(); // at the request, before the read
+    let (sid, rk) = (d.sid, d.rk.clone());
+    let info = PageInfo { offset: t.offset, end: t.end, total: t.total, more: t.more, unstable: false };
+    // A seek opens its window on the listing alone: the window it replaces is not an overlap to
+    // carry, and the page's ledger holds nothing of positions it has not read.
+    let rows: Vec<Row> = if seek { Vec::new() } else { t.positions.iter().copied()
+        .zip(d.related[t.head..].iter().map(|m| std::sync::Arc::new(m.clone()))).collect() };
+    let skip: std::collections::HashSet<String> =
+        t.exclude.iter().cloned().chain(d.related[..t.head].iter().map(|m| m.rk.clone())).collect();
+    let hubs = t.hubs.clone();
+    let row = if seek { Default::default() } else { t.row.clone() };
+    // The read is the application's to start. A launch that starts nothing is
+    // `MetaRelatedPort::refused`, which gives the claim taken above back, so the next edge asks
+    // again.
+    state.jobs.push(crate::stores::StoreJob::MetaRelated(
+        plx_machine::job::Job {
+            addr: related_addr(seq),
+            req: MetaRelatedReq { sid, rk, ask, info, rows, skip, hubs, row, stamp },
+        },
+        MetaRelatedPort::of(adapter),
+    ));
+    true
+}
+
+/// Where a window opened at tail position `at` starts: half a window before it, so the card has the
+/// room to be walked to on both sides and neither edge's ask fires at once.
+fn related_seek_start(at: usize) -> usize {
+    at.saturating_sub(crate::pms::MAX_SHELF_ITEMS / 2)
+}
+
+/// Withdraws the Related read: one out is discarded when it lands, one landed and not yet installed
+/// is dropped. The read out keeps its single-flight latch until its job has answered or been
+/// refused (a job the runner has parked holds it too), so the next edge asks again only after it
+/// (or adopts it, for the same window). Main thread only.
+fn cancel_related(adapter: &MetadataAdapter) -> bool {
+    let mut rel = adapter.rel_pages.lock().unwrap_or_else(|e| e.into_inner());
+    if rel.inflight { rel.withdrawn = true; }
+    rel.landed.clear();
+    false
+}
+
+/// Test seam: a tail read that started from window `from` of `next`'s item has answered with
+/// `next`'s tail window, and waits for [`pump_related_pages`] exactly as the job port's answer does.
+#[cfg(any(test, feature = "test-support"))]
+pub fn land_related_for_test(adapter: &MetadataAdapter, from: (usize, usize), next: &Detail) {
+    plx_base::testlock::assert_held("the detail store (land_related_for_test)");
+    let t = &next.related_tail;
+    let rows = t.positions.iter().copied()
+        .zip(next.related[t.head..].iter().map(|m| std::sync::Arc::new(m.clone()))).collect();
+    let info = crate::stores::paging::PageInfo { offset: t.offset, end: t.end, total: t.total, more: t.more, unstable: false };
+    adapter.rel_pages.lock().unwrap_or_else(|e| e.into_inner()).landed.push(RelLanded {
+        sid: next.sid, rk: next.rk.clone(), from, window: Some((rows, info, t.hubs.clone(), t.row.clone())),
+        stamp: 0,
+    });
+}
+
+/// Test seam: the Related read's single-flight claim, as `(a read is out, the reader withdrew it)`.
+/// A test that drives a runner reads it to prove a read's ONE answer, or its refusal, gave the claim
+/// back.
+#[cfg(any(test, feature = "test-support"))]
+pub fn related_claim_for_test(adapter: &MetadataAdapter) -> (bool, bool) {
+    let rel = adapter.rel_pages.lock().unwrap_or_else(|e| e.into_inner());
+    (rel.inflight, rel.withdrawn)
+}
+
+/// Test seam: how many Related answers wait in the mailbox for [`pump_related_pages`]. A job that
+/// answered the failure left one (with no window); a refused job left none, and gave the claim back
+/// the same way, so the claim alone cannot tell the two apart.
+#[cfg(any(test, feature = "test-support"))]
+pub fn related_landed_for_test(adapter: &MetadataAdapter) -> usize {
+    adapter.rel_pages.lock().unwrap_or_else(|e| e.into_inner()).landed.len()
+}
+
+/// Main-thread pump: install a Related window that landed on the page and the window it was read
+/// from. True when the row changed.
+pub fn pump_related_pages(state: &mut MetadataState, adapter: &MetadataAdapter) -> bool {
+    let landed = {
+        let mut rel = adapter.rel_pages.lock().unwrap_or_else(|e| e.into_inner());
+        if rel.landed.is_empty() { return false; }
+        std::mem::take(&mut rel.landed)
+    };
+    let Some(d) = state.current.as_mut() else { return false };
+    let mut changed = false;
+    let mut since = crate::viewledger::Stamp::MAX;
+    for l in landed {
+        let t = &mut d.related_tail;
+        if !plx_plex::plex::same_item((d.sid, &d.rk), (l.sid, &l.rk)) || (t.offset, t.end) != l.from {
+            continue;
+        }
+        let Some((rows, info, hubs, state)) = l.window else { continue };
+        d.related.truncate(t.head);
+        t.positions = rows.iter().map(|(position, _)| *position).collect();
+        d.related.extend(rows.into_iter().map(|(_, m)| std::sync::Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone())));
+        (t.offset, t.end, t.total, t.more, t.hubs, t.row) = (info.offset, info.end, info.total, info.more, hubs, state);
+        since = since.min(l.stamp);
+        changed = true;
+    }
+    if changed {
+        replay_views(state, since);
+    }
+    changed
+}
+
+// ---- the Related window job -------------------------------------------------------------------
+// `ask_related` takes the single-flight claim in `rel_pages` and leaves a `StoreJob::MetaRelated`
+// on the outbox (`Direct`: a controlled run never emits it, `bootstrap/effects.rs` has no related
+// arm). The application's runner resolves the server's client at the launch and runs
+// [`finish_related_job`]; the answer comes back through the job's port, which gives the claim back
+// and lands the window into the mailbox [`pump_related_pages`] reads (an ungated take, as before).
+
+/// A Related window job's address: the sequence of its own (`RelPages.sent`). Another kind of
+/// Metadata job can carry an identical `Addr` (see [`pages_addr`]); nothing routes by it alone.
+fn related_addr(seq: u32) -> plx_machine::machine::Addr {
+    season_addr(seq)
+}
+
+/// What one tail window read is for and everything it reads from, captured on the main thread at
+/// the ask: `sid` and `rk` name the loaded item, `ask` the edge or the seek, `info` the window it
+/// starts from (also the landing's `from`), `rows` the cards of that window (empty for a seek,
+/// which opens on the listing alone), `skip` the keys the tail must not show, `hubs` the lists it
+/// reads (with the lengths learned so far), `row` the ledger the window carries and `stamp` the
+/// view-state publish order at the request. The runner resolves `sid` to its client at the launch;
+/// a server it holds none for answers the failure without a GET.
+#[derive(Clone, PartialEq)]
+pub struct MetaRelatedReq {
+    pub sid: plx_plex::plex::ServerId,
+    pub rk: String,
+    pub ask: RelatedAsk,
+    pub info: crate::stores::paging::PageInfo,
+    pub rows: Vec<crate::stores::paging::Row>,
+    pub skip: std::collections::HashSet<String>,
+    pub hubs: Vec<TailHub>,
+    pub row: crate::stores::paging::RowState,
+    pub stamp: crate::viewledger::Stamp,
+}
+
+/// Counts, not cards: a card (`PmsMovie`) has no `Debug` of its own.
+impl std::fmt::Debug for MetaRelatedReq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MetaRelatedReq {{ sid: {:?}, rk: {:?}, ask: {:?}, from: ({}, {}), {} row(s), {} skipped, {} hub(s), stamp: {} }}",
+            self.sid, self.rk, self.ask, self.info.offset, self.info.end, self.rows.len(), self.skip.len(),
+            self.hubs.len(), self.stamp)
+    }
+}
+
+/// A window the read produced: the cards, where the window sits, the hubs with the lengths the read
+/// learned, and the ledger the window carries.
+type RelatedWindow = (Vec<crate::stores::paging::Row>, crate::stores::paging::PageInfo, Vec<TailHub>,
+    crate::stores::paging::RowState);
+
+/// Where a window read's ONE answer goes: the mailbox of the adapter the request was made from (an
+/// owner that has since been `Reset` holds a new one; this port still lands into the retired one
+/// nobody pumps). Two ports are equal when they reach the same adapter.
+#[derive(Clone)]
+pub struct MetaRelatedPort(std::sync::Arc<MetadataAdapter>);
+
+impl MetaRelatedPort {
+    pub(crate) fn of(adapter: &std::sync::Arc<MetadataAdapter>) -> Self {
+        Self(std::sync::Arc::clone(adapter))
+    }
+}
+
+impl PartialEq for MetaRelatedPort {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for MetaRelatedPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MetaRelatedPort({:p})", std::sync::Arc::as_ptr(&self.0))
+    }
+}
+
+/// A window read's answer, opaque to the runner: `window` is `None` for a FAILED read.
+pub struct RelatedAnswer {
+    sid: plx_plex::plex::ServerId,
+    rk: String,
+    from: (usize, usize),
+    window: Option<RelatedWindow>,
+    stamp: crate::viewledger::Stamp,
+}
+
+impl plx_machine::job::Port<RelatedAnswer> for MetaRelatedPort {
+    /// The read finished: give the claim back, then land the window unless the reader withdrew the
+    /// read while it was out (a withdrawn answer is dropped, and the flag is spent with it).
+    fn done(&self, _addr: plx_machine::machine::Addr, a: RelatedAnswer) {
+        let mut rel = self.0.rel_pages.lock().unwrap_or_else(|e| e.into_inner());
+        rel.inflight = false;
+        rel.out = None;
+        if std::mem::take(&mut rel.withdrawn) { return; }
+        rel.landed.push(RelLanded { sid: a.sid, rk: a.rk, from: a.from, window: a.window, stamp: a.stamp });
+    }
+
+    /// The read was never started: give the claim back in the call that refused it, which is where
+    /// the inline spawn's `!spawned` arm gave it back, so the next edge asks again. `withdrawn` goes
+    /// with it: no read is out for it to discard, and a later read must not be dropped on a stale
+    /// flag.
+    fn refused(&self, _addr: plx_machine::machine::Addr) {
+        let mut rel = self.0.rel_pages.lock().unwrap_or_else(|e| e.into_inner());
+        rel.inflight = false;
+        rel.out = None;
+        rel.withdrawn = false;
+    }
+}
+
+/// The window read's IO body and its completion: read the window through `client` and post the
+/// answer to `port`. `client` is the one the runner resolved at the launch; `None` is a server it
+/// held none for, which answers the failure without a GET. The answer is posted OUTSIDE the guard,
+/// so a read that panics still lands, as a FAILURE.
+///
+/// WORKER THREAD.
+pub fn finish_related_job(
+    port: &MetaRelatedPort, addr: plx_machine::machine::Addr,
+    client: Option<&'static plx_plex::plex::Client>, req: MetaRelatedReq,
+) {
+    finish_related_with(port, addr, client, req, read_related_window);
+}
+
+fn finish_related_with(
+    port: &MetaRelatedPort, addr: plx_machine::machine::Addr,
+    client: Option<&'static plx_plex::plex::Client>, req: MetaRelatedReq,
+    read: impl FnOnce(&'static plx_plex::plex::Client, MetaRelatedReq) -> Option<RelatedWindow>,
+) {
+    use plx_machine::job::Port;
+    let (sid, rk, stamp, from) = (req.sid, req.rk.clone(), req.stamp, (req.info.offset, req.info.end));
+    let window = read_through(client, |client| read(client, req));
+    port.done(addr, RelatedAnswer { sid, rk, from, window, stamp });
+}
+
+/// The window itself: one page of the hubs' listings from where the ask starts, read through the
+/// shared row reader.
+fn read_related_window(client: &'static plx_plex::plex::Client, req: MetaRelatedReq) -> Option<RelatedWindow> {
+    let MetaRelatedReq { sid, ask, info, rows, skip, mut hubs, row, .. } = req;
+    let (start, before) = match ask {
+        RelatedAsk::Seek(at) => (related_seek_start(at), false),
+        RelatedAsk::Edge { before } => (if before { info.offset } else { info.end }, before),
+    };
+    let ask = crate::stores::paging::Ask { start, before, hidden: &[] };
+    let current = (!rows.is_empty()).then_some((rows, info));
+    // The shared row reader: a listing that shifts between reads moves the window onto its
+    // ledger of shown keys instead of stopping it, so no card repeats and the end is reached.
+    let (rows, info, row) = crate::stores::paging::read_row(sid, &ask, current, row, 0, |start, size| {
+        tail_page(&mut hubs, &skip, start, size, &mut |key, at, count| client.hub_items_paged(key, at as i64, count as i64))
+    }, |keys| client.metadata_many(&keys.iter().map(String::as_str).collect::<Vec<_>>()))?;
+    Some((rows, info, hubs, row))
 }
 
 /// True while a season fetch is in flight — drives the episode row's loading dim + spinner.
@@ -4481,7 +6033,7 @@ pub fn pump_season_with_gate(state: &mut MetadataState, adapter: &MetadataAdapte
     // the landing GATE (§3.3 step 3): a replay takes this on its recorded frame
     // DUMP MODE: owed while `season_loading` (a request is out, and `season_done` has not caught
     // up). A superseded request's late answer is dropped INSIDE the take, so it neither ends the
-    // wait nor settles the new request (`supersede_season` and a refused spawn catch `season_done`
+    // wait nor settles the new request (`supersede_season` and a refused job catch `season_done`
     // up themselves, so an abandoned request is not owed).
     let res = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Metadata,
         || season_loading(adapter), || {
@@ -4513,7 +6065,10 @@ pub fn pump_season_with_gate(state: &mut MetadataState, adapter: &MetadataAdapte
     match r.eps {
         Some(eps) => {
             d.episodes = eps;
+            // the old list's wanted range means nothing to the new one
+            adapter.ep_pages.lock().unwrap_or_else(|e| e.into_inner()).keep = None;
             d.cur_season = r.idx;
+            replay_views(state, r.stamp);
             true
         }
         None => {
@@ -4669,6 +6224,59 @@ mod marker_tests {
             "a non-final segment ends where it says it does"
         );
     }
+
+    fn view<'a>(state: &'a MetadataState, adapter: &'a MetadataAdapter) -> MetadataView<'a> {
+        MetadataView { state, adapter }
+    }
+
+    /// The HUD dismisses an offer by marking its segment skipped, so the same `skipped` set that
+    /// retires a server marker must retire a synthesized tail.
+    #[test]
+    fn a_dismissed_synthesized_tail_is_not_offered_again() {
+        let adapter = MetadataAdapter::default();
+        let mut state = MetadataState::default();
+        state.playing = Some(PlayingItem::with_subs(Vec::new()));
+        let dur_ms = 22 * 60 * 1_000;
+        let head = Playhead {
+            playing: true,
+            pos_ns: (dur_ms - TAIL_WINDOW_MS + 1) * 1_000_000,
+            dur_ns: dur_ms * 1_000_000,
+        };
+        let marker = view(&state, &adapter)
+            .synthesized_tail_marker(head, true)
+            .expect("the tail of an episode with a successor is offered");
+        mark_skipped(&mut state, marker);
+        assert!(
+            view(&state, &adapter).synthesized_tail_marker(head, true).is_none(),
+            "BACK dismissed this tail: the discs stay up for the rest of this playback"
+        );
+    }
+
+    /// Retiring one segment retires only that one: the intro is dismissed, the credits still offer.
+    #[test]
+    fn dismissing_one_marker_leaves_a_later_segment_on_offer() {
+        let adapter = MetadataAdapter::default();
+        let mut state = MetadataState::default();
+        let markers = episode_markers();
+        let intro = markers[1];
+        state.playing = Some(PlayingItem {
+            markers,
+            ..PlayingItem::with_subs(Vec::new())
+        });
+        let head = |pos_ms: i64| Playhead {
+            playing: true,
+            pos_ns: pos_ms * 1_000_000,
+            dur_ns: 3_200_000 * 1_000_000,
+        };
+        mark_skipped(&mut state, intro);
+        let v = view(&state, &adapter);
+        assert!(v.active_marker(head(50_000)).is_none(), "the dismissed intro is not re-offered");
+        assert_eq!(
+            v.active_marker(head(3_100_000)).map(|m| m.kind),
+            Some(MarkerKind::Credits),
+            "BACK dismissed the intro segment, not every offer in the episode"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4731,6 +6339,27 @@ mod episode_tests {
             both.resume_ms, 120_000,
             "and keeps the resume point the player needs"
         );
+    }
+}
+
+#[cfg(test)]
+mod episodes_show_rk_tests {
+    use super::*;
+
+    /// **The show an episode played from a page belongs to, per kind of page**: the play queue is
+    /// built from it (`route::request_play`), so the episodes before the played one are in the
+    /// queue and Previous has somewhere to go. Only the pages that play episodes have one.
+    #[test]
+    fn each_page_that_plays_episodes_names_its_show() {
+        let show = Detail { is_show: true, kind: "show".into(), rk: "50".into(), ..Default::default() };
+        assert_eq!(show.episodes_show_rk(), "50", "a show page's own key");
+        let season = Detail { kind: "season".into(), rk: "60".into(), parent_rk: "50".into(), ..Default::default() };
+        assert_eq!(season.episodes_show_rk(), "50", "a season page's parent");
+        let episode = Detail { kind: "episode".into(), rk: "101".into(), show_rk: "50".into(), ..Default::default() };
+        assert_eq!(episode.episodes_show_rk(), "50", "an episode page's grandparent");
+        let movie = Detail { kind: "movie".into(), rk: "9".into(), show_rk: "50".into(), ..Default::default() };
+        assert_eq!(movie.episodes_show_rk(), "", "a movie has no show, whatever a stale field holds");
+        assert_eq!(Detail::default().episodes_show_rk(), "");
     }
 }
 
@@ -5099,12 +6728,14 @@ mod trailer_tests {
         };
         assert!(d.trailer().is_none());
         assert_eq!(d.rk, "movie");
+        let _serial = plx_base::testlock::serial();
+        let client = super::test_support::offline_client();
         assert!(
-            resolve_trailer(plx_plex::plex::ServerId::UNSET, &[], "").is_none(),
+            resolve_trailer(client.0, &[], "").is_none(),
             "empty extras never fails the page"
         );
         assert!(
-            fetch_primary_trailer(plx_plex::plex::ServerId::UNSET, "").is_none(),
+            fetch_primary_trailer(client.0, "").is_none(),
             "no primaryExtraKey → no follow-up GET"
         );
     }
@@ -5126,10 +6757,20 @@ mod trailer_tests {
         assert_eq!(shelf[0].rk, "1");
         assert_eq!(shelf[0].thumb, "/t");
         assert_eq!(shelf[0].caption(), "Behind the Scenes");
+        let _serial = plx_base::testlock::serial();
+        let client = super::test_support::offline_client();
         let mut d = Detail::default();
-        project_extras(&mut d, plx_plex::plex::ServerId::UNSET, &rows, "");
+        project_extras(&mut d, client.0, &rows, "");
         assert_eq!(d.trailer().unwrap().rk, "9");
         assert_eq!(d.extras.len(), 2, "the shelf keeps the featurette");
+        // every row reaches the shelf, however many there are, and the picker still names the
+        // same trailer: the one that sits past the old 32-row cut
+        let mut many: Vec<_> = (0..100).map(|i| bts(&format!("{}", 1000 + i))).collect();
+        many.push(trailer("9000", "/library/parts/9000"));
+        let mut d = Detail::default();
+        project_extras(&mut d, client.0, &many, "");
+        assert_eq!(d.extras.len(), 101, "every extras row is on the shelf");
+        assert_eq!(d.trailer().expect("a trailer").rk, "9000");
         let bare = Extra {
             title: "No still".into(),
             subtype: "featurette".into(),
@@ -5267,6 +6908,10 @@ mod credits_tests;
 mod demo_fixture_tests;
 
 #[cfg(test)]
+// Fork Rofocale11: NuvioNative keeps IMDb and Rotten Tomatoes scores together on a cached detail
+// and lets the native canonical session record pick the rating provider, without substituting IMDb
+// for a missing RT detail score; upstream has no per-provider rating view and its test list cannot
+// express this. Kept beside upstream's added test modules — both are independent #[cfg(test)] items.
 mod nuvio_rating_preference_tests {
     use super::*;
     #[test]
@@ -5283,3 +6928,77 @@ mod nuvio_rating_preference_tests {
         assert!(detail.ratings_for_source(plx_plex::plex::session::RatingSource::RottenTomatoes).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "metadata_episode_pages_tests.rs"]
+mod episode_pages_tests;
+
+#[cfg(test)]
+#[path = "metadata_related_tail_tests.rs"]
+mod related_tail_tests;
+
+#[cfg(test)]
+#[path = "metadata_initial_season_tests.rs"]
+mod initial_season_tests;
+
+#[cfg(test)]
+#[path = "metadata_detail_job_tests.rs"]
+mod detail_job_tests;
+
+#[cfg(test)]
+#[path = "metadata_detail_client_tests.rs"]
+mod detail_client_tests;
+
+#[cfg(test)]
+#[path = "metadata_season_job_tests.rs"]
+mod season_job_tests;
+
+#[cfg(test)]
+#[path = "metadata_related_job_tests.rs"]
+mod related_job_tests;
+
+/// #814: the runtime an *Also available* row carries is a fact about one FILE, so only a leaf has
+/// one. A show container's `duration` is the metadata agent's nominal per-episode figure.
+#[cfg(test)]
+mod alt_runtime_tests {
+    use super::*;
+
+    fn copies(kind: &str) -> Vec<AltCopy> {
+        let body = format!(
+            r#"{{"MediaContainer":{{"size":1,"Metadata":[{{"ratingKey":"100","type":"{kind}",
+                "librarySectionTitle":"Library","duration":6000000}}]}}}}"#
+        );
+        let mc = serde_json::from_str::<plx_plex::plex::Envelope>(&body).unwrap().media_container;
+        alt_copies_from(plx_plex::plex::ServerId::UNSET, "", &mc)
+    }
+
+    #[test]
+    fn a_show_or_season_copy_carries_no_runtime() {
+        for kind in ["show", "season"] {
+            let c = copies(kind);
+            assert_eq!(c.len(), 1);
+            assert_eq!(c[0].dur_ms, 0, "{kind}: the container's duration is no file's runtime");
+        }
+    }
+
+    #[test]
+    fn a_leaf_copy_keeps_its_runtime() {
+        for kind in ["movie", "episode", "clip"] {
+            assert_eq!(copies(kind)[0].dur_ms, 6_000_000, "{kind}");
+        }
+    }
+
+    #[test]
+    fn only_a_playable_leaf_kind_has_a_runtime() {
+        for k in ["movie", "episode", "clip"] {
+            assert!(has_runtime(k), "{k}");
+        }
+        for k in ["show", "season", "artist", "album", "collection"] {
+            assert!(!has_runtime(k), "{k}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "metadata/captured_inputs_tests.rs"]
+mod captured_inputs_tests;

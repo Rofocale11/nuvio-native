@@ -28,25 +28,33 @@
 //!
 //! **Focus elements are row indices, except for a form-backed table.** `TablePart::keys` (a
 //! `ui::form::RowKeys`, i.e. a `FormTable`) makes the element a row's `RowKey`, and all five hooks
-//! plus the pointer stops translate key <-> index; without it the element is the index.
+//! plus the pointer stops translate key <-> index; without it the element is the index. The
+//! accessibility ids (`a11y`) follow the same map: a row is `row.<n>` (its ordinal among the element rows, `geom::table_a11y`), or the name its
+//! [`FormId::a11y`](super::form::FormId::a11y) declares, and a separator or note (no key) is no
+//! element (the group's `len` still counts it: it is the layout's row count, which seating reads,
+//! so the ids' conformance rule is "at most `len`"). The band is `band.<i>`.
 
 use crate::View;
 use std::ffi::CStr;
 
+use super::a11y::{A11y, A11yPath, Role};
 use super::document_reader::DocumentReader;
 use super::form::{RowKey, RowKeys};
 use super::frame::Budget;
-use super::geom::{Document, IndexElem, Table};
+use super::geom::{indexed, table_a11y, table_a11y_find, table_elems, Document, IndexElem, Table};
 use plx_machine::machine::{Cx, EntryId, FocusKey, GroupId, Host, Measure, NavOpKind, PartId};
 use super::route_screen::RouteLayout;
 use super::screen::{
-    composed_draw, composed_group_of, composed_groups, composed_neighbour, composed_place,
-    composed_prepare, composed_reconcile, composed_seat, Activate, At, AxisMask, Composed, Dir,
+    composed_a11y, composed_a11y_elems, composed_a11y_find, composed_draw, composed_group_of,
+    composed_groups, composed_neighbour, composed_place, composed_prepare, composed_reconcile,
+    composed_seat, Activate, At, AxisMask, Composed, Dir,
     DrawFrame, EdgeRule, ElemKind, Focusable, GroupKind, GroupSpec, Hover, Part, Placed, Seat,
     Step, Stop,
 };
 use super::widgets::{ControlPalette, KeyHint};
+use super::hstack::Item;
 use super::table::TableView;
+use super::vstack::{Anchor, VStack};
 use super::{theme, Painter, Rect};
 
 /// The narrative column: crumb (where BACK goes, `None` = nowhere inside the app), title, copy.
@@ -56,11 +64,21 @@ pub struct Header<'a> {
     pub crumb: Option<&'a str>,
     pub title: &'a str,
     pub copy: &'a str,
-    pub copy_size: std::os::raw::c_int,
     /// One key-cap line stacked under the copy's measured height (the Language page's "Hold
     /// [BACK] to close PlxNative"). Never elided: a screen that sets one owns a fit test for it
     /// against [`RouteLayout`]'s narrative width.
     pub hint: Option<KeyHint<'a>>,
+    /// A loading read-out in the copy: accounted and sentinel-painted at the actual draw.
+    pub pending_copy: Option<&'a str>,
+    /// The copy as a sentence that FOLLOWS FOCUS (Settings v2): drawn by the cross-fade in the
+    /// fixed spot under the title, up to [`super::follow_copy::FOLLOW_LINES`] lines, in place of
+    /// `copy` (which stays the page's own sentence, the one a row with none shows). `None` draws
+    /// `copy` as before.
+    pub follow: Option<&'a super::follow_copy::FollowCopy>,
+    /// Display-only art in the picture slot ([`RouteLayout::picture_slot`]); no focus or hit stop.
+    /// The one slot for a page's picture: a poster fan, the Under posters tiles, a HUD's preview
+    /// ([`super::follow_copy::LandscapePicture`]).
+    pub picture: Option<&'a dyn super::follow_copy::PictureSlot>,
 }
 
 impl<'a> Header<'a> {
@@ -70,9 +88,28 @@ impl<'a> Header<'a> {
             crumb,
             title,
             copy,
-            copy_size: theme::size::LABEL,
             hint: None,
+            pending_copy: None,
+            follow: None,
+            picture: None,
         }
+    }
+
+    /// The copy follows focus: `follow` is stepped by the screen and lent for the frame.
+    pub fn with_follow(mut self, follow: &'a super::follow_copy::FollowCopy) -> Self {
+        self.follow = Some(follow);
+        self
+    }
+
+    /// Display-only art in the fixed picture slot under the sentence.
+    pub fn with_picture(mut self, picture: &'a dyn super::follow_copy::PictureSlot) -> Self {
+        self.picture = Some(picture);
+        self
+    }
+
+    pub fn with_pending_copy(mut self, key: &'a str) -> Self {
+        self.pending_copy = Some(key);
+        self
     }
 
     pub fn with_hint(mut self, hint: KeyHint<'a>) -> Self {
@@ -80,16 +117,26 @@ impl<'a> Header<'a> {
         self
     }
 
-    pub fn with_copy_size(mut self, sz: std::os::raw::c_int) -> Self {
-        self.copy_size = sz;
-        self
-    }
-
     /// The one drawing routine, for both loops.
     pub fn paint(&self, p: Painter, measure: &dyn Measure) {
-        let copy_end = self.layout.draw_narrative(p, self.crumb, self.title, self.copy, self.copy_size, measure);
+        let copy_end = if let Some(follow) = self.follow {
+            // the title (and crumb) alone, then the followed sentence in the fixed frame under it
+            self.layout.draw_narrative_pending(p, self.crumb, self.title, "", measure, None);
+            let frame = self.layout.copy_text_frame(self.crumb.is_some(), self.title, self.layout.action.y, measure);
+            follow.draw(p, frame);
+            frame.y
+        } else {
+            self.layout.draw_narrative_pending(p, self.crumb, self.title, self.copy, measure, self.pending_copy)
+        };
+        if let Some(picture) = self.picture {
+            picture.draw(p, self.layout.picture_slot(), measure);
+        }
         if let Some(hint) = &self.hint {
-            let top = copy_end + theme::space::MD;
+            // The copy's end, then the hint one MD under it: a two-item run from `copy_end`.
+            let run = [Item::new(0.0), Item::new(KeyHint::height())];
+            let Some((top, _)) = VStack::new(&run, theme::space::MD, Anchor::Top(copy_end)).span(1) else {
+                unreachable!("the hint is always present")
+            };
             // The copy already stops short of the action band; the hint keeps the same margin.
             if top + KeyHint::height() <= self.layout.action.y - theme::space::XL {
                 hint.draw(p, self.layout.narrative.x, top + KeyHint::height() * 0.5, measure);
@@ -132,7 +179,8 @@ where
 impl<H: Host> Part<H> for Header<'_> {
     fn prepare(&mut self, _b: &mut Budget, _cx: &Cx<'_, H>) {}
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>, _rect: Rect) {
-        self.paint(f.painter, f.measure);
+        // the narrative column holds still under a route push and cross-fades its content
+        self.paint(f.narrative_painter(), f.measure);
     }
 }
 
@@ -249,6 +297,23 @@ where
         let got = Focusable::<H>::seat(&self.view(), g, from, cx);
         FocusKey { entry: got.entry, elem: self.to_key(got.elem) }
     }
+    /// `row.<n>`, `n` the row's ordinal among the table's element rows, or the row's own name when
+    /// its form id declares one ([`FormId::a11y`](super::form::FormId::a11y)): the convention is
+    /// [`table_a11y`]'s, one for every table. In a form-backed table the element is the row's key; a
+    /// separator or note has none, so it is no element.
+    fn a11y(&self, key: &H::Elem, _cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        let index = self.to_index(*key)?.index()? as usize;
+        table_a11y(self.table, self.keys, index)
+    }
+    fn a11y_elems(&self, g: GroupId, _cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        if g == self.group {
+            out.extend(table_elems(self.table, self.keys).map(|i| self.to_key(H::Elem::of_index(i as u32))));
+        }
+    }
+    fn a11y_find(&self, path: &A11yPath, _cx: &Cx<'_, H>) -> Option<H::Elem> {
+        let index = table_a11y_find(self.table, self.keys, path)?;
+        Some(self.to_key(H::Elem::of_index(index as u32)))
+    }
 }
 
 impl<H: Host> Part<H> for TablePart<'_>
@@ -257,7 +322,8 @@ where
 {
     fn prepare(&mut self, _b: &mut Budget, _cx: &Cx<'_, H>) {}
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>, rect: Rect) {
-        let p = f.painter;
+        // the list is what travels under a route push that holds the narrative column
+        let p = f.list_painter();
         self.frame = rect;
         self.paint(p, f.measure);
         // every selectable row is a stop (rule 11: hover parks, a click activates)
@@ -308,7 +374,15 @@ pub struct BandPart<'a> {
     pub palette: ControlPalette,
     /// The one control drawn in the danger face (an alert's destructive answer), if any.
     pub danger: Option<usize>,
+    /// ONE line of words beside a LONE control, in the action slot ("Back discards your changes."
+    /// beside Settings' Done): [`Self::note_rect`] places it, so it is never part of the focus
+    /// geometry. Ignored beside a pair (first run's two answers stand alone).
+    pub note: Option<&'a CStr>,
 }
+
+/// The gap between a lone control and the [`BandPart::note`] beside it: a control gap, the way
+/// two peers of the action slot are spaced ([`super::widgets::CONTROL_GAP`]).
+pub const NOTE_GAP: f32 = super::widgets::CONTROL_GAP;
 
 /// `Button::pill_w`'s formula over a `Measure`: label width plus the pill's air.
 pub fn pill_w(m: &dyn Measure, label: &CStr, sz: std::os::raw::c_int) -> f32 {
@@ -332,6 +406,17 @@ impl BandPart<'_> {
                 vec![lr, tr]
             }
         }
+    }
+
+    /// Where the [`Self::note`] is set: one line beside the lone control, as wide as the slot
+    /// leaves; `None` without a note or beside a pair. A note that is wider than that is a copy
+    /// bug the screen's fit test catches, never a clip.
+    pub fn note_rect(&self, m: &dyn Measure) -> Option<Rect> {
+        let (&[_], Some(_)) = (self.labels, self.note) else { return None };
+        let pill = *self.rects(m).first()?;
+        let x = pill.x + pill.w + NOTE_GAP;
+        let a = self.layout.action;
+        Some(Rect::new(x, pill.y, (a.x + a.w - x).max(0.0), pill.h))
     }
 
     /// The band's actual occupied region, including a second row when labels reflow.
@@ -422,6 +507,24 @@ where
     fn seat(&self, _g: GroupId, _from: Placed, _cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         self.key::<H>(0)
     }
+    /// `band.<i>`: the action band's pills, in order, each a `Button` labelled with its words.
+    fn a11y(&self, key: &H::Elem, _cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        let i = key.index()?.checked_sub(BAND_BASE)? as usize;
+        let label = self.labels.get(i)?;
+        let a = A11y::new(A11yPath::new().name("band").index(i), Role::Button);
+        Some(match label.to_str() {
+            Ok(text) if !text.is_empty() => a.with_label(text),
+            _ => a,
+        })
+    }
+    fn a11y_elems(&self, g: GroupId, _cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        if g == self.group {
+            out.extend((0..self.labels.len()).map(|i| self.key::<H>(i).elem));
+        }
+    }
+    fn a11y_find(&self, path: &A11yPath, _cx: &Cx<'_, H>) -> Option<H::Elem> {
+        indexed(path, "band", self.labels.len()).map(|i| self.key::<H>(i).elem)
+    }
 }
 
 impl<H: Host> Part<H> for BandPart<'_>
@@ -430,7 +533,8 @@ where
 {
     fn prepare(&mut self, _b: &mut Budget, _cx: &Cx<'_, H>) {}
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>, _rect: Rect) {
-        let p = f.painter;
+        // the action band is the narrative column's: it holds still and cross-fades with it
+        let p = f.narrative_painter();
         let focused = f.focus.current.and_then(|k| k.elem.index()).and_then(|e| e.checked_sub(BAND_BASE));
         let rects = self.rects(f.measure);
         let env = super::Env::inert();
@@ -454,6 +558,9 @@ where
                     activate: Activate::Press,
                 },
             );
+        }
+        if let (Some(note), Some(frame)) = (self.note, self.note_rect(f.measure)) {
+            super::label::Label::new(note.as_ptr(), theme::size::CAPTION, theme::TEXT_SECONDARY).draw(p, frame);
         }
     }
 }
@@ -571,6 +678,16 @@ where
     fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         composed_seat(self, g, from, cx)
     }
+    // The parts' ids do not meet (`row.<i>` / a row's name, `band.<i>`), so no prefix is added.
+    fn a11y(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        composed_a11y(self, key, cx)
+    }
+    fn a11y_elems(&self, g: GroupId, cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        composed_a11y_elems(self, g, cx, out)
+    }
+    fn a11y_find(&self, path: &A11yPath, cx: &Cx<'_, H>) -> Option<H::Elem> {
+        composed_a11y_find(self, path, cx)
+    }
 }
 
 impl<H: Host> Part<H> for TableScreen<'_>
@@ -641,6 +758,17 @@ where
     fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         Focusable::<H>::seat(&self.view(), g, from, cx)
     }
+    // `geom::Document`'s `document`; the view is a temporary, so the projection (which carries no
+    // text) is handed back owning.
+    fn a11y(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        Focusable::<H>::a11y(&self.view(), key, cx).map(A11y::into_owned)
+    }
+    fn a11y_elems(&self, g: GroupId, cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        Focusable::<H>::a11y_elems(&self.view(), g, cx, out)
+    }
+    fn a11y_find(&self, path: &A11yPath, cx: &Cx<'_, H>) -> Option<H::Elem> {
+        Focusable::<H>::a11y_find(&self.view(), path, cx)
+    }
 }
 
 impl DocumentPart<'_> {
@@ -680,6 +808,15 @@ where
     fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         Focusable::<H>::seat(&self.focus(), g, from, cx)
     }
+    fn a11y(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        Focusable::<H>::a11y(&self.focus(), key, cx).map(A11y::into_owned)
+    }
+    fn a11y_elems(&self, g: GroupId, cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        Focusable::<H>::a11y_elems(&self.focus(), g, cx, out)
+    }
+    fn a11y_find(&self, path: &A11yPath, cx: &Cx<'_, H>) -> Option<H::Elem> {
+        Focusable::<H>::a11y_find(&self.focus(), path, cx)
+    }
 }
 
 impl<H: Host> Part<H> for DocumentPart<'_>
@@ -688,7 +825,8 @@ where
 {
     fn prepare(&mut self, _b: &mut Budget, _cx: &Cx<'_, H>) {}
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>, rect: Rect) {
-        let p = f.painter;
+        // the document is the route's content column: it travels under a push that holds the narrative column
+        let p = f.list_painter();
         self.frame = rect;
         self.paint(p);
         f.stop(
@@ -718,7 +856,7 @@ pub struct DocumentScreen<'a> {
 impl<'a> DocumentScreen<'a> {
     /// Over a route's own layout: the document hangs from the TITLE's anchor (`RouteLayout::document`).
     pub fn new(header: Header<'a>, reader: &'a mut DocumentReader, body: &'a str, group: GroupId, entry: EntryId) -> Self {
-        let frame = header.layout.document(header.crumb.is_some());
+        let frame = header.layout.document();
         Self {
             header,
             doc: DocumentPart {
@@ -780,6 +918,15 @@ where
     fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         composed_seat(self, g, from, cx)
     }
+    fn a11y(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        composed_a11y(self, key, cx)
+    }
+    fn a11y_elems(&self, g: GroupId, cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        composed_a11y_elems(self, g, cx, out)
+    }
+    fn a11y_find(&self, path: &A11yPath, cx: &Cx<'_, H>) -> Option<H::Elem> {
+        composed_a11y_find(self, path, cx)
+    }
 }
 
 impl<H: Host> Part<H> for DocumentScreen<'_>
@@ -814,6 +961,7 @@ mod tests {
             press: PressRead::default(),
             focus: FocusRead::default(),
             owner: InputOwner::Entry(EntryId(0)),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
         }
     }
 
@@ -961,11 +1109,11 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert!(matches!(groups[0].kind, GroupKind::Document));
         assert_eq!(groups[0].edge[2], EdgeRule::Nav(NavOpKind::Back));
-        assert!(same(groups[0].extent, layout.document(true)));
+        assert!(same(groups[0].extent, layout.document()));
         let k = FocusKey { entry: E, elem: 0u32 };
         assert!(matches!(Focusable::<FixtureHost>::neighbour(&ds.doc, k, Dir::Up, &cx), Step::Edge), "at the top, UP leaves");
         assert!(matches!(Focusable::<FixtureHost>::neighbour(&ds.doc, k, Dir::Down, &cx), Step::Move(_)), "not at the end: DOWN scrolls inside");
-        assert!(same(Focusable::<FixtureHost>::place(&ds.doc, &0, &cx, At::Drawn).unwrap().rect, layout.document(true)));
+        assert!(same(Focusable::<FixtureHost>::place(&ds.doc, &0, &cx, At::Drawn).unwrap().rect, layout.document()));
     }
     /// The real Belarusian consent labels overflowed the horizontal band's width and aborted
     /// the simulator. Use Unicode-scalar measurement so UTF-8 byte length cannot create this
@@ -984,7 +1132,7 @@ mod tests {
         let labels = [c"Адпраўляць справаздачы", c"Не адпраўляць"];
         let layout = RouteLayout::screen();
         let band = BandPart { layout, labels: &labels, group: G, entry: E,
-            uncommitted: false, scales: [1.0; 2], palette: ControlPalette::default(), danger: None };
+            uncommitted: false, scales: [1.0; 2], palette: ControlPalette::default(), danger: None, note: None };
         let (measure, view) = (CyrillicMeasure, FixtureView::default());
         let cx = cx(&measure, &view);
         let rects = band.rects(&measure);
@@ -1006,4 +1154,127 @@ mod tests {
         }
     }
 
+    /// **A form-backed table names its rows and has no element for an inert one.** The elements are
+    /// the rows' keys (30, 10, 20 down the page); a row whose `FormId::a11y` names it is that name
+    /// and ONLY that name, an unnamed one is `row.<n>`, `n` its ordinal among the keyed rows (named
+    /// ones count: the convention is one for every table); the separator and the note, which
+    /// have no key, are no elements, yet `GroupSpec::len` still counts them (it is the layout's row
+    /// count, which seating reads), so `a11y_elems` lists fewer than `len`. A toggle row is a
+    /// `Toggle`.
+    #[test]
+    fn a_form_backed_table_names_its_rows_and_has_no_element_for_an_inert_one() {
+        use crate::a11y::conformance;
+        use crate::form::{Form, FormId, FormSection, FormTable, RowKind};
+        #[derive(Clone, PartialEq)]
+        struct Id(u32, Option<&'static str>);
+        impl FormId for Id {
+            fn key(&self) -> RowKey {
+                RowKey(self.0)
+            }
+            fn a11y(&self) -> Option<&'static str> {
+                self.1
+            }
+        }
+        type H = FixtureHost;
+        let mut form = FormTable::<Id, (), ()>::new(100);
+        let sec = FormSection::new("Section")
+            .item(Id(30, Some("alpha")), RowKind::Button, (), Row::new("Alpha"))
+            .separator()
+            .item(Id(10, None), RowKind::Toggle, (), Row::new("Beta").toggle(true))
+            .note("careful")
+            .item(Id(20, Some("gamma")), RowKind::Button, (), Row::new("Gamma"));
+        form.set(Form::new().section(sec), None);
+        let (m, v) = (FixtureMeasure, FixtureView::default());
+        let cx = cx(&m, &v);
+        let frame = RouteLayout::screen().sectioned_table();
+        let keyed = TablePart {
+            table: &form.table, frame, group: G, entry: E,
+            uncommitted: false, has_band: false, keys: Some(&form),
+        };
+
+        let mut groups = Vec::new();
+        Focusable::<H>::groups(&keyed, &cx, &mut groups);
+        assert_eq!(
+            groups[0].len,
+            form.table.n_rows().max(0) as usize,
+            "the layout's rows, as seating reads them: the separator and the note are counted"
+        );
+        assert!(groups[0].len > 3, "more cells than the three keyed rows, which are all that list");
+        conformance(&keyed, &cx);
+
+        let rel = |s: &str| A11yPath::parse_relative(s).unwrap();
+        let at = |k: u32| {
+            Focusable::<H>::a11y(&keyed, &k, &cx).map(|a| (a.path, a.role, a.label.map(|l| l.into_owned())))
+        };
+        assert_eq!(at(30), Some((rel("alpha"), Role::Row, Some("Alpha".to_owned()))));
+        assert_eq!(at(10), Some((rel("row.1"), Role::Toggle, Some("Beta".to_owned()))));
+        assert_eq!(at(20), Some((rel("gamma"), Role::Row, Some("Gamma".to_owned()))));
+        assert_eq!(at(0), None, "an index is not a key here");
+        assert_eq!(at(99), None);
+
+        let find = |s: &str| Focusable::<H>::a11y_find(&keyed, &rel(s), &cx);
+        assert_eq!((find("alpha"), find("row.1"), find("gamma")), (Some(30), Some(10), Some(20)));
+        for gone in ["row.0", "row.2", "row.3", "row.4", "beta"] {
+            assert_eq!(find(gone), None, "{gone}: a named row has one spelling, an ordinal past the last none");
+        }
+        let mut elems = Vec::new();
+        Focusable::<H>::a11y_elems(&keyed, G, &cx, &mut elems);
+        assert_eq!(elems, [30, 10, 20], "the keys, in row order");
+        elems.clear();
+        Focusable::<H>::a11y_elems(&keyed, GroupId(77), &cx, &mut elems);
+        assert!(elems.is_empty(), "a foreign group lists nothing");
+    }
+
+    /// **The plain table part, the action band and the document answer the id contract**, and the
+    /// ids of the table and the band (`row.<i>`, `band.<i>`) do not meet, which is why the composed
+    /// `TableScreen` adds no prefix. (The parts are asked directly: see the note above the tests.)
+    #[test]
+    fn the_table_the_band_and_the_document_answer_the_id_contract() {
+        use crate::a11y::conformance;
+        type H = FixtureHost;
+        let (m, v) = (FixtureMeasure, FixtureView::default());
+        let cx = cx(&m, &v);
+        let layout = RouteLayout::screen();
+        let rel = |s: &str| A11yPath::parse_relative(s).unwrap();
+
+        let t = table(3);
+        let ts = TableScreen::new(Header::new(layout, Some("Settings"), "Legal notices", "copy"), &t, G, E);
+        conformance(&ts.table, &cx);
+        let labels = [c"Done", c"Cancel"];
+        let band_group = GroupId(10);
+        let band = BandPart {
+            layout, labels: &labels, group: band_group, entry: E,
+            uncommitted: false, scales: [1.0; 2], palette: ControlPalette::default(), danger: None, note: None,
+        };
+        conformance(&band, &cx);
+
+        let first = band.key::<H>(0).elem;
+        let a = Focusable::<H>::a11y(&band, &first, &cx).unwrap();
+        assert_eq!((a.path, a.role, a.label.as_deref()), (rel("band.0"), Role::Button, Some("Done")));
+        assert_eq!(Focusable::<H>::a11y_find(&band, &rel("band.1"), &cx), Some(band.key::<H>(1).elem));
+        assert_eq!(Focusable::<H>::a11y_find(&band, &rel("band.2"), &cx), None);
+        assert_eq!(Focusable::<H>::a11y_find(&ts.table, &rel("row.2"), &cx), Some(2));
+        assert_eq!(Focusable::<H>::a11y_find(&ts.table, &rel("band.0"), &cx), None);
+        assert!(Focusable::<H>::a11y(&ts.table, &first, &cx).is_none(), "a band key is not a row");
+        assert!(Focusable::<H>::a11y(&band, &0, &cx).is_none(), "a row index is not a band key");
+
+        let (mut rows, mut pills) = (Vec::new(), Vec::new());
+        Focusable::<H>::a11y_elems(&ts.table, G, &cx, &mut rows);
+        Focusable::<H>::a11y_elems(&band, band_group, &cx, &mut pills);
+        let mut paths: Vec<A11yPath> = rows.iter().map(|k| Focusable::<H>::a11y(&ts.table, k, &cx).unwrap().path).collect();
+        paths.extend(pills.iter().map(|k| Focusable::<H>::a11y(&band, k, &cx).unwrap().path));
+        let distinct: std::collections::HashSet<_> = paths.iter().cloned().collect();
+        assert_eq!((paths.len(), distinct.len()), (5, 5), "the table's ids and the band's never meet");
+
+        let mut r = DocumentReader::new();
+        r.set_extent_for_test(400.0);
+        let focus = DocumentFocus { reader: &r, frame: layout.document(), group: G, entry: E };
+        conformance(&focus, &cx);
+        let a = Focusable::<H>::a11y(&focus, &0, &cx).unwrap();
+        assert_eq!((a.path, a.role), (rel("document"), Role::Text));
+        assert_eq!(Focusable::<H>::a11y_find(&focus, &rel("document"), &cx), Some(0));
+        let ds = DocumentScreen::new(Header::new(layout, Some("Legal notices"), "Privacy", "copy"), &mut r, "body", G, E);
+        conformance(&ds.doc, &cx);
+        assert_eq!(Focusable::<H>::a11y_find(&ds.doc, &rel("document"), &cx), Some(0));
+    }
 }

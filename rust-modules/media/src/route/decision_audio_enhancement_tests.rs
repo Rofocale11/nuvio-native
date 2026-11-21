@@ -27,6 +27,8 @@ fn track(sid: i64, ordinal: i32, codec: &str, channels: i64, capable: bool, imme
         channels,
         can_normalize_loudness: capable,
         immersive,
+        sample_rate: 0,
+        bit_depth: 0,
     }
 }
 fn a1() -> CarriedAudio { track(11, 1, "ac3", 2, true, false) }
@@ -34,6 +36,8 @@ fn a2() -> CarriedAudio { track(12, 2, "eac3", 6, true, true) }
 fn a3() -> CarriedAudio { track(13, 3, "ac3", 6, true, false) }
 fn a4() -> CarriedAudio { track(14, 4, "truehd", 8, true, false) }
 fn a5() -> CarriedAudio { track(15, 5, "ac3", 2, false, false) }
+
+const SOURCE_FPS: f64 = 23.976;
 
 fn candidate(direct: bool, audio: CarriedAudio, subtitle_ordinal: Option<i32>) -> AutoOriginalCandidate {
     AutoOriginalCandidate {
@@ -137,6 +141,8 @@ fn install(
             acodec: audio.codec.clone(),
             src_vcodec: "hevc".into(),
             src_acodec: audio.codec.clone(),
+            // The fixture's file is a 23.976 fps one, whichever route carries it.
+            src_fps: SOURCE_FPS,
             contract,
             enhancement,
             transport_kbps: 28_000,
@@ -200,10 +206,6 @@ fn settle(ps: &mut PlaybackSession, action: &ClaimedRouteAction, tail: ClaimTail
         ClaimTail::Original(_) => true,
         ClaimTail::Rejected(_) => finish_route_action(ps, action, RouteApplyResult::Rejected),
     }
-}
-
-fn desired_audio_idx() -> i32 {
-    crate::player::SHARED.desired_audio_idx.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn decisions(requests: &[String]) -> Vec<&String> {
@@ -424,7 +426,7 @@ fn cleanup(ps: &mut PlaybackSession) {
     reset_session(ps);
     install_active_encoder("");
     reset_player_control_for_test(ps);
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(ps);
     crate::player::reset_subtitle();
 }
 
@@ -578,6 +580,45 @@ fn enhancement_released_contract_allows_auto_and_original() {
 }
 
 // ---- toggling ------------------------------------------------------------------------------
+
+/// A remux copies the source's video elementary stream, so the Load must declare the SOURCE rate:
+/// a 4K H.264 24p stream declared at the 60 an unknown rate keeps is presented at ~13 fps
+/// (`player/CLAUDE.md`, "Load's adaptiveStreaming ceiling"). The claim path that lands it is
+/// `apply_retranscode_outcome_to_projection`.
+#[test]
+fn toggle_on_from_direct_declares_the_source_rate_for_the_remux() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), None)), 0);
+    assert!(toggle(&mut ps, PREF));
+    let (action, tail) = claim(&mut ps);
+    settle(&mut ps, &action, tail);
+    assert!(ps.cur_contract.remux, "the enhanced route copies the video");
+    assert_eq!(ps.stream_fps, SOURCE_FPS);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// The recovery path (`install_original_remux`) is the other writer of a remux's `stream_fps`.
+#[test]
+fn recovery_to_an_enhanced_remux_declares_the_source_rate() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    crate::player::restore_audio_enhancements(PREF);
+    install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(true, a1(), None)), 0);
+    let ticket = worker_ticket();
+    assert_eq!(
+        recover_auto_to_original_for(&mut ps, &ticket, 60, RecoveryCause::Automatic),
+        Some(AutoOriginalReload::Remux),
+    );
+    assert!(ps.cur_contract.remux);
+    assert_eq!(ps.stream_fps, SOURCE_FPS);
+    live.finish();
+    cleanup(&mut ps);
+}
 
 #[test]
 fn toggle_on_from_direct_queues_retranscode_then_remux_params() {
@@ -1127,7 +1168,7 @@ fn capable_pick_while_enhanced_then_off_releases_to_new_track() {
     assert_eq!(tail, ClaimTail::Original(AutoOriginalReload::Direct));
     assert_eq!(ps.cur_audio, Some(a3()));
     assert_eq!(ps.stream_acodec, "ac3");
-    assert_eq!(desired_audio_idx(), 3, "the direct branch feeds the NEW track");
+    assert_eq!(desired_audio_idx(&ps), 3, "the direct branch feeds the NEW track");
     live.finish();
     cleanup(&mut ps);
 }
@@ -1170,8 +1211,10 @@ fn eac3_joc_to_ac3_release_immersive_false() {
         can_normalize_loudness: true,
         ..Default::default()
     };
-    // `app::playback::commit_track`'s `TrackCommit::Audio` arm is exactly this call (that arm only
-    // forwards the frozen snapshot); route tests cannot name the app or the track menu above it.
+    // `app::playback::commit_track`'s `TrackCommit::Audio` arm is this call plus the track memory's
+    // write (`commit_audio_pick`, which a pick with no descriptor skips); the route tests under
+    // `decision_track_memory_tests` grade the write, and this one the route, which cannot name the
+    // app or the track menu above it.
     commit_audio_selection(&mut ps, CarriedAudio::from_stream(&stream, 3));
     assert!(toggle(&mut ps, NONE));
     let (_, tail) = claim(&mut ps);
@@ -1198,7 +1241,7 @@ fn pending_release_plus_audio_pick_uses_new_track() {
     confirm_original_recovery(&mut ps);
     assert_eq!(ps.cur_audio, Some(a3()));
     assert!(pending_user_route_intent(UserRouteIntent::NativeAudioReload));
-    assert_eq!(desired_audio_idx(), 3);
+    assert_eq!(desired_audio_idx(&ps), 3);
     assert_eq!(ps.stream_acodec, "ac3");
     live.finish();
     cleanup(&mut ps);
@@ -1408,14 +1451,14 @@ fn a_direct_played_dv_profile_5_never_rebuilds_as_a_plain_remux() {
 #[test]
 fn a_remux_that_cannot_be_asked_for_codecs_guesses_what_the_server_would_send() {
     let a = |c: &str, ch| CarriedAudio { codec: c.into(), channels: ch, ..a1() };
-    assert_eq!(remux_output_acodec(false, Some(&a("ac3", 2)), "truehd"), "ac3");
-    assert_eq!(remux_output_acodec(false, Some(&a("eac3", 6)), "truehd"), "eac3");
+    assert_eq!(remux_output_acodec(&plx_os::devcaps::caps(), false, Some(&a("ac3", 2)), "truehd"), "ac3");
+    assert_eq!(remux_output_acodec(&plx_os::devcaps::caps(), false, Some(&a("eac3", 6)), "truehd"), "eac3");
     // a carried track the profile cannot admit is converted to its first target
-    assert_eq!(remux_output_acodec(false, Some(&a("truehd", 8)), "truehd"), "ac3");
+    assert_eq!(remux_output_acodec(&plx_os::devcaps::caps(), false, Some(&a("truehd", 8)), "truehd"), "ac3");
     // an enhanced remux re-encodes whatever it carries
-    assert_eq!(remux_output_acodec(true, Some(&a("eac3", 6)), "truehd"), "ac3");
+    assert_eq!(remux_output_acodec(&plx_os::devcaps::caps(), true, Some(&a("eac3", 6)), "truehd"), "ac3");
     // no carried track: the file's own default
-    assert_eq!(remux_output_acodec(false, None, "eac3"), "eac3");
+    assert_eq!(remux_output_acodec(&plx_os::devcaps::caps(), false, None, "eac3"), "eac3");
 }
 
 #[test]
@@ -1723,7 +1766,7 @@ fn rejected_remux_with_displaced_audio_runs_native_in_claim() {
     let revision = desired_contract_revision();
     assert!(action.displaced_pick);
     assert_eq!(tail, ClaimTail::NativeAudio);
-    assert_eq!(desired_audio_idx(), 3);
+    assert_eq!(desired_audio_idx(&ps), 3);
     assert_eq!(ps.stream_acodec, "ac3");
     assert!(matches!(phase(), ControlPhase::Applying(_)), "the PMS half never settles a reload tail");
     assert_eq!(desired_contract_revision(), revision, "no user-contract advance mid-claim");
@@ -1797,7 +1840,7 @@ fn not_involved_with_displaced_pick_native_switch_no_decision() {
     let (action, tail) = claim(&mut ps);
     assert!(action.displaced_pick);
     assert_eq!(tail, ClaimTail::NativeAudio);
-    assert_eq!(desired_audio_idx(), 2);
+    assert_eq!(desired_audio_idx(&ps), 2);
     assert_eq!(ps.stream_acodec, "eac3");
     let requests = live.finish();
     assert!(decisions(&requests).is_empty(), "{requests:?}");
@@ -1816,7 +1859,7 @@ fn not_involved_latest_pick_wins_native_a3() {
     toggle(&mut ps, NONE);
     let (_, tail) = claim(&mut ps);
     assert_eq!(tail, ClaimTail::NativeAudio);
-    assert_eq!(desired_audio_idx(), 3);
+    assert_eq!(desired_audio_idx(&ps), 3);
     assert_eq!(ps.stream_acodec, "ac3", "A3's payload codec");
     live.finish();
     cleanup(&mut ps);
@@ -1871,7 +1914,7 @@ fn request_play_clears_displaced_pick() {
     let _g = fresh_registry(&mut ps);
     queue_user_route_intent(&ps, UserRouteIntent::Retranscode, true);
     assert!(PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner()).displaced_pick);
-    assert!(begin_playback_request());
+    assert!(begin_playback_request().is_some());
     assert!(!PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner()).displaced_pick);
     queue_user_route_intent(&ps, UserRouteIntent::Retranscode, true);
     begin_engine_teardown(false);
@@ -1884,11 +1927,13 @@ fn other_arm_with_displaced_pick_stores_index_before_reload() {
     let mut ps = PlaybackSession::IDLE;
     let _g = fresh_registry(&mut ps);
     { let s = &mut ps; s.cur_audio = Some(a3()); s.stream_acodec = "eac3".into(); }
-    crate::player::set_audio_track(1);
-    honour_displaced_pick(&mut ps, false, "NativeAudioReload");
-    assert_eq!(desired_audio_idx(), 1, "no marker, no change");
-    honour_displaced_pick(&mut ps, true, "NativeAudioReload");
-    assert_eq!(desired_audio_idx(), 3);
+    crate::player::set_audio_track(&mut ps, 1);
+    let staged = desired_audio_idx(&ps);
+    honour_displaced_pick(&mut ps, false, staged, "NativeAudioReload");
+    assert_eq!(desired_audio_idx(&ps), 1, "no marker, no change");
+    let staged = desired_audio_idx(&ps);
+    honour_displaced_pick(&mut ps, true, staged, "NativeAudioReload");
+    assert_eq!(desired_audio_idx(&ps), 3);
     assert_eq!(ps.stream_acodec, "ac3");
     cleanup(&mut ps);
 }
@@ -2256,7 +2301,7 @@ fn legacy_primary_rejection_keeps_the_legacy_rejected_label() {
     reset_player_control_for_test(&mut ps);
     reset_session(&mut ps);
     crate::player::restore_audio_enhancements(NONE);
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -2494,7 +2539,7 @@ fn an_engine_failure_during_the_flight_ends_in_error_with_no_spinner() {
 
     // What the pump does on a terminal failure.
     fail_current_engine();
-    crate::player::SHARED.pb_state.store(PlaybackState::Error as u8, std::sync::atomic::Ordering::Relaxed);
+    crate::player::swap_state_for_test(&mut ps, PlaybackState::Error);
 
     assert!(matches!(phase(), ControlPhase::Failed(_)), "the failure was hidden behind Applying: {:?}", phase());
     assert!(!crate::player::claim_hold::active(), "the hold's spinner outlived the failure");
@@ -2518,7 +2563,7 @@ fn an_engine_failure_during_the_flight_ends_in_error_with_no_spinner() {
         wait_until("the failed claim's encoder to be stopped", || any_stop_seen(&log));
     }
 
-    crate::player::SHARED.pb_state.store(PlaybackState::Idle as u8, std::sync::atomic::Ordering::Relaxed);
+    crate::player::restore_state_for_test(&mut ps, PlaybackState::Idle as u8);
     crate::player::claim_hold::clear();
     live.finish();
     cleanup(&mut ps);
@@ -2548,7 +2593,7 @@ fn a_landing_from_a_torn_down_item_never_reaches_the_next_playback() {
     {
         let _frame = plx_base::task::FrameScope::enter();
         begin_engine_teardown(false);
-        assert!(begin_playback_request());
+        assert!(begin_playback_request().is_some());
     }
     assert!(
         RETRANSCODE_CLAIM_SLOT.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
@@ -2564,7 +2609,7 @@ fn a_landing_from_a_torn_down_item_never_reaches_the_next_playback() {
     reset_player_control_for_test(&mut ps);
     reset_session(&mut ps);
     crate::player::restore_audio_enhancements(NONE);
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -2589,12 +2634,16 @@ fn the_stale_arms_of_the_drain_stop_their_encoder_off_the_frame_thread() {
         pending_seek: -1,
         user_target: 0,
         result: RetranscodeClaimResult::Retranscode(AppliedRetranscode {
+            recovery_offer: None,
             qsess: qsess.to_owned(),
             url: String::new(),
             vcodec: "hevc".into(),
             acodec: "ac3".into(),
+            dovi: plx_data::metadata::Dovi::NONE,
+            dv_decision: plx_data::metadata::DvDecision::NONE,
             contract: plx_plex::plex::EncodeContract::default(),
             enhancement: EnhancementOutcome::Off,
+            lanes: crate::player::recovery::Lanes { video: crate::player::recovery::Lane::Copy, audio: crate::player::recovery::Lane::Transcode },
             ticket,
             client,
             superseded: String::new(),
@@ -2709,6 +2758,7 @@ fn a_stale_landing_at_drain_time_stops_the_leaked_encoder_instead_of_installing_
         pending_seek: -1,
         user_target: 0,
         result: RetranscodeClaimResult::Retranscode(AppliedRetranscode {
+            recovery_offer: None,
             qsess: "leaked-worker-session".to_string(),
             url: format!(
                 "http://127.0.0.1:{}/video/:/transcode/universal/start.mkv?session=leaked-worker-session",
@@ -2716,8 +2766,11 @@ fn a_stale_landing_at_drain_time_stops_the_leaked_encoder_instead_of_installing_
             ),
             vcodec: "hevc".into(),
             acodec: "ac3".into(),
+            dovi: plx_data::metadata::Dovi::NONE,
+            dv_decision: plx_data::metadata::DvDecision::NONE,
             contract: plx_plex::plex::EncodeContract::default(),
             enhancement: EnhancementOutcome::Off,
+            lanes: crate::player::recovery::Lanes { video: crate::player::recovery::Lane::Copy, audio: crate::player::recovery::Lane::Transcode },
             ticket: leaked_ticket,
             client: cur_client(&ps).expect("install() registered this session's server"),
             superseded: String::new(),
@@ -3120,6 +3173,53 @@ fn a_user_claim_queued_mid_automatic_flight_waits_for_the_landing_and_runs_after
     cleanup(&mut ps);
 }
 
+/// **A refused automatic Original is the reducer's fact about the HLS encoder it was asked from,
+/// and only about that encoder.** The pump reopens the retained HLS for the refusal, and the worker
+/// it spawns on the same encoder is handed the refusal, so its source gate does not probe and ask
+/// again (`player::pump::flight_tests`' reopen twin). A new encoder — an HLS rung commit, a
+/// transcode seek's rebuild, a user change — is a new admission question: its worker's gate
+/// starts fresh, so the refusal is never a give-up for the playback.
+#[test]
+fn a_refused_automatic_original_holds_the_source_gate_on_its_own_encoder_only() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = always_refusing_live();
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(false, a1(), None)), 0);
+    let (fresh, asked_on) = hls_abr_control(&ps).expect("the Auto HLS worker's capture");
+    assert!(!fresh.original_refused_on_this_route(), "sanity: nothing has been refused yet");
+
+    assert_eq!(
+        publish_automatic_route_intent(AutomaticRouteIntent::HlsToOriginal {
+            ticket: worker_ticket(),
+            evidence_kbps: 80_000,
+            position_ns: 60_000_000_000,
+        }),
+        AutomaticIntentResult::Accepted,
+    );
+    let action = claim_route_action().expect("the Auto worker's handoff");
+    let _frame = plx_base::task::FrameScope::enter();
+    let dispatch =
+        execute_recover_original_claim(&mut ps, &action, 60, RecoveryCause::Automatic, -1, 60_000_000_000);
+    drop(_frame);
+    assert!(matches!(dispatch, RetranscodeClaimDispatch::Pending), "a remux reaches PMS: {dispatch:?}");
+    let (_, tail, ..) = await_landing(&mut ps, "automatic Original worker never landed");
+    assert_eq!(tail, ClaimTail::Rejected(AUTO_ORIGINAL_REJECTED));
+    assert!(settle(&mut ps, &action, tail));
+
+    let (reopened, same) = hls_abr_control(&ps).expect("the retained HLS worker's capture");
+    assert_eq!(same.encoder(), asked_on.encoder(), "the refusal retained the HLS encoder");
+    assert!(reopened.original_refused_on_this_route(), "the encoder that refused Original is not asked again");
+
+    install_active_hls("next-encoder", "http://host/next.m3u8", crate::abr::Rung::P720);
+    let (moved, next) = hls_abr_control(&ps).expect("the next HLS worker's capture");
+    assert_eq!(next.encoder(), "next-encoder");
+    assert!(!moved.original_refused_on_this_route(), "a new encoder is a new admission question");
+    live.finish();
+    cleanup(&mut ps);
+}
+
 /// A direct Original needs no server round trip for an automatic recovery: the plan says so, and
 /// the pump leaves the stream playing instead of holding it for a flight that is over in a frame.
 #[test]
@@ -3146,6 +3246,52 @@ fn an_automatic_direct_original_recovery_is_a_flight_that_holds_nothing() {
     assert!(original_recovery_pending());
     let requests = live.finish();
     assert!(decisions(&requests).is_empty(), "a direct Original registers no replacement: {requests:?}");
+    cleanup(&mut ps);
+}
+
+/// **The no-Plex pipeline tier's recovery is the same flight, and it has no server to ask.** The
+/// `pipe_auto_original_slow_recover` TV case (`arm_auto_fixture`: a fixture Original, fixture HLS
+/// rungs, no Plex client) used to reach Original through the synchronous recovery; once the
+/// handoff became a claim flight (#457) its plan step also snapshotted the PMS retranscode inputs,
+/// which need a client, so the automatic direct Original — whose PMS half never touches the
+/// server — was refused as `AUTO_ORIGINAL_REJECTED` before it flew. The pump then reopened the retained HLS and the Auto
+/// worker probed, recovered and was refused again every ~10 s (13 Loads instead of 3).
+#[test]
+fn an_automatic_direct_original_recovery_needs_no_server_on_the_no_plex_fixture() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    assert_eq!(
+        arm_auto_fixture(&mut ps, "http://host/clip.mp4", 8_000, "http://host/__abr", false, (1_920, 1_080)),
+        None,
+        "the fixture starts on its Original",
+    );
+    let hls = fallback_auto_to_hls_for(&mut ps, &worker_ticket(), 4_000, 11)
+        .expect("the watched fixture Original falls back to fixture HLS");
+    assert!(hls.contains("/__abr/"), "{hls}");
+    assert!(cur_client(&ps).is_none(), "the fixture has no Plex client behind it");
+    assert_eq!(
+        publish_automatic_route_intent(AutomaticRouteIntent::HlsToOriginal {
+            ticket: worker_ticket(),
+            evidence_kbps: 34_000,
+            position_ns: 24_000_000_000,
+        }),
+        AutomaticIntentResult::Accepted,
+    );
+    let action = claim_route_action().expect("the Auto worker's handoff");
+    let _frame = plx_base::task::FrameScope::enter();
+    let dispatch =
+        execute_recover_original_claim(&mut ps, &action, 24, RecoveryCause::Automatic, -1, 24_000_000_000);
+    drop(_frame);
+    assert!(
+        matches!(dispatch, RetranscodeClaimDispatch::PendingNoHold),
+        "a direct fixture Original is a flight that reaches no server, not a refusal: {dispatch:?}",
+    );
+    let (_, tail, ..) = await_landing(&mut ps, "automatic fixture Original worker never landed");
+    assert_eq!(tail, ClaimTail::Original(AutoOriginalReload::Direct));
+    assert!(original_recovery_pending());
+    assert_eq!(ps.url, "http://host/clip.mp4", "the trial opens the fixture's own Original");
     cleanup(&mut ps);
 }
 
@@ -3683,6 +3829,31 @@ fn install_truehd_remux(ps: &mut PlaybackSession, live: &Live) {
     install(ps, live, Delivery::Remux(NONE), a4(), Some(candidate(false, a4(), None)), 0);
 }
 
+/// A native-audio conversion rebuilds a DIRECT play as the plain Original remux, the same contract
+/// an undecodable audio-track pick asks for: the server copies the video and converts only the
+/// audio the TV's pipeline refused, instead of re-encoding the picture. With an embedded subtitle
+/// on screen (no one to draw it) the server must burn it, which is a re-encode by nature.
+#[test]
+fn a_direct_play_with_native_surround_audio_rebuilds_as_the_plain_remux() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&mut ps);
+    crate::player::restore_audio_enhancements(NONE);
+    let opus = track(21, 1, "opus", 6, false, false);
+    install(&mut ps, &live, Delivery::Direct, opus.clone(), Some(candidate(true, opus.clone(), None)), 0);
+    assert!(plain_rebuild_is_remux(&ps), "a direct play with no subtitle is the Original shape");
+    assert_eq!(retranscode_contract(&ps), enhanced_remux_contract(NONE, false), "a remux, not a re-encode");
+
+    // A subtitle the server has to burn is a re-encode whichever way the audio is carried.
+    install(&mut ps, &live, Delivery::Direct, opus.clone(), Some(candidate(true, opus, Some(2))), 77);
+    assert!(!plain_rebuild_is_remux(&ps));
+    assert!(!retranscode_contract(&ps).remux, "the burn re-encodes the picture");
+    live.finish();
+    cleanup(&mut ps);
+}
+
 /// Settle a claim and let the engine confirm it, so the next edit may be claimed.
 fn land(ps: &mut PlaybackSession, action: &ClaimedRouteAction, tail: ClaimTail) {
     settle(ps, action, tail);
@@ -3891,19 +4062,20 @@ fn plain_rebuild_stays_remux_with_a_drawable_sidecar() {
 
 #[test]
 fn transcode_spec_never_names_a_subtitle_on_a_remux() {
+    let caps = plx_os::devcaps::caps();
     let remux = enhanced_remux_contract(NONE, false);
     let spec = crate::route::plan::transcode_spec(
-        "5", "s", "s", plx_plex::plex::TranscodeOffset::Fresh, 14, 78, remux,
+        &caps, "5", 0, "s", "s", plx_plex::plex::TranscodeOffset::Fresh, 14, 78, remux,
     );
     assert_eq!(spec.subtitle_stream_id, 0, "no subtitle id rides a remux");
     assert!(spec.client_subtitles, "the app draws it, and the query says so");
     let none = crate::route::plan::transcode_spec(
-        "5", "s", "s", plx_plex::plex::TranscodeOffset::Fresh, 14, 0, remux,
+        &caps, "5", 0, "s", "s", plx_plex::plex::TranscodeOffset::Fresh, 14, 0, remux,
     );
     assert!(!none.client_subtitles, "no subtitle, nothing to say");
     // Every burn is a `remux: false` contract and keeps its id.
     let burn = crate::route::plan::transcode_spec(
-        "5", "s", "s", plx_plex::plex::TranscodeOffset::Fresh, 14, 77, enhanced_remux_contract(NONE, true),
+        &caps, "5", 0, "s", "s", plx_plex::plex::TranscodeOffset::Fresh, 14, 77, enhanced_remux_contract(NONE, true),
     );
     assert_eq!((burn.subtitle_stream_id, burn.client_subtitles), (77, false));
 }
@@ -3985,6 +4157,8 @@ fn admit_side_reader(ps: &mut PlaybackSession) {
         title: String::new(),
         ctx: String::new(),
         preview: false,
+        version: None,
+        show_rk: String::new(),
     });
 }
 
@@ -4072,9 +4246,19 @@ fn side_reader_target_names_the_selected_tracks_ordinal() {
         assert_eq!((t.sid, t.part_kbps), (live.sid, 7_400));
         commit_subtitle_selection(&mut ps, 1, 78, true);
         assert_eq!(side_reader_target(&ps).map(|t| t.ordinal), Some(1));
-        // A sidecar is fetched by the app itself: no reader.
+        // A sidecar is fetched by the app itself: the reader reads no track, it only measures the
+        // clock the sidecar is drawn on (`player::sidecar_clock_ns`)...
         commit_subtitle_selection(&mut ps, -1, 79, true);
-        assert!(side_reader_target(&ps).is_none());
+        let t = side_reader_target(&ps).expect("a sidecar over an admitted remux gets a clock-only reader");
+        assert!(t.clock_only());
+        assert_eq!((t.sid, t.part_kbps), (live.sid, 7_400));
+        // ...and only where an embedded track would be admitted too: off the gate, nothing runs.
+        ps.cur_transport_kbps = 30_001;
+        assert!(side_reader_target(&ps).is_none(), "a Part above the bitrate bound: no reader");
+        ps.cur_transport_kbps = 0;
+        assert!(side_reader_target(&ps).is_none(), "an unmeasured bitrate: no reader");
+        ps.cur_transport_kbps = 7_400;
+        assert!(side_reader_target(&ps).is_some());
         // Refused (failed) reader: the burn is the route, no reader.
         commit_subtitle_selection(&mut ps, 4, 77, true);
         ps.side_subs_refused = true;
@@ -4082,6 +4266,184 @@ fn side_reader_target_names_the_selected_tracks_ordinal() {
         live.finish();
         cleanup(&mut ps);
     });
+}
+
+// ---- a sidecar over a remux is drawn on the CONTENT's clock ---------------------------------------
+
+/// A live admitted remux with a sidecar picked: the app draws it, over a remux whose clock the side
+/// reader maps onto the Part's (`plx_play_feed::side_reader`, `ff::subside`).
+fn sidecar_over_admitted_remux(ps: &mut PlaybackSession) -> Live {
+    let live = Live::start(EnhMode::Honor("ac3"));
+    install_truehd_remux(ps, &live);
+    ps.begin_attempt_view(RouteStartAttempt::fixture(),
+        crate::player::attempt_view::Backend::Feed);
+    admit_side_reader(ps);
+    commit_subtitle_selection(ps, -1, 79, true);
+    assert!(ps.cur_sub_sidecar);
+    assert_eq!(subtitle_presenter(ps), SubtitlePresenter::ClientOverRemux);
+    live
+}
+
+/// The engine's state `reload_transcode_start` leaves for a remux asked to start at `requested_ns`
+/// whose first frame (stream time `first_pts_ns`) is shown at once: `disp_base` is the REQUESTED
+/// offset, and the playhead the position callback stores is `fed - pts_shift + disp_base`. Returns
+/// the playhead of that first frame.
+fn remux_started_at(requested_ns: i64, first_pts_ns: i64) -> i64 {
+    use plx_playback_contract::subtitle::playhead_of;
+    let playhead = playhead_of(first_pts_ns, 0, requested_ns);
+    crate::player::set_clock_for_test(Some(0), requested_ns, playhead);
+    playhead
+}
+
+/// The reader's measurement for such a run, as the feed's sample carries it
+/// (`FeedRaw::side_exact_delta_ns`, which `read_once`'s publish fills).
+fn measured(ps: &mut PlaybackSession, part_kf_ns: i64, first_pts_ns: i64, requested_ns: i64) -> i64 {
+    let delta = plx_playback_contract::subtitle::delta_exact(part_kf_ns, first_pts_ns, 0, requested_ns);
+    sample_exact_delta(ps, Some(delta));
+    delta
+}
+
+/// The feed's sample with the reader's exact delta `delta`.
+fn sample_exact_delta(ps: &mut PlaybackSession, delta: Option<i64>) {
+    ps.step_readout(crate::player::readout::ReadoutEvent::FactsIngested(
+        plx_playback_contract::feed::FeedRaw { side_exact_delta_ns: delta, ..Default::default() }));
+}
+
+/// What the route asked of the side reader since the last call, as the pump takes it:
+/// `Some(Some(ordinal))` = draw this track, `Some(None)` = stop it, `None` = nothing asked.
+fn take_side_reader_want(ps: &mut PlaybackSession) -> Option<Option<i32>> {
+    let want = ps.readout().side_reader_want().map(|want| want.as_ref().map(|spec| spec.ordinal));
+    if want.is_some() {
+        ps.step_readout(crate::player::readout::ReadoutEvent::SideReaderWantTaken);
+    }
+    want
+}
+
+fn clear_remux_run(ps: &mut PlaybackSession) {
+    sample_exact_delta(ps, None);
+    crate::player::set_clock_for_test(None, 0, 0);
+}
+
+/// **The measured case.** With Boost Dialog on, a direct play is a PMS remux that (re)starts on a
+/// Part keyframe EARLIER than or at the requested offset — not always the last one (917 s started
+/// on 914.914 s while 916.916 s existed) — while the app labels that frame with the REQUESTED
+/// offset (`disp_base`), so the playhead runs ahead of the content by `offset + 0.083 s -
+/// keyframe` and an external subtitle (file time) drew early. `(requested, remux started on)`, the
+/// first remux frame at 0.083 s, GOP 2.002 s: the four rows measured on one real file.
+#[test]
+fn sidecar_clock_a_sidecar_over_a_remux_is_drawn_on_the_clock_of_the_content_it_belongs_to() {
+    const FIRST_FRAME: i64 = 83_000_000;
+    let rows: [(i64, i64, i64); 4] = [
+        // requested, Part keyframe the remux started on, the app clock's lead in ms
+        (439_000_000_000, 438_438_000_000, 645),
+        (475_000_000_000, 474_474_000_000, 609),
+        (564_000_000_000, 562_562_000_000, 1_521),
+        (917_000_000_000, 914_914_000_000, 2_169),
+    ];
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = sidecar_over_admitted_remux(&mut ps);
+    for (requested, kf, lead_ms) in rows {
+        let playhead = remux_started_at(requested, FIRST_FRAME);
+        assert_eq!(playhead - kf, lead_ms * 1_000_000, "fixture: the app clock leads the content by the measured amount");
+        let delta = measured(&mut ps, kf, FIRST_FRAME, requested);
+        assert_eq!(delta, -lead_ms * 1_000_000);
+        assert_eq!(
+            crate::player::sidecar_clock_ns(&ps, playhead),
+            kf,
+            "the first frame shows the content of the Part keyframe {kf} ns, requested {requested} ns"
+        );
+        // and it keeps that offset while playing
+        assert_eq!(crate::player::sidecar_clock_ns(&ps, playhead + 10_000_000_000), kf + 10_000_000_000);
+        clear_remux_run(&mut ps);
+    }
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// An EMBEDDED track's cues were moved onto the remux clock by the reader (`-delta`), so the draw
+/// must not move the playhead again; a route the app is not drawing a sidecar over must not either,
+/// whatever an earlier run left behind.
+#[test]
+fn sidecar_clock_only_a_sidecar_over_a_live_remux_is_moved_and_only_by_a_measured_delta() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = sidecar_over_admitted_remux(&mut ps);
+    let playhead = remux_started_at(917_000_000_000, 83_000_000);
+    // nothing measured: unchanged
+    assert_eq!(crate::player::sidecar_clock_ns(&ps, playhead), playhead);
+    measured(&mut ps, 914_914_000_000, 83_000_000, 917_000_000_000);
+    assert_eq!(crate::player::sidecar_clock_ns(&ps, playhead), 914_914_000_000);
+    // an embedded pick on the same run: its cues carry the correction already
+    commit_subtitle_selection(&mut ps, 2, 77, true);
+    assert!(!ps.cur_sub_sidecar);
+    assert_eq!(crate::player::sidecar_clock_ns(&ps, playhead), playhead, "embedded cues are not corrected twice");
+    // the reader gave up and the server burns: no app drawing at all
+    commit_subtitle_selection(&mut ps, -1, 79, true);
+    ps.side_subs_refused = true;
+    assert_eq!(crate::player::sidecar_clock_ns(&ps, playhead), playhead);
+    ps.side_subs_refused = false;
+    // the engine run is over: its measurement does not survive it
+    sample_exact_delta(&mut ps, None);
+    assert_eq!(crate::player::sidecar_clock_ns(&ps, playhead), playhead);
+    clear_remux_run(&mut ps);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// **The draw's media half.** `player::subtitle_draw` hands the screen the sidecar's source and
+/// the position it samples, so handing the sidecar the raw playhead (the bug) fails here. The
+/// screen's own use of that answer is its six-line call site in `ass_subtitles.rs`, not pinned by
+/// this test.
+#[test]
+fn sidecar_clock_the_draw_asks_the_sidecar_at_the_corrected_position() {
+    const SCRIPT: &[u8] = b"[Script Info]\nScriptType: v4.00+\n[Events]\n\
+        Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,SIDE\n";
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = sidecar_over_admitted_remux(&mut ps);
+    crate::player::sidecar::select_loaded_for_test(79, SCRIPT);
+    let drawn = crate::player::sidecar::ass_source(false).expect("fixture: the sidecar is loaded");
+    let playhead = remux_started_at(917_000_000_000, 83_000_000);
+    let attempt = RouteStartAttempt::fixture();
+    ps.begin_attempt_view(attempt, crate::player::attempt_view::Backend::Feed);
+    assert!(ps.ingest_attempt_facts(attempt, crate::player::attempt_view::Backend::Feed,
+        crate::player::attempt_view::AttemptFacts {
+            position_ns: Some(playhead), seen_frame: Some(true), ..Default::default()
+        }));
+    let (source, position) = crate::player::subtitle_draw(&ps).expect("the app draws the sidecar");
+    assert!(std::sync::Arc::ptr_eq(&source, &drawn), "the drawn source is the sidecar, not an embedded track");
+    assert_eq!(position, playhead, "nothing measured yet: drawn exactly as before");
+    measured(&mut ps, 914_914_000_000, 83_000_000, 917_000_000_000);
+    let (source, position) = crate::player::subtitle_draw(&ps).expect("the app draws the sidecar");
+    assert!(std::sync::Arc::ptr_eq(&source, &drawn), "still the sidecar");
+    assert_eq!(position, 914_914_000_000, "drawn at the content whose picture is on screen");
+    assert_ne!(position, playhead, "the raw playhead is exactly the bug");
+    crate::player::sidecar::reset();
+    clear_remux_run(&mut ps);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// The screen subtracts the viewer's timing offset from the clock it samples; the offset composes
+/// with the correction, and its range stays the sidecar's.
+#[test]
+fn sidecar_clock_the_viewers_timing_offset_composes_with_the_remux_correction() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = sidecar_over_admitted_remux(&mut ps);
+    let range = crate::player::subtitle_offset_range_ms();
+    let playhead = remux_started_at(475_000_000_000, 83_000_000);
+    measured(&mut ps, 474_474_000_000, 83_000_000, 475_000_000_000);
+    crate::player::restore_subtitle_offset(500);
+    // what `AssSubtitles::update` asks the renderer: the sampled position less the offset
+    let asked_ms = crate::player::sidecar_clock_ns(&ps, playhead) / 1_000_000 - crate::player::subtitle_offset_ms();
+    assert_eq!(asked_ms, 474_474 - 500, "a +500 ms delay shows the cue authored 500 ms earlier, in content time");
+    assert_eq!(crate::player::subtitle_offset_range_ms(), range, "the correction does not move the offset range");
+    crate::player::restore_subtitle_offset(0);
+    clear_remux_run(&mut ps);
+    live.finish();
+    cleanup(&mut ps);
 }
 
 /// PMS discards a DOWNLOADED subtitle when the part's selection moves off it, so while the app
@@ -4131,16 +4493,16 @@ fn embedded_pick_on_a_live_remux_queues_no_retranscode() {
     let live = Live::start(EnhMode::Honor("ac3"));
     install_truehd_remux(&mut ps, &live);
     admit_side_reader(&mut ps);
-    let _ = crate::player::subside::take_test_syncs();
+    let _ = take_side_reader_want(&mut ps);
     pick_embedded(&mut ps);
     assert!(!pending_user_route_intent(UserRouteIntent::Retranscode), "the stream is not touched");
     assert!(claim_route_action().is_none());
     assert!(ps.cur_contract.remux, "still the copy");
     assert_eq!((ps.cur_sub_sid, ps.cur_sub_sidecar, ps.cur_sub_ordinal), (77, false, 2));
-    assert_eq!(crate::player::subside::take_test_syncs(), vec![Some(2)], "the reader starts on the pick");
+    assert_eq!(take_side_reader_want(&mut ps), Some(Some(2)), "the reader starts on the pick");
     commit_subtitle_selection(&mut ps, -1, 0, false);
     assert!(!pending_user_route_intent(UserRouteIntent::Retranscode), "Off needs no rebuild either");
-    assert_eq!(crate::player::subside::take_test_syncs(), vec![None], "and the reader stops");
+    assert_eq!(take_side_reader_want(&mut ps), Some(None), "and the reader stops");
     assert!(decisions(&live.finish()).is_empty());
     cleanup(&mut ps);
 }
@@ -4152,20 +4514,25 @@ fn switching_embedded_tracks_on_a_live_remux_queues_no_retranscode() {
     let live = Live::start(EnhMode::Honor("ac3"));
     install_truehd_remux(&mut ps, &live);
     admit_side_reader(&mut ps);
-    let _ = crate::player::subside::take_test_syncs();
+    let _ = take_side_reader_want(&mut ps);
+    let mut asked = Vec::new();
     pick_embedded(&mut ps);
+    asked.push(take_side_reader_want(&mut ps));
     commit_subtitle_selection(&mut ps, 5, 78, true);
+    asked.push(take_side_reader_want(&mut ps));
     assert!(!pending_user_route_intent(UserRouteIntent::Retranscode));
     assert_eq!(ps.cur_sub_sid, 78);
     // embedded -> sidecar -> embedded: the reader follows each pick, the stream none.
     commit_subtitle_selection(&mut ps, -1, 79, true);
+    asked.push(take_side_reader_want(&mut ps));
     commit_subtitle_selection(&mut ps, 3, 80, true);
+    asked.push(take_side_reader_want(&mut ps));
     assert!(!pending_user_route_intent(UserRouteIntent::Retranscode));
     assert!(claim_route_action().is_none());
     assert_eq!(
-        crate::player::subside::take_test_syncs(),
-        vec![Some(2), Some(5), None, Some(3)],
-        "track 2, switch to 5, a sidecar needs no reader, back to 3"
+        asked,
+        vec![Some(Some(2)), Some(Some(5)), Some(Some(plx_playback_contract::subtitle::SIDE_READER_CLOCK_ONLY)), Some(Some(3))],
+        "track 2, switch to 5, a sidecar reads no track (clock only), back to 3"
     );
     assert!(ps.cur_contract.remux);
     assert!(decisions(&live.finish()).is_empty());
@@ -4183,10 +4550,10 @@ fn embedded_pick_from_a_live_burn_rebuilds_into_the_remux() {
     assert_eq!(ps.cur_contract, enhanced_remux_contract(NONE, true));
     admit_side_reader(&mut ps);
     reset_player_control_for_test(&ps);
-    let _ = crate::player::subside::take_test_syncs();
+    let _ = take_side_reader_want(&mut ps);
     commit_subtitle_selection(&mut ps, 5, 78, true);
     assert!(pending_user_route_intent(UserRouteIntent::Retranscode), "leaving a burn rebuilds once");
-    assert!(crate::player::subside::take_test_syncs().is_empty(), "the new engine starts the reader");
+    assert_eq!(take_side_reader_want(&mut ps), None, "the new engine starts the reader");
     let (action, tail) = claim(&mut ps);
     land(&mut ps, &action, tail);
     assert_eq!(ps.cur_contract, enhanced_remux_contract(NONE, false), "back into the copy");
@@ -4264,7 +4631,7 @@ fn a_cancelled_resolve_restores_the_retained_remuxs_reader_target() {
     install_truehd_remux(&mut ps, &live);
     admit_side_reader(&mut ps);
     pick_embedded(&mut ps);
-    assert!(begin_playback_request());
+    assert!(begin_playback_request().is_some());
     // What `request_play_inner` resets for the incoming item.
     ps.cur_sub_sid = 0;
     ps.cur_sub_sidecar = false;
@@ -4412,5 +4779,208 @@ fn sidecar_to_embedded_and_back_rebuilds_then_returns_to_remux() {
     let last = d.last().expect("a decision was made");
     assert!(!last.contains("subtitles=burn"), "{last}");
     assert_eq!(query_param(last, "directStreamAudio"), Some("1"), "{last}");
+    cleanup(&mut ps);
+}
+
+
+// ---- a subtitle turned ON mid-play offers the same enhancement as one the playback started with ----
+//
+// Owner report: a Family Guy episode (MKV, AC3 2.0 with `canNormalizeLoudness`, ONE embedded ASS
+// subtitle, subtitles ON, Direct Play Auto) showed Boost dialog / Normalize loudness disabled with
+// "Available only at Original quality" under Quality: Original. Path A starts with the subtitle,
+// Path B enables it during playback; M7 says an embedded subtitle takes the Burn route either way.
+
+/// What the Audio tab says for a direct play that STARTED with subtitle `sub_sid` on screen.
+fn availability_when_started_with(sub_sid: i64, ordinal: Option<i32>) -> EnhancementAvailability {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), ordinal)), sub_sid);
+    let got = menu_enhancement_availability(&ps);
+    live.finish();
+    cleanup(&mut ps);
+    got
+}
+
+/// What the Audio tab says after the same subtitle is enabled MID-PLAY through the real commit.
+fn availability_after_midplay_pick(
+    sub_idx: i32,
+    sub_sid: i64,
+    client_renderable: bool,
+) -> (EnhancementAvailability, bool) {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), None)), 0);
+    commit_subtitle_selection(&mut ps, sub_idx, sub_sid, client_renderable);
+    let got = (menu_enhancement_availability(&ps), ps.auto_original.is_some());
+    live.finish();
+    cleanup(&mut ps);
+    got
+}
+
+/// Control: an EMBEDDED subtitle (ASS, PGS, any codec: the menu hands `client_renderable =
+/// render_ordinal >= 0`) keeps the candidate, so mid-play equals start-with-sub. Passes.
+#[test]
+fn embedded_subtitle_enabled_midplay_offers_the_same_burn_as_one_at_start() {
+    let at_start = availability_when_started_with(77, Some(2));
+    let (midplay, kept) = availability_after_midplay_pick(2, 77, true);
+    assert_eq!(at_start, EnhancementAvailability::Offered(EnhancementRoute::Burn));
+    assert!(kept, "the candidate follows the embedded pick");
+    assert_eq!(midplay, at_start);
+}
+
+/// A pick the client does not draw (`client_renderable == false`, e.g. an external image sidecar)
+/// used to DROP the candidate (`TrackPickDropped`), so the Audio tab read Disabled(NotCopyable) for
+/// the rest of the playback. It now keeps it and offers the Burn: an intended mid-play behaviour.
+/// (A cold start with an image sidecar selected plays with the subtitle OFF, `pick_dp_subtitle`
+/// excludes externals, so this is not "parity with start".)
+#[test]
+fn non_drawable_subtitle_enabled_midplay_keeps_the_candidate_and_offers_burn() {
+    let (midplay, kept) = availability_after_midplay_pick(-1, 78, false);
+    assert!(kept, "the Original candidate must survive a pick it can only burn");
+    assert_eq!(midplay, EnhancementAvailability::Offered(EnhancementRoute::Burn));
+}
+
+/// An image sidecar (`.sup`/`.idx`: no ordinal, no sidecar key) on a standing enhanced Burn.
+fn undrawable_sidecar_on_burn(ps: &mut PlaybackSession, live: &Live) {
+    install(ps, live, Delivery::Burn(PREF), a1(), Some(candidate(true, a1(), None)), 78);
+    ps.cur_sub_sidecar = true;
+    ps.cur_sub_client_drawable = false;
+}
+
+/// The plain Original route is untouched by the kept candidate: with no enhancement wanted, a
+/// non-drawable pick on direct play leaves the step alone and records no drop.
+#[test]
+fn non_drawable_subtitle_midplay_leaves_the_plain_original_route_alone() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Direct, a1(), Some(candidate(true, a1(), None)), 0);
+    commit_subtitle_selection(&mut ps, -1, 78, false);
+    assert!(ps.auto_original.is_some() && ps.original_declined.is_none());
+    assert_eq!(ps.auto_original.as_ref().and_then(|c| c.subtitle_ordinal), None);
+    assert_eq!(live_subtitle_effect(&ps), SubtitleEffect::Embedded, "never a drawable sidecar");
+    assert_eq!(enhancement_step(&ps), EnhancementStep::NotInvolved);
+    assert!(!is_transcoding(&ps), "still the direct play it was");
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// Releasing the enhancement while the undrawable subtitle is still selected must keep the
+/// burn, never return to a direct play that would show nothing.
+#[test]
+fn releasing_the_enhancement_with_a_non_drawable_subtitle_keeps_the_burn() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    undrawable_sidecar_on_burn(&mut ps, &live);
+    assert_eq!(live_subtitle_effect(&ps), SubtitleEffect::Embedded);
+    assert_eq!(enhancement_step(&ps), EnhancementStep::Remux(enhanced_remux_contract(NONE, true)));
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// Turning the subtitle Off afterwards: the enhancement stays wanted as a plain enhanced remux
+/// (no burn), and once it is released too the way back is the direct play.
+#[test]
+fn turning_a_non_drawable_subtitle_off_lands_on_the_plain_routes() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(PREF);
+    undrawable_sidecar_on_burn(&mut ps, &live);
+    commit_subtitle_selection(&mut ps, -1, 0, false);
+    reset_player_control_for_test(&ps);
+    assert_eq!(ps.cur_sub_sid, 0);
+    assert!(ps.auto_original.is_some());
+    assert_eq!(enhancement_step(&ps), EnhancementStep::Remux(enhanced_remux_contract(PREF, false)));
+    crate::player::restore_audio_enhancements(NONE);
+    assert_eq!(enhancement_step(&ps), EnhancementStep::ReleaseToDirect);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// A cold start that lands on the enhancement's Burn records `cur_sub_client_drawable == false` even
+/// for an embedded track the app CAN draw (`force_burn` leaves no `sub_render_ordinal`), while the
+/// candidate still names the ordinal. Releasing the enhancement returns to direct play, where the
+/// candidate draws that subtitle.
+#[test]
+fn cold_start_burn_released_returns_to_direct_with_the_subtitle_restored() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(PREF);
+    install(&mut ps, &live, Delivery::Burn(PREF), a1(), Some(candidate(true, a1(), Some(2))), 77);
+    assert!(!ps.cur_sub_client_drawable, "what a cold-start burn records");
+    crate::player::restore_audio_enhancements(NONE);
+    assert_eq!(enhancement_step(&ps), EnhancementStep::ReleaseToDirect);
+    live.finish();
+    cleanup(&mut ps);
+}
+
+/// Recovery to the Original candidate while a subtitle only a burn can show is selected must not
+/// land on a direct play (or a plain remux) that drops it: it is the plain Original burn.
+#[test]
+fn recovery_with_a_non_drawable_subtitle_burns_instead_of_dropping_it() {
+    for (quality, cause) in [
+        (Quality::Auto, RecoveryCause::Automatic),
+        (Quality::Original, RecoveryCause::ManualOriginal),
+    ] {
+        let mut ps = PlaybackSession::IDLE;
+        let _g = fresh_registry(&mut ps);
+        let live = Live::start(EnhMode::Honor("ac3"));
+        restore_quality(quality);
+        reset_player_control_for_test(&ps);
+        crate::player::restore_audio_enhancements(NONE);
+        install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(true, a1(), None)), 78);
+        ps.cur_sub_sidecar = true;
+        ps.cur_sub_client_drawable = false;
+        let ticket = worker_ticket();
+        assert_eq!(
+            recover_auto_to_original_for(&mut ps, &ticket, 60, cause),
+            Some(AutoOriginalReload::Remux),
+            "{quality:?}",
+        );
+        assert_eq!(ps.cur_contract, enhanced_remux_contract(NONE, true), "{quality:?}");
+        let requests = live.finish();
+        let d = decisions(&requests);
+        assert!(d.last().is_some_and(|r| r.contains("subtitles=burn")), "{quality:?}: {requests:?}");
+        cleanup(&mut ps);
+    }
+}
+
+/// Same recovery, but the subtitle is one the candidate shows: the direct play stays direct.
+#[test]
+fn recovery_with_a_drawable_subtitle_still_returns_to_direct() {
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let live = Live::start(EnhMode::Honor("ac3"));
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    crate::player::restore_audio_enhancements(NONE);
+    install(&mut ps, &live, Delivery::Hls, a1(), Some(candidate(true, a1(), Some(2))), 77);
+    let ticket = worker_ticket();
+    assert_eq!(
+        recover_auto_to_original_for(&mut ps, &ticket, 60, RecoveryCause::Automatic),
+        Some(AutoOriginalReload::Direct),
+    );
+    live.finish();
     cleanup(&mut ps);
 }

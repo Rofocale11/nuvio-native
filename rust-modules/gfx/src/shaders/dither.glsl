@@ -37,8 +37,8 @@
 //     programs it measured +4M shader words a frame with every draw answering 0 (2026-09-04), and
 //     on a scrolling Library the branch alone was +5.8M arithmetic words a frame, 49 fps against 59
 //     with the same fetch unguarded (2026-09-19, the HWCNT vinstr profiler). So the helpers below are
-//     straight-line, and the one broad surface that must NOT dither — the hero scrim over
-//     artwork — is a plain twin program (`gfx::ambient_program`, `dither_stub.glsl`). A field under
+//     straight-line, and the one broad surface that must NOT dither — a corner-alpha fade over
+//     artwork (`gfx::draw_grad4`) — is a plain twin program (`gfx::ambient_program`, `dither_stub.glsl`). A field under
 //     `gfx::dither_for_field`'s threshold pays one idle-pipe fetch times 0. Only the three
 //     slow-field programs carry this prelude at all.
 //  2. **A TEXTURE FETCH, never a hash.** `fract(sin(dot(p,k))*43758.5)` is a range reduction plus a
@@ -78,8 +78,9 @@
 // corner springs the wash undithered itself for the whole of its own colour dissolve. Nor may the
 // ARTWORK's motion: Home's and Detail's washes dropped the noise while a photograph slid over them
 // until 2026-09-19 (`gfx::page_wash_dither`, now deleted), and the band of wash below Home's diving
-// hero — wash-only, nothing over it — banded for the length of the dive. Every page wash dithers
-// on every frame (`gfx::draw_ambient` takes no flag); rules 1 and 4 are what made that affordable.
+// hero — wash-only, nothing over it — banded for the length of the dive. Every page wash with a
+// gradient dithers on every frame (`gfx::draw_ambient` takes no flag; one of a single colour is a
+// clear and never reaches this program); rules 1 and 4 are what made that affordable.
 precision mediump float;
 uniform float u_dither;
 uniform sampler2D u_dither_tex; // gfx::noise_tex — 256², TPDF, GL_REPEAT + GL_NEAREST, unit 2

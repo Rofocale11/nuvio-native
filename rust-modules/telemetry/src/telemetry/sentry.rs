@@ -195,7 +195,7 @@ fn image_addr_of(buf: &[u8]) -> String {
 
 /// The head of a file — enough to hold an ELF header and every program header after it. Bounded
 /// rather than a whole read: this runs at boot on a set with 1.68 GB, and the binary is 7 MB.
-fn read_head(path: &str) -> Option<Vec<u8>> {
+pub(super) fn read_head(path: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut buf = Vec::new();
     std::fs::File::open(path)
@@ -530,13 +530,14 @@ pub fn attach_user(body: &mut serde_json::Value, errors_id: Option<&str>) {
 /// One function rather than a copy per call site, so playback and any future handled event cannot
 /// drift into their own spelling of "which webOS is this" — the same reasoning `attach_user` states
 /// for the identity field. Field names match `telemetry/native.rs`'s `WEBOS_FIELDS`/
-/// `HARDWARE_FIELDS` allowlists exactly, so a handled event and a crash report read identically in
-/// Sentry's Contexts UI. Merges into whatever `contexts` object the caller already built (a
+/// `HARDWARE_FIELDS` allowlists, so a handled event and a crash report read alike in Sentry's
+/// Contexts UI. Two keys are on these events and not on a native crash (the SDK's scope, set in C,
+/// cannot carry them): the webOS `build` and the hardware `probe`. Merges into whatever `contexts` object the caller already built (a
 /// `playback` context sits beside these, not under them) rather than replacing it — and creates one
 /// if the body had none yet.
 pub fn attach_hardware_context(body: &mut serde_json::Value) {
-    let webos = plx_platform::tv::device::info();
-    let hw = plx_platform::tv::device::device();
+    let webos = plx_os::tv::device::info();
+    let hw = plx_os::tv::device::device();
     let contexts = body
         .as_object_mut()
         .expect("event body is always a JSON object")
@@ -544,19 +545,79 @@ pub fn attach_hardware_context(body: &mut serde_json::Value) {
         .or_insert_with(|| serde_json::json!({}));
     contexts["webos"] = serde_json::json!({
         "type": "webos",
-        "name": webos.name,
+        "name": webos.webos.name,
         "release": webos.release,
-        "codename": webos.codename,
-        "api": webos.api,
+        // The exact firmware build (nyx's `core_os_release`, e.g. `6.5.3-47`), which a patch within
+        // one release changes and `release` does not: what a refusal is learned against.
+        "build": webos.build,
+        "codename": webos.webos.codename,
+        "api": webos.webos.api,
     });
     contexts["hardware"] = serde_json::json!({
         "type": "hardware",
         "model": hw.model,
         "soc": hw.board,
         "revision": hw.hw_revision,
-        "rtkmem": plx_platform::tv::sandbox::context(),
+        // Why the three fields above may be empty: what the boot probe found in each of nyx's
+        // two files (`<os_info>/<device_info>`, each `ok` / `no_keys` / `unreadable`, or
+        // `unprobed`). Four fixed words, never free text.
+        "probe": plx_os::tv::device::probe().code(),
+        "rtkmem": plx_os::tv::native_video::context(),
         "install": plx_base::paths::install_kind(),
     });
+}
+
+/// The `os` context a native crash carries, built from the kernel's `uname` fields the way the
+/// SDK's `sentry__get_os_context` does (`sentry_os.c`, Linux branch): the leading digits and at
+/// most two dots of the release are the `version`, whatever follows (minus one separator) the
+/// `build`. `native::OS_FIELDS` is the allowlist the SDK's version of this passes through, and
+/// this is exactly that field set, so a fallback event and a native one read alike in Sentry.
+pub fn os_context_of(sysname: &str, release: &str) -> serde_json::Value {
+    let mut dots = 0;
+    let mut end = release.len();
+    for (i, c) in release.char_indices() {
+        if c == '.' {
+            dots += 1;
+        }
+        if !c.is_ascii_digit() && (c != '.' || dots > 2) {
+            end = i;
+            break;
+        }
+    }
+    let (version, rest) = release.split_at(end);
+    let build = rest.strip_prefix(['-', '.']).unwrap_or(rest);
+    let mut os = serde_json::json!({"type": "os", "name": sysname, "version": version});
+    if !build.is_empty() {
+        os["build"] = serde_json::Value::String(build.to_string());
+    }
+    os
+}
+
+/// Attach this kernel's `os` context to a hand-built event — the one a native crash gets from the
+/// SDK and the fallback events (which the SDK never sees) otherwise lack.
+///
+/// The crash log lives in `/tmp` and is cleared when the television restarts, so the kernel that
+/// reads it is the kernel that wrote it. Nothing is attached when `uname` fails.
+pub fn attach_os_context(body: &mut serde_json::Value) {
+    // SAFETY: `uname` fills the struct it is handed and nothing else.
+    let uts = unsafe {
+        let mut uts: libc::utsname = std::mem::zeroed();
+        if libc::uname(&mut uts) != 0 {
+            return;
+        }
+        uts
+    };
+    let field = |raw: &[libc::c_char]| {
+        let bytes: Vec<u8> = raw.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let os = os_context_of(&field(&uts.sysname), &field(&uts.release));
+    let contexts = body
+        .as_object_mut()
+        .expect("event body is always a JSON object")
+        .entry("contexts")
+        .or_insert_with(|| serde_json::json!({}));
+    contexts["os"] = os;
 }
 
 /// Frame one item into an envelope: an envelope header line, an item header line, then the payload.
@@ -574,6 +635,22 @@ pub fn envelope(event_id: &str, item_type: &str, payload: &[u8]) -> Vec<u8> {
         )
         .as_bytes(),
     );
+    out.extend_from_slice(payload);
+    out.push(b'\n');
+    out
+}
+
+/// Frame one release-health session item. A session is not an event, so the envelope header has no
+/// `event_id` (<https://develop.sentry.dev/sdk/telemetry/sessions/>); it carries `sent_at`, the
+/// moment of sending by this clock, which lets Relay correct a television's clock drift. A clock
+/// that was never set (`sent_at_unix` is `None`) says nothing rather than a wrong time.
+pub fn session_envelope(payload: &[u8], sent_at_unix: Option<u64>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 80);
+    match sent_at_unix {
+        Some(t) => out.extend_from_slice(format!("{{\"sent_at\":\"{}\"}}\n", super::session::iso(t)).as_bytes()),
+        None => out.extend_from_slice(b"{}\n"),
+    }
+    out.extend_from_slice(format!("{{\"type\":\"session\",\"length\":{}}}\n", payload.len()).as_bytes());
     out.extend_from_slice(payload);
     out.push(b'\n');
     out
@@ -612,7 +689,7 @@ mod tests {
             .expect("webos context present");
         let mut webos_keys: Vec<&str> = webos.keys().map(String::as_str).collect();
         webos_keys.sort_unstable();
-        assert_eq!(webos_keys, ["api", "codename", "name", "release", "type"]);
+        assert_eq!(webos_keys, ["api", "build", "codename", "name", "release", "type"]);
         assert_eq!(webos["type"], "webos");
         let hardware = body["contexts"]["hardware"]
             .as_object()
@@ -621,9 +698,17 @@ mod tests {
         hardware_keys.sort_unstable();
         assert_eq!(
             hardware_keys,
-            ["install", "model", "revision", "rtkmem", "soc", "type"]
+            ["install", "model", "probe", "revision", "rtkmem", "soc", "type"]
         );
         assert_eq!(hardware["type"], "hardware");
+        // The status is the closed `<os_info>/<device_info>` pair, so an empty model or release is
+        // never mistaken for a probe that did not run: it reads `unprobed` here, off the TV.
+        let probe = hardware["probe"].as_str().expect("probe is a string");
+        let words: Vec<&str> = probe.split('/').collect();
+        assert_eq!(words.len(), 2, "{probe}");
+        for word in words {
+            assert!(["unprobed", "ok", "no_keys", "unreadable"].contains(&word), "{probe}");
+        }
         // On the host these read as the empty/`n/a`/`unknown` fallbacks the probes report when
         // there is no `/var/run/nyx/os_info.json` — still present as keys, never omitted.
         assert!(hardware["rtkmem"].is_string());
@@ -900,6 +985,22 @@ mod tests {
         let mut far = elf32(&[text], &[], 0);
         far[28..32].copy_from_slice(&0x10_0000u32.to_le_bytes());
         assert_eq!(lowest_load_vaddr(&far), None);
+    }
+
+    /// The fallback events' `os` context is built the way the SDK builds the native one: the
+    /// numeric head of the kernel release is the version, the remainder the build.
+    #[test]
+    fn the_os_context_splits_the_kernel_release_like_the_sdk_does() {
+        assert_eq!(
+            os_context_of("Linux", "4.4.84-169.gld4tv.5"),
+            serde_json::json!({"type": "os", "name": "Linux", "version": "4.4.84", "build": "169.gld4tv.5"})
+        );
+        assert_eq!(
+            os_context_of("Linux", "5.4.0"),
+            serde_json::json!({"type": "os", "name": "Linux", "version": "5.4.0"}),
+            "no remainder, no build"
+        );
+        assert_eq!(os_context_of("Linux", "4.4.84.5-x")["version"], "4.4.84");
     }
 
     /// **The build id is found past a note that precedes it**, which is the padding case above. A

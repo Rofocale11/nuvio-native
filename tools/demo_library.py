@@ -53,6 +53,16 @@ Per-title flags in `catalog.json`, all checked by `check`:
   listed in the catalog's `still_poster_approved`, and then the asset may be of kind `still` or
   `backdrop`.
 
+People. The catalog's `people` maps a credited NAME (exactly as a `cast`, `directors`, `writers` or
+`creators` row spells it) to `{"photo": {"asset": id, "box": [x, y, w, h]}}`: an asset and the part
+of it, in SOURCE pixels, that is cut to the 2:3 portrait the mock serves as that person's `thumb`. A
+person without an entry is served without one and the app draws its glyph. The asset is a frame of
+an openly licensed film the person appears in (kind `still` or `backdrop`, which a title may use
+too, and two people may share), or a `headshot`: an openly licensed photograph OF THAT PERSON. Who
+is in the picture is checked by a person, against the film's own credits or the file page: the name
+on a search result is not enough (a namesake is a different person), and a headshot that carries
+the Commons personality-rights tag is refused (`check_assets_complete`).
+
 A clear logo is cut from the title's own poster (`logo-from-poster`: asset kind `poster`), or is the
 film's own official title card or a frame of the film: asset kind `logo-title-card`, which records
 `of` (the title id it belongs to) and `origin` (`official-title-card` or `film-frame`). It is a
@@ -97,6 +107,10 @@ UA = "PlxNativeDemoLibrary/1.0 (+https://github.com/GLinnik21/plex-native-poc)"
 POSTER = (600, 900)
 ART = (1920, 1080)
 THUMB = (1280, 720)
+# A person's photograph as the mock serves it: 2:3, the shape of a real server's headshots, which the
+# app's cast tile crops high (`Crop::Headshot`).
+HEADSHOT = (600, 900)
+SIZES = {"poster": POSTER, "art": ART, "thumb": THUMB, "photo": HEADSHOT}
 
 
 def cache_dir():
@@ -235,10 +249,15 @@ def derive_image(src, dst, size, recipe):
       show may not use it (the pad boundary is a visible seam in the text zone): `hero_geometry`
       refuses `extend`, so such a title is `cover` with a declared `art.subject`.
     * `crop: focus-right` / `upper` — a named anchor for a cover crop (poster from a landscape still).
+    * `box: [x, y, w, h]` — cut that part of the source first (`mode: cover` only): a person's
+      photograph is the face, not the page it was printed on.
     """
     w, h = size
     mode = recipe.get("mode", "cover")
     anchor = recipe_anchor(recipe)
+    # `box: [x, y, w, h]` in source pixels: the part of the source the recipe is about (a face in a
+    # magazine page), cut out before anything else.
+    box = "crop={2}:{3}:{0}:{1},".format(*recipe["box"]) if "box" in recipe else ""
     if mode == "extend":
         x = "W-w" if anchor == "right" else "(W-w)/2"
         graph = (f"[0:v]format=rgb24,split[a][b];"
@@ -246,7 +265,7 @@ def derive_image(src, dst, size, recipe):
                  f"[b]scale=-2:{h}:flags=lanczos,crop='min(iw,{w})':{h}:'max(iw-{w},0)':0[fg];"
                  f"[bg][fg]overlay=x={x}:y=0,format=yuvj444p[o]")
     else:
-        graph = f"[0:v]format=rgb24,{_cover(w, h, anchor)},format=yuvj444p[o]"
+        graph = f"[0:v]format=rgb24,{box}{_cover(w, h, anchor)},format=yuvj444p[o]"
     _ffmpeg(["-i", str(src), "-filter_complex", graph, "-map", "[o]", "-frames:v", "1",
              "-q:v", "3", "-bitexact", str(dst)])
 
@@ -377,6 +396,27 @@ def item_keys(catalog):
                 yield f"{s['id']}/{season['index']}/{e['index']}", "episode", e
 
 
+def person_key(name):
+    """The derived-file key of one of the catalog's `people`: `person-<slug of the name>`."""
+    return "person-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def people(catalog):
+    """(derived key, name, record) for every person the catalog gives a photograph."""
+    for name, rec in catalog.get("people", {}).items():
+        yield person_key(name), name, rec
+
+
+def credited_names(catalog):
+    """Every name a title credits: cast, directors, writers, creators."""
+    names = set()
+    for _, _, rec in item_keys(catalog):
+        names.update(c["name"] for c in rec.get("cast", []))
+        for job in ("directors", "writers", "creators"):
+            names.update(rec.get(job, []))
+    return names
+
+
 def derived_dir():
     return cache_dir() / "derived"
 
@@ -391,10 +431,9 @@ DERIVED_EXT = {"logo": "png", "stand-in": "mp4"}
 def derived_parts(assets, rec, role):
     """What decides the bytes of one derived file: the source's hash, the frame it is cut to and the
     recipe less its `subject` (a declaration about the picture, not a step in making it)."""
-    if role in ("poster", "art", "thumb"):
+    if role in SIZES:
         recipe = rec[role]
-        size = {"poster": POSTER, "art": ART, "thumb": THUMB}[role]
-        return [assets[recipe["asset"]]["sha256"], list(size), recipe_stamp(recipe)]
+        return [assets[recipe["asset"]]["sha256"], list(SIZES[role]), recipe_stamp(recipe)]
     if role == "logo":
         return [assets[rec["logo"]["asset"]]["sha256"], rec["logo"]]
     if role == "stand-in":
@@ -441,8 +480,13 @@ def derive(assets, catalog):
             elif role == "stand-in":
                 _atomically(dst, lambda t: derive_stand_in(t, rec["minutes"] * 60))
             else:
-                size = {"poster": POSTER, "art": ART, "thumb": THUMB}[role]
-                _atomically(dst, lambda t: derive_image(paths[rec[role]["asset"]], t, size, rec[role]))
+                _atomically(dst, lambda t: derive_image(paths[rec[role]["asset"]], t, SIZES[role], rec[role]))
+    for key, _, rec in people(catalog):
+        dst = derived_file(assets, cache_dir(), key, rec, "photo")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        count += 1
+        if not dst.exists():
+            _atomically(dst, lambda t: derive_image(paths[rec["photo"]["asset"]], t, HEADSHOT, rec["photo"]))
     print(f"demo_library: {count} derived files in {out}", flush=True)
     return out
 
@@ -515,6 +559,8 @@ def check(assets, catalog):
                 assert aid in assets, f"{key}: {role} asset {aid!r} is not in assets.json"
                 assert assets[aid].get("kind") != "logo-title-card", \
                     f"{key}: {role} uses a title card, which is a source for a clear logo only"
+                assert assets[aid].get("kind") != "headshot", \
+                    f"{key}: {role} uses a headshot, which is a person's photograph only"
                 used.add(aid)
         check_cited_metadata(key, kind, rec)
         if "media" in rec:
@@ -553,6 +599,7 @@ def check(assets, catalog):
             assert a.get("of") in seen, f"asset {aid}: a title card names the item it belongs to in `of`"
             assert a.get("origin") in TITLE_CARD_ORIGINS, \
                 f"asset {aid}: a title card's `origin` is one of {sorted(TITLE_CARD_ORIGINS)}"
+    check_people(assets, catalog, used)
     check_flags(assets, catalog, seen)
     unused = sorted(set(assets) - used)
     assert not unused, f"assets never used: {unused}"
@@ -586,6 +633,11 @@ COVER_ANCHORS = {"right": (1.0, 0.5), "left": (0.0, 0.5), "upper": (0.5, 0.3)}
 HERO_CENTRE_MIN_X = 0.60 * ART[0]
 # ffmpeg rounds the scaled picture to whole pixels, so the mapped box is good to about one.
 HERO_FRAME_EPS = 1.0
+# Composition policy for these stills: keep the focal subject out of the lower-right 35%.
+# This is an art-selection reserve, not the live bounds of variable-length People text.
+# Text contrast is checked separately against the actual UI geometry in widgets_hero_shade_tests (Home) and
+# widgets_hero_scrim_tests (Detail).
+HERO_SUBJECT_FOOT = 0.65 * ART[1]
 
 # The layout numbers the zones come from, each COPIED here and pinned to where it lives in the Rust
 # source: `check_hero_pins` re-reads the source and fails when a copy has drifted, so a layout change
@@ -598,24 +650,23 @@ HERO_PINS = {
     "SCR_W": ["rust-modules/base/src/surface.rs", "const", "LOGICAL_W", 1920.0],
     "SCR_H": ["rust-modules/base/src/surface.rs", "const", "LOGICAL_H", 1080.0],
     "MARGIN_X": ["rust-modules/ui/src/consts.rs", "const", "MARGIN_X", 96.0],
-    "PEEK_Y": ["rust-modules/ui/src/consts.rs", "const", "PEEK_Y", 811.0],
+    "PEEK_Y": ["rust-modules/ui/src/consts.rs", "const", "PEEK_Y", 742.0],
     "TITLE_DY": ["rust-modules/ui/src/consts.rs", "const", "TITLE_DY", 34.0],
-    "COL_W": ["rust-modules/ui/src/landing_hero.rs", "const", "COL_W", 660.0],
-    "TEXT_BOTTOM": ["rust-modules/ui/src/landing_hero.rs", "const", "TEXT_BOTTOM", 692.0],
-    "SPACE_MD": ["rust-modules/ui/src/theme.rs", "const", "space::MD", 24.0],
+    "TEXT_W": ["rust-modules/ui/src/theme.rs", "const", "hero::TEXT_W", 943.0],
+    "COL_W": ["rust-modules/ui/src/landing_hero.rs", "const", "COL_W", 943.0],
+    "HOME_ACTIONS_Y": ["rust-modules/ui/src/theme.rs", "const", "hero::HOME_ACTIONS_Y", 668.0],
     "CTRL_H": ["rust-modules/ui/src/widgets.rs", "const", "CTRL_H", 60.0],
-    "HERO_SCRIM_W": ["rust-modules/ui/src/widgets.rs", "const", "HERO_SCRIM_W", 1536.0],
-    "HERO_SCRIM_TOP": ["rust-modules/ui/src/widgets.rs", "const", "HERO_SCRIM_TOP", 162.0],
-    "HERO_SCRIM_R_TOP": ["rust-modules/ui/src/widgets.rs", "const", "HERO_SCRIM_R_TOP", 702.0],
-    "HERO_LOGO_TOP_DETAIL": ["rust-modules/ui/src/widgets.rs", "literal", r"y=(\d+) on detail", 298.0],
-    "HERO_LOGO_TOP_HOME": ["rust-modules/ui/src/hero_logo.rs", "literal", r"tall\.y,\s*([0-9.]+),", 260.0],
+    "DETAIL_TITLE_BOTTOM": ["rust-modules/ui/src/detail_layout.rs", "const", "TITLE_BOTTOM", 566.0],
+    "HERO_LOGO_H_MAX": ["rust-modules/ui/src/theme.rs", "const", "logo::HERO_H_MAX", 240.0],
+    "DETAIL_FACTS_TOP": ["rust-modules/ui/src/detail_layout.rs", "literal", r"minimum\.facts_y,\s*([0-9.]+)", 714.0],
+    "HERO_LOGO_TOP_HOME": ["rust-modules/ui/src/hero_logo.rs", "literal", r"tall\.y,\s*([0-9.]+),", 206.0],
     "HERO_TEXT_W": ["rust-modules/ui/src/detail_layout.rs", "const", "HERO_TEXT_W", 943.0],
     "PEOPLE_W": ["rust-modules/ui/src/detail_layout.rs", "const", "PEOPLE_W", 560.0],
     "PEOPLE_LEAD": ["rust-modules/ui/src/detail_layout.rs", "const", "PEOPLE_LEAD", 32.0],
     "PEOPLE_MAX_LINES": ["rust-modules/ui/src/detail_layout.rs", "const", "PEOPLE_MAX_LINES", 4.0],
     # The formulas the zones rebuild from those numbers:
     "HOME_ROW_RULE": ["rust-modules/screens/src/home/mod.rs", "text",
-                      "const HERO_ROW_Y: f32 = HERO_TEXT_BOTTOM + theme::space::MD;", None],
+                      "const HERO_ROW_Y: f32 = theme::hero::HOME_ACTIONS_Y;", None],
     "HOME_CTRL_RULE": ["rust-modules/screens/src/home/mod.rs", "text",
                        "const HERO_CTRL_D: f32 = StatusOverlay::CTRL_H;", None],
     "HOME_SHELF_HEADING_RULE": ["rust-modules/screens/src/home/mod.rs", "text", "row_y - TITLE_DY - lift", None],
@@ -710,7 +761,7 @@ def check_hero_pins(pins=None, root=None):
 
 def hero_zones(pins=None):
     """The rectangles ([x0, y0, x1, y1], frame pixels) hero art must keep its subject out of, built
-    from the pinned layout numbers. `advisory` ones are reported, never gated."""
+    from the pinned layout numbers."""
     v = {n: p[3] for n, p in (HERO_PINS if pins is None else pins).items()}
     w, h = v["SCR_W"], v["SCR_H"]
     text_r = v["MARGIN_X"] + v["HERO_TEXT_W"]
@@ -719,28 +770,26 @@ def hero_zones(pins=None):
     def zone(name, rect, uses, **extra):
         return dict(name=name, rect=rect, uses=uses, **extra)
     return [
-        # Home: the logo (paints up from the band to y 260), title, meta, synopsis and the CTA row
-        # (HERO_ROW_Y = TEXT_BOTTOM + MD, CTRL_H tall), all in the COL_W column from the margin.
+        # Home: the logo, title, the one block above the actions (an episode's label or the synopsis)
+        # and the CTA row (HERO_ROW_Y = HOME_ACTIONS_Y, CTRL_H tall), all in the COL_W column from
+        # the margin; the logo paints up from the ladder's title band to at most HERO_LOGO_TOP_HOME.
         zone("home text column", [v["MARGIN_X"], v["HERO_LOGO_TOP_HOME"], v["MARGIN_X"] + v["COL_W"],
-                                  v["TEXT_BOTTOM"] + v["SPACE_MD"] + v["CTRL_H"]],
-             ["MARGIN_X", "HERO_LOGO_TOP_HOME", "COL_W", "TEXT_BOTTOM", "SPACE_MD", "CTRL_H"]),
+                                  v["HOME_ACTIONS_Y"] + v["CTRL_H"]],
+             ["MARGIN_X", "HERO_LOGO_TOP_HOME", "TEXT_W", "COL_W", "HOME_ACTIONS_Y", "CTRL_H"]),
         # The peek shelf: its heading draws TITLE_DY above the row origin PEEK_Y, its cards below.
         zone("home shelf row", [0.0, v["PEEK_Y"] - v["TITLE_DY"], w, h], ["PEEK_Y", "TITLE_DY", "SCR_H", "SCR_W"]),
         # Detail: logo, identity line, synopsis and buttons, to the synopsis' wrap edge. The chain
         # below the title is measured at run time, so this runs to the foot of the frame.
-        zone("detail text column", [v["MARGIN_X"], v["HERO_LOGO_TOP_DETAIL"], text_r, h],
-             ["MARGIN_X", "HERO_LOGO_TOP_DETAIL", "HERO_TEXT_W", "SCR_H"]),
+        zone("detail text column", [v["MARGIN_X"], v["DETAIL_TITLE_BOTTOM"] - v["HERO_LOGO_H_MAX"], text_r, h],
+             ["MARGIN_X", "DETAIL_TITLE_BOTTOM", "HERO_LOGO_H_MAX", "HERO_TEXT_W", "SCR_H"]),
         # The facts row runs from there to the people column and sits level with that column's top
         # line (a 4-line block reaches PEOPLE_MAX_LINES * PEOPLE_LEAD below it).
-        zone("detail facts row", [text_r, v["HERO_SCRIM_R_TOP"], people_l,
-                                  v["HERO_SCRIM_R_TOP"] + v["PEOPLE_MAX_LINES"] * v["PEOPLE_LEAD"]],
-             ["MARGIN_X", "HERO_TEXT_W", "SCR_W", "PEOPLE_W", "HERO_SCRIM_R_TOP", "PEOPLE_MAX_LINES", "PEOPLE_LEAD"]),
-        # The right-aligned Starring block, from where the right wedge starts to the frame's foot.
-        zone("detail starring column", [people_l, v["HERO_SCRIM_R_TOP"], w - v["MARGIN_X"], h],
-             ["SCR_W", "MARGIN_X", "PEOPLE_W", "HERO_SCRIM_R_TOP", "SCR_H"]),
-        # The left wedge's scrim: it darkens, it does not hide, so its share is only printed.
-        zone("hero scrim", [0.0, v["HERO_SCRIM_TOP"], v["HERO_SCRIM_W"], h],
-             ["HERO_SCRIM_TOP", "HERO_SCRIM_W", "SCR_H"], advisory=True),
+        zone("detail facts row", [text_r, v["DETAIL_FACTS_TOP"], people_l,
+                                  v["DETAIL_FACTS_TOP"] + v["PEOPLE_MAX_LINES"] * v["PEOPLE_LEAD"]],
+             ["MARGIN_X", "HERO_TEXT_W", "SCR_W", "PEOPLE_W", "DETAIL_FACTS_TOP", "PEOPLE_MAX_LINES", "PEOPLE_LEAD"]),
+        # The existing lower-right art-selection reserve, independent of variable People text.
+        zone("detail starring column", [people_l, HERO_SUBJECT_FOOT, w - v["MARGIN_X"], h],
+             ["SCR_W", "MARGIN_X", "PEOPLE_W", "SCR_H"]),
     ]
 
 
@@ -776,7 +825,7 @@ def hero_geometry(assets, rec):
     (not a cover crop), `no-subject`, `bad-subject`, `outside-source`, `outside-frame` (the crop cuts
     the subject off), `centre-left`, and `overlap:<zone>` per gated zone it touches."""
     out = {"verdict": "fail", "reasons": [], "box": None, "overlaps": {}, "centre_x": None,
-           "scrim_share": None, "source": None}
+           "source": None}
     art = rec.get("art")
     if not art:
         return dict(out, verdict="skip", reasons=["no-art"])
@@ -804,15 +853,11 @@ def hero_geometry(assets, rec):
     out["centre_x"] = (box[0] + box[2]) / 2
     if out["centre_x"] < HERO_CENTRE_MIN_X:
         out["reasons"].append("centre-left")
-    area = (box[2] - box[0]) * (box[3] - box[1])
     for z in hero_zones():
         hit = _overlap(box, z["rect"])
-        if z.get("advisory"):
-            out["scrim_share"] = hit / area
-        else:
-            out["overlaps"][z["name"]] = hit
-            if hit:
-                out["reasons"].append(f"overlap:{z['name']}")
+        out["overlaps"][z["name"]] = hit
+        if hit:
+            out["reasons"].append(f"overlap:{z['name']}")
     out["verdict"] = "fail" if out["reasons"] else "pass"
     return out
 
@@ -846,6 +891,38 @@ def hero_pool(catalog, hero=None):
         if ref in movies and "art" in movies[ref] and ref not in pool:
             pool.append(ref)
     return pool[:int(HERO_POOL_PINS["HERO_MAX"][3])]
+
+
+# What a person's portrait may be cut from: a photograph of them, or a frame of a film they are in.
+PORTRAIT_KINDS = frozenset({"headshot", "still", "backdrop"})
+
+
+def check_people(assets, catalog, used):
+    """The catalog's `people` (module docstring): each names someone a title credits, and an asset (a
+    `headshot`, or a film frame: `still`/`backdrop`) with the `box` of it that is the portrait, inside
+    the source and 2:3 to within a pixel (so the cover crop that follows cuts nothing a person did not
+    choose). Adds the assets to `used`."""
+    names = credited_names(catalog)
+    keys = {}
+    for key, name, rec in people(catalog):
+        assert name in names, f"people: {name!r} is credited by no title"
+        assert keys.setdefault(key, name) == name, f"people: {name!r} and {keys[key]!r} derive to one file"
+        photo = rec.get("photo")
+        assert isinstance(photo, dict) and set(photo) == {"asset", "box"}, \
+            f"people: {name}: `photo` is {{asset, box}}"
+        aid = photo["asset"]
+        assert aid in assets, f"people: {name}: photo asset {aid!r} is not in assets.json"
+        assert assets[aid].get("kind") in PORTRAIT_KINDS, \
+            f"people: {name}: a photo is cut from an asset of kind {sorted(PORTRAIT_KINDS)}"
+        box = photo["box"]
+        assert isinstance(box, list) and len(box) == 4 and all(type(v) is int and v >= 0 for v in box), \
+            f"people: {name}: box is [x, y, w, h] in source pixels"
+        x, y, w, h = box
+        assert w > 0 and h > 0 and x + w <= assets[aid]["width"] and y + h <= assets[aid]["height"], \
+            f"people: {name}: box {box} leaves the {assets[aid]['width']}x{assets[aid]['height']} source"
+        assert abs(w * HEADSHOT[1] - h * HEADSHOT[0]) <= max(HEADSHOT), \
+            f"people: {name}: box {w}x{h} is not the portrait's {HEADSHOT[0]}:{HEADSHOT[1]} shape"
+        used.add(aid)
 
 
 def check_flags(assets, catalog, seen):
@@ -896,8 +973,7 @@ def hero_report(assets, catalog):
     gated zone, and the verdict."""
     print("hero zones (frame pixels x0 y0 x1 y1); each number is pinned to the Rust source in HERO_PINS:")
     for z in hero_zones():
-        tag = " (advisory)" if z.get("advisory") else ""
-        print(f"  {z['name']:<24} {' '.join(f'{n:g}' for n in z['rect'])}{tag}")
+        print(f"  {z['name']:<24} {' '.join(f'{n:g}' for n in z['rect'])}")
     print("pins (python copy == Rust source, checked by `check --complete`):")
     for name, (file, kind, key, value) in HERO_PINS.items():
         print(f"  {name:<24} {'' if value is None else f'{value:g}':<7} {file} {kind} {key}")
@@ -914,9 +990,8 @@ def hero_report(assets, catalog):
         subject = json.dumps(art.get("subject")) if art.get("subject") is not None else "-"
         box = "-" if v["box"] is None else "[" + ", ".join(f"{n:.0f}" for n in v["box"]) + "]"
         hits = ", ".join(f"{n} {a:.0f}px2" for n, a in v["overlaps"].items() if a) or "-"
-        scrim = "-" if v["scrim_share"] is None else f"{v['scrim_share']:.0%}"
         print(f"{key:<26} {src:>10} {recipe:<14} subject {subject} -> {box} overlaps {hits} "
-              f"scrim {scrim} {v['verdict']} {', '.join(v['reasons']) or '-'}")
+              f"{v['verdict']} {', '.join(v['reasons']) or '-'}")
     print(f"\nhero art: {counts['pass']} pass, {counts['fail']} fail, {counts['skip']} skip (no art)")
 
 
@@ -924,7 +999,7 @@ def hero_report(assets, catalog):
 
 # What a source file IS (`kind` in assets.json), which decides the roles it may fill: a title's
 # poster is a `poster`, its backdrop a `backdrop` or a `still`, an episode's thumbnail a `still`.
-# `media` is a film itself, `headshot` a photograph of a person (none yet), `logo-title-card` a
+# `media` is a film itself, `headshot` a photograph of a person (the catalog's `people`), `logo-title-card` a
 # film's own official title card or a frame of the film, the source of its clear logo.
 ASSET_KINDS = frozenset({"poster", "backdrop", "still", "headshot", "media", "logo-title-card"})
 # Where a `logo-title-card` comes from: the studio's own title card, or a frame of the film itself.
@@ -1064,7 +1139,11 @@ def credits(assets, catalog, dst=CREDITS):
             card = assets[rec["logo"]["asset"]]["kind"] == "logo-title-card"
             where.setdefault(rec["logo"]["asset"], []).append(
                 (key, "logo-card" if card else "logo-fill" if recoloured else "logo"))
+    for _, name, rec in people(catalog):
+        titles[f"person:{name}"] = name
+        where.setdefault(rec["photo"]["asset"], []).append((f"person:{name}", "photo"))
     label = {"poster": "poster", "art": "backdrop", "thumb": "episode still", "media": "video",
+             "photo": "portrait in Cast & Crew",
              "logo-card": "clear logo, the film's own title card",
              "logo": "clear logo, derived from this poster",
              "logo-fill": "clear logo, derived from this poster, lettering recoloured"}
@@ -1085,7 +1164,8 @@ def credits(assets, catalog, dst=CREDITS):
         "poster's licence: its title lettering is cut out onto a transparent ground and nothing is",
         "redrawn; where the table says so, lettering too dark to read over a backdrop is recoloured.",
         "Where the table says a logo is the film's own title card, it is that card (or a frame of the",
-        "film) trimmed to its lettering, under its own licence.",
+        "film) trimmed to its lettering, under its own licence. A performer's portrait is cut to the",
+        "face from a photograph of them or a frame of the film, and resized; nothing else is changed.",
         "",
         "Written by `make screenshots` with the images; do not edit by hand.",
         "",
@@ -1130,7 +1210,9 @@ def _changes(role, recipe):
         text = "Title lettering cut out of the poster onto a transparent ground for the clear logo"
         return text + ("; dark lettering recoloured to read over a backdrop." if any("fill" in k for k in recipe["keys"])
                        else ".")
-    w, h = {"poster": POSTER, "art": ART, "thumb": THUMB}[role]
+    if role == "photo":
+        return f"Cut to the performer's face and scaled to a {HEADSHOT[0]}×{HEADSHOT[1]} portrait."
+    w, h = SIZES[role]
     what = {"poster": "poster", "art": "backdrop", "thumb": "episode still"}[role]
     if role == "art" and recipe.get("mode") == "extend":
         return (f"Scaled to fit a {w}×{h} {what}; the sides are filled with a blurred, "
@@ -1196,6 +1278,13 @@ def site_works(assets, catalog):
                     e["roles"] = ["Episode stills"]
             works.append({"id": rec["id"], "kind": kind, "title": rec["title"], "year": rec.get("year"),
                           "entries": entries})
+    # The people a Cast & Crew row shows a photograph of, in the catalog's order.
+    for key, name, rec in people(catalog):
+        a = assets[rec["photo"]["asset"]]
+        who = a["author"] if a["attribution"] in ("", a["author"]) else f"{a['author']}; {a['attribution']}"
+        works.append({"id": key, "kind": "person", "title": name, "year": None, "entries": [
+            {"roles": ["Portrait"], "author": who, "licence": a["licence"], "changes": [_changes("photo", rec["photo"])],
+             "sources": [((), _source_host(a["source_page"]), a["source_page"])]}]})
     return works
 
 
@@ -1243,8 +1332,9 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
 
     used = [name for name in LICENCE_TEXTS if any(a["licence"] == name for a in assets.values())]
     licences = ", ".join(f'<a href="{esc(LICENCE_TEXTS[n])}" rel="license">{esc(n)}</a>' for n in used)
-    repo = "https://github.com/GLinnik21/plx-native/blob/main/"
-    sections = "\n".join(section("film", "Films") + section("series", "Series"))
+    repo = "https://github.com/plxnative/plx-native/blob/main/"
+    sections = "\n".join(section("film", "Films") + section("series", "Series")
+                         + (section("person", "People") if any(w["kind"] == "person" for w in works) else []))
     page = f"""<!doctype html>
 <!-- Written by `python3 tools/demo_library.py site-credits` (make screenshots) from
      tests/demo_library/assets.json and catalog.json. Do not edit by hand. -->
@@ -1288,12 +1378,12 @@ def site_credits(assets, catalog, dst=SITE_CREDITS):
               <span class="brand-name"><span class="back-arrow" aria-hidden="true">&larr;</span> PlxNative</span>
             </a>
             <nav class="site-nav" aria-label="Primary navigation">
-              <a href="./#feel">Demo</a>
-              <a href="./#why">Why</a>
-              <a href="./#showcase">Features</a>
+              <a href="./#features">Features</a>
+              <a href="./#approach">Approach</a>
+              <a href="./#faq">FAQ</a>
             </nav>
             <div class="header-actions">
-              <a class="header-github" href="https://github.com/GLinnik21/plx-native" aria-label="PlxNative on GitHub">
+              <a class="header-github" href="https://github.com/plxnative/plx-native" aria-label="PlxNative on GitHub">
                 <svg class="gh-icon" viewBox="0 0 24 24" width="21" height="21" fill="currentColor" aria-hidden="true"><path d="M12 1.5a10.5 10.5 0 0 0-3.32 20.46c.53.1.72-.23.72-.5v-1.76c-2.92.64-3.54-1.4-3.54-1.4-.48-1.22-1.17-1.55-1.17-1.55-.95-.65.07-.64.07-.64 1.06.08 1.61 1.09 1.61 1.09.94 1.6 2.46 1.14 3.06.87.1-.68.37-1.14.67-1.4-2.33-.27-4.78-1.17-4.78-5.2 0-1.15.41-2.09 1.08-2.83-.11-.27-.47-1.34.1-2.79 0 0 .88-.28 2.88 1.08a9.98 9.98 0 0 1 5.24 0c2-1.36 2.88-1.08 2.88-1.08.57 1.45.21 2.52.1 2.79.67.74 1.08 1.68 1.08 2.83 0 4.04-2.46 4.93-4.8 5.19.38.33.72.97.72 1.96v2.9c0 .28.19.62.73.51A10.5 10.5 0 0 0 12 1.5Z"></path></svg>
               </a>
               <a class="header-kofi" href="https://ko-fi.com/0xbeb" aria-label="Support the project on Ko-fi" title="Support the project on Ko-fi">

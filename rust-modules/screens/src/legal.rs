@@ -1,12 +1,15 @@
 //! **Legal notices and About, as pages of the Settings surface** (restructure phase 5b; the
-//! documents are `ui/legal.rs`'s words, moved here unchanged). The index is a `TableScreen` whose
-//! every row pushes a [`DocumentPage`]; a document is a `DocumentScreen` — one `Document` group
+//! documents are `ui/legal.rs`'s words, moved here unchanged). The index is a `TableScreen` (Settings v2
+//! anatomy: rows without sub-lines, the focused row's sentence in the left column) whose
+//! every row pushes a [`DocumentPage`]; a document is a `DocumentScreen` (its title at the Settings
+//! page rung, the crumb above the guide, the old subtitle as the sentence) — one `Document` group
 //! that scrolls inside and leaves at its ends, LEFT = BACK. About is a document pushed straight
 //! from the root, so its crumb names Settings rather than the index.
 
 use std::borrow::Cow;
 
 use plx_ui::document_reader::DocumentReader;
+use plx_ui::follow_copy::FollowCopy;
 use plx_ui::frame::Budget;
 use plx_ui::form::{Form, FormId, FormSection, FormTable, RowKey, RowKind};
 use plx_machine::machine::{Canon, Cx, Effects, EntryId, GroupId, Handled, Key, LogicalState, Machine};
@@ -14,7 +17,7 @@ use plx_ui::route_screen::RouteLayout;
 use plx_ui::screen::{DrawFrame, FocusSource, HitSource, Part, RenderStrategy, Screen, ScreenEvent};
 use plx_ui::table::Row;
 use plx_ui::table_screen::{DocumentFocus, DocumentScreen, Header, TableScreen};
-use plx_ui::{theme, Rect};
+use plx_ui::Rect;
 
 use super::family::{form_activate, form_focus, form_right_target, InnerHost, SettingsPage};
 use super::registry::word;
@@ -47,22 +50,22 @@ impl Page {
     ];
     fn title(self) -> &'static str {
         match self {
-            Self::Privacy => plx_platform::i18n::msg::settings_legal_privacy_title(),
-            Self::OpenSource => plx_platform::i18n::msg::settings_legal_opensource_title(),
-            Self::Ffmpeg => plx_platform::i18n::msg::settings_legal_ffmpeg_title(),
-            Self::Source => plx_platform::i18n::msg::settings_legal_source_title(),
-            Self::Trademarks => plx_platform::i18n::msg::settings_legal_trademarks_title(),
-            Self::Contact => plx_platform::i18n::msg::settings_legal_contact_title(),
+            Self::Privacy => plx_os::i18n::msg::settings_legal_privacy_title(),
+            Self::OpenSource => plx_os::i18n::msg::settings_legal_opensource_title(),
+            Self::Ffmpeg => plx_os::i18n::msg::settings_legal_ffmpeg_title(),
+            Self::Source => plx_os::i18n::msg::settings_legal_source_title(),
+            Self::Trademarks => plx_os::i18n::msg::settings_legal_trademarks_title(),
+            Self::Contact => plx_os::i18n::msg::settings_legal_contact_title(),
         }
     }
     fn subtitle(self) -> &'static str {
         match self {
-            Self::Privacy => plx_platform::i18n::msg::settings_legal_privacy_subtitle(),
-            Self::OpenSource => plx_platform::i18n::msg::settings_legal_opensource_subtitle(),
-            Self::Ffmpeg => plx_platform::i18n::msg::settings_legal_ffmpeg_subtitle(),
-            Self::Source => plx_platform::i18n::msg::settings_legal_source_subtitle(),
-            Self::Trademarks => plx_platform::i18n::msg::settings_legal_trademarks_subtitle(),
-            Self::Contact => plx_platform::i18n::msg::settings_legal_contact_subtitle(),
+            Self::Privacy => plx_os::i18n::msg::settings_legal_privacy_subtitle(),
+            Self::OpenSource => plx_os::i18n::msg::settings_legal_opensource_subtitle(),
+            Self::Ffmpeg => plx_os::i18n::msg::settings_legal_ffmpeg_subtitle(),
+            Self::Source => plx_os::i18n::msg::settings_legal_source_subtitle(),
+            Self::Trademarks => plx_os::i18n::msg::settings_legal_trademarks_subtitle(),
+            Self::Contact => plx_os::i18n::msg::settings_legal_contact_subtitle(),
         }
     }
     pub fn body(self) -> &'static str {
@@ -84,40 +87,40 @@ pub fn privacy_policy() -> &'static str {
 }
 
 static PRIVACY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| [
-    plx_platform::i18n::msg::settings_legal_privacy_responsible(),
-    plx_platform::i18n::msg::settings_legal_privacy_responsible_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_plex(),
-    plx_platform::i18n::msg::settings_legal_privacy_plex_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_plex_link(),
-    plx_platform::i18n::msg::settings_legal_privacy_servers(),
-    plx_platform::i18n::msg::settings_legal_privacy_servers_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_local(),
-    plx_platform::i18n::msg::settings_legal_privacy_local_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_plaintext_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_crashes(),
-    plx_platform::i18n::msg::settings_legal_privacy_crashes_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_signin_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_analytics(),
-    plx_platform::i18n::msg::settings_legal_privacy_analytics_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_excluded(),
-    plx_platform::i18n::msg::settings_legal_privacy_excluded_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_retention(),
-    plx_platform::i18n::msg::settings_legal_privacy_retention_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_choices(),
-    plx_platform::i18n::msg::settings_legal_privacy_choices_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_processing(),
-    plx_platform::i18n::msg::settings_legal_privacy_processing_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_uninstall(),
-    plx_platform::i18n::msg::settings_legal_privacy_uninstall_body(),
-    plx_platform::i18n::msg::settings_legal_privacy_contact(),
-    plx_platform::i18n::msg::settings_legal_privacy_contact_body()
+    plx_os::i18n::msg::settings_legal_privacy_responsible(),
+    plx_os::i18n::msg::settings_legal_privacy_responsible_body(),
+    plx_os::i18n::msg::settings_legal_privacy_plex(),
+    plx_os::i18n::msg::settings_legal_privacy_plex_body(),
+    plx_os::i18n::msg::settings_legal_privacy_plex_link(),
+    plx_os::i18n::msg::settings_legal_privacy_servers(),
+    plx_os::i18n::msg::settings_legal_privacy_servers_body(),
+    plx_os::i18n::msg::settings_legal_privacy_local(),
+    plx_os::i18n::msg::settings_legal_privacy_local_body(),
+    plx_os::i18n::msg::settings_legal_privacy_plaintext_body(),
+    plx_os::i18n::msg::settings_legal_privacy_crashes(),
+    plx_os::i18n::msg::settings_legal_privacy_crashes_body(),
+    plx_os::i18n::msg::settings_legal_privacy_signin_body(),
+    plx_os::i18n::msg::settings_legal_privacy_analytics(),
+    plx_os::i18n::msg::settings_legal_privacy_analytics_body(),
+    plx_os::i18n::msg::settings_legal_privacy_excluded(),
+    plx_os::i18n::msg::settings_legal_privacy_excluded_body(),
+    plx_os::i18n::msg::settings_legal_privacy_retention(),
+    plx_os::i18n::msg::settings_legal_privacy_retention_body(),
+    plx_os::i18n::msg::settings_legal_privacy_choices(),
+    plx_os::i18n::msg::settings_legal_privacy_choices_body(),
+    plx_os::i18n::msg::settings_legal_privacy_processing(),
+    plx_os::i18n::msg::settings_legal_privacy_processing_body(),
+    plx_os::i18n::msg::settings_legal_privacy_uninstall(),
+    plx_os::i18n::msg::settings_legal_privacy_uninstall_body(),
+    plx_os::i18n::msg::settings_legal_privacy_contact(),
+    plx_os::i18n::msg::settings_legal_privacy_contact_body()
 ].join("\n\n"));
-static OPEN_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("{}\n\n{}", plx_platform::i18n::msg::settings_legal_opensource_body(), include_str!("../../../LICENSE")));
-static FFMPEG: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(plx_platform::i18n::msg::settings_legal_ffmpeg_body);
-static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| plx_platform::i18n::msg::settings_legal_source_body(build_sha()));
-static TRADEMARKS: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(plx_platform::i18n::msg::settings_legal_trademarks_body);
-static CONTACT: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(plx_platform::i18n::msg::settings_legal_contact_body);
-static ABOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| plx_platform::i18n::msg::settings_about_body(build_sha(), plx_plex::plex::identity::version()));
+static OPEN_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("{}\n\n{}", plx_os::i18n::msg::settings_legal_opensource_body(), include_str!("../../../LICENSE")));
+static FFMPEG: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(plx_os::i18n::msg::settings_legal_ffmpeg_body);
+static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| plx_os::i18n::msg::settings_legal_source_body(build_sha()));
+static TRADEMARKS: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(plx_os::i18n::msg::settings_legal_trademarks_body);
+static CONTACT: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(plx_os::i18n::msg::settings_legal_contact_body);
+static ABOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| plx_os::i18n::msg::settings_about_body(build_sha(), plx_plex::plex::identity::version()));
 
 /// The short commit this binary was built from, handed in by the application: `PLX_BUILD_SHA` is a
 /// `cargo:rustc-env` of the application crate's build script and reaches that one crate only, and
@@ -171,6 +174,16 @@ impl FormId for Page {
             Page::Contact => 5,
         })
     }
+    fn a11y(&self) -> Option<&'static str> {
+        Some(match self {
+            Page::Privacy => "privacy",
+            Page::OpenSource => "open_source",
+            Page::Ffmpeg => "ffmpeg",
+            Page::Source => "source",
+            Page::Trademarks => "trademarks",
+            Page::Contact => "contact",
+        })
+    }
 }
 
 impl Page {
@@ -182,15 +195,21 @@ impl Page {
     }
 }
 
+/// **The sentence the Legal index states for the focused row**: the document's old sub-line, else
+/// the page's own. A pure function of the focused row.
+fn index_sentence(id: Option<Page>) -> &'static str {
+    id.map_or_else(plx_os::i18n::msg::settings_legal_copy, Page::subtitle)
+}
+
 /// The Legal index as a [`Form`]: every document is a `Nav` row pushing its `Document` page.
 fn legal_form() -> Form<Page, (), SettingsPage> {
-    let mut docs = FormSection::new(plx_platform::i18n::msg::settings_legal_section());
+    let mut docs = FormSection::new(plx_os::i18n::msg::settings_legal_section());
     for page in Page::ALL {
         docs = docs.item(
             page,
             RowKind::Nav(page.document()),
             (),
-            Row::new(page.title()).detail(page.subtitle()).chevron(true),
+            Row::new(page.title()).chevron(true),
         );
     }
     Form::new().section(docs)
@@ -199,6 +218,8 @@ fn legal_form() -> Form<Page, (), SettingsPage> {
 pub struct LegalIndex {
     entry: EntryId,
     form: FormTable<Page, (), SettingsPage>,
+    /// The sentence beside the table ([`index_sentence`]); this only fades between its answers.
+    follow: FollowCopy,
     state: IndexState,
 }
 
@@ -218,15 +239,16 @@ impl LogicalState for IndexState {
 
 impl LegalIndex {
     pub fn new(entry: EntryId) -> Self {
-        let mut form = FormTable::new(super::registry::BAND);
-        form.table.compact = false;
-        form.table.header_ink = theme::TEXT_READING;
+        let mut form = FormTable::page(super::registry::BAND);
         form.set(legal_form(), None);
         form.table.list_focused = true;
         let sel = form.key_at(form.table.sel.max(0) as usize).unwrap_or(RowKey(0));
+        // the page opens on its first row's sentence at once, nothing fading
+        let follow = FollowCopy::new(index_sentence(form.selected_id().copied()));
         Self {
             entry,
             form,
+            follow,
             state: IndexState { sel },
         }
     }
@@ -235,10 +257,11 @@ impl LegalIndex {
         TableScreen::new(
             Header::new(
                 RouteLayout::screen(),
-                Some(plx_platform::i18n::msg::settings_title()),
-                plx_platform::i18n::msg::settings_legal_title(),
-                plx_platform::i18n::msg::settings_legal_copy(),
-            ),
+                Some(plx_os::i18n::msg::settings_title()),
+                plx_os::i18n::msg::settings_legal_title(),
+                plx_os::i18n::msg::settings_legal_copy(),
+            )
+            .with_follow(&self.follow),
             &self.form.table,
             GroupId(0),
             self.entry,
@@ -253,6 +276,7 @@ impl Machine<InnerHost> for LegalIndex {
         match ev {
             ScreenEvent::Tick(t) => {
                 self.form.table.update(t.dt(), RouteLayout::screen().sectioned_table().h);
+                self.follow.update(t.dt());
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { to, .. } => {
@@ -260,6 +284,7 @@ impl Machine<InnerHost> for LegalIndex {
                 if let Some(key) = self.form.key_at(self.form.table.sel.max(0) as usize) {
                     self.state.sel = key;
                 }
+                self.follow.follow(index_sentence(self.form.selected_id().copied()));
                 Handled::Yes
             }
             ScreenEvent::Activate(key) => {
@@ -290,7 +315,7 @@ impl Screen<InnerHost> for LegalIndex {
         &self.state
     }
     fn crumb(&self, _cx: &Cx<'_, InnerHost>) -> Option<Cow<'_, str>> {
-        Some(Cow::Borrowed(plx_platform::i18n::msg::settings_title()))
+        Some(Cow::Borrowed(plx_os::i18n::msg::settings_title()))
     }
     fn prepare(&mut self, _b: &mut Budget, _cx: &Cx<'_, InnerHost>) {}
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, InnerHost>) {
@@ -322,9 +347,17 @@ pub struct DocumentPage {
     body: Cow<'static, str>,
     qr: Option<plx_ui::qr::QrCode>,
     guide_caption: Option<&'static str>,
+    /// How the title sets: the Settings page rung for Legal and About, the hero for the Language
+    /// page's Contribute page (which keeps its stage-1 look).
+    layout: RouteLayout,
     word: &'static str,
     state: DocState,
 }
+
+/// [`DocState::which`] for the About page and for the Language page's Contribute page; a legal document's
+/// is its place in [`Page::ALL`].
+const WHICH_ABOUT: u8 = 0xff;
+const WHICH_CONTRIBUTE: u8 = 0xfe;
 
 struct DocState {
     which: u8,
@@ -372,12 +405,13 @@ impl DocumentPage {
         Self {
             entry,
             reader: DocumentReader::new(),
-            crumb: plx_platform::i18n::msg::settings_legal_title(),
+            crumb: plx_os::i18n::msg::settings_legal_title(),
             title: page.title(),
             subtitle: page.subtitle(),
             body: Cow::Borrowed(page.body()),
             qr: None,
             guide_caption: None,
+            layout: RouteLayout::screen(),
             word: word::LEGAL,
             state: DocState { which: i, pos: 0 },
         }
@@ -387,14 +421,15 @@ impl DocumentPage {
         Self {
             entry,
             reader: DocumentReader::new(),
-            crumb: plx_platform::i18n::msg::settings_title(),
-            title: plx_platform::i18n::msg::settings_about_title(),
-            subtitle: plx_platform::i18n::msg::settings_about_subtitle(),
+            crumb: plx_os::i18n::msg::settings_title(),
+            title: plx_os::i18n::msg::settings_about_title(),
+            subtitle: plx_os::i18n::msg::settings_about_subtitle(),
             body: Cow::Borrowed(&ABOUT),
             qr: None,
             guide_caption: None,
+            layout: RouteLayout::screen(),
             word: word::LEGAL,
-            state: DocState { which: 0xff, pos: 0 },
+            state: DocState { which: WHICH_ABOUT, pos: 0 },
         }
     }
 
@@ -402,19 +437,20 @@ impl DocumentPage {
         Self {
             entry,
             reader: DocumentReader::new(),
-            crumb: plx_platform::i18n::msg::settings_language_title(),
-            title: plx_platform::i18n::msg::settings_language_contribute(),
-            subtitle: plx_platform::i18n::msg::settings_language_contribute_copy(),
+            crumb: plx_os::i18n::msg::settings_language_title(),
+            title: plx_os::i18n::msg::settings_language_contribute(),
+            subtitle: plx_os::i18n::msg::settings_language_contribute_copy(),
             body: Cow::Owned(contribution_address()),
-            qr: plx_ui::qr::QrCode::new(plx_platform::i18n::CONTRIBUTE_URL).ok(),
-            guide_caption: Some(plx_platform::i18n::msg::settings_language_contribute_body()),
+            qr: plx_ui::qr::QrCode::new(plx_os::i18n::CONTRIBUTE_URL).ok(),
+            guide_caption: Some(plx_os::i18n::msg::settings_language_contribute_body()),
+            layout: RouteLayout::screen(),
             word: "contribute",
-            state: DocState { which: 0xfe, pos: 0 },
+            state: DocState { which: WHICH_CONTRIBUTE, pos: 0 },
         }
     }
 
     fn document_frame(&self) -> Rect {
-        RouteLayout::screen().document(true)
+        self.layout.document()
     }
 
     fn guide(&self) -> Option<plx_ui::qr::QrLink<'_>> {
@@ -480,6 +516,16 @@ impl Screen<InnerHost> for DocumentPage {
     fn name(&self) -> &'static str {
         self.word
     }
+    /// A Legal document and About share the heartbeat word of the Legal index (`legal`), so each answers
+    /// a namespace of its own and an id names the page it was read on.
+    fn a11y_ns(&self) -> &'static str {
+        match self.state.which {
+            // not `about`: the content panel (`about_panel`) answers that word
+            WHICH_ABOUT => "settings-about",
+            WHICH_CONTRIBUTE => self.word,
+            _ => "legal-document",
+        }
+    }
     fn state(&self) -> &dyn LogicalState {
         &self.state
     }
@@ -495,15 +541,16 @@ impl Screen<InnerHost> for DocumentPage {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, InnerHost>) {
         let document_frame = self.document_frame();
         if let Some(guide) = self.guide() {
-            let layout = guide.draw(f.painter, document_frame, f.measure);
-            if let Some(qr) = &self.qr { qr.draw(f.painter, layout.code); }
-            Header::new(RouteLayout::screen(), Some(self.crumb), self.title, self.subtitle)
-                .paint(f.painter, f.measure);
+            // the guide and its code are the content column (they travel under a push), the header the narrative one
+            let layout = guide.draw(f.list_painter(), document_frame, f.measure);
+            if let Some(qr) = &self.qr { qr.draw(f.list_painter(), layout.code); }
+            Header::new(self.layout, Some(self.crumb), self.title, self.subtitle)
+                .paint(f.narrative_painter(), f.measure);
             return;
         }
-        let Self { reader, crumb, title, subtitle, body, entry, .. } = self;
+        let Self { reader, crumb, title, subtitle, body, entry, layout, .. } = self;
         let mut v = DocumentScreen::new(
-            Header::new(RouteLayout::screen(), Some(crumb), title, subtitle),
+            Header::new(*layout, Some(crumb), title, subtitle),
             reader,
             body.as_ref(),
             GroupId(0),
@@ -526,14 +573,14 @@ impl Screen<InnerHost> for DocumentPage {
 /// A visual line break, not a different address. The path keeps its leading slash and all
 /// GitHub route segments so typing the two lines reaches the QR's exact destination.
 fn contribution_address() -> String {
-    plx_platform::i18n::CONTRIBUTE_URL.trim_start_matches("https://").replace("/blob/", "\n/blob/")
+    plx_os::i18n::CONTRIBUTE_URL.trim_start_matches("https://").replace("/blob/", "\n/blob/")
 }
 
 /// The `(focus key, destination)` of every `Nav` row the index lists — the structural navigation
 /// test's expectation, built by the page's own form builder.
 #[cfg(test)]
 pub fn nav_items_for_test() -> Vec<(u32, SettingsPage)> {
-    let mut form: FormTable<Page, (), SettingsPage> = FormTable::new(super::registry::BAND);
+    let mut form: FormTable<Page, (), SettingsPage> = FormTable::page(super::registry::BAND);
     form.set(legal_form(), None);
     (0..form.table.n_rows() as usize)
         .filter_map(|i| match form.binding_at(i)?.kind.clone() {
@@ -560,20 +607,20 @@ mod tests {
     fn contribution_manual_address_is_the_complete_qr_destination() {
         let _guard = plx_base::testlock::serial();
         let page = DocumentPage::contribute(EntryId(0));
-        assert_eq!(format!("https://{}", page.body.replace('\n', "")), plx_platform::i18n::CONTRIBUTE_URL,
+        assert_eq!(format!("https://{}", page.body.replace('\n', "")), plx_os::i18n::CONTRIBUTE_URL,
             "a viewer who cannot scan the QR needs the same complete address in text");
         assert!(page.body.lines().nth(1).unwrap().starts_with('/'));
     }
 
     #[test]
     fn every_contribution_locale_preserves_the_canonical_address() {
-        use plx_platform::i18n::{LocaleContext, SHIPPED};
+        use plx_os::i18n::{LocaleContext, SHIPPED};
         for preference in SHIPPED {
             let locale = LocaleContext::resolve(preference, None, None, None, None);
-            let caption = plx_platform::i18n::msg::settings_language_contribute_body_in(&locale);
+            let caption = plx_os::i18n::msg::settings_language_contribute_body_in(&locale);
             assert!(!caption.contains("github.com"), "only the caption is translated");
             assert_eq!(format!("https://{}", contribution_address().replace('\n', "")),
-                plx_platform::i18n::CONTRIBUTE_URL);
+                plx_os::i18n::CONTRIBUTE_URL);
         }
     }
 
@@ -724,7 +771,8 @@ mod tests {
         assert_eq!(rows.len(), Page::ALL.len());
         for (row, page) in rows.iter().zip(Page::ALL) {
             assert_eq!(row.label, page.title());
-            assert_eq!(row.detail, page.subtitle());
+            assert!(row.detail.is_empty(), "the subtitle moved to the left column (Settings v2)");
+            assert_eq!(index_sentence(Some(page)), page.subtitle());
             assert_eq!(
                 row.ticon,
                 Some(plx_ui::icons::Icon::Chevron),
@@ -786,10 +834,11 @@ mod tests {
     /// or stepping a `Machine` outside the real dispatcher.
     fn fixture_cx(m: &FixtureMeasure, focus: Option<FocusKey<u32>>) -> Cx<'_, InnerHost> {
         Cx {
-            views: plx_data::stores::browse::DirectoryView::empty_for_test(),
+            views: crate::registry::InnerViews::new(plx_data::stores::browse::DirectoryView::empty_for_test(), crate::registry::publication_fixture()),
             tick: Tick::default(),
             measure: m,
             press: PressRead::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             focus: FocusRead { current: focus , ..Default::default() },
             owner: InputOwner::Entry(EntryId(0)),
         }
@@ -1138,7 +1187,7 @@ mod tests {
     #[test]
     fn a_click_on_a_document_parks_nothing_and_the_screen_declines_the_activation() {
         let mut doc = DocumentPage::legal(EntryId(13), 2);
-        let frame = RouteLayout::screen().document(true);
+        let frame = RouteLayout::screen().document();
 
         let mut map: HitMap<u32> = HitMap::new();
         map.fill(vec![Stop {
@@ -1190,7 +1239,7 @@ mod tests {
     /// device's whole-pixel advances (see `settings_text_fit_tests.rs` for the Settings root).
     #[test]
     fn every_legal_row_fits_its_column_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let frame_w = plx_ui::route_screen::RouteLayout::screen().sectioned_table().w;
         let mut out = Vec::new();
         for language in SHIPPED {
@@ -1200,5 +1249,112 @@ mod tests {
             out.extend(table.app_fit_failures(frame_w, tag));
         }
         plx_ui::table::assert_no_fit_failures(&out);
+    }
+
+    // ---- Settings v2, stage 3: the Legal anatomy ---------------------------------------------
+
+    fn focus_row(idx: &mut LegalIndex, page: Page) {
+        let m = FixtureMeasure;
+        let cx = fixture_cx(&m, None);
+        let mut buf: Vec<Stamped<InnerHost>> = Vec::new();
+        let mut present = Present::default();
+        let mut fx = Effects::new(&mut buf, MachineId::Input, &mut present);
+        let to = FocusKey { entry: idx.entry, elem: page.key().0 };
+        idx.step(&ScreenEvent::FocusMoved { from: None, to, by: plx_ui::screen::By::Dir }, &cx, &mut fx);
+    }
+
+    /// The board (nE): one section, Legal, six rows without sub-lines.
+    #[test]
+    fn the_index_is_one_section_of_six_rows_without_sub_lines() {
+        let idx = LegalIndex::new(EntryId(0));
+        assert_eq!(idx.form.table.sections.len(), 1);
+        assert_eq!(idx.form.table.sections[0].rows.len(), 6);
+        for row in &idx.form.table.sections[0].rows {
+            assert!(row.detail.is_empty(), "{:?} still carries a sub-line", row.label);
+        }
+    }
+
+    /// The sentence is the focused document's old sub-line, the page's with none focused, and the
+    /// page opens on its first row's with nothing fading.
+    #[test]
+    fn the_sentence_follows_the_focused_row() {
+        let _serial = plx_base::testlock::serial();
+        let mut idx = LegalIndex::new(EntryId(0));
+        assert_eq!(idx.follow.text(), Page::Privacy.subtitle());
+        assert_eq!(idx.follow.arrival(), 1.0);
+        for page in Page::ALL {
+            focus_row(&mut idx, page);
+            assert_eq!(idx.follow.text(), page.subtitle(), "{page:?}");
+        }
+        assert_eq!(index_sentence(None), plx_os::i18n::msg::settings_legal_copy());
+    }
+
+    /// **A title that wraps to two lines pushes the sentence down for the whole page and never
+    /// overlaps it**, in every shipped language: at most two title lines, the sentence frame
+    /// starting below the title's box, the reader hanging from the guide where the title starts.
+    #[test]
+    fn a_two_line_title_sits_above_a_lower_sentence_without_overlap() {
+        use plx_base::fontcov::advances::ShippedMeasure;
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
+        let _serial = plx_base::testlock::serial();
+        let layout = RouteLayout::screen();
+        let leading = RouteLayout::narrative_title("").line_h();
+        let mut two_line = 0;
+        let mut out = Vec::new();
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            let tag = language.tag();
+            for page in Page::ALL.into_iter().map(|p| (p.title(), p.subtitle())).chain([(
+                plx_os::i18n::msg::settings_about_title(), plx_os::i18n::msg::settings_about_subtitle())])
+            {
+                let (title, subtitle) = page;
+                let h = layout.title_view(title).with_measure(&ShippedMeasure).measure_h(layout.narrative.w);
+                let lines = (h / leading).round() as usize;
+                if lines > 2 { out.push(format!("{tag} {title:?}: {lines} title lines")); }
+                if lines == 2 { two_line += 1; }
+                let copy = layout.narrative_copy_frame(true, title, layout.action.y, &ShippedMeasure);
+                if copy.y < layout.narrative.y + h {
+                    out.push(format!("{tag} {title:?}: the sentence starts at {} inside the title ending {}", copy.y, layout.narrative.y + h));
+                }
+                let one = layout.narrative_copy_frame(true, "x", layout.action.y, &ShippedMeasure);
+                if lines == 2 && copy.y <= one.y {
+                    out.push(format!("{tag} {title:?}: a two-line title did not move the sentence down"));
+                }
+                // the sentence fits the room left above the action slot
+                let sentence_h = plx_ui::text_view::TextView::new(subtitle, layout_copy_size(), plx_ui::theme::TEXT_READING)
+                    .leading(layout_copy_size() as f32 + plx_ui::theme::space::XS)
+                    .max_lines(12).with_measure(&ShippedMeasure).measure_h(layout.narrative.w);
+                if sentence_h > copy.h { out.push(format!("{tag} {title:?}: the sentence ({sentence_h}px) overflows {}px", copy.h)); }
+            }
+        }
+        assert!(two_line > 0, "the board's case (a title on two lines) is exercised");
+        assert!(out.is_empty(), "{}", out.join("\n"));
+        assert_eq!(layout.document().y, layout.narrative.y, "the reader hangs from the title's anchor");
+    }
+
+    fn layout_copy_size() -> std::os::raw::c_int { plx_ui::route_screen::COPY_SIZE }
+
+    /// The Legal index's sentences each fit five lines in every language.
+    #[test]
+    fn every_legal_sentence_fits_five_lines_in_every_language() {
+        use plx_base::fontcov::advances::ShippedMeasure;
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_ui::text_view::TextView;
+        let _serial = plx_base::testlock::serial();
+        let layout = RouteLayout::screen();
+        let leading = plx_ui::theme::size::LABEL as f32 + plx_ui::theme::space::XS;
+        let mut out = Vec::new();
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            let frame = layout.narrative_copy_frame(true, plx_os::i18n::msg::settings_legal_title(), layout.action.y, &ShippedMeasure);
+            for id in Page::ALL.into_iter().map(Some).chain([None]) {
+                let view = TextView::new(index_sentence(id), plx_ui::theme::size::LABEL, plx_ui::theme::TEXT_READING)
+                    .leading(leading).max_lines(plx_ui::follow_copy::FOLLOW_LINES + 1).with_measure(&ShippedMeasure);
+                let lines = (view.measure_h(layout.narrative.w) / leading).round() as usize;
+                if lines > plx_ui::follow_copy::FOLLOW_LINES { out.push(format!("{} {id:?}: {lines} lines", language.tag())); }
+                if frame.y + lines as f32 * leading > layout.action.y { out.push(format!("{} {id:?}: runs into the action slot", language.tag())); }
+            }
+        }
+        assert!(out.is_empty(), "{}", out.join("\n"));
     }
 }

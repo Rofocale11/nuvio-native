@@ -1,7 +1,7 @@
 {
  "anchor": true,
  "blobs": false,
- "build": "0.9.0-dev",
+ "build": "0.10.0-dev",
  "clock": {
   "start": 0
  },
@@ -182,11 +182,11 @@
    ],
    "version": 1
   },
-  "hash": 7514343320884947068,
+  "hash": 16008345530691286612,
   "probe": "controlled=home version=1"
  },
  "schema": 3,
- "state_fp": 16921795122013909805,
+ "state_fp": 4239819007634745513,
  "triggers": [
   "plxnative-app-init",
   "plxnative-rec",

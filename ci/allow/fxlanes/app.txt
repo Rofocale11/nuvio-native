@@ -1,0 +1,6 @@
+# count: 0
+# Bridge::app_effect arms off the ordered lane (docs/sans-io.md), area `app`.
+# Direct deliveries stay on the dispatcher FIFO. External variants must be unreachable here,
+# explicitly classified to yield, and handled by the taken-head runner; check-app-command-routing.py
+# proves that contract before the exact fxlanes scan accepts an unreachable arm.
+# New side queues or unproved arms fail; this ledger only shrinks.

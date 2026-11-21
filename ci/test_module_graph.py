@@ -332,13 +332,13 @@ class Gate(unittest.TestCase):
         code, out, _ = self.run_gate(self.CLEAN, LAYERS, '# count: 0\n', '--report')
         self.assertIn('low        ready', out)
 
-    PORT = LAYERS + '[port p]\nmembers = b c\n'
+    PORT = LAYERS + '[platform p]\nmembers = b c\n'
 
     def test_a_reference_into_a_port_from_outside_it_fails_even_down_the_graph(self):
         code, out, _ = self.run_gate(self.CLEAN, self.PORT, '# count: 0\n')
         self.assertEqual(code, 1)
-        self.assertIn('a.rs names c from outside [port p], which only the port itself may name: a.rs:1 c::g', out)
-        self.assertIn('a.rs names b from outside [port p]', out)
+        self.assertIn('a.rs names c from outside [platform p], which only the port itself may name: a.rs:1 c::g', out)
+        self.assertIn('a.rs names b from outside [platform p]', out)
         self.assertNotIn('names a', out, 'the port may name what its layer may')
 
     def test_port_entries_are_allowlisted_pruned_and_do_not_hold_up_the_split(self):
@@ -346,7 +346,7 @@ class Gate(unittest.TestCase):
         code, out, _ = self.run_gate(self.CLEAN, self.PORT, '# count: 2\n' + entries)
         self.assertEqual(code, 0, out)
         self.assertIn('2 migration entries left in', out)
-        self.assertIn('2 of them into [port p]', out)
+        self.assertIn('2 of them into [platform p]', out)
         code, _, remaining = self.run_gate(self.CLEAN, self.PORT, '# count: 2\n' + entries, '--prune')
         self.assertEqual((code, remaining), (0, gate.ALLOW_HEADER.format(count=2) + entries))
         code, out, _ = self.run_gate(self.CLEAN, self.PORT, '# count: 2\n' + entries, '--report')
@@ -359,12 +359,51 @@ class Gate(unittest.TestCase):
 
     def test_port_config_errors_fail(self):
         for layers, message in [
-            (LAYERS + '[port p]\nmembers = ghost\n', 'ghost is listed in [port p] but is not a module'),
-            (LAYERS + '[port p]\nmembers = c\n[port q]\nmembers = c\n', 'c is listed in [port p] and [port q]'),
-            (LAYERS + '[port p]\nmembers = c\nuses = low\n', "[port p] has unknown key(s) ['uses']"),
+            (LAYERS + '[platform p]\nmembers = ghost\n', 'ghost is listed in [platform p] but is not a module'),
+            (LAYERS + '[platform p]\nmembers = c\n[platform q]\nmembers = c\n', 'c is listed in [platform p] and [platform q]'),
+            (LAYERS + '[platform p]\nmembers = c\nfoo = low\n', "[platform p] has unknown key(s) ['foo']"),
         ]:
             with self.subTest(message=message):
                 code, out, _ = self.run_gate(self.CLEAN, layers, '# count: 0\n')
+                self.assertEqual(code, 1)
+                self.assertIn(message, out)
+
+    # A platform section that carries `uses` is a platform CRATE (W7b): one member, placed in a layer of
+    # its own above the ones it uses, and still a port. `d` stands for the crate's mount.
+    PLATFORM_FILES = dict(CLEAN, **{'lib.rs': LIB + 'mod d;', 'd.rs': 'fn x() { crate::a::f(); crate::c::g(); }'})
+    CRATE = LAYERS + '[platform p]\nuses = low high\nmembers = d\n'
+
+    def test_a_platform_with_uses_is_one_crate_layer_that_may_name_what_it_uses(self):
+        code, out, _ = self.run_gate(self.PLATFORM_FILES, self.CRATE, '# count: 0\n')
+        self.assertEqual(code, 0, out)
+        self.assertIn('green — 2 layers and 1 platform crates, ', out)
+
+    def test_a_platform_crate_may_not_name_a_layer_outside_its_uses(self):
+        code, out, _ = self.run_gate(self.PLATFORM_FILES, LAYERS + '[platform p]\nuses = low\nmembers = d\n', '# count: 0\n')
+        self.assertEqual(code, 1)
+        self.assertIn('d.rs names a ([high]), which [platform p] may not use: d.rs:1 a::f', out)
+        self.assertNotIn('names c', out)
+
+    def test_nothing_names_a_platform_crate_not_even_down_the_graph(self):
+        files = dict(self.PLATFORM_FILES, **{'a.rs': 'fn f() { crate::d::x(); }'})
+        code, out, _ = self.run_gate(files, self.CRATE, '# count: 0\n')
+        self.assertEqual(code, 1)
+        self.assertIn('a.rs names d ([platform p]), which [high] may not use: a.rs:1 d::x', out)
+
+    def test_platform_crate_config_errors_fail(self):
+        for layers, message in [
+            (LAYERS + '[platform p]\nuses = low high\nmembers = c d\n', '[platform p] carries `uses`, so it is one crate'),
+            (LAYERS + '[platform p]\nuses = low high\nmembers =\n', '[platform p] carries `uses`, so it is one crate'),
+            # No `uses` can spell a platform: its name has a space, so a layer cannot list it, and a
+            # platform cannot list another.
+            (LAYERS + '[platform p]\nuses = low high\nmembers = d\n[platform q]\nuses = low p\nmembers = e\n',
+             '[platform q] uses unknown layer p'),
+            (LAYERS.replace('uses = low', 'uses = low platform p') + '[platform p]\nuses = low high\nmembers = d\n',
+             '[high] uses unknown layer platform'),
+        ]:
+            with self.subTest(message=message):
+                files = dict(self.PLATFORM_FILES, **{'lib.rs': LIB + 'mod d; mod e;', 'e.rs': ''})
+                code, out, _ = self.run_gate(files, layers, '# count: 0\n')
                 self.assertEqual(code, 1)
                 self.assertIn(message, out)
 
@@ -379,6 +418,159 @@ class Gate(unittest.TestCase):
                 code, out, _ = self.run_gate(self.CLEAN, layers, '# count: 0\n')
                 self.assertEqual(code, 1)
                 self.assertIn(message, out)
+
+
+class CargoDeclarations(unittest.TestCase):
+    """A dependency declaration is an edge even when no Rust token names that crate yet."""
+    LAYERS = '[low]\nuses =\nmembers = low\n[high]\nuses = low\nmembers = high\n[app]\nuses = low high\nmembers = crate\n'
+    BASE = {
+        'src/lib.rs': '',
+        'low/src/lib.rs': '',
+        'high/src/lib.rs': '',
+        'high/Cargo.toml': '[package]\nname = "plx_high"\n[package.metadata.plx]\nmount = "high"\n',
+    }
+
+    def run_cargo_gate(self, low_extra, high_extra='', root_manifest=None):
+        files = dict(self.BASE)
+        files['low/Cargo.toml'] = '[package]\nname = "plx_low"\n[package.metadata.plx]\nmount = "low"\n' + low_extra
+        files['high/Cargo.toml'] += high_extra
+        if root_manifest is not None:
+            files['Cargo.toml'] = root_manifest
+        with Tree(files) as tree:
+            layers = tree.root / 'layers.ini'
+            layers.write_text(self.LAYERS)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = gate.main(['--src', str(tree.root / 'src'), '--layers', str(layers),
+                                    '--allow', str(tree.root / 'allow.txt')])
+        return result, output.getvalue()
+
+    def test_unused_upward_dependency_fails_and_downward_dependency_passes(self):
+        code, out = self.run_cargo_gate('[dependencies]\nplx_high = { path = "../high" }\n')
+        self.assertEqual(code, 1, out)
+        self.assertIn('plx_high declares [low] -> [high]', out)
+        code, out = self.run_cargo_gate('', '[dependencies]\nplx_low = { path = "../low" }\n')
+        self.assertEqual(code, 0, out)
+        self.assertIn('1 Cargo layer declarations', out)
+
+    def test_build_dev_optional_target_and_feature_dependency_edges(self):
+        for body in [
+            '[build-dependencies]\nplx_high = { path = "../high" }\n',
+            '[dev-dependencies]\nplx_high = { path = "../high" }\n',
+            '[target.\'cfg(target_os = "linux")\'.dependencies]\nplx_high = { path = "../high", optional = true }\n',
+            '[dependencies.plx_high]\npath = "../high"\noptional = true\n[features]\nprobe = ["dep:plx_high"]\n',
+        ]:
+            with self.subTest(body=body):
+                code, out = self.run_cargo_gate(body)
+                self.assertEqual(code, 1, out)
+                self.assertIn('plx_high declares [low] -> [high]', out)
+
+    def test_renamed_local_dependency_cannot_hide_the_edge(self):
+        code, out = self.run_cargo_gate('[dependencies]\nback = { package = "plx_high", path = "../high" }\n')
+        self.assertEqual(code, 1, out)
+        self.assertIn('back declares [low] -> [high]', out)
+
+    def test_multiline_single_quoted_optional_target_rename_cannot_hide_the_edge(self):
+        body = ("[target.'cfg(target_os = \"linux\")'.dependencies.back]\n"
+                "package = 'plx_high'\npath = '../high'\n"
+                "optional = true\n[features]\nprobe = ['dep:back']\n")
+        code, out = self.run_cargo_gate(body)
+        self.assertEqual(code, 1, out)
+        self.assertIn('back declares [low] -> [high]', out)
+
+    def test_external_unknown_dep_and_self_test_dep_do_not_add_an_edge(self):
+        code, out = self.run_cargo_gate('[dependencies]\nplx_external = "1"\n[dev-dependencies]\nplx_low = { path = "." }\n')
+        self.assertEqual(code, 0, out)
+        self.assertIn('0 Cargo layer declarations', out)
+
+    def test_workspace_inheritance_resolves_alias_and_root_relative_path(self):
+        root = ('[workspace]\nmembers = ["low", "high"]\n'
+                '[workspace.dependencies]\nback = { package = "plx_high", path = "high" }\n'
+                '[package]\nname = "plxnative-modules"\n')
+        code, out = self.run_cargo_gate('[dependencies]\nback = { workspace = true, optional = true }\n',
+                                        root_manifest=root)
+        self.assertEqual(code, 1, out)
+        self.assertIn('back declares [low] -> [high]', out)
+
+    def test_app_root_is_checked_and_cannot_be_a_hidden_upward_path_target(self):
+        root = '[package]\nname = "plxnative-modules"\n[dependencies]\nplx_high = { path = "high" }\n'
+        code, out = self.run_cargo_gate('[dependencies]\napp = { package = "plxnative-modules", path = ".." }\n',
+                                        root_manifest=root)
+        self.assertEqual(code, 1, out)
+        self.assertIn('app declares [low] -> [app]', out)
+        self.assertNotIn('plx_high declares [app] -> [high]', out, 'the application may use lower layers')
+
+
+class PlatformCrates(unittest.TestCase):
+    """A `plx_platform_<name>` package is the one member of `[platform <name>]`, above `app`: it may
+    declare the application and every layer it uses, and no package may declare a platform."""
+    LAYERS = ('[low]\nuses =\nmembers = low\n[app]\nuses = low\nmembers = crate\n'
+              '[platform webos]\nuses = low app\nmembers = platform_webos\n'
+              '[platform desktop]\nuses = low app\nmembers = platform_desktop\n')
+    APP = '[package]\nname = "plxnative-modules"\n'
+
+    @staticmethod
+    def package(name, mount, deps=''):
+        mounted = f'[package.metadata.plx]\nmount = "{mount}"\n' if mount else ''
+        return f'[package]\nname = "{name}"\n{mounted}{deps}'
+
+    PLATFORM_DEPS = '[dependencies]\nplxnative-modules = { path = ".." }\nplx_low = { path = "../low" }\n'
+
+    def run_platform_gate(self, **manifests):
+        """Manifests by directory (`root`, `low`, `webos`, `desktop`); a missing one gets its valid default."""
+        files = {'src/lib.rs': '', 'low/src/lib.rs': '', 'platform-webos/src/lib.rs': '', 'platform-desktop/src/lib.rs': ''}
+        files['Cargo.toml'] = manifests.get('root', self.APP)
+        files['low/Cargo.toml'] = manifests.get('low', self.package('plx_low', 'low'))
+        files['platform-webos/Cargo.toml'] = manifests.get(
+            'webos', self.package('plx_platform_webos', 'platform_webos', self.PLATFORM_DEPS))
+        files['platform-desktop/Cargo.toml'] = manifests.get(
+            'desktop', self.package('plx_platform_desktop', 'platform_desktop', '[dependencies]\nplxnative-modules = { path = ".." }\n'))
+        with Tree(files) as tree:
+            layers = tree.root / 'layers.ini'
+            layers.write_text(self.LAYERS)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = gate.main(['--src', str(tree.root / 'src'), '--layers', str(layers),
+                                    '--allow', str(tree.root / 'allow.txt')])
+        return result, output.getvalue()
+
+    def test_a_platform_crate_may_declare_the_application_and_the_layers_it_uses(self):
+        code, out = self.run_platform_gate()
+        self.assertEqual(code, 0, out)
+        self.assertIn('green — 2 layers and 2 platform crates, ', out)
+        self.assertIn('3 Cargo layer declarations', out)
+
+    def test_a_platform_never_declares_another_platform(self):
+        code, out = self.run_platform_gate(webos=self.package(
+            'plx_platform_webos', 'platform_webos', self.PLATFORM_DEPS + 'plx_platform_desktop = { path = "../platform-desktop" }\n'))
+        self.assertEqual(code, 1, out)
+        self.assertIn('plx_platform_desktop declares [platform webos] -> [platform desktop]', out)
+
+    def test_nothing_declares_a_platform_the_application_and_a_layer_included(self):
+        code, out = self.run_platform_gate(root=self.APP + '[dependencies]\nplx_platform_webos = { path = "platform-webos" }\n')
+        self.assertEqual(code, 1, out)
+        self.assertIn('plx_platform_webos declares [app] -> [platform webos]', out)
+        code, out = self.run_platform_gate(low=self.package(
+            'plx_low', 'low', '[dev-dependencies]\nplx_platform_desktop = { path = "../platform-desktop" }\n'))
+        self.assertEqual(code, 1, out)
+        self.assertIn('plx_platform_desktop declares [low] -> [platform desktop]', out)
+
+    def test_a_platform_crate_without_a_mount_would_merge_into_the_application_tree(self):
+        code, out = self.run_platform_gate(webos=self.package('plx_platform_webos', None, self.PLATFORM_DEPS))
+        self.assertEqual(code, 1, out)
+        self.assertIn('platform package plx_platform_webos declares no [package.metadata.plx] mount', out)
+
+    def test_a_platform_crate_and_its_layer_name_each_other(self):
+        code, out = self.run_platform_gate(webos=self.package('plx_platform_webos', 'low', self.PLATFORM_DEPS))
+        self.assertEqual(code, 1, out)
+        self.assertIn('plx_platform_webos is mounted in [low], but a platform crate plx_platform_<name> is the one '
+                      'member of [platform <name>] and nothing else is', out)
+        code, out = self.run_platform_gate(webos=self.package('plx_platform_webos', 'platform_desktop', self.PLATFORM_DEPS))
+        self.assertEqual(code, 1, out)
+        self.assertIn('is mounted in [platform desktop]', out)
+        code, out = self.run_platform_gate(low=self.package('plx_low', 'platform_webos'))
+        self.assertEqual(code, 1, out)
+        self.assertIn('package plx_low is mounted in [platform webos]', out)
 
 
 if __name__ == '__main__':

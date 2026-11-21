@@ -35,9 +35,11 @@
 //! **1. The feather is per-RUN, not per-pixel.** The design masks the scrolling body with an 88px
 //! `linear-gradient` at whichever edge has more content behind it. This renderer has no vertical
 //! mask: `fs_text_fade.frag` fades on `v_tuv.x` (a string's own width — `TextView::fade_last`'s
-//! right-edge dissolve) and there is no y-axis twin. So the ramp is applied as a CASCADE ALPHA per
-//! text run, evaluated at that run's cap-band centre ([`feather_alpha`]), inside a hard
-//! `Painter::clip` that bounds the band exactly. The body is 100% text, so nothing escapes it.
+//! right-edge dissolve) or, through its `u_vfadeT`/`u_vfadeB` bands (`Painter::text_fade_v`), on a
+//! glyph's absolute screen y, but this panel uses neither, and neither is a mask over its pixels.
+//! So the ramp is applied as a CASCADE ALPHA per text run, evaluated at that run's cap-band centre
+//! ([`feather_alpha`]), inside a hard `Painter::clip` that bounds the band exactly. The body is
+//! 100% text, so nothing escapes it.
 //!
 //! `table.rs` carries a warning that reads like a contradiction and is not: it replaced the track
 //! menu's old fade masks with a hard scissor because *"a tall two-line edge row is cut uniformly
@@ -65,10 +67,12 @@
 #[cfg_attr(not(test), allow(unused_imports))]
 use plx_data::metadata::{self, Detail, Stream};
 use plx_ui::consts::{SCR_H, SCR_W, SDLK_DOWN, SDLK_UP};
+use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::icons::Icon;
 use plx_ui::label::{HAlign, Label, VAlign};
 use plx_ui::popover::Popover;
 use plx_ui::theme;
+use plx_ui::vstack::{Anchor, AlertHead, HeadRule, VStack};
 use plx_ui::widgets;
 use plx_ui::{Painter, Rect, Spring};
 use std::ffi::CString;
@@ -103,17 +107,15 @@ const FEATHER: f32 = theme::alert::FEATHER;
 /// panel with no focus has nothing for a line-step to land on.
 const PAGE_STEP: f32 = 370.0;
 
-/// Scroll-spring stiffness. `220.0` is `chapters_panel`'s scroll constant — the same gesture
+/// Scroll-spring stiffness. `220.0` is the Chapters strip's scroll constant (`player_hud::strip::STRIP_K_SCROLL`) — the same gesture
 /// (a discrete jump the eye follows) so it gets the same rate.
 const K_SCROLL: f32 = 220.0;
 
 // Vertical rhythm inside the panel, top to bottom. Each is the design's own `margin-top`, kept as
 // named steps rather than one accumulated table so a changed block moves the ones below it.
-// The first four are the FAMILY's head ladder ([`theme::alert`]), not this panel's — §1B and §1C
-// spell the same eyebrow → title → subtitle steps, and the one that spelled them itself drifted 12px
-// tight. Named through here so the local flow still reads as a flow.
-const TITLE_H: f32 = theme::alert::TITLE_LEAD;
-const GAP_EYEBROW_TITLE: f32 = theme::alert::GAP_EYEBROW_TITLE;
+// The eyebrow → title → path steps are the FAMILY's head ladder ([`theme::alert`]), not this panel's
+// — §1B and §1C spell the same steps, and the one that spelled them itself drifted 12px tight. They
+// come from [`header`] (`vstack::AlertHead`); only the path → rule and rule → body steps are named here.
 const PATH_H: f32 = theme::size::MICRO as f32 * 1.3;
 const GAP_PATH_RULE: f32 = 28.0;
 const GAP_RULE_BODY: f32 = theme::space::MD;
@@ -126,6 +128,46 @@ const GAP_RULE_BODY: f32 = theme::space::MD;
 /// 2px top and bottom, and the overflow would have been invisible in review because nothing draws
 /// an edge there.
 const FOOTER_H: f32 = plx_ui::widgets::KeyHint::height();
+/// The footer's scroll hint: the two chevron marks and "to scroll", on one gap that is the VISIBLE
+/// gap between the chevron inks and the label (the marks are placed by ink, `Item::glyph`).
+const FOOTER_SCROLL_GAP: f32 = theme::space::SM;
+/// The chevron marks' box, at their natural size with no frame (the Library A-Z rail's idiom).
+const FOOTER_GLYPH: f32 = 22.0;
+
+/// The label is the LAST item of a leading-aligned stack, so its width moves no x: it is passed as 0
+/// and never measured (no per-frame Width query for a width nothing reads).
+fn footer_scroll_items() -> [Item; 3] {
+    [
+        Item::glyph(Icon::ChevronUp, FOOTER_GLYPH),
+        Item::glyph(Icon::ChevronDown, FOOTER_GLYPH),
+        Item::new(0.0),
+    ]
+}
+
+/// The footer's left read-out: the two chevrons + "to scroll", starting at `x`, the chevrons centred
+/// on `cy` and the label in the footer band at `fy`. Marks, not controls — there is nothing to
+/// focus, so they are drawn at their natural size with no frame (the Library A–Z rail's idiom).
+fn draw_scroll_hint(p: Painter, x: f32, cy: f32, fy: f32, cw: f32) {
+    let hint = plx_os::i18n::msg::widgets_hint_scroll_c();
+    let items = footer_scroll_items();
+    for (span, icon) in HStack::new(&items, FOOTER_SCROLL_GAP, Align::Leading(x))
+        .placed()
+        .zip([Some(Icon::ChevronUp), Some(Icon::ChevronDown), None])
+    {
+        match icon {
+            Some(icon) => plx_ui::icons::draw(
+                p,
+                icon,
+                Rect::new(span.box_x, cy - FOOTER_GLYPH * 0.5, FOOTER_GLYPH, FOOTER_GLYPH),
+                theme::TEXT_TERTIARY,
+            ),
+            None => {
+                Label::new(hint.as_ptr(), theme::size::CAPTION, theme::TEXT_TERTIARY)
+                    .draw(p, Rect::new(span.x, fy, cw, FOOTER_H));
+            }
+        }
+    }
+}
 
 // Body rhythm — the design's `gap` values, one per nesting level.
 const SECTION_GAP: f32 = theme::space::LG; // 40 — between the grid / AUDIO / SUBTITLES blocks
@@ -149,26 +191,54 @@ fn panel_rect() -> Rect {
     )
 }
 
+/// The header's ladder: the family's head (eyebrow, title, path band) and the y of the rule under it.
+/// ONE stack, so [`body_rect`] (which positions the body under the rule) and [`TracksPanelScreen::paint`]
+/// (which draws the head and the rule) read the same spans. The path band is reserved whether or not
+/// the file has a path, so the body viewport stays fixed from one item to the next.
+struct Header {
+    head: AlertHead,
+    /// The rule's top edge.
+    rule: f32,
+    /// Where the body viewport opens: the rule's bottom and `GAP_RULE_BODY`.
+    body_top: f32,
+}
+
+fn header(top: f32) -> Header {
+    let rule = HeadRule { gap_above: GAP_PATH_RULE, h: widgets::HAIRLINE_H, gap_below: GAP_RULE_BODY };
+    let head = AlertHead::ruled(top, theme::alert::TITLE_LEAD, Some(PATH_H), rule);
+    let (Some(rule), Some(body)) = (head.rule, head.body) else {
+        unreachable!("a ruled head has its rule and its body marker")
+    };
+    Header { head, rule: rule.y, body_top: body.y }
+}
+
+/// Where the footer stands: the body viewport's bottom, the rule under it and the footer band.
+struct Footer {
+    /// The body viewport's bottom edge.
+    body_bottom: f32,
+    /// The rule's top edge.
+    rule: f32,
+    /// The footer band's top edge.
+    top: f32,
+}
+
+/// **The footer's one stack**, read by [`body_rect`] (where the body ends) and [`TracksPanelScreen::paint`]
+/// (the rule and the band): from the panel's bottom pad up, the band, `MD`, the rule, `MD`, and the
+/// body's bottom, so the measure and the draw cannot sum the gaps apart.
+fn footer() -> Footer {
+    let r = panel_rect();
+    let items = [Item::new(0.0), Item::new(widgets::HAIRLINE_H), Item::new(FOOTER_H)];
+    let stack = VStack::new(&items, theme::space::MD, Anchor::Bottom(r.y + PANEL_H - plx_ui::widgets::KeyHint::pad_below()));
+    let at = |i| stack.span(i).map_or(0.0, |(y, _)| y);
+    Footer { body_bottom: at(0), rule: at(1), top: at(2) }
+}
+
 /// The scrolling body's viewport — inside the padding, below the header rule, above the footer
 /// rule, and left of the rail.
 fn body_rect() -> Rect {
     let r = panel_rect();
-    let top = r.y
-        + PAD
-        + theme::alert::EYEBROW_LEAD
-        + GAP_EYEBROW_TITLE
-        + TITLE_H
-        + theme::alert::GAP_TITLE_SUB
-        + PATH_H
-        + GAP_PATH_RULE
-        + widgets::HAIRLINE_H
-        + GAP_RULE_BODY;
-    let bottom = r.y + PANEL_H
-        - plx_ui::widgets::KeyHint::pad_below()
-        - FOOTER_H
-        - theme::space::MD
-        - widgets::HAIRLINE_H
-        - theme::space::MD;
+    let top = header(r.y + PAD).body_top;
+    let bottom = footer().body_bottom;
     Rect::new(
         r.x + PAD,
         top,
@@ -202,7 +272,7 @@ pub fn fmt_size(bytes: i64) -> Option<String> {
     }
     // Below a kilobyte the Info panel spells the count in words rather than as a bare `B`.
     Some(if bytes < 1024 {
-        plx_platform::i18n::msg::widgets_tracks_bytes(bytes)
+        plx_os::i18n::msg::widgets_tracks_bytes(bytes)
     } else {
         plx_ui::fmt::bytes(bytes, (2, 2, 2))
     })
@@ -253,7 +323,7 @@ fn title_case(s: &str) -> String {
 /// `"10-bit · 4:2:0"` — bit depth and chroma as ONE fact, because neither is meaningful without
 /// the other. Either half alone still draws, so a container that reports only one is not silent.
 pub fn fmt_depth_chroma(bit_depth: i64, chroma: &str) -> Option<String> {
-    let d = (bit_depth > 0).then(|| plx_platform::i18n::msg::widgets_tracks_depth(bit_depth));
+    let d = (bit_depth > 0).then(|| plx_os::i18n::msg::widgets_tracks_depth(bit_depth));
     let c = (!chroma.trim().is_empty()).then(|| chroma.trim().to_string());
     match (d, c) {
         (Some(d), Some(c)) => Some(format!("{d} \u{b7} {c}")),
@@ -277,7 +347,7 @@ pub fn fmt_fps(fps: f64) -> Option<String> {
         return None;
     }
     let rate = localized_precision(fps, 3);
-    Some(plx_platform::i18n::msg::widgets_tracks_fps(&rate))
+    Some(plx_os::i18n::msg::widgets_tracks_fps(&rate))
 }
 
 /// `"2.35"` — the display aspect as PMS sends it, trailing zeros trimmed.
@@ -296,7 +366,7 @@ fn localized_precision(value: f64, max_scale: i16) -> String {
         coefficient /= 10;
         scale -= 1;
     }
-    plx_platform::i18n::current().decimal(coefficient, scale)
+    plx_os::i18n::current().decimal(coefficient, scale)
 }
 
 /// A channel layout in the design's spelling: `"5.1(side)"` → `"5.1"`, `"stereo"` → `"Stereo"`.
@@ -310,9 +380,9 @@ pub fn fmt_layout(layout: &str, channels: i64) -> String {
     if base.is_empty() {
         return match channels {
             0 => String::new(),
-            1 => plx_platform::i18n::msg::widgets_tracks_mono().to_string(),
-            2 => plx_platform::i18n::msg::widgets_tracks_stereo().to_string(),
-            n => plx_platform::i18n::msg::widgets_tracks_channels(n),
+            1 => plx_os::i18n::msg::widgets_tracks_mono().to_string(),
+            2 => plx_os::i18n::msg::widgets_tracks_stereo().to_string(),
+            n => plx_os::i18n::msg::widgets_tracks_channels(n),
         };
     }
     // a numeric layout ("5.1", "7.1") is already how it is written; a word one is capitalised
@@ -320,8 +390,8 @@ pub fn fmt_layout(layout: &str, channels: i64) -> String {
         base.to_string()
     } else {
         match base {
-            "mono" => plx_platform::i18n::msg::widgets_tracks_mono().to_string(),
-            "stereo" => plx_platform::i18n::msg::widgets_tracks_stereo().to_string(),
+            "mono" => plx_os::i18n::msg::widgets_tracks_mono().to_string(),
+            "stereo" => plx_os::i18n::msg::widgets_tracks_stereo().to_string(),
             _ => title_case(base),
         }
     }
@@ -368,7 +438,7 @@ pub fn audio_detail(s: &Stream) -> String {
         parts.push(b);
     }
     if s.selected {
-        parts.push(plx_platform::i18n::msg::widgets_tracks_playing().to_string());
+        parts.push(plx_os::i18n::msg::widgets_tracks_playing().to_string());
     }
     parts.join(" \u{b7} ")
 }
@@ -384,7 +454,7 @@ pub fn audio_rows(audio: &[Stream]) -> Vec<TrackRow> {
         .iter()
         .map(|s| TrackRow {
             name: if s.lang.trim().is_empty() {
-                plx_platform::i18n::msg::widgets_tracks_unknown().to_string()
+                plx_os::i18n::msg::widgets_tracks_unknown().to_string()
             } else {
                 s.lang.clone()
             },
@@ -412,7 +482,7 @@ pub fn subtitle_rows(subs: &[Stream]) -> Vec<TrackRow> {
     let mut out: Vec<(String, String, String, usize)> = Vec::new();
     for s in subs {
         let name = if s.lang.trim().is_empty() {
-            plx_platform::i18n::msg::widgets_tracks_unknown().to_string()
+            plx_os::i18n::msg::widgets_tracks_unknown().to_string()
         } else {
             s.lang.clone()
         };
@@ -426,9 +496,9 @@ pub fn subtitle_rows(subs: &[Stream]) -> Vec<TrackRow> {
         // has; the parsed kind only ADDS a flag the title spelled out.
         let (forced, sdh) = track_label::flags(&label, s.forced, s.sdh);
         for (on, tag) in [
-            (forced, plx_platform::i18n::msg::widgets_tracks_forced()),
-            (sdh, plx_platform::i18n::msg::widgets_badge_sdh()),
-            (s.external, plx_platform::i18n::msg::widgets_tracks_external()),
+            (forced, plx_os::i18n::msg::widgets_tracks_forced()),
+            (sdh, plx_os::i18n::msg::widgets_badge_sdh()),
+            (s.external, plx_os::i18n::msg::widgets_tracks_external()),
         ] {
             if on {
                 head = if head.is_empty() {
@@ -455,9 +525,9 @@ pub fn subtitle_rows(subs: &[Stream]) -> Vec<TrackRow> {
         .map(|(_, name, head, n)| {
             let detail = match (head.is_empty(), n) {
                 (true, 1) => String::new(),
-                (true, n) => plx_platform::i18n::msg::widgets_tracks_count(n as i64),
+                (true, n) => plx_os::i18n::msg::widgets_tracks_count(n as i64),
                 (false, 1) => head,
-                (false, n) => plx_platform::i18n::msg::widgets_tracks_count_detail(n as i64, &head),
+                (false, n) => plx_os::i18n::msg::widgets_tracks_count_detail(n as i64, &head),
             };
             TrackRow { name, detail }
         })
@@ -473,16 +543,16 @@ pub fn file_rows(d: &Detail) -> Vec<Pair> {
         }
     };
     push(
-        plx_platform::i18n::msg::widgets_tracks_container(),
+        plx_os::i18n::msg::widgets_tracks_container(),
         (!d.container.is_empty()).then(|| d.container.to_uppercase()),
     );
-    push(plx_platform::i18n::msg::widgets_tracks_size(), fmt_size(d.size));
-    push(plx_platform::i18n::msg::widgets_tracks_total_bitrate(), fmt_bitrate(d.bitrate));
+    push(plx_os::i18n::msg::widgets_tracks_size(), fmt_size(d.size));
+    push(plx_os::i18n::msg::widgets_tracks_total_bitrate(), fmt_bitrate(d.bitrate));
     push(
-        plx_platform::i18n::msg::widgets_tracks_duration(),
+        plx_os::i18n::msg::widgets_tracks_duration(),
         (d.dur_ms > 0).then(|| plx_ui::fmt::clock(d.dur_ms)),
     );
-    push(plx_platform::i18n::msg::widgets_tracks_aspect(), fmt_aspect(d.aspect_ratio));
+    push(plx_os::i18n::msg::widgets_tracks_aspect(), fmt_aspect(d.aspect_ratio));
     v
 }
 
@@ -502,14 +572,14 @@ pub fn video_rows(d: &Detail) -> Vec<Pair> {
         .filter(|s| !s.is_empty())
         .unwrap_or(d.vcodec.as_str());
     let profile = vs.map(|s| s.profile.as_str()).unwrap_or("");
-    push(plx_platform::i18n::msg::widgets_tracks_codec(), fmt_codec_profile(codec, profile));
-    push(plx_platform::i18n::msg::widgets_tracks_resolution(), fmt_frame_size(d.width, d.height));
-    push(plx_platform::i18n::msg::widgets_tracks_frame_rate(), fmt_fps(d.video_fps));
+    push(plx_os::i18n::msg::widgets_tracks_codec(), fmt_codec_profile(codec, profile));
+    push(plx_os::i18n::msg::widgets_tracks_resolution(), fmt_frame_size(d.width, d.height));
+    push(plx_os::i18n::msg::widgets_tracks_frame_rate(), fmt_fps(d.video_fps));
     // the STREAM's bitrate, not the file's — `d.bitrate` is already the FILE column's own row, and
     // repeating it here would state the same number twice under two different labels
-    push(plx_platform::i18n::msg::widgets_tracks_bitrate(), vs.and_then(|s| fmt_bitrate(s.bitrate)));
+    push(plx_os::i18n::msg::widgets_tracks_bitrate(), vs.and_then(|s| fmt_bitrate(s.bitrate)));
     push(
-        plx_platform::i18n::msg::widgets_tracks_bit_depth(),
+        plx_os::i18n::msg::widgets_tracks_bit_depth(),
         vs.and_then(|s| fmt_depth_chroma(s.bit_depth, &s.chroma)),
     );
     v
@@ -530,17 +600,17 @@ pub fn dovi_rows(d: &Detail) -> Vec<Pair> {
             v.push(Pair { label, value });
         }
     };
-    push(plx_platform::i18n::msg::widgets_tracks_profile(), (dv.profile > 0).then(|| dv.profile.to_string()));
-    push(plx_platform::i18n::msg::widgets_tracks_level(), (dv.level > 0).then(|| dv.level.to_string()));
-    push(plx_platform::i18n::msg::widgets_tracks_version(), dv.version_str());
-    push(plx_platform::i18n::msg::widgets_tracks_base_layer(), dv.bl_present.then(|| plx_platform::i18n::msg::widgets_tracks_present().to_string()));
-    push("RPU", dv.rpu_present.then(|| plx_platform::i18n::msg::widgets_tracks_present().to_string()));
+    push(plx_os::i18n::msg::widgets_tracks_profile(), (dv.profile > 0).then(|| dv.profile.to_string()));
+    push(plx_os::i18n::msg::widgets_tracks_level(), (dv.level > 0).then(|| dv.level.to_string()));
+    push(plx_os::i18n::msg::widgets_tracks_version(), dv.version_str());
+    push(plx_os::i18n::msg::widgets_tracks_base_layer(), dv.bl_present.then(|| plx_os::i18n::msg::widgets_tracks_present().to_string()));
+    push("RPU", dv.rpu_present.then(|| plx_os::i18n::msg::widgets_tracks_present().to_string()));
     v
 }
 
 /// A section head as it is drawn: `AUDIO · 8 TRACKS`. Caps, because the head names the group.
 pub fn track_head(word: &str, n: usize) -> String {
-    plx_platform::i18n::msg::widgets_tracks_count_heading(n as i64, word)
+    plx_os::i18n::msg::widgets_tracks_count_heading(n as i64, word)
 }
 
 // ---- the scroll: pages, mask edges and the rail (also PURE) --------------------------------------
@@ -900,8 +970,8 @@ struct Content {
 fn content_of(d: &Detail) -> Content {
     Content {
         cols: [
-            (plx_platform::i18n::msg::widgets_tracks_file_heading(), file_rows(d)),
-            (plx_platform::i18n::msg::widgets_tracks_video_heading(), video_rows(d)),
+            (plx_os::i18n::msg::widgets_tracks_file_heading(), file_rows(d)),
+            (plx_os::i18n::msg::widgets_tracks_video_heading(), video_rows(d)),
             ("DOLBY VISION", dovi_rows(d)),
         ],
         audio: (d.audio.len(), audio_rows(&d.audio)),
@@ -959,7 +1029,7 @@ fn body_flow(
     // subtitles those are different numbers — that is the whole point of grouping them, and
     // passing `rows.len()` here is how the head came to say "SUBTITLES · 3 TRACKS" over a list
     // describing nine of them.
-    for (word, (total, rows)) in [(plx_platform::i18n::msg::widgets_tracks_audio_heading(), &c.audio), (plx_platform::i18n::msg::widgets_tracks_subtitles_heading(), &c.subs)] {
+    for (word, (total, rows)) in [(plx_os::i18n::msg::widgets_tracks_audio_heading(), &c.audio), (plx_os::i18n::msg::widgets_tracks_subtitles_heading(), &c.subs)] {
         if rows.is_empty() {
             continue;
         }
@@ -988,42 +1058,38 @@ impl TracksPanelScreen {
         field: Option<&plx_ui::underlay::UnderlayField>,
     ) {
         let r = panel_rect();
-        let slide = RISE * (1.0 - appear);
-        let p = Painter::root().alpha(appear).translate(0.0, slide);
-        plx_ui::widgets::panel_ground(p, r, theme::ALERT_PANEL_RAD, field);
+        let p = sheet_painter(appear);
+        plx_ui::widgets::panel_ground(p, r, theme::ALERT_PANEL_RAD, field, plx_ui::widgets::Ground::Sheet);
 
         // ---- header ------------------------------------------------------------------------------
         let cx = r.x + PAD;
         let cw = PANEL_W - 2.0 * PAD;
-        let mut y = r.y + PAD;
-        let eyebrow = plx_platform::i18n::msg::widgets_tracks_heading_c();
+        let hd = header(r.y + PAD);
+        let eyebrow = plx_os::i18n::msg::widgets_tracks_heading_c();
         Label::new(eyebrow.as_ptr(), theme::size::CAPTION, theme::TEXT_TERTIARY).h(theme::alert::TEXT_ALIGN)
             .bold()
             .v(VAlign::CapTop)
-            .draw(p, Rect::new(cx, y, cw, theme::alert::EYEBROW_LEAD));
-        y += theme::alert::EYEBROW_LEAD + GAP_EYEBROW_TITLE;
+            .draw(p, Rect::new(cx, hd.head.eyebrow.y, cw, hd.head.eyebrow.h));
         if let Ok(cs) = CString::new(plx_gfx::text::elide_by(&d.title, cw, false, |t| {
             measure.width_str(t, theme::size::TITLE, true)
         })) {
             Label::new(cs.as_ptr(), theme::size::TITLE, theme::TEXT_PRIMARY).h(theme::alert::TEXT_ALIGN)
                 .bold()
                 .v(VAlign::CapTop)
-                .draw(p, Rect::new(cx, y, cw, TITLE_H));
+                .draw(p, Rect::new(cx, hd.head.title.y, cw, hd.head.title.h));
         }
-        y += TITLE_H + theme::alert::GAP_TITLE_SUB;
         // the server's own path for the part. One line, ellipsised, micro, tertiary — it is the
         // panel's subject, not its content, and it can be arbitrarily long.
-        if !d.file.is_empty() {
+        if let Some(path) = hd.head.sub.filter(|_| !d.file.is_empty()) {
             if let Ok(cs) = CString::new(plx_gfx::text::elide_by(&d.file, cw, false, |t| {
                 measure.width_str(t, theme::size::MICRO, false)
             })) {
                 Label::new(cs.as_ptr(), theme::size::MICRO, theme::TEXT_TERTIARY).h(theme::alert::TEXT_ALIGN)
                     .v(VAlign::CapTop)
-                    .draw(p, Rect::new(cx, y, cw, PATH_H));
+                    .draw(p, Rect::new(cx, path.y, cw, path.h));
             }
         }
-        y += PATH_H + GAP_PATH_RULE;
-        rule(p, cx, y, cw);
+        rule(p, cx, hd.rule, cw);
 
         // ---- body --------------------------------------------------------------------------------
         let band = body_rect();
@@ -1058,34 +1124,17 @@ impl TracksPanelScreen {
         );
 
         // ---- footer ------------------------------------------------------------------------------
-        let fy = r.y + PANEL_H - plx_ui::widgets::KeyHint::pad_below() - FOOTER_H;
-        rule(p, cx, fy - theme::space::MD - widgets::HAIRLINE_H, cw);
+        let foot = footer();
+        let fy = foot.top;
+        rule(p, cx, foot.rule, cw);
         let cy = fy + FOOTER_H * 0.5;
-        // left: the two chevrons + "to scroll". Marks, not controls — there is nothing to focus, so
-        // they are drawn at their natural size with no frame (the Library A–Z rail's idiom).
-        const GLYPH: f32 = 22.0;
-        let mut gx = cx;
-        for icon in [Icon::ChevronUp, Icon::ChevronDown] {
-            plx_ui::icons::draw(
-                p,
-                icon,
-                Rect::new(gx, cy - GLYPH * 0.5, GLYPH, GLYPH),
-                theme::TEXT_TERTIARY,
-            );
-            gx += GLYPH + theme::space::XS + 4.0;
-        }
-        // The design's `gap:12` applies between EVERY item in this run, the label included — the loop
-        // above already advances by 12, so the label takes the pen where it is rather than adding a
-        // second nudge of its own (which is what made this one gap 16 while its neighbour was 12).
-        let hint = plx_platform::i18n::msg::widgets_hint_scroll_c();
-        Label::new(hint.as_ptr(), theme::size::CAPTION, theme::TEXT_TERTIARY)
-            .draw(p, Rect::new(gx, fy, cw, FOOTER_H));
+        draw_scroll_hint(p, cx, cy, fy, cw);
         // right: Press [BACK] to return, RIGHT-aligned on the padding edge. The shared
         // `widgets::KeyHint` places by x and each caller solves its own alignment, so a right edge is
         // `right - width()`. (This was a local `key_cap_hint` that built its cap out of `keyline_chip`
         // — which HUGS its label's cap band, where the design's KeyCap is a fixed 82x36 with a MICRO
         // bold label. The shared cap is the fixed band, so the panels all draw one object.)
-        let back_hint = plx_ui::widgets::KeyHint::translated(plx_platform::i18n::msg::widgets_hint_return("\u{fffc}"), c"BACK");
+        let back_hint = plx_ui::widgets::KeyHint::translated(plx_os::i18n::msg::widgets_hint_return("\u{fffc}"), c"BACK");
         back_hint.draw(p, cx + cw - back_hint.width(measure), cy, measure);
     }
 }
@@ -1215,6 +1264,15 @@ impl<H: crate::registry::AppLike> plx_ui::screen::Focusable<H> for TracksPanelSc
             elem: 0,
         }
     }
+    /// The one element is the sheet's paged body: `body`.
+    fn a11y(&self, key: &u32, _cx: &plx_machine::machine::Cx<'_, H>) -> Option<plx_ui::a11y::A11y<'_>> {
+        (*key == 0).then(|| plx_ui::a11y::A11y::new(plx_ui::a11y::A11yPath::new().name("body"), plx_ui::a11y::Role::Text))
+    }
+    fn a11y_elems(&self, g: plx_machine::machine::GroupId, _cx: &plx_machine::machine::Cx<'_, H>, out: &mut Vec<u32>) {
+        if g == plx_machine::machine::GroupId(0) {
+            out.push(0);
+        }
+    }
 }
 
 impl plx_machine::machine::LogicalState for TracksPanelScreen {
@@ -1246,7 +1304,7 @@ impl<H: crate::registry::AppLike + crate::registry::MetadataLike> plx_ui::screen
     ///
     /// **The ordering this replaces was load-bearing and is now the container's** (§16.3): the
     /// panel's ground once sampled the framebuffer (`Glass::CACHED`), so the dim had to be down
-    /// before the backdrop was taken; the ground is the latched underlay field now, latched at the
+    /// before the backdrop was taken; the ground is the latched underlay field (a sheet is never glass; DS6 glass is for menus), latched at the
     /// head of the dims from the undimmed page. `ModalStack::draw_scrims` draws it at the end of the PAGE pass — strictly
     /// earlier than the surface pass this `draw` runs in — and multiplies by the appear spring and
     /// by `nav::page_alpha`, which is `Popover::scrim`'s own arithmetic and one factor more than
@@ -1299,9 +1357,41 @@ fn rule(p: Painter, x: f32, y: f32, w: f32) {
 /// spring; this is only the distance it drives.
 const RISE: f32 = Popover::RISE;
 
+/// The painter every frame of the sheet draws through: the appear fade and the rise.
+fn sheet_painter(appear: f32) -> Painter {
+    Painter::root().alpha(appear).translate(0.0, RISE * (1.0 - appear))
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Q6, painted: the footer's chevrons stand by their INK, so the gap the eye reads (ink to ink, and
+    /// the last ink to the label) is the token, not the token plus the empty margin of the 22 px box.
+    /// The footer is PAINTED through a recording painter and read back off the glyph and run census.
+    #[test]
+    fn the_painted_scroll_hint_footer_keeps_one_visible_gap_between_chevron_inks_and_label() {
+        let _g = plx_base::testlock::serial();
+        let mut runs = Vec::new();
+        let icons = plx_ui::draw_census::capture_icons(|| {
+            runs = plx_ui::draw_census::capture_runs(|| {
+                draw_scroll_hint(Painter::recording(), 100.0, 300.0, 280.0, 600.0);
+            });
+        });
+        let label = runs.iter().find(|r| r.text == plx_os::i18n::msg::widgets_hint_scroll_c().to_str().unwrap()).expect("the label is painted");
+        assert_eq!((label.size, label.ink), (theme::size::CAPTION, theme::TEXT_TERTIARY));
+        let ink = |icon: Icon| {
+            let (_, r) = icons.iter().find(|(i, _)| *i == icon).unwrap_or_else(|| panic!("{icon:?} is painted"));
+            assert_eq!((r.w, r.h), (FOOTER_GLYPH, FOOTER_GLYPH));
+            assert!((r.y + r.h * 0.5 - 300.0).abs() < 0.01, "centred on the footer band");
+            let (l, rt) = plx_ui::icons::ink_x(icon);
+            (r.x + l * r.w, r.x + rt * r.w)
+        };
+        let (up, down) = (ink(Icon::ChevronUp), ink(Icon::ChevronDown));
+        assert!((up.0 - 100.0).abs() < 0.5, "the run starts at the first ink: {}", up.0);
+        assert!((down.0 - up.1 - FOOTER_SCROLL_GAP).abs() < 0.5, "chevron to chevron: {}", down.0 - up.1);
+        assert!((label.at.x - down.1 - FOOTER_SCROLL_GAP).abs() < 0.5, "chevron to label: {}", label.at.x - down.1);
+    }
 
     fn audio(lang: &str, codec: &str, layout: &str, ch: i64, kbps: i64) -> Stream {
         Stream {
@@ -1892,6 +1982,7 @@ mod tests {
             measure: &plx_ui::fixture::FixtureMeasure,
             focus: FocusRead { current: focus, ..Default::default() },
             press: PressRead::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             owner: InputOwner::Entry(EntryId(9)),
         }
     }
@@ -1917,6 +2008,25 @@ mod tests {
             <TracksPanelScreen as plx_ui::screen::Screen<HostFixture>>::hit_source(&p),
             plx_ui::screen::HitSource::Engine
         );
+    }
+
+    /// The *Track information* sheet, run through the id conformance (`AppArg::TracksPanel`; the
+    /// coverage table calls this).
+    pub(crate) fn tracks_panel_conforms() -> plx_ui::a11y::Namespaces {
+        vec![plx_ui::a11y::conform::<HostFixture, _>(&panel(EntryId(3)), &fixture_cx(None))]
+    }
+
+    /// The one element has an id, and the id finds it again: `tracks.body` (the namespace is the
+    /// host's; the screen answers `body`).
+    #[test]
+    fn the_one_element_answers_an_id() {
+        let p = panel(EntryId(3));
+        let cx = fixture_cx(None);
+        plx_ui::a11y::conform::<HostFixture, _>(&p, &cx);
+        let body = plx_ui::a11y::A11yPath::parse_relative("body").expect("a well-formed path");
+        assert_eq!(Focusable::<HostFixture>::a11y_find(&p, &body, &cx), Some(0));
+        let elsewhere = plx_ui::a11y::A11yPath::parse_relative("page.1").expect("a well-formed path");
+        assert_eq!(Focusable::<HostFixture>::a11y_find(&p, &elsewhere, &cx), None);
     }
 
     /// **The Focusable contract is exactly one stationary element.** `groups` answers a single
@@ -2020,5 +2130,39 @@ mod tests {
         }
         assert_eq!(p.page, 2, "DOWN pages the body, still inside the screen's own step");
         assert!(buf.is_empty(), "paging is not a navigation effect");
+    }
+
+    /// The header is ONE ladder: each rung stands the alert token under the one above, the rule stands
+    /// `GAP_PATH_RULE` under the (always reserved) path band, and the body viewport opens under the
+    /// rule, whether the file has a path or not.
+    #[test]
+    fn the_header_ladder_stands_each_rung_its_token_under_the_last() {
+        let h = header(100.0);
+        let sub = h.head.sub.expect("the path band is reserved");
+        assert_eq!(h.head.eyebrow.y, 100.0);
+        assert_eq!(h.head.title.y - (h.head.eyebrow.y + h.head.eyebrow.h), theme::alert::GAP_EYEBROW_TITLE);
+        assert_eq!(sub.y - (h.head.title.y + h.head.title.h), theme::alert::GAP_TITLE_SUB);
+        assert_eq!((sub.h, h.head.title.h), (PATH_H, theme::alert::TITLE_LEAD));
+        assert_eq!(h.rule - (sub.y + sub.h), GAP_PATH_RULE);
+        let r = header(panel_rect().y + PAD);
+        assert_eq!(body_rect().y, r.rule + widgets::HAIRLINE_H + GAP_RULE_BODY);
+        assert_eq!(r.body_top, r.rule + widgets::HAIRLINE_H + GAP_RULE_BODY);
+    }
+
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    /// The footer stack is the old hand sums, to the bit.
+    #[test]
+    fn the_footer_stack_is_the_old_sums_to_the_bit() {
+        let (r, f) = (panel_rect(), footer());
+        let fy = r.y + PANEL_H - plx_ui::widgets::KeyHint::pad_below() - FOOTER_H;
+        assert_eq!(f.top, fy);
+        assert_eq!(f.rule, fy - theme::space::MD - widgets::HAIRLINE_H);
+        assert_eq!(f.body_bottom, fy - theme::space::MD - widgets::HAIRLINE_H - theme::space::MD);
+        assert_eq!(body_rect().y + body_rect().h, f.body_bottom);
     }
 }

@@ -80,12 +80,16 @@ state. Close other WSL work, run `wsl.exe --shutdown`, and retry; accept the run
 `use_gfxredir = 1`.
 
 **Ask for `SIM_W=1920 SIM_H=1080` on any shot you intend to JUDGE.** The window is otherwise sized
-to fit the display (`app::boot::desktop_window_size`), and on a 1x screen that divisor lands on 2, so
+to fit the display (`plx_shell_sdl::window::plan_desktop_window`), and on a 1x screen that divisor lands on 2, so
 every screenshot comes back 960x540 — half the canvas the UI is authored at. A 1px edge-sheen, a
 hairline, a snapped glyph and a specular rim are exactly the things that do not survive that
-halving, which makes a shot at the default size evidence about layout and nothing else. The window
-may then be larger than the display; for a headless grab that is fine, because the drawable is the
-window's own framebuffer, not the part of it a compositor happens to show.
+halving, which makes a shot at the default size evidence about layout and nothing else. The size is
+the DRAWABLE, in pixels, on any display: the simulator measures the display's pixel density from
+its window and sizes the window in points for it, so a Retina Mac opens a 960x540-point window for
+the 1920x1080 drawable (`surface: window=960x540 drawable=1920x1080 … scale=1.000`), never a
+3840x2160 one. The window may then be larger than the display on a 1x screen; for a headless grab
+that is fine, because the drawable is the window's own framebuffer, not the part of it a
+compositor happens to show.
 
 ```sh
 make sim-macos-shot SIM_DIR=$D SIM_W=1920 SIM_H=1080 SIM_SHOT=$D/home.png
@@ -140,9 +144,9 @@ Three things, and notably no webOS NDK and no nightly:
    still needs them installed. The simulator also loads the bundled ASS renderer from its staged
    resources. Build on the machine rather than copying: `build.rs` asks `brew --prefix`, so it is
    also correct on an Intel Mac where Homebrew lives at `/usr/local`.
-2. **rustup + stable.** Not nightly. `rust-modules/.cargo/config.toml` carries `[unstable]
-   build-std`, which looks like it forces nightly, but that table is gated and stable cargo ignores
-   it — it only applies to the ARM cross-build, which passes `cargo +nightly` explicitly.
+2. **rustup + the pinned stable toolchain** (`rust-modules/rust-toolchain.toml`; `make setup-rust`).
+   No nightly: the ARM cross-build runs on the same stable release (prebuilt armv7 std, no
+   `-Z build-std`), and `rust-modules/.cargo/config.toml` no longer has an `[unstable]` table.
 3. `src/config.local.h` for the PMS host and token. Gitignored, so a fresh clone has none: pass
    `SIM_PMS=<ip>` and write the token into `$SIM_DIR/plxnative-token` by hand.
 
@@ -162,6 +166,34 @@ make sim-macos-shot SIM_DIR=$SIM_DIR
 
 Stale triggers change which screen you boot to, silently — same trap as on the device. `make
 sim-clean SIM_DIR=…` resets a root.
+
+### A simulator run against `tests/mock_pms.py` must arm the Discover stand-in
+
+A person page reads its biography and filmography from the plex.tv metadata provider, not from the
+PMS. The mock serves those two reads (`GET /library/people/{tagKey}` and `.../credits`) on the same
+listener as everything else, but the app only asks it when told where Discover lives:
+
+```sh
+echo "http://127.0.0.1:$MOCK_PORT" > $SIM_DIR/plxnative-discover     # the mock's own port
+```
+
+(`plxnative-plextv=http://127.0.0.1:$MOCK_PORT`, which the QR sign-in flow needs anyway, is followed by
+Discover too.) A `plxnative-token` boot has no account token, so with the stand-in armed the biography
+arrives (synthetic prose, or just the name for a demo-library actor) while the credits answer `401`
+exactly as the real provider does, and the Filmography stays empty unless `plxnative-personcredits`
+seeds it.
+
+**Decision: a `plxnative-token` boot with neither stand-in armed does NOT fall through to
+`discover.provider.plex.tv`; the app refuses both person reads locally and does not ask again.** The
+cost is accepted: such a boot (`--guest`, `--guest --mock`, `tests/run.py --mock`, a real-PMS
+`--guest` scene) shows no biography and no filmography credits, and the page settles as it does for a
+person the provider has never heard of. To see them, arm the stand-in. The event log says so once
+(`discover: GET discover.provider.plex.tv/library/people/{id} refused`, and `discover: base=real
+reads=refused` at boot). **Before opening a person page, read the boot line**: `discover:
+base=stand-in reads=open` (or `base=real reads=refused`) means nothing reaches the real provider;
+`base=real reads=open` means a stored or interactive session that WILL, so do not open the page.
+`tools/screenshots.py`, `tools/site_video.py` and `tools/watchlist_captures.py` arm both triggers and
+fail the run unless the boot logged `discover: base=stand-in` (`mock_pms.discover_stand_in_problem`).
 
 ## Drive it, then screenshot
 
@@ -188,6 +220,33 @@ nobody opens has verified nothing.
 Tokens: `up`/`down`/`left`/`right`, `ok`, `back`, `play`/`pause`/`stop`, `ck:X,Y` (clicks in
 authored 1920×1080 coords), `okdown`/`okup` (split halves — the only way to drive a press-and-hold
 past `press::LONG_MS`), and `shot` (simulator only).
+
+**Reach a target by id, not by walking to it.** A debug (`devtriggers`) build also takes
+`focus:<id>`, `press:<id>` (focus, then an ordinary OK) and `press:<id>@<subject>` (refuses and
+presses nothing when the element the id NAMES carries another subject than the one given), plus
+`state:<nonce>`, which writes `plxnative-a11y.json` in the runtime dir (route, owner, the focused full
+id, every element's id, role, rect, `visible`, `loaded`, label and subject) with the nonce echoed back.
+An id is a place-based dot path (`nav.watchlist`, `watchlist.grid.card.7`, `detail.hero.play`) in the
+namespace of whoever OWNS input, so inside a menu it is the menu's (`itemmenu.watchlist_remove`); a
+refusal presses nothing and logs `a11y: refused <act> <id> <reason> owner=<ns>` (`unloaded` is not
+an error: the element is not pressable yet, a card whose item has not landed or Home's focused element while its picture
+lags a key across the hero/grid door, so press again once the screen has settled). `tools/a11y.py` writes
+the tokens (`focus`, `press`) and reads the answer (`expect_focus`). Prefer these over key walks; a walk
+stays where the test's subject IS the travel (fps walks, focus fingerprints, a held key).
+
+The simulator boots against the owner's real server unless you aim it at the mock, and OK on a title
+can play it, so the command line refuses to press one UNNAMED: `python3 tools/a11y.py press <runtime>
+<id>` WITHOUT `--subject <ratingKey>` (and `send press:<id>` without an `@<subject>`) exits 2 and sends
+nothing when the id is of an element that ACTS ON a title it names (it plays, restarts, finishes or retries it,
+marks it watched or unwatched, bookmarks it, acts on the title a menu was opened for, or opens that title's own page
+or menu where the title can change under the press: a card, a credit, the Home carousel's Info, a hero button, an
+item-menu row, a Play Version row, a player control that starts a title; only a control whose target the page fixes
+stays bare). `SUBJECT_BEARING` in `tools/a11y.py` is the one list of those ids, and the key to name is the ratingKey
+of the title the press acts on, which `state` prints as the element's subject. Read the ratingKey from `state`
+first. The library functions `a11y.press` / `press_token` stay unguarded, for a script that drives the mock (a
+script that imports them against a real server has no check). `a11y.py
+send` writes ONE token: a word with whitespace in it (`send "back press:<card>"`) exits 2 and sends
+nothing, because the app cuts a FIFO line at any whitespace and the second token would skip that guard.
 
 A desktop keyboard also works directly in `make sim-macos-run`: arrows, RETURN, ESC (`is_ok`/`is_back`
 have always accepted keyboard keys), plus space=pause, `p`=play, `s`=stop, backspace=BACK.
@@ -216,7 +275,7 @@ sign-in may legitimately have advanced by the time the app is foregrounded again
 ## Documentation screenshots
 
 `make screenshots` regenerates every image under `docs/screenshots/`, and the website's close-up
-stills and link-preview card under `site/media/`, from a committed scene manifest, against the
+stills (the Features "look" panels use `closeup-glass` and `closeup-tiles`) and link-preview card under `site/media/`, from a committed scene manifest, against the
 mock server's demo library — no Plex account, no television, no gitignored file:
 
 ```sh
@@ -249,16 +308,19 @@ make screenshots SHOT_HERO_VARIANTS=1 # also home-hero-<film>.jpg for each hero 
   must agree within the scene's `max_delta`, the first capture is adopted. `python3 tools/site_stills.py files`
   lists them; `files --manual` is empty today (only the TV photograph `navblur-transition.jpg` is by hand). A Mac
   render is a preview of what the bot commits (the two differ by renderer noise, not by content).
-- **The site's copies follow the render.** After re-rendering the `site-*` scenes, run
+- **The site's copies follow the render.** (The page shows the `closeup-glass` and `closeup-tiles` stills in its Features look panels, so a re-render changes live site imagery; the `closeup-player` set and the narrow glass cut are unused by the page (phones crop the wide glass still), still produced and staged.) After re-rendering the `site-*` scenes, run
   `python3 tools/render-site-variants.py` (the WebP of every close-up and the phone copies of
   tiles and player) and then `python3 tools/render-site-glows.py`; both read the rendered JPEGs.
 - **Screenshot triggers worth knowing.** `grid=<row>,<col>` (Home), `libgrid=<row>,<col>` (the
-  library's All grid), `libshelf=<shelf>,<col>` (a library shelf; the view scrolls to it),
-  `libtype=<movies|shows|seasons|episodes|collections>` (the All grid's TYPE menu value, applied
-  before `libgrid`/`libshelf`/`libmenu` act), `libmenu=<sort|filter|type>,<ms>`, and under `hostsim` `clockstop=<ms>`: the clock sink's clock stops at that
+  library's poster grid), `libshelf=<shelf>,<col>` (a shelf on the Recommended page only, so arm
+  `libtype=recommended` first; the view scrolls to it),
+  `libtype=<movies|shows|seasons|episodes|collections|recommended>` (the first four set the Show-menu
+  type of the page's grid; `collections` and `recommended` press the header control that opens that
+  page; applied before `libgrid`/`libshelf`/`libmenu` act), `libmenu=<sortfilter|sort|filter|type>,<ms>`, and under `hostsim` `clockstop=<ms>`: the clock sink's clock stops at that
   position while the player stays PLAYING (Up Next only shows while playing; `autopause` would
-  take it down). The settled capture waits for every armed seat, menu and clock stop to land, so
-  a scene that seeks does not rest before it. `stillclock` also holds the Up Next countdown.
+  take it down). The settled capture waits for every armed seat, menu, clock stop and
+  `autopause` pause to land, so a scene that seeks does not rest before it (a busy host can leave a
+  loading player still for longer than the capture's quiet). `stillclock` also holds the Up Next countdown.
 - **The capture is the app's, once the screen is at rest.** `PLXNATIVE_SHOT_SETTLE=<ms>` makes the
   simulator write one PNG after the screen has not changed for that long (and not before
   `PLXNATIVE_SHOT_AFTER`), then exit with `PLXNATIVE_SHOT_EXIT=1`. The driver waits on that
@@ -316,15 +378,22 @@ Report these ONLY from the device, via the **`tv-session`** skill (and `wake-tv`
   `loop=` from a simulator as evidence about performance.
 - **Text rasterization truth.** Different FreeType, so stem/bar weight, hinting and the
   `theme::size` ladder stay device questions — `tools/font-hint-audit.py` and a device capture.
+  Arabic and Hebrew runs are the exception for shape and order: libass-plx draws them with the same
+  pinned FreeType and HarfBuzz in the simulator and on the TV, and `make check-ass` checks their ink.
   The window is no longer at an arbitrary fitted scale (`scale≈0.86` was the old fitted size): it
   opens at an exact divisor of the 1920x1080 canvas and is not resizable, so on a Retina display
-  the drawable is 1920x1080 and `scale` is exactly 1.0. Check the `surface:` line — it prints the
-  drawable and the scale, and a 0.5 there means glyphs are downscaled and softer by construction.
+  the drawable is 1920x1080 and `scale` is exactly 1.0 — whatever the display's size and with or
+  without `SIM_W`/`SIM_H`, since the window is sized in points from the density it measures. Check
+  the `surface:` line — it prints the drawable and the scale, and a 0.5 there means glyphs are
+  downscaled and softer by construction (a 2.0 would be a drawable larger than the canvas, which the
+  render-set ceiling in a debug build refuses by panicking).
 - **Anything about LG's DECODER** — resource-allocation refusals, the Load payload's Dolby
   declaration, `SOUND_ERROR_019`, frame pacing, which codecs the panel takes. The 29-symbol
-  Starfish/ACB seam does not exist off-device, so by default `player::ffi`'s host arm reports the
-  seam's own "no video path" failure and pressing Play lands on the app's real failure read-out —
-  correct behaviour, not a bug, and a convenient way to look at that screen.
+  Starfish/ACB seam does not exist off-device, so by default the simulator's stand-in
+  (`plx_play_feed::ffi_host::HostSink`; a simulator built without `play-feed` installs `NoSink`,
+  see `ci/test_sim_backend.py`) reports the seam's own "no video path" failure and pressing Play
+  lands on the app's real failure read-out — correct behaviour, not a bug, and a convenient way to
+  look at that screen.
 - ~~**Anything about video.**~~ **Narrowed twice, and the second time is recent.** Arm
   **`plxnative-clocksink`** in the instance root and the seam becomes a plant: access units are
   accepted and discarded and a presentation clock advances at real time, clamped to the last fed
@@ -371,21 +440,23 @@ device-verified" is a useful, honest status. "Verified" without a TV is not.
   needs Screen Recording permission — a GUI prompt that silently yields black frames headlessly —
   and it grabs whatever is actually on screen, so an occluded window or two parallel simulators
   corrupt it. The in-app shot needs no permission, works occluded, and is deterministic.
-- The window is not 1:1. `surface::probe` letterboxes 1920×1080 into whatever the drawable is, so
-  shots come out at the viewport size (e.g. 1650×928). Fine for layout, wrong for pixel work.
+- The window is 1:1 only where the display can give a 1920x1080 drawable: a Retina Mac always does,
+  and `SIM_W=1920 SIM_H=1080` asks for it anywhere. A fitted window on a 1x screen is a whole fraction
+  of the canvas (960x540, `scale` 0.5) and `surface::probe` letterboxes 1920×1080 into it, so shots
+  come out at the viewport size — fine for layout, wrong for pixel work. Read the `surface:` line.
 - Without `plxnative-clocksink` there is no `player` route to screenshot beyond the failure
   read-out and the HUD's busy states. With it there is a real one, driven by a real stream — but
   the video PLANE is empty, because the app decodes nothing and the wayland overlay is webOS-only:
   the HUD sits over black. Arm `plxnative-simvideo` as well and a system `ffmpeg` child decodes
-  the stream the clock sink accepts and composites it UNDER the UI (`player/sim_video.rs`). That
+  the stream the clock sink accepts and composites it UNDER the UI (`src/app/adapters/hostsim/sim_video.rs`). That
   is a screenshot facility for the documentation's player figure; it says nothing about LG's
   decoder, the video plane or picture timing on the television.
 
 ## The frame dump (the demo video's renderer)
 
 `make site-video-sim` builds the simulator for the demo-video pipeline (`--no-default-features
---features hostsim,devtriggers,placeholder-sentinel`, release, its own target dir, libass only), and
-`python3 tools/site_video.py render --out DIR --storyboard` plays `tests/video/feel.json` (positions and durations, compiled to the driver's key schedule: Home hero, hero paged to the second page and back, down to the Continue Watching shelf, the third card's Detail opened with OK and held about 4 s, back, the Movies library, back to Home, about 27 s; no scrolling on Detail, no modal; shot with the hold hint taught, so card rests and the card OK are not capped: `render --storyboard` sets the `plxnative-hintoff` trigger (`devtriggers` builds only; it calls `hold_hint::teach_all_for_dev`, once, at boot) because the capsule is a one-time teaching overlay and a film has no viewer to teach) and records its sha256, `--extra-holds`, `--trigger`, how far each beat still moved at its end (`storyboard.rest`) and which titles it opened and `hold_hint: suppressed` in `render.json`. Before the film boots the launcher signs the simulator in to the mock's Demo account through the app's own QR sign-in (a prep boot with the `plxnative-login` trigger), because `up` from the hero always lands on the profile chip and an account-less session would read "Sign in" there. A pushed page is filmed LIVE under the dip, never as a held image (`plx_gfx::dump`'s one page rule: every dip frame re-captures the page, `PageImage::step_filmed`), so a page that mounts hidden and fades in (an `Xfade` mount, the Library's) fades in as it does in the product, with its entrance springs playing, and nothing cuts when the dip ends. Either way `render` runs the simulator headless against the mock catalog (without `--storyboard` it holds Home for `--frames`, 180 by default) and leaves
+--features hostsim,play-feed,devtriggers,placeholder-sentinel`, release, its own target dir, libass only), and
+`python3 tools/site_video.py render --out DIR --storyboard` plays `tests/video/feel.json` (positions and durations, compiled to the driver's key schedule: Home hero, hero paged to the second page and back, down to the Continue Watching shelf, the third card's Detail opened with OK and scrolled with five downs past its Cast & Crew row to the About section, back, the Movies library walked down with arrows only to its All poster grid and across it, walked back up and left with one back, about 30 s; nothing opened from Detail, no modal; shot with the hold hint taught, so card rests and the card OK are not capped: `render --storyboard` sets the `plxnative-hintoff` trigger (`devtriggers` builds only; it calls `hold_hint::teach_all_for_dev`, once, at boot) because the capsule is a one-time teaching overlay and a film has no viewer to teach) and records its sha256, `--extra-holds`, `--trigger`, how far each beat still moved at its end (`storyboard.rest`) and which titles it opened and `hold_hint: suppressed` in `render.json`. Before the film boots the launcher signs the simulator in to the mock's Demo account through the app's own QR sign-in (a prep boot with the `plxnative-login` trigger), so the profile chip, one `left` from the Home pill that `up` from the hero lands on, reads "Demo" and never "Sign in" should a beat press `left` there. A pushed page is filmed LIVE under the dip, never as a held image (`plx_gfx::dump`'s one page rule: every dip frame re-captures the page, `PageImage::step_filmed`), so a page that mounts hidden and fades in (an `Xfade` mount, the Library's) fades in as it does in the product, with its entrance springs playing, and nothing cuts when the dip ends. Either way `render` runs the simulator headless against the mock catalog (without `--storyboard` it holds Home for `--frames`, 180 by default) and leaves
 `master.mkv`, `frames.tsv`, `dump.json` and `render.json`. The simulator side is
 `rust-modules/src/dev/framedump.rs`, armed by `PLXNATIVE_DUMP=<dir>` (its module doc lists the
 variables). It drives the app from VIRTUAL time (`clock::set_replay`, 60 fps), forces a present every

@@ -8,7 +8,7 @@ description: >
   "audit the docs against this diff", "what does this change make stale", "I renamed X, what says
   the old name", or a review turns up a doc that contradicts the code. Takes a diff (or derives
   one), greps the prose surfaces that actually exist here — AGENTS.md,
-  docs/agent-reference.md, the three nested module guides, the READMEs, the notes under docs/,
+  docs/agent-reference.md, the nested module guides, the READMEs, the notes under docs/,
   the skills, and the `//!` module doc on every Rust file —
   and reports contradictions ONLY. NOT for writing or extending documentation, and not for
   "consider documenting X": a doc that fails to mention your new thing is out of scope by
@@ -29,7 +29,7 @@ down in the past tense. Go and read them; they are all still in `docs/agent-refe
   the same batch that documented it." docs/agent-reference.md now **refuses to state a count at all** and opens
   with "Treat every test COUNT in this section as already wrong, including the one in this
   sentence," handing the reader
-  `cd rust-modules && cargo +nightly test --lib -- --list | grep -c ': test'` instead. `ci.yml`'s
+  `cd rust-modules && cargo +$(make -s print-rust-toolchain) test --lib -- --list | grep -c ': test'` instead. `ci.yml`'s
   *Report suite size* step does the same thing for the same stated reason — it **prints** the
   number into the run summary rather than asserting it, because "the count is a fact the suite can
   produce about itself."
@@ -94,8 +94,10 @@ Ranked by blast radius, which is also the order to report findings in:
 
 1. **`AGENTS.md`** (root). Loaded into every Codex session and imported by Claude, so a false claim
    here is repeated to every agent. A finding here outranks the identical finding anywhere else.
-2. **`docs/agent-reference.md` and the three nested `docs/agent-reference.md` guides** under
-   `rust-modules/ui/src/`, `rust-modules/plex/src/plex/`, and `rust-modules/media/src/player/`. The long-form
+2. **`docs/agent-reference.md` and the nested module guides**: a `CLAUDE.md` under
+   `rust-modules/ui/src/`, `rust-modules/screens/src/`, `rust-modules/plex/src/plex/` and
+   `rust-modules/media/src/player/`, and `rust-modules/data/src/AGENTS.md` (its `CLAUDE.md` imports it
+   and `docs/sans-io-guide.md`). The long-form
    reference is imported by Claude and routed from `AGENTS.md`; each nested guide is the "read this
    before touching X" file for its directory,
    and the root file delegates whole subjects to them (the Starfish/ACB ABI and bind-order rules
@@ -201,8 +203,8 @@ however long you look at it. Verify the code side yourself: open the file, run `
 symbol, run the counting command. Do not infer a claim is false from the diff alone; a rename with
 a `pub use` alias left behind keeps the old name true.
 
-Host-only verification is free and you should use it: `cd rust-modules && cargo +nightly check`,
-`cargo +nightly test --lib -- --list`, `make -s print-flavor print-appid print-rundir`,
+Host-only verification is free and you should use it: `cd rust-modules && cargo +$(make -s print-rust-toolchain) check`,
+`cargo +$(make -s print-rust-toolchain) test --lib -- --list`, `make -s print-flavor print-appid print-rundir`,
 `make check`. **Never anything that reaches the television** — a `PreToolUse` hook refuses it,
 there is one physical set shared with other work, and no finding here needs a device.
 

@@ -4,12 +4,14 @@
 //! `acct`, `detail`, `search`, `library`, `play`…), never through a key walk.
 //!
 //! Each arm here drives the SAME command path a user's key does (`LibraryCmd::FocusGrid` reseats
-//! focus the way the grid's own navigation does; `LibraryCmd::OpenMenu` is OK on the toolbar
-//! chip), and each logs one line when its state is REACHED rather than when it was asked for, so
+//! focus the way the grid's own navigation does; `LibraryCmd::OpenMenu` is OK on the header's
+//! Sort & Filter control), and each logs one line when its state is REACHED rather than when it was asked for, so
 //! the driver can verify from the event log that the picture it captured is the one the manifest
-//! named. `libtype` chooses the listing (the TYPE menu's value) the others then act on. Every arm
-//! gives up after [`CEILING_MS`] with a log line of its own, so a scene whose data never arrives
-//! fails loudly instead of capturing the wrong screen.
+//! named. `libtype` chooses the listing the others then act on (the Show-menu type, or the
+//! Collections / Recommended page the header pushes). Every arm gives up with a log line of its
+//! own, so a scene whose data never arrives fails loudly instead of capturing the wrong screen: after
+//! [`CEILING_MS`], except the two that wait on playback, `clockstop` (`CLOCKSTOP_CEILING_MS`) and
+//! `autopause` (`AUTOPAUSE_CEILING_MS`), which wait up to a minute.
 //!
 //! Dev-only, like every arm in [`super`]: the reads go through `devtrig::read`, which is `None` at
 //! compile time without the `devtriggers` feature.
@@ -17,6 +19,7 @@
 use crate::app::run::Frame;
 use crate::app::App;
 use plx_data::browse::LibraryType;
+use plx_screens::library::Listing;
 use plx_screens::registry::{AppArg, LibraryCmd, LibraryMenuKind};
 
 /// How long an arm keeps retrying for its data before it gives up and says so.
@@ -38,6 +41,9 @@ pub(crate) struct ScreenshotArms {
     clockstop: Option<Option<u32>>,
     #[cfg(feature = "hostsim")]
     clockstop_reached: bool,
+    /// What `autopause` still owes the settled capture — see [`PauseDebt`].
+    #[cfg(feature = "hostsim")]
+    autopause: PauseDebt,
 }
 
 impl ScreenshotArms {
@@ -54,6 +60,79 @@ impl ScreenshotArms {
             || !self.libmenu_done
             || self.clockstop.is_none()
             || (matches!(self.clockstop, Some(Some(_))) && !self.clockstop_reached)
+            || self.autopause != PauseDebt::Paid
+    }
+}
+
+/// **What `autopause` still owes the settled capture: its Pause.**
+///
+/// The pause is the state a pause scene photographs (a `hold=` pause is photographed paused, so its
+/// Resume is not owed), and it cannot land early: the arm only arms itself six seconds into the
+/// run (`autopause_arm`), then waits for the playhead (`at=`). The capture's quiet is WALL clock
+/// (`shot::tick`: nothing changed for `PLXNATIVE_SHOT_SETTLE` ms), and a host that is slow to start
+/// playback satisfies it before the Pause: with the host busy the debug simulator runs a frame a
+/// second (`fps=1`) and a Play start stalls the main thread for seconds (`main-thread hang`), so
+/// the first tick after the stall finds the screen unchanged for longer than the quiet and
+/// captures the player still loading — `shot: settled (7866 ms at rest, 7866 ms after the first
+/// frame)`, no picture, no pause. So the capture waits on the debt, as it waits on a seat or a
+/// clock stop ([`ScreenshotArms::pending`]).
+///
+/// `Unread` is the trigger not read yet, which counts as owed, as an unread `clockstop` does: until
+/// the first frame has read it, nothing can say there is nothing to wait for.
+#[cfg(feature = "hostsim")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PauseDebt {
+    #[default]
+    Unread,
+    Owed,
+    Paid,
+}
+
+#[cfg(feature = "hostsim")]
+impl PauseDebt {
+    /// The debt after one frame. `armed` reads whether a trigger asks for a pause at all (called
+    /// once, while `Unread`); `edges_left` says the Pause has not landed (the arm is not armed yet,
+    /// or armed and waiting on the playhead); `expired` is the ceiling
+    /// ([`AUTOPAUSE_CEILING_MS`]), after which the arm stops holding the capture back so a scene
+    /// whose playhead never arrives fails on its `expect` lines, with the arm's own give-up line
+    /// in the log, instead of on the driver's timeout.
+    fn step(self, armed: impl FnOnce() -> bool, edges_left: bool, expired: bool) -> Self {
+        match self {
+            Self::Unread if armed() => Self::Owed,
+            Self::Unread => Self::Paid,
+            Self::Owed if !edges_left || expired => Self::Paid,
+            held => held,
+        }
+    }
+}
+
+/// How long `autopause` waits for its Pause, counted from the app's start. Far longer than
+/// [`CEILING_MS`], which is for a screen that is already there: the playhead this waits on is
+/// reached through a Load, an open and playback in real time from the resume point.
+#[cfg(feature = "hostsim")]
+const AUTOPAUSE_CEILING_MS: u32 = 60_000;
+
+/// Has `autopause`'s Pause not landed yet? True while the arm has not armed itself (`pause_tried`
+/// is its once-latch, set six seconds into the run on the Player route, whether or not a trigger
+/// asked for a pause) and while it is armed and waiting on its playhead (`script_armed`, the
+/// scheduled pause still in hand). Without the first clause the frames before the arm arms itself
+/// would read as "nothing left to wait for", which is the flake this debt exists to close.
+#[cfg(feature = "hostsim")]
+fn pause_edges_left(pause_tried: bool, script_armed: bool) -> bool {
+    !pause_tried || script_armed
+}
+
+/// Keep [`ScreenshotArms`]' `autopause` debt current. Called every frame by `each_frame`, ahead of
+/// the arms that act on the player. Simulator only, as the settled capture is.
+#[cfg(feature = "hostsim")]
+pub(crate) fn autopause_debt(app: &mut App, fr: &Frame) {
+    let sc = &mut app.scenarios;
+    let edges_left = pause_edges_left(sc.pause_tried, sc.pause_script.is_some());
+    let expired = fr.now.wrapping_sub(app.t0) > AUTOPAUSE_CEILING_MS;
+    let before = sc.shots.autopause;
+    sc.shots.autopause = before.step(|| crate::dev::pause_script().is_some(), edges_left, expired);
+    if before == PauseDebt::Owed && sc.shots.autopause == PauseDebt::Paid && edges_left {
+        plx_base::eventlog::log("autopause: gave up; the pause never landed");
     }
 }
 
@@ -86,14 +165,14 @@ pub(super) fn parse_cell(v: &str) -> Option<(usize, usize)> {
 /// accept a rest period, and hold the surface back until the page has stopped changing. The signal
 /// is `plx_machine::idle`'s change clock, which only the simulator keeps; on the television there is none,
 /// the wait is skipped, and the arm behaves exactly as it did before it took a value.
-pub(crate) fn at_rest(now: u32, rest: Option<u32>) -> bool {
+pub(crate) fn at_rest(now: u32, rest: Option<u32>, last_change_ms: u32, current_changed: bool) -> bool {
     #[cfg(feature = "hostsim")]
     {
-        rest.is_none_or(|ms| now.wrapping_sub(plx_machine::idle::last_change_ms()) >= ms)
+        rest.is_none_or(|ms| !current_changed && now.wrapping_sub(last_change_ms) >= ms)
     }
     #[cfg(not(feature = "hostsim"))]
     {
-        let _ = (now, rest);
+        let _ = (now, rest, last_change_ms, current_changed);
         true
     }
 }
@@ -111,21 +190,37 @@ fn due(sent: Option<u32>, now: u32) -> bool {
     sent.is_none_or(|at| now.wrapping_sub(at) >= RESEND_MS)
 }
 
-/// `"<name>"` → the TYPE menu value it names.
-fn parse_type(v: &str) -> Option<LibraryType> {
+/// What `plxnative-libtype` asks for: a Show-menu type of the page's own grid, or one of the two
+/// pages the header's controls push over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibTypeArm {
+    Type(LibraryType),
+    Page(Listing),
+}
+
+/// `"<name>"` → what it names.
+fn parse_type(v: &str) -> Option<LibTypeArm> {
     Some(match v.trim() {
-        "primary" | "movies" | "shows" => LibraryType::Primary,
-        "seasons" => LibraryType::Seasons,
-        "episodes" => LibraryType::Episodes,
-        "collections" => LibraryType::Collections,
+        "primary" | "movies" | "shows" => LibTypeArm::Type(LibraryType::Primary),
+        "seasons" => LibTypeArm::Type(LibraryType::Seasons),
+        "episodes" => LibTypeArm::Type(LibraryType::Episodes),
+        "collections" => LibTypeArm::Page(Listing::Collections),
+        "recommended" => LibTypeArm::Page(Listing::Recommended),
         _ => return None,
     })
 }
 
-/// `/tmp/plxnative-libtype=<movies|shows|seasons|episodes|collections>` — on the Library page,
-/// choose that TYPE menu value the way its row does, once the section's listing is there. Done
-/// when the page's committed listing REPORTS that type; `libgrid` and `libmenu` wait for it, so a
-/// seat or a menu lands on the listing this trigger asked for.
+/// The Library family of routes: the full grid and the two pages its header pushes over it.
+fn on_library_page(app: &App) -> bool {
+    app.route().is_library_family()
+}
+
+/// `/tmp/plxnative-libtype=<movies|shows|seasons|episodes|collections|recommended>` — on the
+/// Library page, choose that Show-menu type the way its row does, or (collections, recommended)
+/// press the header control that opens that page (the `library-collections` and
+/// `library-recommended` scenarios), once the section's listing is there. Done when the page's
+/// committed listing REPORTS that type, or the route is that page; `libgrid` and `libmenu` wait for
+/// it, so a seat or a menu lands on the listing this trigger asked for.
 pub(crate) fn libtype_arm(app: &mut App, fr: &Frame) {
     if app.scenarios.shots.libtype_done {
         return;
@@ -136,11 +231,16 @@ pub(crate) fn libtype_arm(app: &mut App, fr: &Frame) {
     };
     let Some(kind) = parse_type(&v) else {
         #[cfg(feature = "devtriggers")]
-        plx_base::eventlog::log(&format!("BADTRIGGER libtype {v:?}: expected movies, shows, seasons, episodes or collections"));
+        plx_base::eventlog::log(&format!("BADTRIGGER libtype {v:?}: expected movies, shows, seasons, episodes, collections or recommended"));
         app.scenarios.shots.libtype_done = true;
         return;
     };
-    if crate::app::bridge::Bridge::library_listed(&app.pages) == Some(kind) {
+    let reached = match kind {
+        LibTypeArm::Type(kind) => crate::app::bridge::Bridge::library_listed(&app.pages) == Some(kind),
+        LibTypeArm::Page(Listing::Collections) => matches!(app.route(), AppArg::LibraryCollections { .. }),
+        LibTypeArm::Page(_) => matches!(app.route(), AppArg::LibraryRecommended { .. }),
+    };
+    if reached {
         plx_base::eventlog::log(&format!("libtype: listing {}", v.trim()));
         app.scenarios.shots.libtype_done = true;
         return;
@@ -152,7 +252,11 @@ pub(crate) fn libtype_arm(app: &mut App, fr: &Frame) {
     }
     if matches!(app.route(), AppArg::Library) && due(app.scenarios.shots.libtype_sent, fr.now) {
         app.scenarios.shots.libtype_sent = Some(fr.now);
-        crate::app::bridge::Bridge::library_command(&mut app.pages, LibraryCmd::SetType(kind));
+        let command = match kind {
+            LibTypeArm::Type(kind) => LibraryCmd::SetType(kind),
+            LibTypeArm::Page(listing) => LibraryCmd::OpenListing(listing),
+        };
+        crate::app::bridge::Bridge::library_command(&mut app.pages, command);
     }
 }
 
@@ -162,7 +266,7 @@ pub(crate) fn libgrid_arm(app: &mut App, fr: &Frame) {
     if !app.scenarios.shots.libtype_done {
         return;
     }
-    let on_library = matches!(app.route(), AppArg::Library);
+    let on_library = on_library_page(app);
     let arm = &mut app.scenarios.shots.libgrid;
     let Some((row, col)) = arm.pending("libgrid", || plx_base::devtrig::read("libgrid"), "focus seated at row {0} col {1}",
         fr, app.t0, || crate::app::bridge::Bridge::library_grid_position(&app.pages)) else { return };
@@ -179,7 +283,7 @@ pub(crate) fn libshelf_arm(app: &mut App, fr: &Frame) {
     if !app.scenarios.shots.libtype_done {
         return;
     }
-    let on_library = matches!(app.route(), AppArg::Library);
+    let on_library = on_library_page(app);
     let arm = &mut app.scenarios.shots.libshelf;
     let Some((shelf, col)) = arm.pending("libshelf", || plx_base::devtrig::read("libshelf"), "focus seated on shelf {0} col {1}",
         fr, app.t0, || crate::app::bridge::Bridge::library_shelf_position(&app.pages)) else { return };
@@ -240,7 +344,7 @@ impl SeatArm {
     }
 }
 
-/// `/tmp/plxnative-libmenu=<sort|filter|type>[,<rest ms>]` — on the Library page, open that toolbar
+/// `/tmp/plxnative-libmenu=<sortfilter|sort|filter|type>[,<rest ms>]` — on the Library page, open that toolbar
 /// menu, after `libgrid` (if armed) has seated its focus and, with a rest period, once the page has
 /// stopped moving ([`at_rest`]). Done when the menu SURFACE is up.
 pub(crate) fn libmenu_arm(app: &mut App, fr: &Frame) {
@@ -256,9 +360,10 @@ pub(crate) fn libmenu_arm(app: &mut App, fr: &Frame) {
         "sort" => LibraryMenuKind::Sort,
         "filter" => LibraryMenuKind::Filter,
         "type" => LibraryMenuKind::Type,
+        "sortfilter" | "sort-filter" => LibraryMenuKind::SortFilter,
         _other => {
             #[cfg(feature = "devtriggers")]
-            plx_base::eventlog::log(&format!("BADTRIGGER libmenu {_other:?}: expected sort, filter or type"));
+            plx_base::eventlog::log(&format!("BADTRIGGER libmenu {_other:?}: expected sort, filter, type or sortfilter"));
             app.scenarios.shots.libmenu_done = true;
             return;
         }
@@ -273,8 +378,9 @@ pub(crate) fn libmenu_arm(app: &mut App, fr: &Frame) {
         app.scenarios.shots.libmenu_done = true;
         return;
     }
-    if matches!(app.route(), AppArg::Library)
-        && at_rest(fr.now, rest)
+    if on_library_page(app)
+        && at_rest(fr.now, rest, app.pages.present.last_change_ms(),
+            app.pages.present.changed() || plx_machine::motion::report::present_moving())
         && due(app.scenarios.shots.libmenu_sent, fr.now)
     {
         app.scenarios.shots.libmenu_sent = Some(fr.now);
@@ -285,10 +391,10 @@ pub(crate) fn libmenu_arm(app: &mut App, fr: &Frame) {
 /// `/tmp/plxnative-clockstop=<ms>` — simulator only: stop the clock sink at that movie position
 /// and leave the transport PLAYING, so the player holds a moment of playback that pausing would
 /// change (the Up Next tile, which exists only while playing). Logs once when the playhead is
-/// there. The stop is a stall of the sink's own making (`ffi_host.rs::stop_clock_at`), re-armed
+/// there. The stop is a stall of the sink's own making (`HostSink::stop_clock_at`), re-armed
 /// every frame because a Load (a seek) starts a fresh fed timeline.
 pub(crate) fn clockstop_arm(app: &mut App, fr: &Frame) {
-    #[cfg(feature = "hostsim")]
+    #[cfg(all(feature = "hostsim", feature = "play-feed"))]
     {
         let arms = &mut app.scenarios.shots;
         if arms.clockstop.is_none() {
@@ -305,12 +411,12 @@ pub(crate) fn clockstop_arm(app: &mut App, fr: &Frame) {
             return;
         }
         let at = i64::from(ms) * 1_000_000;
-        plx_media::player::stop_sim_clock_at(Some(at));
+        crate::app::adapters::hostsim::stop_sim_clock_at(Some(at));
         let arms = &mut app.scenarios.shots;
         if arms.clockstop_reached {
             return;
         }
-        if crate::app::playback::playpos() >= at {
+        if crate::app::playback::playpos(&app.player.session).is_some_and(|pos| pos >= at) {
             arms.clockstop_reached = true;
             plx_base::eventlog::log(&format!("clockstop: clock held at {ms} ms, still playing"));
         } else if fr.now.wrapping_sub(app.t0) > CLOCKSTOP_CEILING_MS {
@@ -319,16 +425,22 @@ pub(crate) fn clockstop_arm(app: &mut App, fr: &Frame) {
             plx_base::eventlog::log(&format!("clockstop: gave up; the playhead never reached {ms} ms"));
         }
     }
-    #[cfg(not(feature = "hostsim"))]
+    #[cfg(not(all(feature = "hostsim", feature = "play-feed")))]
     {
         let _ = fr;
-        app.scenarios.shots.clockstop = Some(None);
+        if app.scenarios.shots.clockstop.is_none() {
+            #[cfg(all(feature = "hostsim", not(feature = "play-feed")))]
+            if plx_base::devtrig::read("clockstop").is_some() {
+                plx_base::eventlog::log("clockstop: unavailable without Feed simulator clock");
+            }
+            app.scenarios.shots.clockstop = Some(None);
+        }
     }
 }
 
 /// How long `clockstop` waits for the playhead. Longer than [`CEILING_MS`]: its position is
 /// usually reached through `autoseek`, which only fires 12 s into a run.
-#[cfg(feature = "hostsim")]
+#[cfg(all(feature = "hostsim", feature = "play-feed"))]
 const CLOCKSTOP_CEILING_MS: u32 = 60_000;
 
 #[cfg(test)]
@@ -357,5 +469,80 @@ mod tests {
         assert!(!due(Some(1_000), 1_000 + RESEND_MS - 1));
         assert!(due(Some(1_000), 1_000 + RESEND_MS));
         assert!(due(Some(u32::MAX - 10), RESEND_MS), "across the tick wrap");
+    }
+
+    /// The arms of a scene that armed nothing but `autopause`: everything else has landed or was
+    /// never asked for, so `pending` is exactly the debt under test.
+    #[cfg(feature = "hostsim")]
+    fn only_autopause_unlanded() -> super::ScreenshotArms {
+        let landed = || super::SeatArm { done: true, ..Default::default() };
+        super::ScreenshotArms {
+            libtype_done: true,
+            libgrid: landed(),
+            libshelf: landed(),
+            libmenu_done: true,
+            clockstop: Some(None),
+            ..Default::default()
+        }
+    }
+
+    /// The `player` scene's flake. Its settled capture fired on a quiet player that was still
+    /// loading (the Pause could not even arm: it opens six seconds in), so the figure had no
+    /// picture and no pause. A trigger that is armed holds the capture through every frame before
+    /// its Pause lands, including the frames before the arm has armed itself, and releases it when
+    /// the Pause has landed.
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn an_armed_autopause_holds_the_settled_capture_until_its_pause_lands() {
+        use super::PauseDebt;
+        let mut arms = only_autopause_unlanded();
+        assert!(arms.pending(), "unread: a frame that has not reached the arm owes nothing known");
+
+        arms.autopause = arms.autopause.step(|| true, true, false);
+        assert_eq!(arms.autopause, PauseDebt::Owed);
+        assert!(arms.pending(), "armed, and the arm has not armed itself yet");
+
+        for _ in 0..3 {
+            arms.autopause = arms.autopause.step(|| panic!("the trigger is read once"), true, false);
+            assert!(arms.pending(), "a loading player at rest is not the state the scene names");
+        }
+
+        arms.autopause = arms.autopause.step(|| panic!("the trigger is read once"), false, false);
+        assert_eq!(arms.autopause, PauseDebt::Paid);
+        assert!(!arms.pending(), "the Pause landed: the capture may take the rest it is waiting for");
+    }
+
+    /// The line that holds the frames BEFORE the arm arms itself: the arm's latch is not set and no
+    /// pause is scheduled yet, which is the state of the first six seconds of every run. Reading
+    /// that as "nothing left" paid the debt on the first frame and brought the flake back.
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn autopause_stays_owed_on_the_frames_before_its_arm_arms_itself() {
+        use super::{pause_edges_left, PauseDebt};
+        assert!(pause_edges_left(false, false), "not armed yet: the Pause is still to come");
+        assert!(pause_edges_left(true, true), "armed, waiting on its playhead");
+        assert!(!pause_edges_left(true, false), "armed and the Pause landed (or no trigger asked)");
+
+        let mut arms = only_autopause_unlanded();
+        arms.autopause = arms.autopause.step(|| true, pause_edges_left(false, false), false);
+        arms.autopause = arms.autopause.step(|| true, pause_edges_left(false, false), false);
+        assert_eq!(arms.autopause, PauseDebt::Owed);
+        assert!(arms.pending(), "a quiet player before the arm armed itself is not the scene's state");
+    }
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn a_scene_without_autopause_is_not_held_and_a_pause_that_never_lands_gives_up() {
+        use super::PauseDebt;
+        let mut arms = only_autopause_unlanded();
+        arms.autopause = arms.autopause.step(|| false, true, false);
+        assert_eq!(arms.autopause, PauseDebt::Paid, "no trigger, nothing owed");
+        assert!(!arms.pending());
+
+        let mut arms = only_autopause_unlanded();
+        arms.autopause = arms.autopause.step(|| true, true, false);
+        arms.autopause = arms.autopause.step(|| true, true, true);
+        assert_eq!(arms.autopause, PauseDebt::Paid, "past the ceiling the arm stops holding the capture");
+        assert!(!arms.pending());
     }
 }

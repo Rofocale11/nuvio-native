@@ -1,7 +1,7 @@
-/* starfish.c — see starfish.h. The StarfishMediaAPIs (C++) + ACB ABI seam.
+/* starfish.c — buffer-feed StarfishMediaAPIs C++ ABI seam; see starfish.h.
  * Every C++-ABI hazard lives here: the mangled __asm__ symbols, Feed's sret
- * std::string, the over-allocated in-place object (never new/delete), and the
- * 3-arg ACB taskId out-param. Callers touch only the flat sf_ / acb_ verbs. */
+ * std::string and the over-allocated in-place object (never new/delete). The
+ * display binding lives separately in video_plane.c. Callers touch flat sf_ verbs. */
 #include "starfish.h"
 #include <dlfcn.h>
 #include <pthread.h>
@@ -12,172 +12,6 @@
 #include <string.h>
 
 extern FILE *elogf;   /* the event log (owned by the boot shim) */
-
-/* ---------------------------------------------------------------------------
- * The video-plane binding, in its two mutually-exclusive forms.
- *
- * Decoded video does not reach the panel by itself: something has to tell the TV to punch a hole
- * in the compositor and route the pipeline's sink into it. LG changed how, exactly once, at
- * webOS 5.0 — and the two mechanisms are complementary across every firmware, never both:
- *
- *   webOS 2.2.3 .. 4.10.0   libAcbAPI.so.1 present, SDL exports no exported-window entry points
- *   webOS 5.3.1 .. 11.2.0   libAcbAPI.so.1 DELETED, SDL exports all five of them
- *
- * (Verified against 14 real firmware inventories — `tools/fwcompat.py --inventory libAcbAPI`.)
- *
- * So this file resolves BOTH at runtime and picks. libAcbAPI is dlopen'd rather than linked
- * because a DT_NEEDED entry for a library that does not exist kills the process at exec(), before
- * main, before the event log is open — which is what a webOS 5 owner sees today: nothing happens,
- * and there is nothing to send back. The SDL five are dlsym'd out of the already-loaded libSDL2
- * for the same reason in reverse: naming them at link time would make the binary demand symbols
- * that webOS 4.5 does not have.
- *
- * NOTHING BELOW THE RESOLUTION IS DEVICE-VERIFIED ON WEBOS 5. The symbols are proven present and
- * the call shapes come from the two implementations that ship (Kodi and mariotaku's ss4s); that a
- * picture actually lands on the plane is not something a symbol table can tell you, and the author
- * has no webOS 5 television. Treat `VP_EXPORTED` as untested code that is known to compile and
- * known to be calling the right names.
- * ------------------------------------------------------------------------- */
-
-/* Same layout as SDL_Rect, which has been four ints since SDL2 existed. Declared here rather than
- * pulling SDL's headers into this file — the repo pins SDL 2.0.4 headers that predate SDL_webOS.h,
- * so an #include would resolve to a header without the prototypes we need anyway. */
-typedef struct { int x, y, w, h; } VpRect;
-
-static struct {
-    long (*create)(void);
-    int  (*initialize)(long, int, const char *, void (*)(long, long, long, long, long, const char *));
-    int  (*setSinkType)(long, int);
-    int  (*setMediaId)(long, const char *);
-    /* 3-arg ABI CONFIRMED: createTask(TaskType, long*) writes the task id through arg3 — the
-     * 2-arg form leaves garbage in r2 and segfaults / corrupts memory. Audio is owned by the
-     * pipeline: we never hand ACB an audio SINK or elementary stream, and that half of the old
-     * rule stands. What does NOT stand is its stated consequence — `SOUND_ERROR_019` appears in
-     * no library on this device, and the clause carried no evidence from the initial commit
-     * onward. `setMediaAudioData` is used, for a two-key METADATA descriptor: see
-     * acb_send_atmos(). */
-    int  (*setMediaVideoData)(long, const char *, long *);
-    int  (*setState)(long, int, int, long *);
-    int  (*setDisplayWindow)(long, long, long, long, long, int, long *);
-    /* OPTIONAL — deliberately absent from the all-present gate below, and this is the one
-     * pointer here that may legitimately be NULL. `AcbAPI_setMediaAudioData` is exported on
-     * webOS 3.9.2 / 4.4.2 / 4.10.0 but NOT on 2.2.3 or 3.4.0 (tools/fwcompat.py --lib
-     * libAcbAPI.so.1.0.0 --grep setMedia). Adding it to the AND would refuse ACB outright on
-     * those two releases and take ALL VIDEO with it — a Dolby Atmos read-out is not worth a
-     * black screen. See acb_send_atmos(). */
-    int  (*setMediaAudioData)(long, const char *, long *);
-} acb;
-
-static struct {
-    const char *(*createExportedWindow)(int type);
-    int  (*setExportedWindow)(const char *windowId, VpRect *src, VpRect *dst);
-    void (*destroyExportedWindow)(const char *windowId);
-} sdlvp;
-
-static int g_vp_mode = -1;                  /* -1 = not yet resolved; else a VP_* value */
-static char g_window_id[64];                /* our copy of SDL's string — see vp_create_window */
-
-/* The webOS 5 exported-window type. The real header spells the constant EXPORED, not EXPORTED
- * (LG's typo, present verbatim in the NDK's SDL_webOS.h); the literal avoids inheriting it. */
-#define VP_EXPORTED_TYPE_VIDEO 0
-
-int vp_mode(void) {
-    if (g_vp_mode >= 0) return g_vp_mode;
-
-    /* ACB first: on a 4.x set it is the only path, and probing SDL there costs five failed
-     * lookups. RTLD_NOW so a half-usable library is rejected here rather than mid-playback. */
-    void *h = dlopen("libAcbAPI.so.1", RTLD_NOW | RTLD_GLOBAL);
-    if (h) {
-        acb.create            = dlsym(h, "AcbAPI_create");
-        acb.initialize        = dlsym(h, "AcbAPI_initialize");
-        acb.setSinkType       = dlsym(h, "AcbAPI_setSinkType");
-        acb.setMediaId        = dlsym(h, "AcbAPI_setMediaId");
-        acb.setMediaVideoData = dlsym(h, "AcbAPI_setMediaVideoData");
-        acb.setState          = dlsym(h, "AcbAPI_setState");
-        acb.setDisplayWindow  = dlsym(h, "AcbAPI_setDisplayWindow");
-        /* Optional; NULL on 2.2.3/3.4.0 and acb_send_atmos() simply does nothing there. */
-        acb.setMediaAudioData = dlsym(h, "AcbAPI_setMediaAudioData");
-        /* Every pointer assigned above, checked. This list used to name seven of the eight and
-         * drop `destroy` silently — which is the argument against hand-enumeration, and why
-         * `destroy` and the two unused SDL crop/property pointers are gone rather than resolved
-         * and forgotten. Add one here only when something calls it. */
-        if (acb.create && acb.initialize && acb.setSinkType && acb.setMediaId &&
-            acb.setMediaVideoData && acb.setState && acb.setDisplayWindow) {
-            g_vp_mode = VP_ACB;
-            if (elogf) { fprintf(elogf, "vplane: ACB (webOS 4.x)\n"); fflush(elogf); }
-            return g_vp_mode;
-        }
-        if (elogf) { fprintf(elogf, "vplane: libAcbAPI.so.1 opened but is missing entry points\n"); fflush(elogf); }
-    }
-
-    /* RTLD_DEFAULT: libSDL2 is a normal DT_NEEDED dependency, so its symbols are already in the
-     * global scope. This asks "did the SDL that actually loaded bring these", which is exactly
-     * the question — the NDK's sysroot copy carries stub bodies for them, so a link-time check
-     * would have said yes on every device and meant nothing. */
-    sdlvp.createExportedWindow  = dlsym(RTLD_DEFAULT, "SDL_webOSCreateExportedWindow");
-    sdlvp.setExportedWindow     = dlsym(RTLD_DEFAULT, "SDL_webOSSetExportedWindow");
-    sdlvp.destroyExportedWindow = dlsym(RTLD_DEFAULT, "SDL_webOSDestroyExportedWindow");
-    if (sdlvp.createExportedWindow && sdlvp.setExportedWindow) {
-        g_vp_mode = VP_EXPORTED;
-        if (elogf) { fprintf(elogf, "vplane: SDL exported window (webOS 5+)\n"); fflush(elogf); }
-        return g_vp_mode;
-    }
-
-    g_vp_mode = VP_NONE;
-    if (elogf) { fprintf(elogf, "vplane: NONE — no libAcbAPI and no SDL exported window; video cannot be shown\n"); fflush(elogf); }
-    return g_vp_mode;
-}
-
-/* Create the exported window and return its id, or NULL. VP_EXPORTED only.
- *
- * Must be called BEFORE Load, because the id has to travel inside the Load payload as
- * option.windowId — that string is the whole of the binding on webOS 5. The compositor assigns it
- * ("_Window_Id_<n>") and SDL hands back a pointer whose ownership and lifetime LG does not
- * document, so it is copied immediately; ss4s does the same. */
-const char *vp_create_window(void) {
-    if (vp_mode() != VP_EXPORTED || !sdlvp.createExportedWindow) return 0;
-    const char *id = sdlvp.createExportedWindow(VP_EXPORTED_TYPE_VIDEO);
-    if (!id) {
-        if (elogf) { fprintf(elogf, "vplane: SDL_webOSCreateExportedWindow returned NULL\n"); fflush(elogf); }
-        return 0;
-    }
-    snprintf(g_window_id, sizeof g_window_id, "%s", id);
-    if (elogf) { fprintf(elogf, "vplane: exported windowId=%s\n", g_window_id); fflush(elogf); }
-    return g_window_id;
-}
-
-/* The compositor-assigned exported windowId, or "" when there is none — for the on-screen
- * diagnostics read-out (`ui::stats`), which needs to say whether the window was ever created.
- * Returns this module's own copy (see vp_create_window), so the pointer is permanently valid and
- * the caller never owns it. Never NULL: an empty string IS the "no window" answer. */
-const char *vp_window_id(void) { return g_window_id; }
-
-/* Place the video: source frame size -> on-screen rect. The VP_EXPORTED counterpart of
- * acb_start's setDisplayWindow, and the pair also expresses scaling. */
-int vp_place(int src_w, int src_h, int dst_x, int dst_y, int dst_w, int dst_h) {
-    if (vp_mode() != VP_EXPORTED || !g_window_id[0] || !sdlvp.setExportedWindow) return 0;
-    VpRect src = { 0, 0, src_w, src_h };
-    VpRect dst = { dst_x, dst_y, dst_w, dst_h };
-    int rv = sdlvp.setExportedWindow(g_window_id, &src, &dst);
-    if (elogf) {
-        fprintf(elogf, "vplane: place %dx%d -> %d,%d %dx%d rv=%d\n",
-                src_w, src_h, dst_x, dst_y, dst_w, dst_h, rv);
-        fflush(elogf);
-    }
-    return rv;
-}
-
-void vp_destroy_window(void) {
-    if (g_window_id[0] && sdlvp.destroyExportedWindow) sdlvp.destroyExportedWindow(g_window_id);
-    g_window_id[0] = 0;
-}
-
-#define SINK_TYPE_MAIN      0
-#define APPSTATE_FOREGROUND 1
-#define PLAYSTATE_UNLOADED  0
-#define PLAYSTATE_LOADED    1
-#define PLAYSTATE_PLAYING   2
-#define PLAYSTATE_PAUSED    3
 
 /* ---- LG StarfishMediaAPIs (libplayerAPIs): mangled C++ symbols. `this` is an
  * over-allocated buffer we construct in place (object size unknown, so never
@@ -238,6 +72,24 @@ extern void SMP_notifyForeground(void *self) __asm__("_ZN17StarfishMediaAPIs16no
 extern int  SMP_isLoadCompleted(void *self) __asm__("_ZN17StarfishMediaAPIs15isLoadCompletedEv");
 extern int  SMP_Pause(void *self) __asm__("_ZN17StarfishMediaAPIs5PauseEv");
 extern int  SMP_flush(void *self) __asm__("_ZN17StarfishMediaAPIs5flushEv");
+/* LG's PUBLIC seek (#568): bool Seek(const char *millis). A decimal-milliseconds string; a negative
+ * value is refused. Present on every firmware 1.2-11.2 (tools/fwcompat.py). Decompiled on 4.5:
+ * it parses the argument, takes the Play() mutex and runs a FLUSH|KEY_UNIT gst_element_seek whose
+ * segment starts at the millis passed - no private offset, no decoder re-init. */
+extern int  SMP_Seek(void *self, const char *millis) __asm__("_ZN17StarfishMediaAPIs4SeekEPKc");
+/* Per-pipeline output volume (the paused-preroll mute): bool setVolume(const char *json). Present on
+ * every firmware 4.4.2-11.2.0 (fwsym inventory) and declared in the NDK header. Decompiled on 4.x:
+ * setVolume parses {"volume":<int>} and, without an "ease" block, applies it at once; its bool
+ * proves nothing (it returns 1 for a null element). Not setAudioMute (absent on 4.4.2 / 4.10.0).
+ *
+ * getVolume is DELIBERATELY NOT BOUND. The NDK header says `const char *getVolume()`, but the 4.5
+ * libplayerAPIs tail-calls the pipeline's vtable slot 0xc8 (`ldr r0,[r0,#0x4c]; ldr r3,[r0];
+ * ldr r3,[r3,#0xc8]; bx r3`), and libpf's implementations (mediapipeline::AbstractPlayer::getVolume,
+ * CustomPipeline::getVolume) return a plain int: the g_object_get "volume" value, 100 when the
+ * property is absent, -1 from the base class. Reading that int as a char* crashed the TV (SIGSEGV,
+ * r0=0x64 into strstr). The mangled name carries no return type and only one firmware was
+ * decompiled, so no readback is declared: the preroll restores the pipeline default (100). */
+extern int  SMP_setVolume(void *self, const char *json) __asm__("_ZN17StarfishMediaAPIs9setVolumeEPKc");
 /* Kodi-parity: signal true end-of-stream so the pipeline drains the last frames instead of
  * hanging on them. Verified present on webOS 4.5 (nm: _ZN17StarfishMediaAPIs7pushEOSEv, defined). */
 extern int  SMP_pushEOS(void *self) __asm__("_ZN17StarfishMediaAPIs7pushEOSEv");
@@ -457,7 +309,6 @@ static void *sf_ready_object(void) {
     SfSlot *slot = sf_current_slot();
     return SMP_READY() && LOAD_RETURNED() && slot ? slot->object : NULL;
 }
-static long g_acb = 0, g_taskId = 0;
 
 /* trampolines: forward library-thread events to the consumer's handlers */
 static void sf_cb(int type, long long num, const char *str, void *ctx) {
@@ -466,10 +317,6 @@ static void sf_cb(int type, long long num, const char *str, void *ctx) {
     if (type == 23 && slot && slot->epoch == epoch)
         __atomic_store_n(&slot->unload_completed, 1, __ATOMIC_RELEASE);
     sf_on_event(epoch, type, num, str);
-}
-static void acb_cb(long a, long t, long ev, long app, long play, const char *reply) {
-    (void)a; (void)t; (void)app; (void)play;
-    acb_on_event(ev, reply);
 }
 
 /* ---- StarfishMediaAPIs verbs ---- */
@@ -552,6 +399,14 @@ int sf_is_load_completed(void) {
 int sf_play(void) {
     void *object = sf_ready_object();
     return object ? SMP_Play(object) : 0;
+}
+/* Set this pipeline's volume (0..100). Returns the library's bool; 0 also when nothing is loaded. */
+int sf_set_volume(int volume) {
+    void *object = sf_ready_object();
+    if (!object) return 0;
+    char json[32];
+    snprintf(json, sizeof json, "{\"volume\":%d}", volume);
+    return SMP_setVolume(object, json) & 0xff;   /* bool in r0: only the low byte is defined */
 }
 int sf_pause(void) {
     void *object = sf_ready_object();
@@ -674,6 +529,20 @@ int sf_set_time_to_decode(long long position_ns) {
     snprintf(j, sizeof j, "{\"position\":%lld}", position_ns);
     return SMP_setTimeToDecode(object, j);
 }
+/* Public in-place seek (#568): the pipeline flushes itself and re-anchors its segment at `ms`, so
+ * the caller must feed PTS on that same timeline afterwards and must NOT call sf_flush() (a flush is
+ * itself a seek to 0). Not safe against a concurrent sf_feed - the caller quiesces the feeder.
+ * Returns the library's bool: 0 = refused (negative ms, not loaded, or failed inside the pipeline,
+ * which then rejects Feed until a seek/flush succeeds). */
+int sf_seek_ms(long long ms) {
+    void *object = sf_ready_object();
+    if (!object) return 0;
+    char arg[32];
+    snprintf(arg, sizeof arg, "%lld", ms);
+    int rv = SMP_Seek(object, arg) & 0xff;   /* bool in r0: only the low byte is defined */
+    if (elogf) { fprintf(elogf, "Seek(%s) -> %d\n", arg, rv); fflush(elogf); }
+    return rv;
+}
 int sf_send_segment(void) {
     void *p = sf_pipeline();
     if (elogf) { fprintf(elogf, "sendSegment: pipeline=%p\n", p); fflush(elogf); }
@@ -731,120 +600,3 @@ int sf_feed_abi_is_cow(void) {
     pthread_once(&g_feed_once, sf_resolve_feed_once);
     return g_feed_cow;
 }
-
-/* ---- ACB verbs (the 3-arg taskId ABI is hidden) ----
- *
- * Every one is a no-op when this device has no ACB, so the caller does not have to branch: on
- * webOS 5 the whole setSinkType / setMediaId / setMediaVideoData / setState sequence has no
- * replacement — it is simply deleted, which is what both reference implementations do (ss4s stubs
- * all of them to `return true`, Kodi guards each with `if (acb)`).
- *
- * issue #74 D.1: these dispatch on `g_acb` alone and never call `sf_ready_object()`, so the
- * in-flight-Load gate below does NOT cover them directly — unlike the nine `sf_*` verbs above.
- * They are today bounded only indirectly, by `pump.rs`'s stage machine (every ACB call site
- * that binds or updates media requires `eng.stage >= Stage::Playing`, reached only after
- * the pump has observed Load return (this file's loadCompleted arm having already observed
- * `LOAD_RETURNED()`) — initialization and teardown are separate lifecycle paths. Extending the
- * gate itself into ACB
- * would need the same device verification any Starfish/ACB bind-order change needs (see
- * player/CLAUDE.md); this comment exists so "the gate covers every Starfish/ACB verb" is not
- * read as true of this block until that is done. */
-long acb_create(const char *appId, int playerType) {
-    if (vp_mode() != VP_ACB) return 0;
-    g_acb = acb.create();
-    /* NO FALLBACK ID. This used to substitute the shipped app's literal id for a NULL `appId`,
-     * which was the far half of a double fallback: the Rust side read `getenv("APPID")` and passed
-     * NULL when SAM had not exported it, and this line then quietly claimed to be the app users
-     * install. With a developer build able to sit beside that app on one television, a wrong id
-     * here binds the video plane for the WRONG application — audio with a black plane, no error
-     * line anywhere. The near half is fixed (`engine::acb_init_acb` now passes
-     * `paths::app_id()`, read from the install directory, which cannot be absent); refusing here
-     * rather than guessing is what keeps the pair readable together. */
-    if (g_acb) {
-        if (appId) {
-            acb.initialize(g_acb, playerType, appId, acb_cb);
-        } else {
-            /* AND HAND BACK NOTHING. Returning the live handle here made the refusal half-done:
-             * the Rust side stores `ACB_OK = acb != 0`, so `acb_bind`, `acb_send_video_data` and
-             * `acb_send_atmos` would all then run against an object the library was never told
-             * about — strictly worse than the fallback id this replaced, which at least talked to
-             * an initialized ACB. Zeroing it makes every `if (!g_acb) return;` guard below do its
-             * job. The handle itself is leaked because this build resolves no `AcbAPI_destroy`
-             * (see the dlsym table's note); one leaked handle on a path that cannot be reached —
-             * `app_id()` cannot be absent — is the right trade against calling into uninitialized
-             * memory. */
-            if (elogf) {
-                fprintf(elogf, "acb: no appId — NOT initialized and NOT returned; video will not bind\n");
-                fflush(elogf);
-            }
-            g_acb = 0;
-        }
-    }
-    return g_acb;
-}
-void acb_bind(const char *mediaId) {
-    if (!g_acb) return;
-    acb.setSinkType(g_acb, SINK_TYPE_MAIN);
-    acb.setMediaId(g_acb, mediaId);
-    acb.setState(g_acb, APPSTATE_FOREGROUND, PLAYSTATE_LOADED, &g_taskId);
-}
-/* Tell ACB the stream is Dolby Atmos — the AUDIO counterpart of acb_send_video_data(), and a
- * METADATA descriptor rather than anything resembling an audio sink.
- *
- * Recovered whole from this television's own binaries (2026-08-21). `libcbe.so`
- * `media::MediaAPIsWrapper::SetDolbyAtmosInfoToACB` @0x01b976f0 — the ONLY caller of the ACB
- * audio entry point anywhere in ~70 harvested libraries, and the path LG's own web apps take —
- * builds exactly this two-key object with jsoncpp and hands it to `Acb::setMediaAudioData` with
- * a NULL taskId. `AcbAPI_setMediaAudioData` @0x1836c is instruction-for-instruction the same
- * 316-byte shape as `AcbAPI_setMediaVideoData` @0x16fac, so the 3-arg taskId ABI applies here
- * unchanged; below it `ACB::AcbCore::setMediaAudioData` @0xfda4 parses the JSON, dedups against
- * its cached copy, and posts luna://com.webos.service.acb/setAudioInfo with
- * {"appId":…,"pipelineId":<mediaId>,"audioInfo":<this object>}. That is the whole path: a
- * validity check, a dedup and one async Luna post. It touches no sink, no elementary stream, no
- * codec descriptor and no second bind.
- *
- * `context` is the SAME string acb_bind() passed to setMediaId, and carrying it is the entire
- * reason LG synthesises this object instead of forwarding the pipeline's own AUDIO_INFO callback:
- * `StarfishMediaAPIs::handleAudioInfoEvent` builds that callback from `track` and `dualMono` only
- * and has no `context`, while `generateVideoInfoPtree` @0x3755c puts one in the VIDEO envelope we
- * already forward verbatim and which already works. Same object, one codec over.
- *
- * ON THE RULE THIS APPEARS TO BREAK. `src/starfish.c` and `player/CLAUDE.md` have said since the
- * initial commit that audio must never be fed to ACB because it causes `SOUND_ERROR_019`. That
- * literal exists in NO library on this device — swept three ways across the whole harvest,
- * including 92 MB of Chromium — and no log line containing it has ever been committed. It sits in
- * `f2523483` beside the 3-arg taskId note, which does carry its evidence. What the rule is
- * plainly RIGHT about is the audio ES: the pipeline owns it and we never hand ACB a sink. This is
- * not that, and the distinction is now readable in the disassembly rather than remembered.
- * The residual is the ACB DAEMON, whose binary is not a `.so` and so was never harvested — the
- * far side of that Luna post is unread. Hence the trigger: this is armed, not assumed.
- *
- * Returns 1 accepted, -1 our JSON was rejected client-side (nothing left the process), -2 ACB not
- * initialized, 0 no ACB / no symbol / no id. Call after acb_bind(), which is where libcbe fires
- * it (0x1b98d78, on LOADCOMPLETED) — no decoded frame is needed and no state is read. */
-int acb_send_atmos(const char *mediaId) {
-    if (!g_acb || !acb.setMediaAudioData || !mediaId) return 0;
-    char j[192];
-    /* The trailing newline is jsoncpp FastWriter's and is byte-for-byte what Chromium sends.
-     * json-c ignores it; it is here for exactness, not because anything requires it. */
-    snprintf(j, sizeof j, "{\"audio\":{\"immersive\":\"ATMOS\"},\"context\":\"%s\"}\n", mediaId);
-    int rv = acb.setMediaAudioData(g_acb, j, &g_taskId);
-    if (elogf) { fprintf(elogf, "acb setMediaAudioData rv=%d payload=%s", rv, j); fflush(elogf); }
-    return rv;
-}
-int acb_send_video_data(const char *sourceInfoVerbatim) {
-    if (!g_acb) return 0;
-    return acb.setMediaVideoData(g_acb, sourceInfoVerbatim, &g_taskId);
-}
-void acb_start(long x, long y, long w, long h) {
-    if (!g_acb) return;
-    acb.setDisplayWindow(g_acb, x, y, w, h, 1, &g_taskId);
-    acb.setState(g_acb, APPSTATE_FOREGROUND, PLAYSTATE_PLAYING, &g_taskId);
-}
-void acb_unload(void) {
-    if (g_acb) acb.setState(g_acb, APPSTATE_FOREGROUND, PLAYSTATE_UNLOADED, &g_taskId);
-}
-/* Kodi-parity: mirror the ACB PLAYSTATE on transport pause/resume (the app owns the sink; the
- * pipeline Pause/Play alone leaves the ACB state stale). Only meaningful once the plane is bound. */
-void acb_pause(void)  { if (g_acb) acb.setState(g_acb, APPSTATE_FOREGROUND, PLAYSTATE_PAUSED,  &g_taskId); }
-void acb_resume(void) { if (g_acb) acb.setState(g_acb, APPSTATE_FOREGROUND, PLAYSTATE_PLAYING, &g_taskId); }

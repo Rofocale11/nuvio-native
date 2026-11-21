@@ -18,11 +18,45 @@ The declaration is conditional on one boot-time configd answer. Only an exact bo
 `tv.config.supportDolbyHDRContents` is support; a refusal, timeout, malformed answer or an answer
 still pending is `Unknown` and follows the unsupported column.
 
+The seated profile's Settings > Playback > Dolby Vision is the second input. `Off` plans every
+route as Unsupported (`DolbyVisionMode::gate`, captured in `ResolveEnv` beside the probe), so a
+confirmed-support set follows the unsupported column for that profile: no node, the base layer
+for P8/P7, P5 refused direct play and asked of the server, which may refuse it as well (code 2000,
+`docs/pms-api.md`). Only the presentation is gated: the route's `DvDecision` keeps the probe's own
+answer, so Off on a confirmed-support set logs `dv: capability=supported presentation=base-layer` and
+Diagnostics' Video row reads `base-layer (supported)`, which a failed probe or a set without Dolby
+Vision cannot produce (they read `unknown` and `unsupported`).
+
+**On webOS 3 a configd `true` is overridden to unsupported** (`webos::caps::platform_gate`, logged
+as `webos-caps: … answer=unsupported source=webos3`). Device-measured 2026-10-14 on an LG OLED C7
+(webOS 3.9.3, m16p) with a P8.1 film: configd answers `true`, the declared Load accepts every
+access unit and never starts its clock (0:00 forever), and the same build with the declaration
+removed plays. One set measured; webOS 4+ and an unreadable version keep configd's answer.
+
+**On webOS 5.5.0-19 (`jhericurl-jervisbay`) and 6.5.3-47 (`kisscurl-koli`, the LG C1) a Dolby Vision
+play withdraws its declaration at a landing the splitter would skip** (#1166). The 5.5.0-19
+`libgstdvsplitter.so` (built only when the Load carries the node) lets only an HEVC IDR be the first
+picture after its init or a flush, so a file whose later random access points are CRAs sits on
+Buffering after every seek and every resume (observed on a CX). The 6.5.3-47 image's splitter has the
+same dispatch, read from its disassembly; the hang was not observed on a C1. The shared device
+table (`devcaps::EXCLUSIONS`) declares those two firmwares IDR-first (`Caps::dv_first_picture`); a landing
+keyframe that is not an IDR (the demuxer classifies it, `aq::hevc_irap_not_idr`) is then not fed:
+the Feed's `dv_start` guard (`play-feed/src/dv_start.rs`) holds it and raises a withdrawal (`FeedLoad::dv_landing_due`), and the pump withdraws the route's declaration (`route::withdraw_dv_presentation`: exactly what
+Off would have planned, the probed capability kept) and reloads once at the same target. For a build
+nobody has read, the same guard withdraws after 4 s with no position update once 700 ms of video was
+accepted. The withdrawal lasts for the rest of that play (Diagnostics reads `base-layer (supported)`,
+the viewer gets the HDR10 base layer, a seek back to 0:00 stays HDR10, and so does a return to
+Original after a trip to HLS, because the stored Original candidate is downgraded with the route);
+the next play is planned again. Only a declared direct play is withdrawn: a Profile 5 (no base layer) and a remux that copies
+the video are reported in the log and fed as before. `platform_gate` is not the vehicle: it removes
+Dolby Vision from every play on a set, while this keeps it wherever the landing is an IDR.
+
 | Source | Confirmed supported | Unsupported / unknown |
 |---|---|---|
 | **P8 single-layer, CCID 1/2/4** | declare + direct play | no node; direct-play the HDR10/SDR/HLG base |
 | **P5** | declare + direct play | refuse direct play and video copy; request a video re-encode |
-| **Enhancement layer present** | refuse → transcode | refuse → transcode |
+| **P7 dual-layer, CCID ≠ 0** (UHD Blu-ray) | convert to 8.1 in-app; declare 8.1 + direct play | convert to 8.1 in-app; no node; direct-play the HDR10 base |
+| **Any other enhancement layer** | refuse → transcode | refuse → transcode |
 | **Non-DV / insufficient metadata** | existing behavior | existing behavior |
 
 Historical census taken 2026-08-21 on the dev server by fetching all 540 leaves and reading every
@@ -33,19 +67,94 @@ affirmative platform result above. The base-layer predicate accepts more compati
 than the measured 1/2/4 set, but reserved/unknown identifiers are not claimed here as validated
 fallback formats.
 
-**Profile 7 is the one real gap and it is structural, not policy.** Its picture is split across a
-base and an enhancement layer — two elementary streams — and BUFFERSTREAM buffer-feed hands the
-pipeline **one**. There is no payload key for the second; `Dovi::presentation` refuses on
-`el_present` before it reaches the declaration arm, which is also what keeps the emitted node's
-`trackType` at `"single"` and makes the pipeline's `dv-dual-svp` secure-video-path flag — which
-this app cannot satisfy — unreachable. Whether `gst_dvbin_pipeline_dovi_dual` (which sits beside
-the `_single` we do use) can be fed from a single appsrc is unexamined.
+**Profile 7 is played by converting it to Profile 8.1 on the feed path, as `dovi_tool -m 2`
+does.** Its picture is split across a base and an enhancement layer, and BUFFERSTREAM buffer-feed
+hands the pipeline **one** elementary stream; there is no payload key for the second. What the
+feed path can do instead is make the single-layer stream a Profile 8.1 file would have been:
+when the demuxer's configuration record says Profile 7 with an enhancement layer and a
+cross-compatible base layer (`ff::dovi_converts_to_p81`; a UHD Blu-ray remux carries CCID 6),
+`ff::packet_to_annexb` drops every enhancement-layer NAL — the `UNSPEC63` wrapper a single-track
+dual layer stores each one in, which is what `dovi_tool demux` splits on, and any NAL above
+`nuh_layer_id` 0 — and rewrites every RPU (`UNSPEC62`) to 8.1 with quietvoid's `dolby_vision`
+crate (`DoviRpu::parse_unspec62_nalu`, `convert_with_mode(To81)`, `write_hevc_unspec62_nalu`: the
+library `dovi_tool` itself is built on). An RPU that does not parse or convert is dropped, never
+forwarded as Profile 7. `Dovi::converts_to_p81` is the route-side twin of that test on the
+server's `DOVI*` fields: such a stream is declared as what is fed (`profileId 8`, `trackType
+"single"`) on a set with confirmed support, plays as its HDR10 base layer without a node
+otherwise, and is not `base_layer_unusable`, so the server may copy it. A host test holds the
+MEL rewrite to `dovi_tool`'s own mode-2 fixture byte for byte.
+
+**What it does not do.** The enhancement layer's own contribution is discarded: for a MEL that is
+nothing, for a FEL it is the residual detail the full enhancement layer adds above the base layer,
+exactly what `dovi_tool -m 2` discards — what reaches the panel is the base layer and the
+dynamic metadata. A dual layer whose base layer is not cross-compatible (CCID 0) has no picture
+the conversion could leave and is still refused on `el_present`, before the declaration arm,
+which is also what keeps the emitted node's `trackType` at `"single"` and makes the pipeline's
+`dv-dual-svp` secure-video-path flag — which this app cannot satisfy — unreachable. Whether
+`gst_dvbin_pipeline_dovi_dual` (which sits beside the `_single` we do use) can be fed from a
+single appsrc, which is what playing the enhancement layer would need, is unexamined.
 
 Profiles not present here: **4** is dual-layer and deprecated (P&L §1.1 p. 6); **9** is single-layer
 **AVC**, and now falls back without a node because codec eligibility is part of
 `Dovi::presentation` itself (the old gate/payload disagreement has a host regression); **10** and
-**20** are AV1 and MV-HEVC, and this panel has no Dolby Vision decoder for either. (A set whose
-codec table lists an AV1 decoder can direct-play plain AV1, but that is not a Dolby Vision path.)
+**20** are AV1 and MV-HEVC, and this panel has no Dolby Vision decoder for either.
+
+**Profile 10 on a set that decodes AV1** is declared like Profile 8: `metadata::dv_video_codec`
+admits `av1` beside `hevc`, the payload keeps `"video":"AV1"`, and the node is the same three
+fields with `profileId: 10`. Nothing here was decompiled: that libpf's AV1 caps branch reaches
+the same Dolby Vision tail was measured on a webOS 6 set (LG C1, webOS 6.5.3, 2026-10-18): an
+AV1 Profile 10.1 file direct-played with the node put the panel in Dolby Vision and played through,
+where without it the same file showed HDR10. It is unmeasured on any other firmware, and the webOS 4.5 dev set never reaches it (no AV1 row in its codec table).
+
+### 1a. Active-area offsets from another raster (#1367)
+
+**The bug class.** An RPU's Level 5 block is the picture's active area, as four offsets (`left`,
+`right`, `top`, `bottom`), and the TV's Dolby Vision engine blanks everything outside it. A
+re-encode cropped from a letterboxed master keeps the master's L5 in every RPU. The report: a
+1920x802 Profile 8.1 file cut from a 3840x2160 master (`dovi_tool info -s`: `L5 offsets: top=276,
+bottom=277, left=0, right=0`) played on an LG C8 (webOS 4.4.3, Feed) as a strip 249 rows high,
+802 - 553. With Dolby Vision off it played whole: the RPU NALs are still fed (nothing drops
+`UNSPEC62` on that path), but the pipeline is built without Dolby Vision, so nothing applies them
+and the HDR10 base layer shows.
+
+**The rule** (`ff::dv_active_area_is_foreign`, per RPU, against the raster the demuxer reports:
+`codecpar`, the displayed one, 1920x802 and not the coded 808). A wrong keep cuts real picture; a
+wrong clear only shows the black bars the encode itself carries, which is what `dovi_tool --crop`
+does. So it leans to clear:
+1. All-zero offsets, or an unknown raster: nothing to do.
+2. **A raster that is not 16:9** (`width * 9 != height * 16`) was cropped and has no bars for an
+   active area to describe: ANY nonzero offsets are cleared. This is what catches 1920x1038 (a 1.85:1
+   master's `top=bottom=42` leaves a plausible 2.01:1 and would still blank 84 rows), 1920x960
+   (`120 / 120`, 2.67:1), 3840x1600 and 4096x2160, which a test of the area's shape alone keeps.
+3. **A 16:9 raster** keeps offsets that can describe it (`ff::dv_active_area_fits`): `left + right <
+   width`, `top + bottom < height`, and an area no wider than 3:1 (`DV_AREA_WIDEST`) and no narrower
+   than 1:2 (`DV_AREA_NARROWEST`); no released picture is wider than 2.76:1 (Ultra Panavision 70) or
+   narrower than 9:16 portrait. A genuine 1920x1080 letterbox (`top=138`, `bottom=139`, 2.39:1) and
+   a 3840x2160 master's own `276 / 277` are kept. Plus a per-stream **latch**
+   (`ff::DvActiveArea::foreign_seen`, owned by the demux loop): once one RPU of the stream has been
+   cleared, every later RPU with nonzero offsets is cleared too, which catches a variable-aspect 4K
+   master downscaled to 1080p, whose 1.90:1 scenes (`69 / 70`) look plausible on their own.
+
+**What is fed.** `ff::packet_to_annexb` checks every HEVC RPU of every profile, the Profile 7
+conversion's output included. When the rule fires, `ff::clear_foreign_active_area` zeroes the four
+offsets (`DoviRpu::crop`) and writes the RPU again, every other field kept; the event log says
+`ff: DV RPU #n active area ... cannot describe WxH; cleared`. Any other RPU is fed as it reached the
+check, not re-serialised: the original bytes, or for a converted Profile 7 the conversion's output.
+That covers offsets that are kept, no L5 block, an RPU that does not parse (a Profile 7 one is
+still dropped, as before) and a raster the demuxer did not report.
+
+**Firmware evidence.** W18O `libkadaptor.so.2.0.1`, `dolbyGenerateRegNLuts_IP` at `0xe620c`, writes
+the L5 offsets into the DM registers `Active_area_*`.
+
+**Limits.** Three, none verified:
+- The URI engine, where the TV reads the file itself, is not covered: nothing of the file passes
+  through this app. Nor is AV1 Profile 10 on the Feed path, whose RPUs go through
+  `av1_packet_to_tu` and are not checked.
+- A 16:9 picture whose first foreign offsets still leave a plausible area is kept: a 1080p downscale
+  of a 1.85:1 master that kept its 4K offsets (`top=bottom=42`, 1.93:1 left) passes and blanks 21
+  rows of picture at each edge. Nothing in the file says the offsets are not its own.
+- It is not verified on a device: our dev set's W19H `libkadaptor` has no `active_area` string, so
+  it cannot reproduce the strip, and the reporter's C8 is where the failure was seen.
 
 ---
 
@@ -258,12 +367,16 @@ vs transcoded"; `/tmp/plxnative-nofps` withholds the esInfo fps rational (withho
 **worse** — 163/160 misses against 82/3 — which is how we learned the pipeline's lattice depends on
 what we send, shortly before learning it does not depend on it in the way we hoped).
 
+`/tmp/plxnative-dvfirstpicture` (a file holding `idr` or `any`, `devtriggers` builds, read at boot) forces
+the splitter rule for this run: `idr` makes every non-IDR landing withdraw, `any` turns a listed
+build's row off so the 4 s watch is what fires (#1166).
+
 Capability experiments use two presence-only, boot-latched triggers:
 `/tmp/plxnative-dvcaps0` forces Unsupported and `/tmp/plxnative-dvcaps1` forces Supported. If both
 exist, `dvcaps0` wins and the conflict is logged. Restart the app between cases; changing a file
 cannot alter either the completed capability result or an installed playback decision. These
-overrides change capability only — they do not bypass `nodv`, the enhancement-layer refusal or the
-HEVC codec guard. `dvnonode` remains the deliberate diagnostic exception: it suppresses a node
+overrides change capability only — they do not bypass `nodv`, the enhancement-layer refusal, the
+HEVC codec guard or a profile's Dolby Vision Off. `dvnonode` remains the deliberate diagnostic exception: it suppresses a node
 after a route has already frozen `Declare`, and logs that disagreement explicitly.
 
 ---
@@ -418,6 +531,9 @@ chain rather than of Dolby Vision alone: **the Profile 7 refusal is confirmed by
 landing on HDR10 exactly as §1 says it should, which no amount of reading our own log could have
 shown. A log line proves what we sent; `dimension.dynamicRange` proves what the panel did with it.
 
+The Profile 7 row is the refusal as it was measured on 2026-08-22. That file now takes §1's
+conversion instead, and the conversion has not been measured with this read on the dev set.
+
 **Why this belongs beside §5's silent instruments.** §5 is about instruments that cannot see the
 thing they are pointed at. This is the opposite failure and worth naming as its own: an instrument
 that existed the whole time, answered the question in one call, and was never asked — while the
@@ -426,18 +542,29 @@ human at the panel, check whether the platform already publishes it.
 
 ## 7. Open
 
-- **Profile 7.** One film on the dev server. Would need to know whether `gst_dvbin_pipeline_dovi_dual`
-  can be fed from a single appsrc, or whether a second one can be created — unexamined. The REFUSAL
-  path is no longer open: §6a confirms it lands on HDR10 at the panel, which is the intended
-  outcome, so what remains is only whether Profile 7 could ever be played as DV rather than whether
-  declining it works.
+- **The IDR-first splitter (#1166).** The NAL-type tables of the 4.10.2 (`b38aedc9`, `4096b724`) and
+  6.5.3-47 (`239b3e04`) splitters are read (`docs/measurements/issue1166-cra.md`): 4.10.2 admits 16
+  to 21, so a CRA first is accepted and the dev set cannot reproduce the hang; 6.5.3-47 admits only
+  19 and 20, so the C1 has a row. The C1 row is from the disassembly; the hang was not observed on
+  a C1. Still open: the 4 s threshold is unmeasured on any 5.x or 6.x set; the watch reads the
+  pipeline's 5 Hz position updates (`SHARED.frames`), not presented pictures, so a firmware that
+  keeps sending them while presenting nothing is not caught (a listed build is covered by its row);
+  the panel's Dolby Vision to HDR10 switch on the withdrawing reload and a PMS video-copy remux
+  landing on a CRA are unmeasured.
+- **Profile 7.** Converted to 8.1 in-app (§1), which plays the base layer and the dynamic metadata
+  and discards a full enhancement layer's residual detail. Playing that detail would need to know
+  whether `gst_dvbin_pipeline_dovi_dual` can be fed from a single appsrc, or whether a second one
+  can be created — unexamined. Not measured on the dev set: the conversion's panel state
+  (`dimension.dynamicRange`, §6a), and its per-frame cost on that set's CPU.
 - **Anonymous configd access.** The key, parser and fail-closed policy are host-tested, but an
   unforced query from this app's anonymous LS2 registration has not yet been measured on device.
   The dev firmware ACL permits public `getConfigs`; that is not proof the registration receives it.
 - **Cross-firmware reply behavior.** The libplayerAPIs mechanism exists in the symbol/decompile
   census from 3.9.2 through 11.2.0, but the key, ACL and reply semantics have not been exercised
   across that range. Older or refusing firmware remains Unknown rather than being inferred from a
-  version or from unrelated `updateConfig` symbols.
+  version or from unrelated `updateConfig` symbols. The one version rule is `platform_gate`: a
+  configd `true` on webOS 1..=3 is reported Unsupported, because that answer was measured wrong
+  on a C7 (webOS 3.9.3).
 - **Profile 9's gate/payload disagreement is closed in code.** `presentation` now takes the output
   codec and an AVC stream cannot produce `Declare`; the regression covers the SDR-compatible
   fallback and an unusable-base non-HEVC refusal. No Profile 9 asset has been measured on device.

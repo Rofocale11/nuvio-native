@@ -31,6 +31,7 @@ FILE *elogf = NULL;   /* shared event/diagnostic log (extern in app.h); used by 
 extern int plex_run(const char *pms_host, int pms_port);  /* Rust app core (no creds — session or /tmp/plxnative-token) */
 extern int plx_sentry_spool_external(const char *path); /* Sentry daemon's spool-only re-entry */
 extern void plx_crash_write_image_marker(int fd); /* identify this binary in the append-only log */
+extern void plx_launch_args(const char *json); /* SAM's launch payload — see rust-modules/os/src/tv/launch.rs */
 
 /* Where this INSTALL's runtime files live — `/tmp/plxnative-events.log` for the app users get,
  * `/tmp/com.nuvionative.app.debug/plxnative-events.log` for a developer build installed beside it.
@@ -94,7 +95,7 @@ static FILE *open_event_log(void) {
  * owner exactly one tool, webOS Dev Manager, and that reads files as an unprivileged user that is
  * in the app's group but is not the app's uid. At 0600 none of the app's logs could be fetched, so
  * a bug report was impossible without root. 0640 is what `plxnative-diag.log` has always shipped
- * (rust-modules/platform/src/storage/diagnostics.rs); "other" still gets nothing.
+ * (rust-modules/os/src/storage/diagnostics.rs); "other" still gets nothing.
  *
  * Why that is acceptable now. The 0600 was the fix for a world-readable log, and the file's CONTENT
  * has since been fixed at the source: every event-log line Rust writes passes
@@ -185,6 +186,9 @@ int main(int argc, char **argv) {
         if (stderr_fd != STDERR_FILENO) close(stderr_fd);
     }
     plx_crash_install(event_fd, crash_fd);
+    /* A launch from SAM carries one argument, its JSON payload (`parameters` = what the launcher
+     * passed). Rust keeps it raw and decides what it means once the app has signed in. */
+    if (argc >= 2) plx_launch_args(argv[1]);
     /* request BACK key delivery from the webOS access policy (before SDL init) */
     setenv("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true", 1);
     return plex_run(PMS_HOST, PMS_PORT);

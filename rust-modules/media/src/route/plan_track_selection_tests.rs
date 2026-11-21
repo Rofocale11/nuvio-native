@@ -8,11 +8,11 @@ use super::test_support::*;
 #[test]
 fn an_empty_track_list_falls_back_to_the_codec_default() {
     assert_eq!(
-        pick_dp_audio(&[], "ac3").map(|(i, c, _)| (i, c)),
+        pick_dp_audio(&plx_os::devcaps::caps(), &[], "ac3").map(|(i, c, _)| (i, c)),
         Some((-1, "ac3".into()))
     );
     assert!(
-        pick_dp_audio(&[], "truehd").is_none(),
+        pick_dp_audio(&plx_os::devcaps::caps(), &[], "truehd").is_none(),
         "a non-direct-playable default must transcode"
     );
 }
@@ -25,9 +25,9 @@ fn an_empty_track_list_falls_back_to_the_codec_default() {
 #[test]
 fn the_files_default_track_wins_without_a_language_preference() {
     let tracks = [trk(1, "ac3", "fre", true), trk(2, "ac3", "eng", false)];
-    assert_eq!(pick_dp_audio(&tracks, "ac3"), Some((0, "ac3".into(), 1)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "ac3"), Some((0, "ac3".into(), 1)));
     let tracks = [trk(1, "ac3", "eng", false), trk(2, "eac3", "fre", true)];
-    assert_eq!(pick_dp_audio(&tracks, "eac3"), Some((1, "eac3".into(), 2)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "eac3"), Some((1, "eac3".into(), 2)));
 }
 
 
@@ -36,7 +36,7 @@ fn the_files_default_track_wins_without_a_language_preference() {
 #[test]
 fn a_reencode_without_a_preference_keeps_the_files_default_language() {
     let tracks = [trk(1, "ac3", "fre", true), trk(2, "dca", "eng", false)];
-    let dp = pick_dp_audio(&tracks, "ac3").map(|(_, _, id)| id).unwrap_or(0);
+    let dp = pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "ac3").map(|(_, _, id)| id).unwrap_or(0);
     assert_eq!(dp, 1, "direct play takes the French default");
     assert_eq!(encode_audio_id(false, dp, 0, &tracks, AudioLangPrefs::default()), 1,
         "a cold re-encode names the French default, not the English DTS");
@@ -46,8 +46,8 @@ fn a_reencode_without_a_preference_keeps_the_files_default_language() {
 fn account_audio_language_selects_french_for_every_cold_play_path() {
     let tracks = [server_selected(trk(1, "ac3", "eng", true)),
         trk(2, "ac3", "fre", false)];
-    let prefs = AudioLangPrefs { show: None, account: Some("fr") };
-    let (_, _, dp) = pick_dp_audio_pref(&tracks, "ac3", prefs).unwrap();
+    let prefs = AudioLangPrefs::new(None, Some("fr"));
+    let (_, _, dp) = pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs).unwrap();
     assert_eq!(dp, 2, "direct play should honour defaultAudioLanguage");
     assert_eq!(encode_audio_id(true, dp, 0, &tracks, prefs), 2,
         "remux copies the account-language track");
@@ -59,15 +59,15 @@ fn account_audio_language_selects_french_for_every_cold_play_path() {
 fn account_audio_language_diagnostic_covers_every_outcome() {
     let no_tracks = [];
     assert_eq!(
-        account_audio_language_log(&AccountAudioLanguage::NoCredential, &no_tracks, None),
+        account_audio_language_log(&plx_os::devcaps::caps(), &AccountAudioLanguage::NoCredential, &no_tracks, None),
         "route: account audio language — no plex.tv credential for this profile",
     );
     assert_eq!(
-        account_audio_language_log(&AccountAudioLanguage::Unavailable, &no_tracks, None),
+        account_audio_language_log(&plx_os::devcaps::caps(), &AccountAudioLanguage::Unavailable, &no_tracks, None),
         "route: account audio language — unavailable (request failed)",
     );
     assert_eq!(
-        account_audio_language_log(&AccountAudioLanguage::TimedOut, &no_tracks, None),
+        account_audio_language_log(&plx_os::devcaps::caps(), &AccountAudioLanguage::TimedOut, &no_tracks, None),
         "route: account audio language — unavailable (timed out)",
     );
     let not_set = |auto_select_audio, stated_language: Option<&str>| {
@@ -76,37 +76,37 @@ fn account_audio_language_diagnostic_covers_every_outcome() {
         }
     };
     assert_eq!(
-        account_audio_language_log(&not_set(Some(true), None), &no_tracks, None),
+        account_audio_language_log(&plx_os::devcaps::caps(), &not_set(Some(true), None), &no_tracks, None),
         "route: account audio language — not set",
     );
     assert_eq!(
-        account_audio_language_log(&not_set(Some(false), Some("ru")), &no_tracks, None),
+        account_audio_language_log(&plx_os::devcaps::caps(), &not_set(Some(false), Some("ru")), &no_tracks, None),
         "route: account audio language — automatic audio selection off (language ru)",
     );
     assert_eq!(
-        account_audio_language_log(&not_set(None, None), &no_tracks, None),
+        account_audio_language_log(&plx_os::devcaps::caps(), &not_set(None, None), &no_tracks, None),
         "route: account audio language — automatic audio selection not reported (language not set)",
     );
 
     let account = AccountAudioLanguage::Set("fr".into());
     let tracks = [trk(1, "ac3", "eng", true), trk(2, "ac3", "fre", false)];
     assert_eq!(
-        account_audio_language_log(&account, &tracks, Some(&(1, "ac3".into(), 2))),
+        account_audio_language_log(&plx_os::devcaps::caps(), &account, &tracks, Some(&(1, "ac3".into(), 2))),
         "route: account prefers audio fr — playing that track",
     );
     assert_eq!(
-        account_audio_language_log(&account, &tracks, Some(&(0, "ac3".into(), 1))),
-        "route: account prefers audio fr — outranked by the PMS selection or show preference",
+        account_audio_language_log(&plx_os::devcaps::caps(), &account, &tracks, Some(&(0, "ac3".into(), 1))),
+        "route: account prefers audio fr — outranked by the remembered pick, the PMS selection or show preference",
     );
 
     let tracks = [trk(1, "ac3", "eng", true), trk(2, "dca", "fra", false)];
     assert_eq!(
-        account_audio_language_log(&account, &tracks, Some(&(0, "ac3".into(), 1))),
+        account_audio_language_log(&plx_os::devcaps::caps(), &account, &tracks, Some(&(0, "ac3".into(), 1))),
         "route: account prefers audio fr — a track in it exists but is not direct-playable; asking the server to convert it",
     );
     let tracks = [trk(1, "ac3", "eng", true)];
     assert_eq!(
-        account_audio_language_log(&account, &tracks, Some(&(0, "ac3".into(), 1))),
+        account_audio_language_log(&plx_os::devcaps::caps(), &account, &tracks, Some(&(0, "ac3".into(), 1))),
         "route: account prefers audio fr — no track in it; using the usual order",
     );
 }
@@ -116,16 +116,16 @@ fn account_audio_language_diagnostic_covers_every_outcome() {
 fn pms_nondefault_selection_outranks_the_show_language() {
     let tracks = [trk(1, "ac3", "hun", true),
         server_selected(trk(2, "ac3", "eng", false))];
-    let prefs = AudioLangPrefs { show: Some("hu-HU"), account: None };
-    assert_eq!(pick_dp_audio_pref(&tracks, "ac3", prefs), Some((1, "ac3".into(), 2)));
+    let prefs = AudioLangPrefs::new(Some("hu-HU"), None);
+    assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs), Some((1, "ac3".into(), 2)));
 }
 
 #[test]
 fn show_language_outranks_account_language() {
     let tracks = [trk(1, "ac3", "eng", true), trk(2, "ac3", "fra", false),
         trk(3, "ac3", "hun", false)];
-    let prefs = AudioLangPrefs { show: Some("hu-HU"), account: Some("fr") };
-    assert_eq!(pick_dp_audio_pref(&tracks, "ac3", prefs), Some((2, "ac3".into(), 3)));
+    let prefs = AudioLangPrefs::new(Some("hu-HU"), Some("fr"));
+    assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs), Some((2, "ac3".into(), 3)));
     assert_eq!(encode_audio_id(false, 3, 0, &tracks, prefs), 3);
 }
 
@@ -133,8 +133,8 @@ fn show_language_outranks_account_language() {
 fn unmatched_or_unset_account_language_falls_to_the_file_default() {
     let tracks = [trk(1, "ac3", "eng", true), trk(2, "ac3", "fra", false)];
     for account in [Some("de"), Some(""), Some("-1"), Some("  ")] {
-        let prefs = AudioLangPrefs { show: None, account };
-        assert_eq!(pick_dp_audio_pref(&tracks, "ac3", prefs), Some((0, "ac3".into(), 1)),
+        let prefs = AudioLangPrefs::new(None, account);
+        assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs), Some((0, "ac3".into(), 1)),
             "{account:?}");
         assert_eq!(encode_audio_id(false, 1, 0, &tracks, prefs), 1, "{account:?}");
     }
@@ -144,8 +144,8 @@ fn unmatched_or_unset_account_language_falls_to_the_file_default() {
 fn account_language_matches_all_french_spellings() {
     for stream in ["fr", "fre", "fra"] {
         let tracks = [trk(1, "ac3", "eng", true), trk(2, "ac3", stream, false)];
-        let prefs = AudioLangPrefs { show: None, account: Some("fr") };
-        assert_eq!(pick_dp_audio_pref(&tracks, "ac3", prefs), Some((1, "ac3".into(), 2)),
+        let prefs = AudioLangPrefs::new(None, Some("fr"));
+        assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs), Some((1, "ac3".into(), 2)),
             "{stream}");
         assert_eq!(encode_audio_id(false, 2, 0, &tracks, prefs), 2, "{stream}");
     }
@@ -161,7 +161,7 @@ fn a_non_playable_pick_is_answered_by_a_sibling_in_its_language() {
         server_selected(trk(2, "dca", "fre", false)),
         trk(3, "ac3", "fre", false),
     ];
-    assert_eq!(pick_dp_audio(&tracks, "ac3"), Some((2, "ac3".into(), 3)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "ac3"), Some((2, "ac3".into(), 3)));
 }
 
 
@@ -170,7 +170,7 @@ fn a_non_playable_pick_is_answered_by_a_sibling_in_its_language() {
 #[test]
 fn the_language_heard_with_no_pick_is_the_intended_tracks() {
     let tracks = [trk(1, "ac3", "rus", true), trk(2, "truehd", "eng", false)];
-    let prefs = AudioLangPrefs { show: None, account: Some("en") };
+    let prefs = AudioLangPrefs::new(None, Some("en"));
     assert_eq!(playing_audio_language(&tracks, None, 0, prefs), "eng");
     // the viewer's own pick of the English track names it too
     assert_eq!(playing_audio_language(&tracks, None, 2, AudioLangPrefs::default()), "eng");
@@ -182,7 +182,7 @@ fn the_language_heard_with_no_pick_is_the_intended_tracks() {
 #[test]
 fn the_flagged_default_wins_over_an_earlier_track() {
     let tracks = [trk(1, "ac3", "deu", false), trk(2, "ac3", "fra", true)];
-    assert_eq!(pick_dp_audio(&tracks, "ac3"), Some((1, "ac3".into(), 2)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "ac3"), Some((1, "ac3".into(), 2)));
 }
 
 
@@ -191,14 +191,14 @@ fn smart_dp_takes_a_playable_sibling_over_a_non_playable_default() {
     // A 4K HEVC item: TrueHD default + an AC3 sibling — direct-play beats the server's
     // video-downscaling transcode.
     let tracks = [trk(1, "truehd", "eng", true), trk(2, "ac3", "eng", false)];
-    assert_eq!(pick_dp_audio(&tracks, "truehd"), Some((1, "ac3".into(), 2)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "truehd"), Some((1, "ac3".into(), 2)));
 }
 
 
 #[test]
 fn no_direct_playable_track_means_transcode() {
     let tracks = [trk(1, "truehd", "eng", true), trk(2, "dts", "eng", false)];
-    assert!(pick_dp_audio(&tracks, "truehd").is_none());
+    assert!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "truehd").is_none());
 }
 
 
@@ -211,7 +211,7 @@ fn the_servers_selected_track_outranks_the_files_default() {
         server_selected(trk(2694, "ac3", "rus", false)),
         trk(2695, "ac3", "eng", false),
     ];
-    assert_eq!(pick_dp_audio(&tracks, "ac3"), Some((1, "ac3".into(), 2694)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "ac3"), Some((1, "ac3".into(), 2694)));
 }
 
 
@@ -225,9 +225,9 @@ fn a_selection_that_only_echoes_the_files_default_is_not_a_pick() {
         server_selected(trk(10975, "eac3", "rus", true)),
         trk(10976, "eac3", "hun", false),
     ];
-    assert_eq!(pick_dp_audio(&tracks, "eac3"), Some((0, "eac3".into(), 10975)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "eac3"), Some((0, "eac3".into(), 10975)));
     assert_eq!(
-        pick_dp_audio_pref(&tracks, "eac3", AudioLangPrefs { show: Some("hu-HU"), account: None }),
+        pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "eac3", AudioLangPrefs::new(Some("hu-HU"), None)),
         Some((1, "eac3".into(), 10976))
     );
 }
@@ -243,7 +243,7 @@ fn a_selected_track_that_cannot_direct_play_falls_through_to_the_ladder() {
         server_selected(trk(2669, "dca", "eng", false)),
         trk(2673, "ac3", "eng", false),
     ];
-    assert_eq!(pick_dp_audio(&tracks, "dca"), Some((2, "ac3".into(), 2673)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "dca"), Some((2, "ac3".into(), 2673)));
 }
 
 
@@ -255,7 +255,7 @@ fn a_reencode_keeps_the_selected_dts_instead_of_the_ac3_sibling() {
         trk(2663, "ac3", "rus", true),
         server_selected(trk(2669, "dca", "eng", false)),
     ];
-    let dp = pick_dp_audio(&tracks, "dca")
+    let dp = pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "dca")
         .map(|(_, _, id)| id)
         .unwrap_or(0);
     assert_eq!(dp, 2663, "smart-DP sibling is the Russian AC3");
@@ -295,17 +295,17 @@ fn a_reencode_does_not_treat_a_default_echo_as_a_pick() {
         server_selected(trk(10975, "eac3", "rus", true)),
         trk(10976, "eac3", "hun", false),
     ];
-    let dp = pick_dp_audio_pref(&tracks, "eac3", AudioLangPrefs { show: Some("hu-HU"), account: None })
+    let dp = pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "eac3", AudioLangPrefs::new(Some("hu-HU"), None))
         .map(|(_, _, id)| id)
         .unwrap_or(0);
     assert_eq!(dp, 10976, "the show's language picks the Hungarian track");
     assert_eq!(
-        encode_audio_id(true, dp, 0, &tracks, AudioLangPrefs { show: Some("hu-HU"), account: None }),
+        encode_audio_id(true, dp, 0, &tracks, AudioLangPrefs::new(Some("hu-HU"), None)),
         10976,
         "remux copies Hungarian"
     );
     assert_eq!(
-        encode_audio_id(false, dp, 0, &tracks, AudioLangPrefs { show: Some("hu-HU"), account: None }),
+        encode_audio_id(false, dp, 0, &tracks, AudioLangPrefs::new(Some("hu-HU"), None)),
         10976,
         "cold re-encode keeps Hungarian, not the echoed Russian default"
     );
@@ -321,7 +321,7 @@ fn a_reencode_names_selected_dts_not_the_english_ac3_sibling() {
         server_selected(trk(2669, "dca", "eng", false)),
         trk(2673, "ac3", "eng", false),
     ];
-    let dp = pick_dp_audio(&tracks, "dca")
+    let dp = pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "dca")
         .map(|(_, _, id)| id)
         .unwrap_or(0);
     assert_eq!(dp, 2673, "smart-DP sibling is the English AC3");
@@ -346,7 +346,7 @@ fn a_reencode_keeps_the_default_over_an_unselected_foreign_dts() {
         server_selected(trk(2663, "ac3", "rus", true)),
         trk(2669, "dca", "eng", false),
     ];
-    let dp = pick_dp_audio(&tracks, "dca")
+    let dp = pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "dca")
         .map(|(_, _, id)| id)
         .unwrap_or(0);
     assert_eq!(dp, 2663, "smart-DP sibling is the Russian AC3");
@@ -371,7 +371,7 @@ fn a_reencode_keeps_an_english_ac3_sibling_over_truehd() {
         server_selected(trk(1, "truehd", "eng", true)),
         trk(2, "ac3", "eng", false),
     ];
-    let dp = pick_dp_audio(&tracks, "truehd")
+    let dp = pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "truehd")
         .map(|(_, _, id)| id)
         .unwrap_or(0);
     assert_eq!(dp, 2, "smart-DP sibling is the English AC3");
@@ -391,7 +391,7 @@ fn a_reencode_names_selected_dts_when_there_is_no_ac3_sibling() {
         trk(1, "truehd", "eng", true),
         server_selected(trk(2, "dca", "eng", false)),
     ];
-    let dp = pick_dp_audio(&tracks, "truehd")
+    let dp = pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "truehd")
         .map(|(_, _, id)| id)
         .unwrap_or(0);
     assert_eq!(dp, 0, "no direct-playable track");
@@ -479,7 +479,7 @@ fn the_audio_ladder_walks_its_rungs_in_order() {
         ),
     ];
     for (what, tracks, acodec, want) in cases {
-        assert_eq!(pick_dp_audio(&tracks, acodec), want, "{what}");
+        assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, acodec), want, "{what}");
     }
 }
 
@@ -564,16 +564,16 @@ fn a_selection_with_no_stream_id_is_left_off_rather_than_half_applied() {
 #[test]
 fn a_shows_preferred_audio_language_is_honoured() {
     let tracks = [trk(1, "ac3", "hun", true), trk(2, "ac3", "eng", false)];
-    assert_eq!(pick_dp_audio_pref(&tracks, "ac3", AudioLangPrefs { show: Some("hu-HU"), account: None }), Some((0, "ac3".into(), 1)));
+    assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", AudioLangPrefs::new(Some("hu-HU"), None)), Some((0, "ac3".into(), 1)));
     // …and the other way round: Hungarian second, English default — the preference moves it
     let tracks = [trk(1, "ac3", "eng", true), trk(2, "eac3", "hun", false)];
-    assert_eq!(pick_dp_audio_pref(&tracks, "ac3", AudioLangPrefs { show: Some("hu-HU"), account: None }), Some((1, "eac3".into(), 2)));
+    assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", AudioLangPrefs::new(Some("hu-HU"), None)), Some((1, "eac3".into(), 2)));
     // a preferred track that cannot direct-play does not force a transcode
     let tracks = [trk(1, "ac3", "eng", true), trk(2, "dca", "hun", false)];
-    assert_eq!(pick_dp_audio_pref(&tracks, "ac3", AudioLangPrefs { show: Some("hu-HU"), account: None }), Some((0, "ac3".into(), 1)));
+    assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", AudioLangPrefs::new(Some("hu-HU"), None)), Some((0, "ac3".into(), 1)));
     // a DIFFERENT track chosen for this episode elsewhere still outranks the show's default
     let tracks = [trk(1, "ac3", "hun", true), server_selected(trk(2, "ac3", "eng", false))];
-    assert_eq!(pick_dp_audio_pref(&tracks, "ac3", AudioLangPrefs { show: Some("hu-HU"), account: None }), Some((1, "ac3".into(), 2)));
+    assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", AudioLangPrefs::new(Some("hu-HU"), None)), Some((1, "ac3".into(), 2)));
 }
 
 #[test]
@@ -638,20 +638,20 @@ fn show_settings_are_read_out_of_a_setting_list() {
 #[test]
 fn a_show_audio_preference_survives_a_video_transcode() {
     let tracks = [trk(1, "ac3", "hun", true), trk(2, "ac3", "eng", false)];
-    let (_, _, dp) = pick_dp_audio_pref(&tracks, "ac3", AudioLangPrefs { show: Some("hu-HU"), account: None }).unwrap();
-    assert_eq!(encode_audio_id(false, dp, 0, &tracks, AudioLangPrefs { show: Some("hu-HU"), account: None }), 1,
+    let (_, _, dp) = pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", AudioLangPrefs::new(Some("hu-HU"), None)).unwrap();
+    assert_eq!(encode_audio_id(false, dp, 0, &tracks, AudioLangPrefs::new(Some("hu-HU"), None)), 1,
         "lowering video quality must not replace the show's chosen audio with English");
 }
 
 #[test]
 fn transcode_show_preference_preserves_overrides_and_missing_language_fallback() {
     let tracks = [trk(1, "ac3", "hun", true), trk(2, "dts", "eng", false)];
-    assert_eq!(encode_audio_id(false, 1, 2, &tracks, AudioLangPrefs { show: Some("hu-HU"), account: None }), 2);
-    assert_eq!(encode_audio_id(true, 1, 2, &tracks, AudioLangPrefs { show: Some("en-US"), account: None }), 1);
+    assert_eq!(encode_audio_id(false, 1, 2, &tracks, AudioLangPrefs::new(Some("hu-HU"), None)), 2);
+    assert_eq!(encode_audio_id(true, 1, 2, &tracks, AudioLangPrefs::new(Some("en-US"), None)), 1);
     // no track in the show's language: the direct-play pick (the Hungarian default), not English
-    assert_eq!(encode_audio_id(false, 1, 0, &tracks, AudioLangPrefs { show: Some("fr-FR"), account: None }), 1);
+    assert_eq!(encode_audio_id(false, 1, 0, &tracks, AudioLangPrefs::new(Some("fr-FR"), None)), 1);
     let tracks = [trk(1, "ac3", "hun", true), server_selected(trk(2, "dts", "eng", false))];
-    assert_eq!(encode_audio_id(false, 1, 0, &tracks, AudioLangPrefs { show: Some("hu-HU"), account: None }), 2);
+    assert_eq!(encode_audio_id(false, 1, 0, &tracks, AudioLangPrefs::new(Some("hu-HU"), None)), 2);
 }
 
 /// **One precedence for every path.** A PMS selection the pipeline cannot decode (English DTS)
@@ -660,13 +660,13 @@ fn transcode_show_preference_preserves_overrides_and_missing_language_fallback()
 /// show's Hungarian while the re-encode named the DTS — two answers to one question.
 #[test]
 fn a_real_pick_outranks_the_show_language_on_every_path() {
-    let prefs = AudioLangPrefs { show: Some("hu-HU"), account: None };
+    let prefs = AudioLangPrefs::new(Some("hu-HU"), None);
     let tracks = [
         trk(1, "ac3", "hun", true),
         server_selected(trk(2, "dca", "eng", false)),
         trk(3, "ac3", "eng", false),
     ];
-    let (_, _, dp) = pick_dp_audio_pref(&tracks, "ac3", prefs).unwrap();
+    let (_, _, dp) = pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs).unwrap();
     assert_eq!(dp, 3, "direct play: the English AC3 beside the picked DTS");
     assert_eq!(encode_audio_id(false, dp, 0, &tracks, prefs), 2, "re-encode: the picked DTS");
     assert_eq!(encode_audio_id(true, dp, 0, &tracks, prefs), 3, "remux copies the sibling");
@@ -677,13 +677,13 @@ fn a_real_pick_outranks_the_show_language_on_every_path() {
 /// direct play and remux take the Hungarian AC3; a re-encode still encodes the French pick.
 #[test]
 fn an_uncarriable_pick_falls_to_the_show_language_before_the_default() {
-    let prefs = AudioLangPrefs { show: Some("hu-HU"), account: None };
+    let prefs = AudioLangPrefs::new(Some("hu-HU"), None);
     let tracks = [
         trk(1, "ac3", "rus", true),
         server_selected(trk(2, "dca", "fre", false)),
         trk(3, "ac3", "hun", false),
     ];
-    let (_, _, dp) = pick_dp_audio_pref(&tracks, "ac3", prefs).unwrap();
+    let (_, _, dp) = pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs).unwrap();
     assert_eq!(dp, 3, "direct play: the show's Hungarian, not the Russian default");
     assert_eq!(encode_audio_id(true, dp, 0, &tracks, prefs), 3, "remux copies it");
     assert_eq!(encode_audio_id(false, dp, 0, &tracks, prefs), 2, "re-encode: the French pick");
@@ -698,7 +698,7 @@ fn a_picks_sibling_matches_across_iso_639_spellings() {
         server_selected(trk(2, "dca", "fre", false)),
         trk(3, "ac3", "fra", false),
     ];
-    assert_eq!(pick_dp_audio(&tracks, "ac3"), Some((2, "ac3".into(), 3)));
+    assert_eq!(pick_dp_audio(&plx_os::devcaps::caps(), &tracks, "ac3"), Some((2, "ac3".into(), 3)));
     assert!(lang_matches("fre", "fra") && lang_matches("ger", "deu") && lang_matches("no", "nob"));
     assert!(!lang_matches("fre", "eng") && !lang_matches("", "") && !lang_matches("xx", "yy"));
 }
@@ -714,8 +714,8 @@ fn an_account_default_show_setting_is_no_preference() {
     );
     let tracks = [trk(1, "ac3", "fre", true), trk(2, "ac3", "eng", false)];
     for show in ["", "-1", " -1 "] {
-        let prefs = AudioLangPrefs { show: Some(show), account: None };
-        assert_eq!(pick_dp_audio_pref(&tracks, "ac3", prefs), Some((0, "ac3".into(), 1)), "{show:?}");
+        let prefs = AudioLangPrefs::new(Some(show), None);
+        assert_eq!(pick_dp_audio_pref(&plx_os::devcaps::caps(), &tracks, "ac3", prefs), Some((0, "ac3".into(), 1)), "{show:?}");
         assert_eq!(encode_audio_id(false, 1, 0, &tracks, prefs), 1, "{show:?}");
     }
 }
@@ -764,13 +764,36 @@ fn account_subtitles_skip_unrenderable_tracks_without_enabling_a_burn() {
 
 #[test]
 fn known_audio_channels_cannot_fall_back_to_an_unknown_codec_default() {
-    let caps = plx_platform::devcaps::Caps { audio_channels: [("aac".into(), 6)].into(), ..plx_platform::devcaps::Caps::assumed() };
+    let caps = plx_os::devcaps::Caps { audio_channels: [("aac".into(), 6)].into(), ..plx_os::devcaps::Caps::assumed() };
     let mut track = trk(1, "aac", "eng", false);
     track.channels = 8;
     assert!(caps.audio_supports("aac", 0), "legacy unknown remains compatible");
-    assert_eq!(pick_dp_audio_eligible(&[track.clone()], "aac", AudioLangPrefs::default(), 0, StandIn::Any, |c, n| caps.audio_supports(c, n)), None);
+    assert_eq!(pick_dp_audio_eligible(&[track.clone()], "aac", AudioLangPrefs::default(), 0, StandIn::Any, |c, n, _| caps.audio_supports(c, n)), None);
     track.channels = 6;
-    assert_eq!(pick_dp_audio_eligible(&[track], "aac", AudioLangPrefs::default(), 0, StandIn::Any, |c, n| caps.audio_supports(c, n)), Some((0, "aac".into(), 1)));
+    assert_eq!(pick_dp_audio_eligible(&[track], "aac", AudioLangPrefs::default(), 0, StandIn::Any, |c, n, _| caps.audio_supports(c, n)), Some((0, "aac".into(), 1)));
+}
+
+/// An Opus track whose width the Load cannot describe is not direct-playable, in either mode: the Load
+/// needs the channel count (`opusInfo`, 1..=8 channels), and the planner asks it of the track, so
+/// Auto converts the track and Force Direct Play shows its refusal instead of dying at the Load (#1096).
+#[test]
+fn an_opus_track_of_unknown_width_is_not_direct_playable_in_either_mode() {
+    let caps = plx_os::devcaps::Caps {
+        audio: "aac,ac3,eac3,opus".into(),
+        audio_channels: [("opus".to_string(), 2)].into(),
+        ..plx_os::devcaps::Caps::assumed()
+    };
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        assert!(!audio_direct_plays_with(&caps, mode, "opus", 0, 48_000), "{mode:?}: unknown width");
+        // The Media-level stand-in of an item with no track list (`acodec`, width and rate unstated).
+        assert!(!audio_direct_plays_with(&caps, mode, "opus", 0, 0), "{mode:?}: Media-level Opus, no track list");
+        assert!(audio_direct_plays_with(&caps, mode, "opus", 2, 48_000), "{mode:?}: stereo");
+        assert!(audio_direct_plays_with(&caps, mode, "opus", 1, 48_000), "{mode:?}: mono");
+    }
+    assert!(!audio_direct_plays_with(&caps, DirectPlayMode::Auto, "opus", 6, 48_000), "Auto holds the stereo bound");
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Forced, "opus", 6, 48_000), "Force has no table ceiling");
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Forced, "opus", 8, 48_000));
+    assert!(!audio_direct_plays_with(&caps, DirectPlayMode::Forced, "opus", 12, 48_000), "wider than any layout");
 }
 
 // ---- StandIn::SameKind: never stand in a different KIND of track ---------------------------
@@ -780,8 +803,8 @@ fn titled(mut s: plx_data::metadata::Stream, title: &str) -> plx_data::metadata:
     s
 }
 
-fn aac_caps() -> plx_platform::devcaps::Caps {
-    plx_platform::devcaps::Caps { audio_channels: [("aac".into(), 6)].into(), ..plx_platform::devcaps::Caps::assumed() }
+fn aac_caps() -> plx_os::devcaps::Caps {
+    plx_os::devcaps::Caps { audio_channels: [("aac".into(), 6)].into(), ..plx_os::devcaps::Caps::assumed() }
 }
 
 /// Direct-play pick under `stand_in` with the stock capability set (AAC capped at 6 channels).
@@ -789,7 +812,7 @@ fn pick_kind(tracks: &[plx_data::metadata::Stream], acodec: &str, prefs: AudioLa
     -> Option<i64>
 {
     let caps = aac_caps();
-    pick_dp_audio_eligible(tracks, acodec, prefs, session, stand_in, |c, n| caps.audio_supports(c, n))
+    pick_dp_audio_eligible(tracks, acodec, prefs, session, stand_in, |c, n, _| caps.audio_supports(c, n))
         .map(|(_, _, id)| id)
 }
 
@@ -823,7 +846,7 @@ fn a_commentary_is_not_the_sibling_of_a_pick_or_a_preferred_language() {
     assert_eq!(pick_kind(&tracks, "truehd", AudioLangPrefs::default(), 0, StandIn::SameKind), None);
     // the account language names English; English holds a commentary the TV could play
     let wide = wide_default_and_commentary();
-    let prefs = AudioLangPrefs { show: None, account: Some("en") };
+    let prefs = AudioLangPrefs::new(None, Some("en"));
     assert_eq!(pick_kind(&wide, "aac", prefs, 0, StandIn::SameKind), None);
 }
 
@@ -888,7 +911,7 @@ fn any_stand_in_prefers_a_non_commentary_track() {
 #[test]
 fn the_language_arm_of_the_encoder_pick_skips_a_commentary() {
     let tracks = [titled(trk(1, "ac3", "eng", false), "Commentary"), trk(2, "dca", "eng", true)];
-    let prefs = AudioLangPrefs { show: Some("en-US"), account: None };
+    let prefs = AudioLangPrefs::new(Some("en-US"), None);
     assert_eq!(encode_audio_id(false, 99, 0, &tracks, prefs), 2);
 }
 
@@ -907,4 +930,285 @@ fn the_encoder_names_the_default_when_nothing_stands_in() {
     let tracks = [titled(trk(1, "truehd", "eng", true), "Commentary"), trk(2, "truehd", "eng", false)];
     assert_eq!(encode_audio_id(true, 0, 0, &tracks, none), 2);
     assert_eq!(encode_audio_id(true, 0, 0, &[], none), 0);
+}
+
+/// An English subtitle stream as the PMS reports it: `title` and the two structured flags, which
+/// on a real library are often both unset while the NAME says Forced or SDH (#828).
+fn titled_sub(id: i64, index: i64, title: &str, forced: bool, sdh: bool) -> plx_data::metadata::Stream {
+    plx_data::metadata::Stream { title: title.into(), forced, sdh, ..sub(id, index, "eng", false) }
+}
+
+fn account_pick(subs: &[plx_data::metadata::Stream], forced: i64) -> Option<i64> {
+    let account = SubtitleLangPrefs { language: Some("en"), mode: 2, forced };
+    pick_dp_subtitle_account(subs, &plx_plex::plex::ShowLangPrefs::default(), account, "eng").map(|p| p.0)
+}
+
+/// **The account rule reads "forced" the way the track menu does (#828).** A track whose title
+/// says "Forced" but whose PMS flag is unset is FORCED in the menu (`sub_traits`), so "prefer not
+/// forced" must skip it for the full track behind it, and "forced only" must take it.
+#[test]
+fn the_account_rule_treats_a_track_titled_forced_as_forced() {
+    let subs = [titled_sub(1, 2, "Forced", false, false), titled_sub(2, 3, "", false, false)];
+    assert!(plx_data::metadata::sub_layout::sub_traits(&subs[0]).forced, "the menu calls track 1 Forced");
+    assert_eq!(account_pick(&subs, 0), Some(2), "prefer non-forced skips the track named Forced");
+    assert_eq!(account_pick(&subs, 3), Some(2), "never-forced skips it too");
+    assert_eq!(account_pick(&subs, 1), Some(1), "prefer forced takes it");
+    assert_eq!(account_pick(&subs, 2), Some(1), "forced only takes it");
+}
+
+/// The SDH half of #828: a track titled "English SDH" with no `sdh` flag is SDH in the menu, so
+/// the plain track behind it wins the first tier.
+#[test]
+fn the_account_rule_treats_a_track_titled_sdh_as_sdh() {
+    let subs = [titled_sub(1, 2, "English SDH", false, false), titled_sub(2, 3, "", false, false)];
+    assert!(plx_data::metadata::sub_layout::sub_traits(&subs[0]).sdh, "the menu calls track 1 SDH");
+    assert_eq!(account_pick(&subs, 0), Some(2), "pref non-SDH skips the track named SDH");
+}
+
+// ---- PMS spells DTS `dca`: the table-backed caps must admit it -----------------------------
+
+/// The dev set's table shape for DTS: the decoder is listed with a 6-channel ceiling.
+fn dts_row_caps() -> plx_os::devcaps::Caps {
+    plx_os::devcaps::Caps {
+        audio: "aac,ac3,eac3,dts".into(),
+        audio_channels: [("dts".into(), 6)].into(),
+        ..plx_os::devcaps::Caps::assumed()
+    }
+}
+
+/// The PMS spelling of DTS direct-plays on a set whose table has a DTS row: the selected `dca`
+/// 5.1 track is picked, not the AC3 sibling (the spelling gap made every DTS file convert).
+#[test]
+fn a_selected_dca_track_is_picked_when_the_table_has_a_dts_row() {
+    let caps = dts_row_caps();
+    let mut dca = server_selected(trk(2669, "dca", "eng", false));
+    dca.channels = 6;
+    let tracks = [trk(2663, "ac3", "rus", true), dca, trk(2673, "ac3", "eng", false)];
+    let pick = pick_dp_audio_eligible(&tracks, "dca", AudioLangPrefs::default(), 0, StandIn::Any,
+        |c, n, _| caps.audio_supports(c, n));
+    assert_eq!(pick.map(|(_, _, id)| id), Some(2669));
+}
+
+/// Auto and Forced decide through the same canonicaliser, and Forced's DTS needs the table row
+/// but not the ceiling (7.1 DTS-HD MA: Auto converts, Forced feeds the core).
+#[test]
+fn auto_and_forced_agree_on_the_dca_spelling() {
+    let caps = dts_row_caps();
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Auto, "dca", 6, 0));
+    assert!(!audio_direct_plays_with(&caps, DirectPlayMode::Auto, "dca", 8, 0));
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Forced, "dca", 6, 0));
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Forced, "dca", 8, 0));
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Forced, "DTS", 8, 0));
+    let assumed = plx_os::devcaps::Caps::assumed();
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        assert!(!audio_direct_plays_with(&assumed, mode, "dca", 6, 0), "{mode:?}: no DTS row, no DTS");
+    }
+    assert!(audio_direct_plays_with(&assumed, DirectPlayMode::Forced, "ac3", 8, 0));
+    assert!(!audio_direct_plays_with(&assumed, DirectPlayMode::Forced, "truehd", 8, 0));
+}
+
+/// **DTS the app decodes** (S4 PR 2): a set with no DTS row direct-plays a DTS track in
+/// BOTH modes, up to 8 channels (the app decodes the core and downmixes), whatever a native
+/// ceiling says; with the policy off nothing changes — no row, no DTS — and the lossless codecs do
+/// not depend on it.
+#[test]
+fn the_lossy_gate_lets_the_app_direct_play_dts_in_both_modes_and_off_changes_nothing() {
+    let off = plx_os::devcaps::Caps::assumed();
+    let on = plx_os::devcaps::Caps::assumed().with_app_lossy();
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        for ch in [2, 6, 8] {
+            assert!(!audio_direct_plays_with(&off, mode, "dca", ch, 0), "{mode:?} {ch}ch: gate off");
+            assert!(audio_direct_plays_with(&on, mode, "dca", ch, 0), "{mode:?} {ch}ch: gate on");
+        }
+        assert!(audio_direct_plays_with(&on, mode, "dca", 6, 96_000), "{mode:?}: a core has no rate bound");
+        assert!(!audio_direct_plays_with(&on, mode, "mlp", 8, 0), "{mode:?}: only the app-decoded set joined");
+        assert!(!audio_direct_plays_with(&on, mode, "aac", 2, 96_000), "{mode:?}: hardware limits stand");
+    }
+    // A policy that merely ADMITS DTS (a read table's `Measured`) is not "in force": Auto never decodes
+    // in the app on its own, Force Direct Play does only where the set has no native path.
+    let admitted = plx_os::devcaps::Caps { app_lossy: plx_os::devcaps::AppLossy::Measured, ..off.clone() };
+    assert!(!audio_direct_plays_with(&admitted, DirectPlayMode::Auto, "dca", 6, 0), "Auto: the server converts it");
+    assert!(audio_direct_plays_with(&admitted, DirectPlayMode::Forced, "dca", 2, 0), "Forced: no native path, nothing to mix down");
+    assert!(
+        !audio_direct_plays_with(&admitted, DirectPlayMode::Forced, "dca", 6, 0),
+        "Forced: no native path and the app will not mix a surround source down (owner, 2026-10-28)"
+    );
+    assert!(!audio_natively_plays_with(&admitted, DirectPlayMode::Forced, "dca", 2, 0));
+    let measured = plx_os::devcaps::Caps { native_ceiling: [("dts".into(), 2)].into(), ..dts_row_caps() };
+    assert!(!audio_direct_plays_with(&measured, DirectPlayMode::Forced, "dca", 6, 0), "native ceiling applies natively");
+    assert!(audio_direct_plays_with(&measured.with_app_lossy(), DirectPlayMode::Forced, "dca", 6, 0));
+}
+
+/// **MP3 and Vorbis in force** (S4-4) direct-play in both modes on a set with no row for
+/// them, and not with it off; a Vorbis above 48 kHz is the server's.
+#[test]
+fn the_lossy_gate_lets_the_app_direct_play_mp3_and_vorbis_in_both_modes() {
+    let off = plx_os::devcaps::Caps::assumed();
+    let on = plx_os::devcaps::Caps::assumed().with_app_lossy();
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        for codec in ["mp3", "vorbis"] {
+            assert!(!audio_direct_plays_with(&off, mode, codec, 2, 44_100), "{mode:?} {codec}: gate off");
+            assert!(audio_direct_plays_with(&on, mode, codec, 2, 44_100), "{mode:?} {codec}: gate on");
+            assert!(audio_direct_plays_with(&on, mode, codec, 2, 0), "{mode:?} {codec}: unstated rate");
+            assert!(!audio_direct_plays_with(&on, mode, codec, 2, 96_000), "{mode:?} {codec}: above 48 kHz");
+        }
+        assert!(audio_direct_plays_with(&on, mode, "vorbis", 6, 48_000), "{mode:?}: 5.1 Vorbis");
+        assert!(!audio_direct_plays_with(&on, mode, "mp2", 2, 44_100), "{mode:?}: only MP3 and Vorbis joined");
+    }
+}
+
+/// **TrueHD in force** (S4-5) direct-plays in both modes at any rate it has, 8 channels,
+/// on a set with no row for it, and not with the gate off.
+#[test]
+fn the_lossy_gate_lets_the_app_direct_play_truehd_at_any_rate_in_both_modes() {
+    let off = plx_os::devcaps::Caps::assumed();
+    let on = plx_os::devcaps::Caps::assumed().with_app_lossy();
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        assert!(!audio_direct_plays_with(&off, mode, "truehd", 8, 48_000), "{mode:?}: gate off");
+        for rate in [0, 48_000, 96_000, 192_000] {
+            for channels in [2, 6, 8] {
+                assert!(audio_direct_plays_with(&on, mode, "truehd", channels, rate), "{mode:?}: {channels}ch {rate} Hz");
+            }
+        }
+        assert!(!audio_direct_plays_with(&on, mode, "mlp", 6, 48_000), "{mode:?}: only truehd");
+    }
+}
+
+/// Issue #951: an LG B8 refused a 96 kHz AAC Load. The server is asked for 48 kHz at most on every
+/// audio codec the app does not resample (not DTS, TrueHD, FLAC, ALAC or LPCM), and the local gate agrees on that axis: a 96 kHz AAC (or AC-3) track does not
+/// direct-play in either mode and never wins the pick over a sibling that does, while an unstated
+/// rate (the planner's `0`) and a DTS core (48 kHz by format, whatever the container says) pass.
+#[test]
+fn a_track_above_the_load_rate_ceiling_is_not_direct_played_in_either_mode() {
+    let caps = dts_row_caps();
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        assert!(audio_direct_plays_with(&caps, mode, "aac", 2, 48_000), "{mode:?}");
+        assert!(audio_direct_plays_with(&caps, mode, "aac", 2, 0), "{mode:?}: unstated rate");
+        assert!(!audio_direct_plays_with(&caps, mode, "aac", 2, 96_000), "{mode:?}: 96 kHz");
+        assert!(!audio_direct_plays_with(&caps, mode, "ac3", 6, 96_000), "{mode:?}: 96 kHz");
+        assert!(audio_direct_plays_with(&caps, mode, "dca", 6, 96_000), "{mode:?}: DTS core");
+    }
+    let hi = plx_data::metadata::Stream { sampling_rate: 96_000, ..trk(1, "aac", "eng", true) };
+    let lo = plx_data::metadata::Stream { sampling_rate: 48_000, ..trk(2, "aac", "eng", false) };
+    let pick = pick_dp_audio_eligible(&[hi, lo], "aac", AudioLangPrefs::default(), 0, StandIn::Any,
+        |c, n, r| audio_direct_plays_with(&caps, DirectPlayMode::Auto, c, n, r));
+    assert_eq!(pick.map(|(_, _, id)| id), Some(2));
+}
+
+/// FLAC is decoded by the app and fed to LG's PCM input, whose limits are its own: two channels,
+/// and only the rates its table names. Forced trusts a hardware decoder past its table,
+/// but not these, so on the B8 a 5.1 FLAC (the Load was refused after PMS had direct-played it)
+/// is refused before anything starts, in both modes. A rate above the table is no refusal: the app
+/// resamples a 96 or 192 kHz stereo FLAC to the table's top (`devcaps::pcm_load_rate`), so both modes
+/// play it; an unstated rate still is.
+#[test]
+fn flac_is_gated_by_the_pcm_paths_own_limits_in_both_modes() {
+    let caps = plx_os::devcaps::Caps {
+        audio: "aac,ac3,eac3,dts,flac".into(),
+        audio_channels: [("dts".into(), 6), ("flac".into(), plx_os::devcaps::PCM_MAX_CHANNELS)].into(),
+        ..plx_os::devcaps::Caps::assumed()
+    };
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        assert!(audio_direct_plays_with(&caps, mode, "flac", 2, 48_000), "{mode:?}");
+        assert!(audio_direct_plays_with(&caps, mode, "flac", 1, 44_100), "{mode:?}");
+        assert!(!audio_direct_plays_with(&caps, mode, "flac", 6, 48_000), "{mode:?}: 5.1");
+        assert!(audio_direct_plays_with(&caps, mode, "flac", 2, 96_000), "{mode:?}: 96 kHz is resampled");
+        assert!(audio_direct_plays_with(&caps, mode, "flac", 2, 192_000), "{mode:?}: 192 kHz is resampled");
+        assert!(audio_direct_plays_with(&caps, mode, "flac", 1, 88_200), "{mode:?}: 88.2 kHz mono");
+        assert!(!audio_direct_plays_with(&caps, mode, "flac", 6, 96_000), "{mode:?}: 5.1 at 96 kHz still converts");
+        assert!(!audio_direct_plays_with(&caps, mode, "flac", 2, 11_025), "{mode:?}: below the table, not in it");
+        assert!(!audio_direct_plays_with(&caps, mode, "flac", 2, 0), "{mode:?}: unstated rate");
+    }
+    // the hardware codecs keep their own rules: Forced still feeds a 7.1 DTS core
+    assert!(audio_direct_plays_with(&caps, DirectPlayMode::Forced, "dca", 8, 96_000));
+    // a stereo 96 kHz FLAC wins the track pick (the app resamples it); a 5.1 one still gives way to the AC3 sibling
+    let mut hi = trk(1, "flac", "eng", true);
+    hi.channels = 2;
+    hi.sampling_rate = 96_000;
+    let mut ac3 = trk(2, "ac3", "eng", false);
+    ac3.channels = 2;
+    let pick = pick_dp_audio_eligible(&[hi.clone(), ac3.clone()], "flac", AudioLangPrefs::default(), 0, StandIn::Any,
+        |c, n, r| audio_direct_plays_with(&caps, DirectPlayMode::Forced, c, n, r));
+    assert_eq!(pick.map(|(_, _, id)| id), Some(1));
+    hi.channels = 6;
+    let pick = pick_dp_audio_eligible(&[hi, ac3], "flac", AudioLangPrefs::default(), 0, StandIn::Any,
+        |c, n, r| audio_direct_plays_with(&caps, DirectPlayMode::Forced, c, n, r));
+    assert_eq!(pick.map(|(_, _, id)| id), Some(2));
+}
+
+/// ALAC and LPCM ride FLAC's path (S4), so they have FLAC's limits and no others: two channels, the
+/// PCM table's rates, in both modes. PMS spells LPCM per width (`pcm_s24le`) on the stream and `pcm`
+/// on the media; both resolve to the one codec the table lists.
+#[test]
+fn alac_and_lpcm_are_gated_by_the_pcm_paths_limits_in_both_modes() {
+    let caps = plx_os::devcaps::Caps {
+        audio: "aac,ac3,eac3,dts,flac,alac,pcm".into(),
+        audio_channels: [
+            ("dts".into(), 6),
+            ("flac".into(), plx_os::devcaps::PCM_MAX_CHANNELS),
+            ("alac".into(), plx_os::devcaps::PCM_MAX_CHANNELS),
+            ("pcm".into(), plx_os::devcaps::PCM_MAX_CHANNELS),
+        ].into(),
+        ..plx_os::devcaps::Caps::assumed()
+    };
+    for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+        for codec in ["alac", "pcm", "pcm_s16le", "pcm_s24le", "lpcm"] {
+            assert!(audio_direct_plays_with(&caps, mode, codec, 2, 44_100), "{codec} {mode:?}");
+            assert!(audio_direct_plays_with(&caps, mode, codec, 1, 48_000), "{codec} {mode:?}");
+            assert!(!audio_direct_plays_with(&caps, mode, codec, 6, 48_000), "{codec} {mode:?}: 5.1");
+            assert!(audio_direct_plays_with(&caps, mode, codec, 2, 96_000), "{codec} {mode:?}: 96 kHz is resampled");
+            assert!(!audio_direct_plays_with(&caps, mode, codec, 6, 96_000), "{codec} {mode:?}: 5.1 at 96 kHz");
+            assert!(!audio_direct_plays_with(&caps, mode, codec, 2, 0), "{codec} {mode:?}: unstated rate");
+        }
+        for not_ours in ["pcm_f32le", "pcm_bluray", "pcm_u8"] {
+            assert!(!audio_direct_plays_with(&caps, mode, not_ours, 2, 48_000), "{not_ours} {mode:?}: the server converts it");
+        }
+    }
+    // a 24-bit/96 kHz ALAC beats a stereo AC3 sibling (the app resamples it)
+    let mut hi = trk(1, "alac", "eng", true);
+    hi.channels = 2;
+    hi.sampling_rate = 96_000;
+    let mut ac3 = trk(2, "ac3", "eng", false);
+    ac3.channels = 2;
+    let pick = pick_dp_audio_eligible(&[hi, ac3], "alac", AudioLangPrefs::default(), 0, StandIn::Any,
+        |c, n, r| audio_direct_plays_with(&caps, DirectPlayMode::Forced, c, n, r));
+    assert_eq!(pick.map(|(_, _, id)| id), Some(1));
+}
+
+
+/// **An attempt's own capability value decides its audio pick; no process-wide answer is read.**
+/// A DTS 5.1 default beside an AC3 5.1 of the same language: on a set whose table lists a 6-channel
+/// DTS decoder (`a`) the DTS plays; the attempt narrowed by [`Caps::without`] (`b`: the DTS row
+/// gone, as a refusal learned for the attempt would leave it) takes the AC3 sibling. Both picks run
+/// side by side in one thread, from the value alone: nothing is installed on the capability door.
+#[test]
+fn an_attempt_without_dts_picks_the_ac3_sibling_while_the_wider_attempt_keeps_the_dts() {
+    use plx_os::devcaps::{Caps, Facet};
+    let a = dts_row_caps();
+    let b = a.without(&Facet::Audio { codec: "dts".into(), channels: 2 });
+    let surround = |id, codec: &str, default| plx_data::metadata::Stream { channels: 6, ..trk(id, codec, "eng", default) };
+    let tracks = [surround(11, "dca", true), surround(12, "ac3", false)];
+    let pick = |caps: &Caps| {
+        pick_dp_audio_eligible(&tracks, "dca", AudioLangPrefs::default(), 0, StandIn::Any, |codec, channels, rate| {
+            audio_direct_plays_with(caps, DirectPlayMode::Auto, codec, channels, rate)
+        })
+    };
+    assert_eq!(pick(&a), Some((0, "dca".into(), 11)), "the set with a DTS row direct-plays its default");
+    assert_eq!(pick(&b), Some((1, "ac3".into(), 12)), "without the row the same-language AC3 plays instead");
+}
+
+#[test]
+fn the_load_declaration_maps_every_dts_spelling_to_the_payload_name() {
+    // PMS writes the DTS family as `dca` / `dca-ma` / `dca_ma`; the demuxer feeds DTS core
+    // bytes for all of them, and the start guard's payload table knows only `dts`. A
+    // declaration that carries a PMS spelling as-is (the no-pick `src_acodec` of a DTS
+    // title) would be refused at Load — the Akira-class silent error.
+    for codec in ["dts", "dca", "dca-ma", "dca_ma", "dts_ma", "dtshd", "DTS", "DCA"] {
+        assert_eq!(audio_declaration(codec), "dts", "{codec}");
+    }
+    // the payload table's other names and a pass-through survive (case-normalised)
+    assert_eq!(audio_declaration("eac3"), "eac3");
+    assert_eq!(audio_declaration("ac3"), "ac3");
+    assert_eq!(audio_declaration("aac"), "aac");
+    assert_eq!(audio_declaration("TrueHD"), "truehd");
 }

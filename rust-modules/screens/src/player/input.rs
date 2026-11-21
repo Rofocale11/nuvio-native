@@ -17,11 +17,16 @@
 //! in phase 10 and needs the same cadence, and a screen may not name a sibling family for a shared
 //! word (§2.1).
 
+use plx_appkit::held_key::HeldKey;
+use plx_appkit::player_hud::command::Section;
+use plx_appkit::player_hud::geometry::{GROUP_ROW, GROUP_SCRUB, GROUP_SECTION, GROUP_STRIP, GROUP_TABS};
+use plx_machine::machine::GroupId;
 use std::os::raw::c_int;
 
 /// Is the transport HUD on screen? Its timer is live, OR playback is paused, OR the pipeline is
 /// BUSY — unless the user explicitly dismissed it (UP from the top row), which holds until the
-/// next key but cannot hide a stalled pipeline's read-out.
+/// next key but cannot hide a stalled pipeline's read-out. A dismissed HUD also stays
+/// hidden through an immediate seek; ordinary buffering retains the read-out.
 ///
 /// **The `loading()` term is load-bearing and there must be exactly ONE predicate.** The draw path
 /// and the pointer path used to spell it out inline while the three KEY sites and the focus PARKER
@@ -36,10 +41,11 @@ use std::os::raw::c_int;
 /// obvious one to reach for. One predicate, no wrong choice.
 #[inline]
 pub fn hud_visible(ps: &plx_media::route::PlaybackSession, now: u32, until: u32, is_paused: bool, dismissed: bool) -> bool {
-    ((now < until || is_paused) && !dismissed) || plx_media::player::loading(ps)
+    ((now < until || is_paused) && !dismissed)
+        || (plx_media::player::loading(ps) && !super::seek_jump::seek_stays_hidden(ps, dismissed))
 }
 
-// (`struct HeldKey` stood here — WHICH key the remote is holding, as one value: the sym the
+// (A different `struct HeldKey` stood here, unrelated to `appkit::held_key::HeldKey` — WHICH key the remote is holding, as one value: the sym the
 // CLIENT-SIDE repeat timer was driving, the two instants that timer read, the hardware heartbeat
 // that caught a dropped key-up, and the sym we watched go physically down. Deleted with the timer
 // in restructure phase 10, whose last consumer was the item context menu; every discrete focus
@@ -56,24 +62,25 @@ pub fn hud_visible(ps: &plx_media::route::PlaybackSession, now: u32, until: u32,
 
 /// Scrub-seek gesture state. This Magic Remote emits a HELD key as auto-repeat keydowns
 /// (state 0x101, ~50ms apart) followed by ONE keyup on release; a TAP is a lone
-/// keydown(0x001)+keyup(0x000). So: a fresh press does the fixed jump; the 0x101 repeats
-/// engage the continuous scrub; the keyup is a reliable release. Taps commit on a short
-/// debounce so quick taps accumulate.
+/// keydown(0x001)+keyup(0x000). A default D-pad press moves the fixed-step target; 0x101 repeats
+/// engage the continuous scrub. A held key's keyup is provisional — the driver can bounce `Up`
+/// then `Down` mid-hold — so the hold ends only after `SCRUB_RELEASE_DEBOUNCE_MS` passes without
+/// the same key returning (`appkit::held_key::HeldKey`). **Neither a hold's end nor a D-pad tap's keyup
+/// seeks:** the keys only move the TARGET, which stays pending (the film plays on underneath)
+/// until OK / PLAY takes it or BACK drops it — click-to-confirm. Only a pointer drag commits by
+/// itself, on its release. Dedicated FF/REW taps are handled by `seek_jump` before this release path.
 pub struct Scrub {
-    pub t: u32,          // last continuous-advance tick
-    pub dir: i32,        // -1 back / +1 forward / 0 = no scrub in progress
-    pub hold: bool,      // a 0x101 repeat arrived → continuous accelerating scrub engaged
-    pub hold_since: u32, // when that hold engaged — the acceleration ramp is measured from here
-    pub alive: u32,      // last held (0x101) event — for the lost-keyup safety commit
-    pub commit_at: u32,  // tap released → commit at this tick (0 = none; a new press cancels)
+    /// The key-hold half — direction, the engaged ramp, the bounce debounce and the lost-keyup net —
+    /// owned once in `appkit::held_key`, which the trailer transport's hold-to-scrub shares.
+    pub key: HeldKey,
     /// This gesture began on a HIDDEN HUD, so its press was spent raising the transport
     /// (`ScrubPress::Reveal`) rather than hopping. It is still a fully armed scrub — a user who
-    /// keeps holding gets the ordinary continuous rewind, and `hold` engaging clears this — but if
+    /// keeps holding gets the ordinary continuous rewind, and the hold engaging clears this — but if
     /// it turns out to have been a TAP, the release must throw the preview away instead of
-    /// committing it: the preview sits on the seed, i.e. exactly where playback already is, and
-    /// committing that is a full reopen+prime to no effect.
+    /// leaving it as a target: it sits on the seed, i.e. exactly where playback already is, and OK
+    /// taking it would be a full reopen+prime to no effect.
     pub reveal: bool,
-    /// **The PREVIEW position, in ns; `-1` = not scrubbing.**
+    /// **The TARGET (the preview position), in ns; `-1` = not scrubbing.**
     ///
     /// This was `player::TX.scrub_ns` and is now the gesture's own field, published back into that
     /// atomic by `PlayerScreen::publish` (§2.3, and the module doc). It sits here rather than
@@ -94,14 +101,9 @@ pub struct Scrub {
     pub drag: bool,
 }
 impl Scrub {
-    /// No scrub in progress and no tap commit pending — where the loop starts.
+    /// No scrub in progress and no target pending — where the loop starts.
     pub const IDLE: Scrub = Scrub {
-        t: 0,
-        dir: 0,
-        hold: false,
-        hold_since: 0,
-        alive: 0,
-        commit_at: 0,
+        key: HeldKey::IDLE,
         reveal: false,
         ns: -1,
         drag: false,
@@ -111,28 +113,33 @@ impl Scrub {
     ///
     /// A gesture can also end without [`disengage`](Self::disengage) — a pointer drag's commit, or
     /// a fresh key press arriving on top of one — and `exit_player` never touches this at all, so
-    /// `hold`/`hold_since` can outlive the gesture that set them and even the playback session.
-    /// Arming only `dir`/`alive` on top of that leaves the per-frame advance reading a `hold_since`
+    /// the hold's clocks can outlive the gesture that set them and even the playback session.
+    /// Arming only the direction on top of that leaves the per-frame advance reading a `since`
     /// from minutes ago: its acceleration ramp is measured from there, so the first frame of a
     /// brand-new press runs at `SCRUB_MAX` and one tap slews the preview tens of seconds.
     pub fn begin(&mut self, now: u32, fwd: bool) {
-        self.dir = if fwd { 1 } else { -1 };
-        self.hold = false;
-        self.hold_since = now;
-        self.t = now;
-        self.alive = now;
-        self.commit_at = 0; // more input → cancel a pending tap commit
+        self.key.begin(now, fwd);
         self.reveal = false;
         self.drag = false; // a key gesture supersedes a pointer one
     }
-    /// End the gesture: no direction, no continuous hold, no drag and no reveal pending.
-    /// `commit_at` is deliberately NOT cleared — most call sites leave a pending tap commit alone,
-    /// and the one that IS that commit clears the field itself right after calling this.
+    /// End the KEY/POINTER gesture — no direction, no continuous hold, no drag and no reveal
+    /// pending — and leave the target ([`ns`](Self::ns)) where it is: a hold's end hands its
+    /// target on to OK, so this is not [`cancel`](Self::cancel).
     pub fn disengage(&mut self) {
-        self.dir = 0;
-        self.hold = false;
+        self.key.disengage();
         self.reveal = false;
         self.drag = false;
+    }
+    /// **Is there a scrub BACK should cancel?** A target exists: a key held (or its release
+    /// waiting out the bounce), a pointer seated on the bar, or a target waiting for OK. Since a
+    /// key never commits by itself, every preview that exists is waiting on something.
+    pub fn is_live(&self) -> bool {
+        self.ns >= 0
+    }
+    /// Throw the whole gesture away: no target, no hold.
+    pub fn cancel(&mut self) {
+        self.ns = -1;
+        self.disengage();
     }
     /// **Where a target may legally land**: never before zero, and never inside the last three
     /// seconds, which is a seek past the point the pipeline can prime from. The one place the two
@@ -140,7 +147,7 @@ impl Scrub {
     /// were three copies of the same four lines in `app/run.rs` and `app/playback.rs`.
     ///
     /// A thin call-through to `appkit::player_hud::scrub_clamp_target` — the shared home for this
-    /// formula and the tuning constants below, since `screens::detail::trailer`'s own hold-to-scrub
+    /// formula (the tuning constants sit beside it), since `screens::detail::trailer`'s own hold-to-scrub
     /// (the trailer transport's LEFT/RIGHT) wants the exact same bound and `ci/check-deps.sh`'s
     /// `sibling` gate forbids that module from naming `crate::player` to reach it here.
     /// Every call site in this file is unchanged.
@@ -148,6 +155,67 @@ impl Scrub {
         plx_appkit::player_hud::scrub_clamp_target(ns, duration_ns)
     }
 }
+/// **Which sections are open**, most recent first: at most the package's two ([`Section`]), a `Copy` value the
+/// screen's state machine edits and the draw reads as the `open` bits of the compiled state.
+///
+/// The policy is the PACKAGE's ([`plx_appkit::hud_format::compile::Compiled::sections_modal`], D6): a **modal**
+/// section replaces whichever is open, an **inline** one opens beside it. BACK closes the latest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sections {
+    open: [Option<Section>; 2],
+}
+
+impl Sections {
+    pub const NONE: Sections = Sections { open: [None, None] };
+
+    pub fn any(self) -> bool {
+        self.open[0].is_some()
+    }
+
+    pub fn contains(self, section: Section) -> bool {
+        self.open.contains(&Some(section))
+    }
+
+    /// The section opened last: the one BACK closes and the one the keys travel into.
+    pub fn latest(self) -> Option<Section> {
+        self.open[0]
+    }
+
+    /// The open sections, latest first.
+    pub fn iter(self) -> impl Iterator<Item = Section> {
+        self.open.into_iter().flatten()
+    }
+
+    /// The `open` key of the compiled state these sections select.
+    pub fn bits(self) -> u8 {
+        self.iter().fold(0, |bits, s| bits | s.open_bit())
+    }
+
+    /// `section` toggled under the package's policy: an open one closes; a closed one opens as the latest,
+    /// replacing the others when the policy is modal.
+    pub fn toggled(self, section: Section, modal: bool) -> Sections {
+        if self.contains(section) {
+            return self.closed(section);
+        }
+        let older = if modal { None } else { self.open[0] };
+        Sections { open: [Some(section), older] }
+    }
+
+    /// `section` closed, the others kept in order.
+    pub fn closed(self, section: Section) -> Sections {
+        let mut it = self.iter().filter(|s| *s != section);
+        Sections { open: [it.next(), it.next()] }
+    }
+
+    /// The group that holds the keys of `section`'s page.
+    pub fn group_of(section: Section) -> GroupId {
+        match section {
+            Section::Chapters => GROUP_STRIP,
+            Section::Info => GROUP_SECTION,
+        }
+    }
+}
+
 /// The player HUD's focus cursor: WHICH row owns focus, plus the index WITHIN each of the
 /// two indexed rows. One cursor, not three settings — the three are drawn together every
 /// frame (`draw_hud`), moved together by UP/DOWN, and, the reason they are bundled here,
@@ -155,20 +223,26 @@ impl Scrub {
 ///
 /// As three loose `plex_run` locals they were never reset at all: `start_playback` sets the
 /// route, the resume point and the HUD timer, but the focus cursor survived from the
-/// PREVIOUS session — leave one movie with the Subtitles button focused (`focus == 1`),
+/// PREVIOUS session — leave one movie with the Subtitles button focused (`focus == GROUP_ROW`),
 /// start another, and the first OK opened the track menu instead of pausing. Bundling makes
 /// "reset the HUD focus" one assignment that `start_playback` cannot half-do.
 #[derive(Clone, Copy)]
 pub struct HudNav {
-    pub focus: i32, // 0 = scrubber, 1 = right buttons (Subtitles/Audio/More), 2 = bottom tabs
-    pub btn: i32,   // 0 = Subtitles, 1 = Audio, 2 = More (within the buttons row)
+    /// Which of the HUD's FocusEngine groups holds focus: [`GROUP_SCRUB`] (the scrubber),
+    /// [`GROUP_ROW`] (the control row: Subtitles/Audio/More, the Skip pill or the Up Next pair),
+    /// [`GROUP_TABS`] (the bottom tabs) or, while a section is open, [`GROUP_SECTION`] (the Info buttons) or
+    /// [`GROUP_STRIP`] (the Chapters cards). It MIRRORS the engine's focus, which is the authority:
+    /// `PlayerScreen::step` writes it on `FocusMoved` and every other write is paired with a
+    /// re-seat. The canon hash writes its `.0`, where the integer used to be.
+    pub focus: GroupId,
+    pub btn: i32,   // 0 = Previous, 1 = Next, 2 = Subtitles, 3 = Audio, 4 = More
     pub tab: i32,   // 0 = Info, 1 = Chapters (within the tabs row)
 }
 impl HudNav {
     /// Focus parked on the scrubber, both indexed rows on their first item — where a fresh
     /// session starts and where an auto-hidden HUD is re-parked.
     pub const HOME: HudNav = HudNav {
-        focus: 0,
+        focus: GROUP_SCRUB,
         btn: 0,
         tab: 0,
     };
@@ -198,9 +272,8 @@ pub struct HudState {
     /// UP-from-the-top explicitly dismisses the HUD even while paused; any other player
     /// input clears it. Without this, paused() would force the HUD permanently visible.
     pub dismissed: bool,
-    /// Was the transport ON SCREEN when the key being handled arrived? Sampled by
-    /// `begin_fresh_press` at the top of every fresh press, and the ONLY honest answer to that
-    /// question by the time an arm runs.
+    /// Was the transport on screen when this bound key was handled? Sampled by
+    /// [`note_fresh_press`](Self::note_fresh_press) before the dismissal is cleared.
     ///
     /// The arm cannot re-derive it, because the same function clears [`dismissed`] one line later —
     /// and `dismissed` OUTRANKS the timer inside [`hud_visible`]. So a user who hid the transport
@@ -211,6 +284,23 @@ pub struct HudState {
     /// click arm's `hud_vis`); this is the key path's version of that sample, taken once so the two
     /// arms that need it cannot answer the question differently.
     pub visible_at_press: bool,
+    /// The last BACK that hid the transport did so WHILE the pipeline was busy
+    /// (`plx_media::player::loading`), so the hide could not take effect: the transport stays up
+    /// until the pipeline settles ([`hud_visible`] ORs the busy state in). The next BACK should then
+    /// leave. SET only by [`hide`](Self::hide); [`note_fresh_press`](Self::note_fresh_press)
+    /// spends it on the very next bound press, whatever that press is, and
+    /// [`settle`](Self::settle) drops it when the pipeline settles with nothing pressed.
+    ///
+    /// A hide done in normal play never sets it: a rebuffer that pops the transport back up after
+    /// the viewer hid it must still cost two presses, because that viewer has not asked to leave.
+    pub exit_armed: bool,
+    /// Does the BACK being handled leave? Sampled by `note_fresh_press` from
+    /// [`exit_armed`](Self::exit_armed) AND [`dismissed`](Self::dismissed), BEFORE the press
+    /// un-dismisses, for the same reason [`visible_at_press`](Self::visible_at_press) is: by the
+    /// time an arm runs the press has already cleared what it would have read. Requiring
+    /// `dismissed` is what makes anything that un-dismisses the transport in between (a segment
+    /// offer, a new episode, pointer motion) disarm it too.
+    pub back_leaves_at_press: bool,
     /// The last SEGMENT the control row offered. Sticky: it is never cleared back to None,
     /// so each segment raises the HUD exactly once per playback however often the row
     /// flickers.
@@ -219,6 +309,10 @@ pub struct HudState {
     /// stand-in vanishing under the focus ring — see `player_hud::standin_left_the_ring`,
     /// which is where that rule is written down and tested.
     pub was_standin: bool,
+    /// **The sections open on the transport** (Chapters, Info): the package's own pages, drawn from the compiled
+    /// state their bits select and opened, travelled, pressed and closed by this screen (PR8). The screen is
+    /// their one owner; the app asks for a toggle with `AppMsg::HudSection`.
+    pub sections: Sections,
 }
 impl HudState {
     /// Focus at rest, no timer, nothing dismissed, no segment seen yet, discs in the control row.
@@ -227,14 +321,18 @@ impl HudState {
         until: 0,
         dismissed: false,
         visible_at_press: false,
+        exit_armed: false,
+        back_leaves_at_press: false,
         last_offer: None,
         was_standin: false,
+        sections: Sections::NONE,
     };
 
     /// Is the transport on screen right now, by this HUD's own state?
     #[inline]
     pub fn visible(&self, ps: &plx_media::route::PlaybackSession, now: u32, is_paused: bool) -> bool {
-        hud_visible(ps, now, self.until, is_paused, self.dismissed)
+        // an open section is the transport's own page: it stays up for as long as it is open
+        self.sections.any() || hud_visible(ps, now, self.until, is_paused, self.dismissed)
     }
 
     /// Raise the HUD to at least `now + ms`, never PULLING IN a deadline already further out.
@@ -261,14 +359,42 @@ impl HudState {
     /// rather than two lines in its caller so that the order is a thing a test can hold still,
     /// instead of a convention a later edit can quietly transpose.
     ///
-    /// That caller is `note_global_press`, NOT `begin_fresh_press` as it once was, and the
-    /// difference is the point of the split: an unsupported key never gets here at all.
+    /// The bare player calls this in delivery order. The loop uses it for a press consumed
+    /// outside the player. Both callers check that the key is bound.
+    ///
+    /// **[`back_leaves_at_press`](Self::back_leaves_at_press) obeys the same order:** it reads
+    /// [`exit_armed`](Self::exit_armed) and `dismissed` BEFORE the clear below, and the press then
+    /// spends the arming, so only a BACK that follows the arming BACK with nothing bound in between
+    /// can leave.
     pub fn note_fresh_press(&mut self, ps: &plx_media::route::PlaybackSession, now: u32, is_paused: bool) {
         self.visible_at_press = self.visible(ps, now, is_paused);
-        // Any BOUND fresh key un-dismisses the HUD (UP-hide re-sets it). "Bound" and not "any" is
-        // the whole of `note_global_press`, the ONLY caller: an unsupported press never reaches
-        // here, so a colour button over a film no longer raises the transport.
+        self.back_leaves_at_press = self.exit_armed && self.dismissed;
+        self.exit_armed = false;
+        // A bound fresh key un-dismisses the HUD. An UP-hide re-sets the dismissal.
         self.dismissed = false;
+    }
+
+    /// Dismiss the transport: it stays down until a bound key (or a segment offer) raises it.
+    ///
+    /// `while_busy` is whether the pipeline is busy right now (`plx_media::player::loading`), and
+    /// only a hide done in that state arms the next BACK to leave
+    /// (see [`exit_armed`](Self::exit_armed)). Every dismissal goes through here, so a hide that is
+    /// not an arming one also clears a stale arming instead of inheriting it.
+    pub fn hide(&mut self, while_busy: bool) {
+        self.dismissed = true;
+        self.exit_armed = while_busy;
+    }
+
+    /// Once per frame, with whether the pipeline is busy right now (`plx_media::player::loading`):
+    /// drops the arming when it is not. The arming belongs to the busy window the hide was done in,
+    /// where the transport could not come down and a second BACK is the only way out; if the
+    /// pipeline settles and nothing is pressed, that window is over, and a rebuffer much later is
+    /// a rebuffer after a hide, which still costs two presses. `dismissed` is not touched: the hide
+    /// itself stands.
+    pub fn settle(&mut self, busy: bool) {
+        if !busy {
+            self.exit_armed = false;
+        }
     }
 
     /// A FRESH segment offer takes the control row: put the HUD ON SCREEN and, from rest, park the
@@ -292,29 +418,26 @@ impl HudState {
     /// Parking is only ever from REST: a user who walked to the Subtitles disc or an Info tab keeps
     /// their spot (and for Up Next thereby declines the countdown — the same one rule, read as a
     /// steady state one block below). `primary` is the occupant's own
-    /// ([`plx_appkit::player_hud::ControlSlot::primary_btn`]) — item 0 for a Skip pill, the
-    /// RIGHT-hand one for Up Next, where parking on item 0 would disarm the timer on the frame
-    /// after it armed.
+    /// ([`plx_appkit::player_hud::ControlSlot::primary_btn`]) — item 0 for a plain (Manual) Skip pill, the
+    /// RIGHT-hand one for Up Next and for the Automatic Skip pair (Watch, then the filled Skip, item 1),
+    /// where parking on item 0 would disarm the timer on the frame after it armed.
     pub fn raise_for_offer(&mut self, now: u32, primary: c_int) {
         self.extend(now, HUD_LINGER_MS);
         self.dismissed = false;
-        if self.nav.focus == 0 {
-            self.nav.focus = 1;
+        if self.nav.focus == GROUP_SCRUB {
+            self.nav.focus = GROUP_ROW;
             self.nav.btn = primary;
         }
     }
 }
-// scrub tuning: a press jumps scrub_step_ns() (the Skip interval); holding engages a continuous scrub ramping
-// SCRUB_BASE→SCRUB_MAX (playback-seconds per real-second). Defined in `appkit::player_hud` and
-// re-exported here — the trailer transport's own hold-to-scrub (`screens::detail::trailer`) wants
-// the identical feel and cannot name this module directly (`ci/check-deps.sh`'s `sibling` gate).
-// Long enough that a rapid tap burst coalesces into ONE seek (`TAP_COMMIT_MS`) — each
-// separate commit is a full reopen+prime on the engine, and back-to-back in-flight seeks are what
-// race the demux (the stale-audio silence incident); short enough that a single tap still feels
-// immediate.
-pub use plx_appkit::player_hud::{
-    scrub_step_ns, SCRUB_ACCEL, SCRUB_BASE, SCRUB_LOST_MS, SCRUB_MAX, TAP_COMMIT_MS,
-};
+// scrub tuning: a press jumps scrub_step_ns() (the Skip interval); holding engages a continuous scrub stepping
+// up via `appkit::player_hud::scrub_speed` (playback-seconds per real-second, doubling every
+// `SCRUB_STEP_MS`). Only the press hop is re-exported here; the ramp and the key-bounce constants
+// are reached through `plx_appkit` — the trailer transport's own hold-to-scrub
+// (`screens::detail::trailer`) shares them and cannot name this module (`ci/check-deps.sh`'s `sibling` gate).
+// (There is no tap debounce here: the keys only move the target and OK commits it, so a burst of
+// taps is one seek because the viewer confirmed one, not because a timer coalesced them.)
+pub use plx_appkit::player_hud::scrub_step_ns;
 // HUD auto-hide: how long the HUD lingers after the input that raised it.
 pub const HUD_LINGER_MS: u32 = plx_appkit::player_hud::LINGER_MS; // plain transport/nav input
 pub const HUD_MENU_MS: u32 = 8000; // a modal menu is up (track/chapter nav) — longer read time
@@ -338,13 +461,16 @@ pub enum ScrubPress {
 }
 
 /// The decision above, written once so the key arm and its test cannot disagree.
-pub fn scrub_press(hud_vis: bool, focus: i32, seekable: bool) -> ScrubPress {
+pub fn scrub_press(hud_vis: bool, focus: GroupId, seekable: bool) -> ScrubPress {
     if !hud_vis {
         return ScrubPress::Reveal;
     }
     match focus {
-        1 => ScrubPress::Row,
-        2 => ScrubPress::Tabs,
+        // the chapters strip is walked sideways by the engine like the row
+        GROUP_ROW | GROUP_STRIP => ScrubPress::Row,
+        GROUP_TABS => ScrubPress::Tabs,
+        // an open section's buttons are a column: a sideways key has nowhere to go and must not scrub
+        GROUP_SECTION => ScrubPress::Nothing,
         _ if seekable => ScrubPress::Jump,
         _ => ScrubPress::Nothing,
     }
@@ -387,6 +513,44 @@ pub fn failed_key_action(key: FailedKey, sel: usize, n: usize) -> FailedKeyActio
     }
 }
 
+/// **The sections-open value** (PR8): what a toggle does under each policy, and what BACK sees.
+#[cfg(test)]
+mod sections_tests {
+    use super::*;
+
+    #[test]
+    fn a_modal_section_replaces_the_one_open_and_an_inline_one_opens_beside_it() {
+        let chapters = Sections::NONE.toggled(Section::Chapters, true);
+        assert_eq!((chapters.latest(), chapters.bits()), (Some(Section::Chapters), Section::Chapters.open_bit()));
+        let modal = chapters.toggled(Section::Info, true);
+        assert_eq!(modal.iter().collect::<Vec<_>>(), vec![Section::Info], "modal: Info replaced Chapters");
+        let inline = chapters.toggled(Section::Info, false);
+        assert_eq!(
+            inline.iter().collect::<Vec<_>>(),
+            vec![Section::Info, Section::Chapters],
+            "inline: Info opened beside Chapters, as the latest"
+        );
+        assert_eq!(inline.bits(), Section::Chapters.open_bit() | Section::Info.open_bit());
+    }
+
+    #[test]
+    fn toggling_an_open_section_closes_it_and_keeps_the_others_in_order() {
+        let both = Sections::NONE.toggled(Section::Chapters, false).toggled(Section::Info, false);
+        assert_eq!(both.latest(), Some(Section::Info), "BACK closes the one opened last");
+        let rest = both.toggled(Section::Info, false);
+        assert_eq!(rest.iter().collect::<Vec<_>>(), vec![Section::Chapters]);
+        assert_eq!(both.closed(Section::Chapters).iter().collect::<Vec<_>>(), vec![Section::Info]);
+        assert!(!rest.closed(Section::Chapters).any());
+        assert_eq!(Sections::NONE.bits(), 0);
+    }
+
+    #[test]
+    fn a_section_is_a_group_of_its_own_page() {
+        assert_eq!(Sections::group_of(Section::Chapters), GROUP_STRIP);
+        assert_eq!(Sections::group_of(Section::Info), GROUP_SECTION);
+    }
+}
+
 #[cfg(test)]
 mod failed_player_input_tests {
     use super::{failed_key_action, FailedKey, FailedKeyAction};
@@ -412,22 +576,23 @@ mod failed_player_input_tests {
 /// diagnostics overlay its whole reason for existing and the Up Next tile its auto-advance.
 ///
 /// Moved here from `app/playback.rs` with its name in phase 9 (§11). Its `with_state` helper still
-/// holds `testlock::serial()`: `hud_visible`'s `loading()` term reads the crate-global playback
-/// state, which is what these cases drive — the HUD's own timer is a screen field now and needs no
-/// lock, but that global has not moved and will not until the `Player` machine lands.
+/// holds `testlock::serial()`: `hud_visible`'s `loading()` term reads `player::state`, whose derived
+/// state is the session's own readout (the case hands it a session that derived the state it
+/// drives) but which also reads crate-global flags (`seeking`, the resolve window) other modules'
+/// tests set — the HUD's own timer is a screen field now and needs no lock.
 #[cfg(test)]
 mod hud_visibility_tests {
     use super::*;
     use plx_media::player::PlaybackState;
 
-    /// Drive the derived playback state through the field the pump owns. Crate-global, so the whole
-    /// body holds `testlock::serial()` — `state()` is read by other modules' tests too.
-    fn with_state<T>(s: PlaybackState, f: impl FnOnce() -> T) -> T {
+    /// Run `f` over a session whose readout derived `s`: the event the pump delivers, stepped on a
+    /// session this case owns rather than written into a global. `state()` also reads crate-global
+    /// flags other modules' tests set, so the whole body holds `testlock::serial()`.
+    fn with_state<T>(s: PlaybackState, f: impl FnOnce(&plx_media::route::PlaybackSession) -> T) -> T {
         let _g = plx_base::testlock::serial();
-        let prev = plx_media::player::swap_state_for_test(s);
-        let out = f();
-        plx_media::player::restore_state_for_test(prev);
-        out
+        let mut ps = plx_media::route::PlaybackSession::IDLE;
+        crate::player::overlay_tests::derive_state(&mut ps, s);
+        f(&ps)
     }
 
     /// THE regression. Stuck in `Buffering` with the linger long expired and nothing paused, the
@@ -436,12 +601,11 @@ mod hud_visibility_tests {
     /// the `…` disc cannot be reached in the one state worth reporting.
     #[test]
     fn a_stalled_pipeline_keeps_the_transport_reachable_after_the_linger_expires() {
-        let ps = plx_media::route::PlaybackSession::IDLE;
-        with_state(PlaybackState::Buffering, || {
+        with_state(PlaybackState::Buffering, |ps| {
             // the timer alone would say hidden — 9 s past the linger, nothing paused
             let (now, expired) = (10_000u32, 1_000u32);
             assert!(
-                hud_visible(&ps, now, expired, false, false),
+                hud_visible(ps, now, expired, false, false),
                 "on screen, so keys must reach it"
             );
         });
@@ -451,11 +615,10 @@ mod hud_visibility_tests {
     /// would never auto-hide at all.
     #[test]
     fn a_healthy_playing_pipeline_still_auto_hides() {
-        let ps = plx_media::route::PlaybackSession::IDLE;
-        with_state(PlaybackState::Playing, || {
-            assert!(!hud_visible(&ps, 10_000, 1_000, false, false));
-            assert!(hud_visible(&ps, 500, 1_000, false, false), "inside the linger");
-            assert!(hud_visible(&ps, 10_000, 1_000, true, false), "paused pins it up");
+        with_state(PlaybackState::Playing, |ps| {
+            assert!(!hud_visible(ps, 10_000, 1_000, false, false));
+            assert!(hud_visible(ps, 500, 1_000, false, false), "inside the linger");
+            assert!(hud_visible(ps, 10_000, 1_000, true, false), "paused pins it up");
         });
     }
 
@@ -466,61 +629,98 @@ mod hud_visibility_tests {
     /// The pairing is the point: whatever the cursor is parked on, an invisible transport takes the
     /// press for itself, and the SAME cursor acts normally the moment the transport is on screen.
     /// Focus survives an auto-hide (`HudNav::HOME` is re-parked one block down in the loop), so
-    /// "hidden but focus == 1" is an ordinary state, not a corner.
+    /// "hidden but focus == GROUP_ROW" is an ordinary state, not a corner.
     #[test]
     fn a_hidden_hud_spends_the_press_on_itself() {
-        for focus in [0, 1, 2] {
+        for focus in [GROUP_SCRUB, GROUP_ROW, GROUP_TABS] {
             for seekable in [false, true] {
                 assert_eq!(
                     scrub_press(false, focus, seekable),
                     ScrubPress::Reveal,
-                    "hidden HUD, focus {focus}: the press raises it and moves nothing"
+                    "hidden HUD, focus {focus:?}: the press raises it and moves nothing"
                 );
             }
         }
         // …and visible, the same three cursors act — this is what the reveal DEFERS to, one press later
-        assert_eq!(scrub_press(true, 0, true), ScrubPress::Jump);
-        assert_eq!(scrub_press(true, 1, true), ScrubPress::Row);
-        assert_eq!(scrub_press(true, 2, true), ScrubPress::Tabs);
+        assert_eq!(scrub_press(true, GROUP_SCRUB, true), ScrubPress::Jump);
+        assert_eq!(scrub_press(true, GROUP_ROW, true), ScrubPress::Row);
+        assert_eq!(scrub_press(true, GROUP_TABS, true), ScrubPress::Tabs);
         // Duration belongs only to the scrubber. Indexed rows remain live without one.
-        assert_eq!(scrub_press(true, 1, false), ScrubPress::Row);
-        assert_eq!(scrub_press(true, 2, false), ScrubPress::Tabs);
+        assert_eq!(scrub_press(true, GROUP_ROW, false), ScrubPress::Row);
+        assert_eq!(scrub_press(true, GROUP_TABS, false), ScrubPress::Tabs);
         // the scrubber itself with nothing to move through is still not a Jump
-        assert_eq!(scrub_press(true, 0, false), ScrubPress::Nothing);
+        assert_eq!(scrub_press(true, GROUP_SCRUB, false), ScrubPress::Nothing);
     }
 
     /// Sample a hand dismissal before the fresh bound press clears it, or the press would drive
     /// hidden geometry while an otherwise-live linger timer is still counting down.
     #[test]
     fn a_hand_hidden_hud_still_takes_the_press_that_wakes_it() {
-        let ps = plx_media::route::PlaybackSession::IDLE;
-        with_state(PlaybackState::Playing, || {
+        with_state(PlaybackState::Playing, |ps| {
             let mut hud = HudState { until: 20_000, dismissed: true, ..HudState::IDLE };
-            hud.note_fresh_press(&ps, 10_000, false);
+            hud.note_fresh_press(ps, 10_000, false);
             assert!(!hud.visible_at_press, "the press found a hand-hidden HUD");
             assert!(!hud.dismissed, "the same bound press wakes it for the next decision");
         });
     }
 
-    /// End every live gesture owner while preserving the independently pending tap debounce.
+    /// The exit arming is sampled BEFORE the press un-dismisses, and the press spends it: only the
+    /// press right after a busy hide sees `back_leaves_at_press`, and only while the hide still
+    /// stands. A hide done in normal play, or any other writer of `dismissed`, arms nothing.
     #[test]
-    fn disengaging_ends_every_part_of_the_gesture() {
-        let mut scrub = Scrub { t: 11, dir: 1, hold: true, hold_since: 12, alive: 13,
-            commit_at: 14, reveal: true, ns: 15, drag: true };
+    fn the_exit_arming_is_sampled_before_the_clear_and_spent_by_the_next_press() {
+        with_state(PlaybackState::Buffering, |ps| {
+            let mut hud = HudState::IDLE;
+            hud.hide(true);
+            hud.note_fresh_press(ps, 10_000, false);
+            assert!(hud.back_leaves_at_press, "the press after a busy hide may leave");
+            assert!(!hud.dismissed && !hud.exit_armed, "…and the same press spends the arming");
+            hud.note_fresh_press(ps, 10_000, false);
+            assert!(!hud.back_leaves_at_press, "the press after that is a first press again");
+
+            hud.hide(false);
+            hud.note_fresh_press(ps, 10_000, false);
+            assert!(!hud.back_leaves_at_press, "a hide that was not done while busy arms nothing");
+
+            hud.hide(true);
+            hud.raise_for_offer(10_000, 1);
+            hud.note_fresh_press(ps, 10_000, false);
+            assert!(!hud.back_leaves_at_press, "an un-dismiss between the presses disarms it");
+
+            hud.hide(true);
+            hud.hide(false);
+            hud.note_fresh_press(ps, 10_000, false);
+            assert!(!hud.back_leaves_at_press, "a later hide that is not an arming one replaces it");
+        });
+    }
+
+    /// Disengaging ends every live gesture owner and leaves the TARGET: a hold's end hands it on
+    /// to OK. Cancelling is what throws the target away too.
+    #[test]
+    fn disengaging_ends_every_part_of_the_gesture_but_keeps_the_target() {
+        let mut key = HeldKey::IDLE;
+        key.press(11, true);
+        key.repeat(12);
+        key.release(13);
+        let mut scrub = Scrub { key, reveal: true, ns: 15, drag: true };
         scrub.disengage();
-        assert_eq!((scrub.dir, scrub.hold, scrub.reveal, scrub.drag), (0, false, false, false));
-        assert_eq!(scrub.commit_at, 14, "disengage must preserve the released tap's commit");
+        assert_eq!((scrub.key.dir, scrub.key.engaged, scrub.reveal, scrub.drag), (0, false, false, false));
+        assert!(!scrub.key.release_pending(), "…nor a release still waiting out the bounce window");
+        assert_eq!(scrub.ns, 15, "disengage must preserve the target");
+        assert!(scrub.is_live(), "…which BACK can still cancel");
+        scrub.cancel();
+        assert_eq!(scrub.ns, -1);
+        assert!(!scrub.is_live());
     }
 
     /// Dismissal outranks healthy playback, but never the stalled pipeline read-out.
     #[test]
     fn dismiss_wins_while_healthy_and_loses_while_stalled() {
-        let ps = plx_media::route::PlaybackSession::IDLE;
-        with_state(PlaybackState::Playing, || {
-            assert!(!hud_visible(&ps, 10_000, 20_000, true, true));
+        with_state(PlaybackState::Playing, |ps| {
+            assert!(!hud_visible(ps, 10_000, 20_000, true, true));
         });
-        with_state(PlaybackState::Buffering, || {
-            assert!(hud_visible(&ps, 10_000, 1_000, false, true));
+        with_state(PlaybackState::Buffering, |ps| {
+            assert!(hud_visible(ps, 10_000, 1_000, false, true));
         });
     }
 
@@ -541,19 +741,18 @@ mod hud_visibility_tests {
     /// screen", which is the half that was missing.
     #[test]
     fn a_fresh_offer_puts_the_transport_up_and_parks_the_ring_on_the_primary() {
-        let ps = plx_media::route::PlaybackSession::IDLE;
-        with_state(PlaybackState::Playing, || {
+        with_state(PlaybackState::Playing, |ps| {
             let now = 10_000u32;
             let mut hud = HudState::IDLE;
             hud.dismissed = true; // UP-hidden mid-episode, exactly as reported
             hud.raise_for_offer(now, plx_appkit::up_next::PRIMARY_BTN);
-            assert!(hud.visible(&ps, now, false), "an offer clears a hand dismissal");
+            assert!(hud.visible(ps, now, false), "an offer clears a hand dismissal");
             assert_eq!(
-                hud.nav.focus, 1,
+                hud.nav.focus, GROUP_ROW,
                 "on the control row, so the auto-hide re-park leaves it"
             );
             assert!(
-                plx_appkit::up_next::countdown_may_run(true, hud.nav.focus == 1, hud.nav.btn),
+                plx_appkit::up_next::countdown_may_run(true, hud.nav.focus == GROUP_ROW, hud.nav.btn == plx_appkit::up_next::BTN_NEXT),
                 "…and RESTING on the primary, which is what the next frame's cancel rule asks"
             );
         });
@@ -565,23 +764,22 @@ mod hud_visibility_tests {
     /// countdown, since the cancel rule reads the ring as a steady state rather than as an edge.
     #[test]
     fn an_offer_leaves_a_user_who_walked_off_the_scrubber_where_they_are() {
-        let ps = plx_media::route::PlaybackSession::IDLE;
-        with_state(PlaybackState::Playing, || {
+        with_state(PlaybackState::Playing, |ps| {
             let now = 10_000u32;
             // parked on the Chapters tab, which is only reachable by pressing DOWN twice
             let mut hud = HudState {
                 nav: HudNav {
-                    focus: 2,
+                    focus: GROUP_TABS,
                     btn: 0,
                     tab: 1,
                 },
                 ..HudState::IDLE
             };
             hud.raise_for_offer(now, plx_appkit::up_next::PRIMARY_BTN);
-            assert!(hud.visible(&ps, now, false), "the offer is still shown");
-            assert_eq!((hud.nav.focus, hud.nav.tab), (2, 1), "their spot is theirs");
+            assert!(hud.visible(ps, now, false), "the offer is still shown");
+            assert_eq!((hud.nav.focus, hud.nav.tab), (GROUP_TABS, 1), "their spot is theirs");
             assert!(
-                !plx_appkit::up_next::countdown_may_run(true, hud.nav.focus == 1, hud.nav.btn),
+                !plx_appkit::up_next::countdown_may_run(true, hud.nav.focus == GROUP_ROW, hud.nav.btn == plx_appkit::up_next::BTN_NEXT),
                 "engaging the transport is not consent to be pulled into the next episode"
             );
         });

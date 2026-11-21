@@ -21,7 +21,14 @@ impl Host for TestHost {
     type Init = FixtureArg;
     type Memory = PageMemory;
 }
+impl crate::registry::ScreenInputsLike for TestHost {
+    fn screen_inputs<'a>(_cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        crate::registry::empty_fixture()
+    }
+}
+
 impl LibraryLike for TestHost {
+    fn clock_facts<'a>(_cx: &Cx<'a, Self>) -> Option<&'a plx_plex::plex::ClockFacts> { None }
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> {
         cx.views.listing
     }
@@ -49,13 +56,13 @@ impl Publication {
     ) -> Self {
         stores.browse.borrow_mut().seed_registered_table_for_test(sids);
         let mut directory = plx_data::stores::browse::DirectorySnapshot::default();
-        stores.capture_browse(&mut directory); // Resolve profile pins before choosing the intended section.
-        stores.browse_run(BrowseCmd::ApplyPins(vec![(0, true), (2, true)]));
-        stores.browse_run(BrowseCmd::SetCur(current));
+        stores.capture_seeded_browse_for_test(&mut directory, sids[0]); // Seeding already resolved profile pins.
+        stores.browse_run_for_test(BrowseCmd::ApplyPins(vec![(0, true), (2, true)]));
+        stores.browse_run_for_test(BrowseCmd::SetCur(current));
         stores.browse.borrow_mut().seed_items_for_test(120);
         // The incoming section's shelves have settled (none): a section reveal waits on them.
         stores.browse.borrow_mut().seed_shelves_for_test(current, &[], 4);
-        let publication = stores.capture_browse(&mut directory);
+        let publication = stores.capture_seeded_browse_for_test(&mut directory, sids[0]);
         let listing = publication.listing;
         let hubs = publication.section_hubs;
         let id = listing.view().id().unwrap();
@@ -85,6 +92,7 @@ impl Publication {
             measure: &FixtureMeasure,
             focus: engine.read(OWNER),
             press: Default::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             owner: OWNER,
         }
     }
@@ -171,7 +179,8 @@ fn foreign_table_replacement_during_grid_query_mounts_incoming_engine_focus_and_
         let mut engine = FocusEngine::new();
         let mut page = LibraryScreen::new(ENTRY, INSTANCE, SecKind::Movie);
         outgoing.deliver(&mut page, &mut engine, ScreenEvent::Mount);
-        let first_group = page.first_group();
+        // The listing is still loading, so the page has no arrival seat of its own: the test seats the header.
+        let first_group = page.first_group().unwrap_or(super::LIBRARY_GROUP);
         outgoing.deliver(
             &mut page,
             &mut engine,
@@ -183,7 +192,9 @@ fn foreign_table_replacement_during_grid_query_mounts_incoming_engine_focus_and_
             outgoing.frame(&mut page, &mut engine, n);
         }
         let old_grid = page.pair.groups_config().detail;
-        let deep = page.key(page.pair.detail.elem_at(9 * COLS + 3).unwrap());
+        let elem = page.pair.detail.elem_for(&outgoing.cx(&engine), &mut page.keys, 9 * COLS + 3, COLS)
+            .expect("a slot of the listing");
+        let deep = page.key(elem);
         outgoing.deliver(
             &mut page,
             &mut engine,
@@ -261,16 +272,12 @@ fn foreign_table_replacement_during_grid_query_mounts_incoming_engine_focus_and_
             )
         )));
         let first = engine.current(OWNER).unwrap();
-        let selected = page
-            .libraries
-            .iter()
-            .find(|(_, index)| *index == incoming_index)
-            .unwrap()
-            .0;
+        // The page arrives in its first poster: the incoming listing's, never the outgoing deep card.
+        let head = page.pair.detail.elem_for(&incoming.cx(&engine), &mut page.keys, 0, COLS).expect("the incoming first poster");
         assert_eq!(
             first,
-            page.key(selected),
-            "first incoming focus is its selected library, not the outgoing deep card"
+            page.key(head),
+            "first incoming focus is its first poster, not the outgoing deep card"
         );
         assert_eq!(page.scroll.pos, 0.0);
         assert_eq!(
@@ -278,7 +285,7 @@ fn foreign_table_replacement_during_grid_query_mounts_incoming_engine_focus_and_
             Some(deep.elem),
             "old history remains engine-owned, but cannot seat the incoming epoch"
         );
-        assert_eq!(engine.read(OWNER).remembered(new_grid), None);
+        assert_eq!(engine.read(OWNER).remembered(new_grid), Some(head), "the new epoch remembers only its own first poster");
 
         // Mount's first ready tick changes Hold to In; the following tick advances alpha.
         incoming.frame(&mut page, &mut engine, 161);
@@ -302,9 +309,7 @@ fn foreign_table_replacement_during_grid_query_mounts_incoming_engine_focus_and_
         for n in 163..240 {
             incoming.frame(&mut page, &mut engine, n);
         }
-        incoming.down(&mut page, &mut engine); // selected library -> toolbar
-        assert_eq!(engine.current_group(OWNER), Some(page.toolbar_group()));
-        incoming.down(&mut page, &mut engine); // toolbar -> the incoming grid's first row, under the chip
+        assert_eq!(engine.current_group(OWNER), Some(new_grid), "the first poster holds the arrival seat");
         let (row, col) = page.grid_position(engine.current(OWNER)).expect("DOWN lands in the grid");
         assert_eq!(row, 0);
         let key = engine.current(OWNER).unwrap();

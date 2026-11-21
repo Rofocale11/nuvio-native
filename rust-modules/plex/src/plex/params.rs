@@ -193,6 +193,9 @@ impl EncodeContract {
 /// and 4 pin that a remux is only ever reached for a source under it.
 pub struct TranscodeSpec<'a> {
     pub rating_key: &'a str,
+    /// The played version's position in `Media[]` (`mediaIndex`), resolved from its id
+    /// (`Metadata::media_version`); 0 is the default version.
+    pub media_index: usize,
     /// The active encoder's PMS playback/timeline wire id.
     pub session: &'a str,
     /// Physical universal-transcoder identity. Production keeps it equal to `session`; the two
@@ -203,6 +206,12 @@ pub struct TranscodeSpec<'a> {
     /// fifth (`audio`) that only ever means anything alongside `remux == true`; one value keeps
     /// that coupling a type can't be built without stating.
     pub contract: EncodeContract,
+    /// The capability value of the attempt this request belongs to: the profile string
+    /// (`X-Plex-Client-Profile-Extra`) is built from it, so the profile PMS reads always comes from
+    /// the value the plan chose its tracks from, never from the process-wide `devcaps::caps()`.
+    /// Deliberately not part of [`EncodeContract`], which stays a request-shape value a seek or a
+    /// track pick can rebuild; the attempt's value rides beside it.
+    pub caps: &'a plx_os::devcaps::Caps,
     /// Source audio stream id to select (0 = server default).
     pub audio_stream_id: i64,
     /// Subtitle stream id to BURN (0 = none). Burn is Plex's decision for our profile —
@@ -266,7 +275,7 @@ impl Ceiling {
 /// store; consumed by `library.rs::section_items_query`. Filters are `(param, value)` pairs
 /// appended verbatim (`("genre","150")`, `("unwatched","1")`, shows: `("unwatchedLeaves","1")`)
 /// — tag-id values come from `section_directory` value lists. Paging: Start AND Size are
-/// always sent together — PMS silently ignores a lone `X-Plex-Container-Size` query param
+/// always sent together — PMS silently ignores a lone size parameter
 /// (verified live on PMS 1.43.2, 2026-07-19).
 pub struct SectionQuery<'a> {
     pub section_key: i64,
@@ -287,8 +296,12 @@ pub struct StreamSelection {
     pub part_id: i64,
     /// 0 = keep the server default (the PUT omits audioStreamID).
     pub audio_stream_id: i64,
-    /// Always sent: 0 = subtitles OFF (suppresses a default-selected burn), else burn this id.
-    pub subtitle_stream_id: i64,
+    /// `Some(0)` = subtitles OFF (suppresses a default-selected burn), `Some(id)` = select (burn)
+    /// this id, `None` = the PUT omits `subtitleStreamID` and says nothing about subtitles. The
+    /// spec marks the field optional (docs/plex-openapi.json, `PUT /library/parts/{partId}`); every
+    /// start and manual pick sends `Some`, and only an audio-only write-back on a Part with no
+    /// selected subtitle sends `None`, so it cannot create an explicit Off.
+    pub subtitle_stream_id: Option<i64>,
 }
 
 /// One agent-backed subtitle search (`GET /library/metadata/{rk}/subtitles`, `docs/pms-api.md` §8).
@@ -306,6 +319,11 @@ pub struct SubtitleSearch {
 /// `*_stream_id` 0 = omit. PMS exposes timeline playback and encoder ownership independently,
 /// but active HLS playback reports the current encoder's coupled wire identity so they remain
 /// correlated.
+///
+/// `continuing` is `continuing=1` on the wire, sent only when true: a `Stopped` that says the
+/// playback goes on under another session id. Plex's own TV client sends it before it restarts a
+/// stream for a quality change, and it is what takes the retired id's row off the server's
+/// dashboard at once instead of minutes later (issue #1236).
 pub struct TimelineReport<'a> {
     pub rating_key: &'a str,
     pub state: TimelineState,
@@ -316,6 +334,19 @@ pub struct TimelineReport<'a> {
     pub play_queue_item_id: &'a str,
     pub audio_stream_id: i64,
     pub subtitle_stream_id: i64,
+    pub continuing: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerStop {
+    pub code: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimelineAnswer {
+    pub taken: bool,
+    pub stop: Option<ServerStop>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

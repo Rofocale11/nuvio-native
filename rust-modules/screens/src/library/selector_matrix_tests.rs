@@ -1,7 +1,6 @@
 //! The library selector across connection tier x ownership x library/source count — see each
 //! test's doc comment for the cell it pins.
 use super::*;
-use std::ffi::CString;
 use super::tests::Fixture;
 
 fn sid(n: u16) -> plx_plex::plex::ServerId {
@@ -36,21 +35,21 @@ fn every_connection_tier_and_source_state_draws_the_same_selector() {
         SourceState::Unreachable, SourceState::InsecureOnly];
     let sid_a = sid(0);
     let sid_b = sid(1);
-    let expected_a = CString::new("Movies A").unwrap();
-    let expected_b = CString::new("Movies B friend").unwrap();
+    let expected_a = "Movies A";
+    let expected_b = "Movies B friend";
 
     for tier in tiers {
         for state in states {
-            // F=1: a lone favourite must never draw a selector, whatever the tier/state.
+            // F=1: a lone favorite keeps a shortcut and options, whatever the tier/state.
             let mut fixture = Fixture::new();
             fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0,
                 vec![(sid_a, group("Cinema server", "", state, tier))],
                 vec![section(sid_a, 1, 0, "Cinema", true)]);
             let page = fixture.screen();
-            assert!(page.libraries.is_empty(),
-                "tier={tier:?} state={state:?}: a single favourite must clear the selector");
-            assert!(!page.layout.libraries,
-                "tier={tier:?} state={state:?}: no row height reserved for a single favourite");
+            assert_eq!(page.libraries.len(), 2,
+                "tier={tier:?} state={state:?}: a single favorite keeps its name and Library options");
+            assert!(page.layout.libraries,
+                "tier={tier:?} state={state:?}: the header row is always there, names or not");
 
             // F=2: two favourites must draw exactly 2 pills, with labels that never move.
             let mut fixture = Fixture::new();
@@ -60,7 +59,7 @@ fn every_connection_tier_and_source_state_draws_the_same_selector() {
                 vec![section(sid_a, 1, 0, "Movies A", true), section(sid_b, 1, 1, "Movies B", false)]);
             let page = fixture.screen();
             let cx = fixture.cx(None);
-            assert_eq!(page.libraries.len(), 2,
+            assert_eq!(page.libraries.len(), 3,
                 "tier={tier:?} state={state:?}: two favourites must draw exactly 2 pills");
             assert_eq!(page.library_label(0, &cx), expected_a, "tier={tier:?} state={state:?}");
             assert_eq!(page.library_label(1, &cx), expected_b, "tier={tier:?} state={state:?}");
@@ -102,7 +101,7 @@ fn ownership_does_not_change_how_many_pills_are_drawn() {
         fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0,
             sources.clone(), vec![section(sources[0].0, 1, 0, "Movies", true)]);
         let page = fixture.screen();
-        assert!(page.libraries.is_empty(), "{label}: F=1 must clear the selector");
+        assert_eq!(page.libraries.len(), 2, "{label}: F=1 keeps its name and Library options");
 
         // F=2: one favourite per source when the roster has two; two libraries on the one source
         // it has otherwise. Either way F becomes 2 and only the pill COUNT is asserted.
@@ -116,7 +115,7 @@ fn ownership_does_not_change_how_many_pills_are_drawn() {
         let mut fixture = Fixture::new();
         fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0, sources, sections);
         let page = fixture.screen();
-        assert_eq!(page.libraries.len(), 2, "{label}: F=2 must draw exactly 2 pills");
+        assert_eq!(page.libraries.len(), 3, "{label}: F=2 must draw exactly 2 pills");
     }
 }
 
@@ -146,11 +145,11 @@ fn a_pill_carries_its_owners_handle_and_a_household_library_carries_none() {
         ]);
     let page = fixture.screen();
     let cx = fixture.cx(None);
-    assert_eq!(page.library_label(0, &cx), CString::new("Films friend").unwrap(),
+    assert_eq!(page.library_label(0, &cx), "Films friend",
         "a share's handle suffixes the pill");
-    assert_eq!(page.library_label(1, &cx), CString::new("Films").unwrap(),
+    assert_eq!(page.library_label(1, &cx), "Films",
         "your own server's empty handle leaves the title bare");
-    assert_eq!(page.library_label(2, &cx), CString::new("Films").unwrap(),
+    assert_eq!(page.library_label(2, &cx), "Films",
         "a managed/Guest profile's own household library is `owned:false` yet still bare — \
          there is no handle for it to carry");
 }
@@ -173,10 +172,10 @@ fn two_owned_servers_with_the_same_library_title_draw_two_identical_pills() {
         vec![section(a, 1, 0, "Movies", true), section(b, 1, 1, "Movies", false)]);
     let page = fixture.screen();
     let cx = fixture.cx(None);
-    assert_eq!(page.libraries.len(), 2);
+    assert_eq!(page.libraries.len(), 3);
     let label_a = page.library_label(0, &cx);
     let label_b = page.library_label(1, &cx);
-    assert_eq!(label_a, CString::new("Movies").unwrap());
+    assert_eq!(label_a, "Movies");
     assert_eq!(label_a, label_b, "two owned servers with the same library title draw indistinguishable pills");
 }
 
@@ -198,7 +197,7 @@ fn an_unreachable_favourite_stays_in_the_selector() {
         vec![section(live, 1, 0, "Movies", true), section(dead, 1, 1, "Movies", false)]);
     let page = fixture.screen();
     let cx = fixture.cx(None);
-    assert_eq!(page.libraries.len(), 2, "the unreachable favourite still counts toward F");
-    assert_eq!(page.library_label(1, &cx), CString::new("Movies friend").unwrap(),
+    assert_eq!(page.libraries.len(), 3, "the unreachable favourite still counts toward F");
+    assert_eq!(page.library_label(1, &cx), "Movies friend",
         "the pill carries the owner handle only — no status word leaks into it");
 }

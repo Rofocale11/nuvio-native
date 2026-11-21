@@ -7,15 +7,23 @@ use std::ffi::CString;
 
 use plx_data::metadata::Detail;
 use plx_machine::machine::{GroupId, Measure};
+use plx_ui::label::HAlign;
 use plx_ui::text_lift::{draw_focused, TextLift, CENTRE};
+use plx_ui::hstack::Item;
 use plx_ui::text_view::TextView;
+use plx_ui::vstack::{Anchor, VFlow, VStack};
 use plx_ui::{theme, Painter, Rect};
 
-pub const ABOUT_ELEM_RANGE_START: u32 = 1664;
-pub const ABOUT_ELEM_RANGE_END: u32 = 1728;
+pub const ABOUT_ELEM_RANGE_START: u32 = 4 * super::SECTION_BLOCK;
+pub const ABOUT_ELEM_RANGE_END: u32 = 5 * super::SECTION_BLOCK;
 pub const ABOUT_GROUP: GroupId = GroupId(5);
 pub const CARD_ELEM: u32 = ABOUT_ELEM_RANGE_START;
 pub const LANGUAGES_ELEM: u32 = ABOUT_ELEM_RANGE_START + 1;
+
+/// How many audio tracks the Languages column names. A summary, not the whole list: the column is
+/// a control (see [`locate`]) whose MORE opens the tracks panel, which lists EVERY audio track in
+/// the server's order (`tracks_panel::audio_rows`), so a track past the summary is one press away.
+const AUDIO_SUMMARY: usize = 8;
 
 const CARD_W: f32 = 640.0;
 const CARD_Y: f32 = 50.0;
@@ -23,6 +31,16 @@ const CARD_PAD: f32 = 30.0;
 /// The `ui::text_lift` corner radius of the About card and the Languages column (the mockup's 14).
 const LIFT_RADIUS: f32 = 14.0;
 const COL_Y: f32 = 430.0;
+/// A column's heading is drawn at the column's top; Information, Languages and Accessibility (its
+/// badge rows and its "no flags" dash alike) start their first row this far below it.
+const HEAD_TO_ROWS: f32 = 68.0;
+/// The air under a label/value pair, and under an accessibility badge row.
+const PAIR_AIR: f32 = 22.0;
+const BADGE_AIR: f32 = 26.0;
+/// A pair's value sits this far under its label.
+const PAIR_VALUE_DY: f32 = 34.0;
+/// An accessibility row: the badge line, then the description this far under its top.
+const BADGE_DESC_DY: f32 = 52.0;
 const LANG_X: f32 = 760.0;
 /// The Languages column's text measure — the width the audio list wraps to, and what the focus
 /// plate is [`CARD_PAD`] wider than on each side.
@@ -106,31 +124,31 @@ impl Rows {
         self.info.clear();
         let released = plx_ui::fmt::pretty_date(&d.aired, d.year);
         if !released.is_empty() {
-            self.info.push((plx_platform::i18n::msg::browse_detail_released(), released));
+            self.info.push((plx_os::i18n::msg::browse_detail_released(), released));
         }
-        let dur = if d.dur_ms > 0 {
-            d.dur_ms
-        } else {
-            d.episodes.first().map(|e| e.dur_ms).unwrap_or(0)
-        };
-        if dur > 0 {
-            self.info.push((plx_platform::i18n::msg::browse_detail_runtime(), plx_ui::fmt::dur_long(dur)));
+        // A show's or season's `duration` is the agent's nominal per-episode figure, no episode's
+        // (#814): only a leaf has a runtime to print.
+        if plx_data::metadata::has_runtime(&d.kind) && !d.is_show && d.dur_ms > 0 {
+            self.info.push((
+                plx_os::i18n::msg::browse_detail_runtime(),
+                plx_ui::fmt::duration(d.dur_ms),
+            ));
         }
         self.info.push((
-            plx_platform::i18n::msg::browse_detail_rated(),
+            plx_os::i18n::msg::browse_detail_rated(),
             if d.rating.is_empty() {
-                plx_platform::i18n::msg::browse_detail_unrated().into()
+                plx_os::i18n::msg::browse_detail_unrated().into()
             } else {
                 d.rating.clone()
             },
         ));
         if !d.countries.is_empty() {
             self.info
-                .push((plx_platform::i18n::msg::browse_detail_origins(), d.countries.join(", ")));
+                .push((plx_os::i18n::msg::browse_detail_origins(), d.countries.join(", ")));
         }
         self.orig_audio = d.audio.first().map(|a| {
             if a.lang.is_empty() {
-                plx_platform::i18n::msg::browse_detail_unknown().into()
+                plx_os::i18n::msg::browse_detail_unknown().into()
             } else {
                 a.lang.clone()
             }
@@ -138,10 +156,10 @@ impl Rows {
         self.audio_list = d
             .audio
             .iter()
-            .take(8)
+            .take(AUDIO_SUMMARY)
             .map(|a| {
                 let lang = if a.lang.is_empty() {
-                    plx_platform::i18n::msg::browse_detail_unknown()
+                    plx_os::i18n::msg::browse_detail_unknown()
                 } else {
                     &a.lang
                 };
@@ -152,17 +170,17 @@ impl Rows {
         self.access.clear();
         if !d.subs.is_empty() {
             self.access.push((
-                plx_platform::i18n::msg::widgets_badge_cc(),
-                plx_platform::i18n::msg::browse_detail_closed_captions(),
+                plx_os::i18n::msg::widgets_badge_cc(),
+                plx_os::i18n::msg::browse_detail_closed_captions(),
             ));
         }
         if d.subs.iter().any(|s| s.sdh) {
-            self.access.push((plx_platform::i18n::msg::widgets_badge_sdh(), plx_platform::i18n::msg::browse_detail_sdh()));
+            self.access.push((plx_os::i18n::msg::widgets_badge_sdh(), plx_os::i18n::msg::browse_detail_sdh()));
         }
         if d.audio.iter().any(|a| a.ad) {
             self.access.push((
-                plx_platform::i18n::msg::widgets_badge_ad(),
-                plx_platform::i18n::msg::browse_detail_audio_description(),
+                plx_os::i18n::msg::widgets_badge_ad(),
+                plx_os::i18n::msg::browse_detail_audio_description(),
             ));
         }
     }
@@ -182,13 +200,8 @@ impl Rows {
     }
 
     pub fn languages_rect(&self, top: f32, measure: &dyn Measure) -> Rect {
-        let mut h = 68.0;
-        if let Some(orig) = &self.orig_audio {
-            h += pair_h(orig, measure);
-        }
-        if !self.audio_list.is_empty() {
-            h += 34.0 + audio_view(&self.audio_list, measure).measure_h(LANG_W);
-        }
+        let items = self.languages_items(measure);
+        let h = VStack::new(&items, 0.0, Anchor::Top(0.0)).height();
         // The plate wears the ABOUT CARD's padding — `CARD_PAD` on all four sides — because the
         // owner named that card as the reference for what these insets should look like
         // (2026-09-18). Its height therefore has to carry the MORE mark too: MORE is INK, the
@@ -201,6 +214,25 @@ impl Rows {
             LANG_W + 2.0 * CARD_PAD,
             CARD_PAD + h + LANG_MORE_LEAD + theme::size::CAPTION as f32 + CARD_PAD,
         )
+    }
+
+    /// The Languages column's run, ONE list that `languages_rect` (its height) and `draw_languages`
+    /// (where each row stands) both read: the heading (a zero-high item whose `after` is the
+    /// distance to the first row), the original-audio pair, the audio list, and a zero-high end item
+    /// so the air under the last pair stays inside the plate's height as it always did.
+    fn languages_items(&self, measure: &dyn Measure) -> [Item; 4] {
+        [
+            Item::new(0.0).after(HEAD_TO_ROWS),
+            self.orig_audio
+                .as_deref()
+                .map_or(Item::absent(), |orig| Item::new(pair_body_h(orig, measure)).after(PAIR_AIR)),
+            if self.audio_list.is_empty() {
+                Item::absent()
+            } else {
+                Item::new(PAIR_VALUE_DY + audio_view(&self.audio_list, measure).measure_h(LANG_W))
+            },
+            Item::new(0.0),
+        ]
     }
 
     /// `tracks` is the PAGE's answer to "is there a file for the track sheet to describe"
@@ -220,7 +252,7 @@ impl Rows {
     ) {
         let x = plx_ui::consts::MARGIN_X;
         p.text(
-            plx_platform::i18n::msg::browse_detail_about_c().as_ptr(),
+            plx_os::i18n::msg::browse_detail_about_c().as_ptr(),
             x,
             top,
             theme::size::HEADLINE,
@@ -233,9 +265,9 @@ impl Rows {
         // columns drawn after it use the caller's own `p` and cannot inherit the lift.
         draw_focused(p, card, LIFT_RADIUS, card_lift, CENTRE, |p| {
             let ix = card.x + CARD_PAD;
-            text_at(
+            card_line(
                 p,
-                ix,
+                card,
                 card.y + CARD_PAD,
                 theme::size::HEADLINE,
                 theme::TEXT_PRIMARY,
@@ -245,9 +277,9 @@ impl Rows {
                 }),
             );
             if !d.genres.is_empty() {
-                text_at(
+                card_line(
                     p,
-                    ix,
+                    card,
                     card.y + CARD_PAD + 44.0,
                     theme::size::CAPTION,
                     theme::TEXT_TERTIARY,
@@ -257,15 +289,19 @@ impl Rows {
                     }),
                 );
             }
-            synopsis(&d.summary, measure)
-                .draw(p, Rect::new(ix, card.y + CARD_PAD + 100.0, SYNOPSIS_W, 0.0));
+            let syn = synopsis(&d.summary, measure);
+            syn.draw(p, Rect::new(ix, card.y + CARD_PAD + 100.0, SYNOPSIS_W, 0.0));
+            // The MORE the synopsis dissolves into: bottom-right, or bottom-LEFT for an Arabic or
+            // Hebrew synopsis, which is drawn right-aligned and dissolves at its left end.
+            let (more_x, more_align) =
+                if syn.is_rtl() { (card.x + CARD_PAD, 0) } else { (card.x + card.w - CARD_PAD, 2) };
             p.text(
                 plx_ui::text_view::more_mark().as_ptr(),
-                card.x + card.w - CARD_PAD,
+                more_x,
                 card.y + card.h - CARD_PAD - theme::size::CAPTION as f32,
                 theme::size::CAPTION,
                 theme::TEXT_TERTIARY,
-                2,
+                more_align,
                 1,
             );
         });
@@ -283,11 +319,12 @@ impl Rows {
             theme::size::HEADLINE,
             theme::TEXT_PRIMARY,
             1,
-            plx_platform::i18n::msg::browse_detail_information(),
+            plx_os::i18n::msg::browse_detail_information(),
         );
-        let mut yy = y + 68.0;
+        let mut flow = VFlow::new(y, 0.0);
+        flow.push(Item::new(0.0).after(HEAD_TO_ROWS));
         for (label, value) in &self.info {
-            yy += draw_pair(p, x, yy, label, value, measure);
+            flow.place(|yy| Item::new(draw_pair(p, x, yy, label, value, measure)).after(PAIR_AIR));
         }
     }
 
@@ -308,13 +345,14 @@ impl Rows {
                 theme::size::HEADLINE,
                 theme::TEXT_PRIMARY,
                 1,
-                plx_platform::i18n::msg::browse_detail_languages(),
+                plx_os::i18n::msg::browse_detail_languages(),
             );
-            let mut yy = y + 68.0;
-            if let Some(orig) = &self.orig_audio {
-                yy += draw_pair(p, LANG_X, yy, plx_platform::i18n::msg::browse_detail_original_audio(), orig, measure);
+            let items = self.languages_items(measure);
+            let stack = VStack::new(&items, 0.0, Anchor::Top(y));
+            if let (Some(orig), Some((yy, _))) = (&self.orig_audio, stack.span(1)) {
+                draw_pair(p, LANG_X, yy, plx_os::i18n::msg::browse_detail_original_audio(), orig, measure);
             }
-            if !self.audio_list.is_empty() {
+            if let Some((yy, _)) = stack.span(2) {
                 text_at(
                     p,
                     LANG_X,
@@ -322,10 +360,10 @@ impl Rows {
                     theme::size::CAPTION,
                     theme::TEXT_TERTIARY,
                     0,
-                    plx_platform::i18n::msg::browse_detail_audio(),
+                    plx_os::i18n::msg::browse_detail_audio(),
                 );
                 audio_view(&self.audio_list, measure)
-                    .draw(p, Rect::new(LANG_X, yy + 34.0, LANG_W, 0.0));
+                    .draw(p, Rect::new(LANG_X, yy + PAIR_VALUE_DY, LANG_W, 0.0));
             }
             if tracks {
                 p.text(
@@ -355,13 +393,13 @@ impl Rows {
             theme::size::HEADLINE,
             theme::TEXT_PRIMARY,
             1,
-            plx_platform::i18n::msg::browse_detail_accessibility(),
+            plx_os::i18n::msg::browse_detail_accessibility(),
         );
         if self.access.is_empty() {
             text_at(
                 p,
                 x,
-                y + 68.0,
+                y + HEAD_TO_ROWS,
                 theme::size::CAPTION,
                 theme::TEXT_TERTIARY,
                 0,
@@ -369,38 +407,43 @@ impl Rows {
             );
             return;
         }
-        let mut yy = y + 64.0;
+        let mut flow = VFlow::new(y, 0.0);
+        flow.push(Item::new(0.0).after(HEAD_TO_ROWS));
         for (label, desc) in &self.access {
-            plx_ui::widgets::badge(
-                p,
-                x,
-                yy + plx_ui::widgets::BADGE_H * 0.5,
-                label,
-                None,
-                plx_ui::widgets::BadgeStyle::Filled,
-                measure,
-            );
-            let h = TextView::new(desc, theme::size::CAPTION, theme::TEXT_HEADING)
-                .with_measure(measure)
-                .leading(30.0)
-                .max_lines(4)
-                .draw(p, Rect::new(x, yy + 52.0, 500.0, 0.0));
-            yy += 52.0 + h + 26.0;
+            flow.place(|yy| {
+                plx_ui::widgets::badge(
+                    p,
+                    x,
+                    yy + plx_ui::widgets::BADGE_H * 0.5,
+                    label,
+                    None,
+                    plx_ui::widgets::BadgeStyle::Filled,
+                    measure,
+                );
+                let h = TextView::new(desc, theme::size::CAPTION, theme::TEXT_HEADING)
+                    .with_measure(measure)
+                    .leading(30.0)
+                    .max_lines(4)
+                    .draw(p, Rect::new(x, yy + BADGE_DESC_DY, 500.0, 0.0));
+                Item::new(BADGE_DESC_DY + h).after(BADGE_AIR)
+            });
         }
     }
 }
 
-fn pair_h(value: &str, measure: &dyn Measure) -> f32 {
-    34.0 + TextView::new(value, theme::size::LABEL, theme::TEXT_HEADING)
-        .bold()
-        .with_measure(measure)
-        .leading(30.0)
-        .max_lines(2)
-        .measure_h(520.0)
-        .max(30.0)
-        + 22.0
+/// A pair's height without the air under it: the label line, then the value (two lines at most).
+fn pair_body_h(value: &str, measure: &dyn Measure) -> f32 {
+    PAIR_VALUE_DY
+        + TextView::new(value, theme::size::LABEL, theme::TEXT_HEADING)
+            .bold()
+            .with_measure(measure)
+            .leading(30.0)
+            .max_lines(2)
+            .measure_h(520.0)
+            .max(30.0)
 }
 
+/// Draws a label/value pair at `y` and returns its height ([`pair_body_h`]), the air excluded.
 fn draw_pair(p: Painter, x: f32, y: f32, label: &str, value: &str, measure: &dyn Measure) -> f32 {
     text_at(
         p,
@@ -416,8 +459,21 @@ fn draw_pair(p: Painter, x: f32, y: f32, label: &str, value: &str, measure: &dyn
         .with_measure(measure)
         .leading(30.0)
         .max_lines(2)
-        .draw(p, Rect::new(x, y + 34.0, 520.0, 0.0));
-    34.0 + h.max(30.0) + 22.0
+        .draw(p, Rect::new(x, y + PAIR_VALUE_DY, 520.0, 0.0));
+    PAIR_VALUE_DY + h.max(30.0)
+}
+
+/// One line of the About card, inside its padding and in the line's OWN direction: it stands at
+/// the [`HAlign::Start`] edge, flush right for an Arabic or Hebrew line, as the synopsis under it
+/// does, any other flush left.
+#[allow(clippy::too_many_arguments)]
+fn card_line(p: Painter, card: Rect, y: f32, size: i32, color: [f32; 4], bold: i32, text: &str) -> f32 {
+    let inner = Rect::new(card.x + CARD_PAD, y, card.w - 2.0 * CARD_PAD, 0.0);
+    let (x, align) = HAlign::Start.resolve(text).anchor(inner);
+    CString::new(text)
+        .ok()
+        .map(|s| p.text(s.as_ptr(), x, y, size, color, align, bold))
+        .unwrap_or(0.0)
 }
 
 fn text_at(p: Painter, x: f32, y: f32, size: i32, color: [f32; 4], bold: i32, text: &str) -> f32 {
@@ -430,6 +486,25 @@ fn text_at(p: Painter, x: f32, y: f32, size: i32, color: [f32; 4], bold: i32, te
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file with twelve audio tracks: the column names the first eight and is a control, and the
+    /// tracks panel it opens has a row for each of the twelve, the last one last.
+    #[test]
+    fn the_audio_summary_stops_at_eight_and_the_tracks_panel_lists_all_twelve() {
+        use plx_data::metadata::Stream;
+        let audio: Vec<Stream> = (0..12)
+            .map(|i| Stream { lang: format!("Lang{i}"), codec: "ac3".into(), ..Default::default() })
+            .collect();
+        let d = Detail { part: "/library/parts/1/file.mkv".into(), audio, ..Default::default() };
+        let mut rows = Rows::new();
+        rows.update(&d);
+        assert_eq!(rows.audio_list.split(", ").count(), AUDIO_SUMMARY);
+        assert!(rows.audio_list.contains("Lang7") && !rows.audio_list.contains("Lang8"));
+        assert_eq!(locate(LANGUAGES_ELEM, d.has_own_file()), Some(1), "the column opens the tracks panel");
+        let panel = crate::registry::tracks_panel_audio_rows(&d.audio);
+        assert_eq!(panel.len(), 12, "the panel lists every track");
+        assert_eq!(panel[11].name, "Lang11");
+    }
 
     /// Issue 15: the About card's MORE is pinned on the synopsis' last line whether or not the
     /// text was truncated, so a synopsis that fits in exactly its five lines with a long last
@@ -532,7 +607,7 @@ mod tests {
         assert!(rows
             .info
             .iter()
-            .any(|(label, value)| *label == "Run Time" && value == "2 min"));
+            .any(|(label, value)| *label == "Run Time" && value == "2m"));
     }
 
     fn movie_with_audio() -> Detail {
@@ -607,6 +682,161 @@ mod tests {
                 lang.step(false, 1.0 / 60.0);
             }
             assert_eq!(census(&rows, &d, &card, &lang), at_rest);
+        }
+    }
+
+    /// #814: a show's `duration` is the metadata agent's nominal per-episode figure, so About
+    /// prints no Runtime for a show or a season, and still prints a movie's or episode's.
+    #[test]
+    fn a_show_or_season_has_no_runtime_row_and_a_leaf_keeps_its_own() {
+        let runtime = plx_os::i18n::msg::browse_detail_runtime();
+        let has = |d: &Detail| {
+            let mut rows = Rows::new();
+            rows.update(d);
+            rows.info.iter().any(|(label, _)| *label == runtime)
+        };
+        let episode = plx_data::metadata::Episode { dur_ms: 45 * 60_000, ..Default::default() };
+        let show = Detail { kind: "show".into(), is_show: true, dur_ms: 6_000_000, ..Default::default() };
+        let season = Detail {
+            kind: "season".into(),
+            dur_ms: 6_000_000,
+            episodes: vec![episode].into(),
+            ..Default::default()
+        };
+        assert!(!has(&show), "a show's nominal duration is no episode's");
+        assert!(!has(&season));
+        for kind in ["movie", "episode"] {
+            let leaf = Detail { kind: kind.into(), dur_ms: 6_000_000, ..Default::default() };
+            assert!(has(&leaf), "{kind}");
+        }
+    }
+
+    /// The painted gaps of the three columns, read off the runs: the Languages column's audio label
+    /// stands a pair's body and [`PAIR_AIR`] under the original-audio label (and straight under the
+    /// heading's [`HEAD_TO_ROWS`] when there is no original), and the Information pairs are the same
+    /// body and air apart. The same list sizes the plate.
+    #[test]
+    fn the_columns_paint_the_named_gaps() {
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let d = Detail::default();
+        let draw = |rows: &Rows| {
+            plx_ui::draw_census::capture_runs(|| {
+                rows.draw(Painter::recording(), &d, 0.0, false, &TextLift::new(), &TextLift::new(), &measure)
+            })
+        };
+        let y_of = |runs: &[plx_ui::draw_census::Run], text: &str| {
+            runs.iter().find(|r| r.text == text).map(|r| r.at.y).unwrap_or_else(|| panic!("{text} not drawn"))
+        };
+        let mut rows = Rows::new();
+        rows.info = vec![("Rated", "PG".into()), ("Origins", "France".into())];
+        rows.orig_audio = Some("English".into());
+        rows.audio_list = "English (AC3)".into();
+        let runs = draw(&rows);
+        let tol = 0.5;
+        assert!((y_of(&runs, "Rated") - (COL_Y + HEAD_TO_ROWS)).abs() < tol);
+        let body = pair_body_h("PG", &measure);
+        assert!((y_of(&runs, "Origins") - y_of(&runs, "Rated") - (body + PAIR_AIR)).abs() < tol);
+        let orig = y_of(&runs, plx_os::i18n::msg::browse_detail_original_audio());
+        let audio = y_of(&runs, plx_os::i18n::msg::browse_detail_audio());
+        assert!((orig - (COL_Y + HEAD_TO_ROWS)).abs() < tol);
+        assert!((audio - orig - (pair_body_h("English", &measure) + PAIR_AIR)).abs() < tol);
+        // The plate is the same list's height: heading distance, the pair and its air, the audio block.
+        let plate = rows.languages_rect(0.0, &measure);
+        let audio_h = PAIR_VALUE_DY + audio_view(&rows.audio_list, &measure).measure_h(LANG_W);
+        let h = HEAD_TO_ROWS + pair_body_h("English", &measure) + PAIR_AIR + audio_h;
+        assert!((plate.h - (CARD_PAD + h + LANG_MORE_LEAD + theme::size::CAPTION as f32 + CARD_PAD)).abs() < tol);
+        // Absent original audio: the audio label stands right under the heading's distance.
+        rows.orig_audio = None;
+        let runs = draw(&rows);
+        let audio = y_of(&runs, plx_os::i18n::msg::browse_detail_audio());
+        assert!((audio - (COL_Y + HEAD_TO_ROWS)).abs() < tol);
+    }
+
+    /// Q3: Accessibility's first badge row stands [`HEAD_TO_ROWS`] under its heading, the very
+    /// distance Information's and Languages' first rows keep (it was four px nearer): the heading
+    /// is at the column top, the first description [`BADGE_DESC_DY`] under the badge row.
+    #[test]
+    fn the_accessibility_rows_stand_the_same_distance_under_their_heading_as_the_others() {
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let d = Detail::default();
+        let mut rows = Rows::new();
+        rows.access = vec![(plx_os::i18n::msg::widgets_badge_cc(), plx_os::i18n::msg::browse_detail_closed_captions())];
+        let runs = plx_ui::draw_census::capture_runs(|| {
+            rows.draw(Painter::recording(), &d, 0.0, false, &TextLift::new(), &TextLift::new(), &measure)
+        });
+        let y_of = |text: &str| runs.iter().find(|r| r.text == text).map(|r| r.at.y).unwrap_or_else(|| panic!("{text} not drawn"));
+        let head = y_of(plx_os::i18n::msg::browse_detail_accessibility());
+        let desc = runs.iter().filter(|r| r.at.x == 1360.0 && r.at.y > head).map(|r| r.at.y).fold(f32::MAX, f32::min);
+        assert!((head - COL_Y).abs() < 0.5, "the heading stands at the column top");
+        // The same description drawn where Information's first row would stand its own body.
+        let want = plx_ui::draw_census::capture_runs(|| {
+            TextView::new(plx_os::i18n::msg::browse_detail_closed_captions(), theme::size::CAPTION, theme::TEXT_HEADING)
+                .with_measure(&measure)
+                .leading(30.0)
+                .max_lines(4)
+                .draw(Painter::recording(), Rect::new(1360.0, COL_Y + HEAD_TO_ROWS + BADGE_DESC_DY, 500.0, 0.0));
+        })[0]
+            .at
+            .y;
+        assert!((desc - want).abs() < 0.5, "the first description is at {desc}, want {want}: a row stands {HEAD_TO_ROWS} under the heading");
+    }
+
+    /// An Arabic or Hebrew synopsis is drawn right-aligned and dissolves at its LEFT end
+    /// (`TextView::is_rtl`), so the card's MORE moves to the bottom-left corner with it; any other
+    /// synopsis keeps the bottom-right.
+    #[test]
+    fn the_more_mark_follows_a_right_to_left_synopsis_to_the_left_corner() {
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let rows = Rows::new();
+        let more = plx_ui::text_view::more_mark().to_string_lossy().into_owned();
+        for (summary, rtl) in [
+            ("تدور أحداث المسلسل في قرية حدودية بين لبنان وسوريا", true),
+            ("A chemistry teacher turns to manufacturing methamphetamine.", false),
+        ] {
+            let mut d = Detail::default();
+            d.summary = summary.into();
+            let card = rows.card_rect(&d, 0.0, &measure);
+            let runs = plx_ui::draw_census::capture_runs(|| {
+                rows.draw(Painter::recording(), &d, 0.0, false, &TextLift::new(), &TextLift::new(), &measure)
+            });
+            let mark = runs.iter().find(|r| r.text == more).expect("the card's MORE");
+            let want = if rtl { (0, card.x + CARD_PAD) } else { (2, card.x + card.w - CARD_PAD) };
+            assert_eq!((mark.align, mark.at.x), want, "{summary:?}: {mark:?}");
+        }
+    }
+
+    /// The card's title and genres line each read in their OWN direction, like its synopsis: an
+    /// Arabic or Hebrew line stands flush with the card's right padding, any other with its left.
+    /// (The page's hero title is not this rule's: it stands in for the logo and keeps the layout.)
+    #[test]
+    fn the_cards_title_and_genres_each_follow_their_own_direction() {
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let rows = Rows::new();
+        for (title, genres, title_rtl, genres_rtl) in [
+            ("باب الحارة", vec!["دراما", "تاريخي"], true, true),
+            ("Breaking Bad", vec!["Drama", "Crime"], false, false),
+            ("الهيبة", vec!["Drama", "Thriller"], true, false),
+            ("שטיסל", vec!["דרמה"], true, true),
+        ] {
+            let mut d = Detail::default();
+            d.title = title.into();
+            d.genres = genres.iter().map(|g| g.to_string()).collect();
+            d.summary = "A summary.".into();
+            let card = rows.card_rect(&d, 0.0, &measure);
+            let runs = plx_ui::draw_census::capture_runs(|| {
+                rows.draw(Painter::recording(), &d, 0.0, false, &TextLift::new(), &TextLift::new(), &measure)
+            });
+            let at = |text: &str| {
+                let r = runs.iter().find(|r| r.text == text).unwrap_or_else(|| panic!("{text:?} not drawn: {runs:?}"));
+                (r.align, r.at.x)
+            };
+            let side = |rtl: bool| if rtl { (2, card.x + card.w - CARD_PAD) } else { (0, card.x + CARD_PAD) };
+            assert_eq!(at(title), side(title_rtl), "title {title:?}");
+            assert_eq!(at(&d.genres.join(", ")), side(genres_rtl), "genres of {title:?}");
         }
     }
 }

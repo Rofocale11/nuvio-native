@@ -5,17 +5,30 @@
 //! [`plan::build_stream`] run on the resolve worker; [`decision`] holds everything else — the
 //! main-thread `Session`, the synchronized `PlayerControl`, and every PMS/native effect. Every
 //! item this module re-exports keeps its old `route::` path, so nothing outside `route/` had to
-//! change. `ci/check-deps.sh`'s `wall` gate holds `plan.rs` to zero
+//! change. `ci/check-deps.sh`'s `wall` gate holds `plan.rs` (and `plan_memory.rs`, its child) to zero
 //! `Instant::now`/`SystemTime::now`/`.elapsed()`; `decision.rs` is not scanned by that gate (a
 //! network/adapter effect is allowed to read wall time) but as of this split carries none either.
 
+pub mod backend_policy;
+pub mod uri_preflight;
+mod uri_offer;
+pub use uri_offer::{QualifiedUriOffer, UriRecoveryNotice, UriSourceRecipe};
 mod decision;
+mod queue_navigation;
+pub use queue_navigation::{QueueContinuation, QueueStep, queue_neighbor, queue_neighbors};
 mod flight;
 mod plan;
+mod prefs;
+mod track_memory;
 
 pub use decision::*;
+/// The playback backends a composition supplies, for the layers (screens) that read the set the
+/// session was told and may not name the contract crate.
+pub use plx_playback_contract::BackendSet;
 pub use flight::{
     discard_stale_flight_landing, engineless_flight_outstanding, flight_is_current, flight_outstanding, recovery_flight_offset_ns, recovery_flight_outstanding, resume_flight_outstanding, retire_superseded_encoder, take_ready_flight,
     take_ready_recovery_flight, ReadyFlight, RecoveryLanding, RecoveryVerdict, SeekVerdict,
 };
 pub use plan::*;
+pub use prefs::*;
+pub use track_memory::{forced_only_language, forced_only_pick, memo_of_audio, memo_of_subtitle, subtitle_pick_changed, SubMode, TrackContext};

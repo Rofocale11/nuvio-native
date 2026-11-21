@@ -149,7 +149,7 @@ and `Directory[].key` — **confirmed** (Directory items are `librarySection`, n
   | name | in | required | type | note |
   |---|---|---|---|---|
   | `ids` | path | yes | **array** (CSV) | app passes a single id — a valid singleton |
-  | `checkFiles`, `skipRefresh`, `asyncCheckFiles`, `includeElements`, … | query | no | integer(0/1) | optional; app sends none |
+  | `checkFiles`, `skipRefresh`, `asyncCheckFiles`, `includeElements`, … | query | no | integer(0/1) | optional; the detail read sends none (background reads by key send `skipRefresh=1`: `docs/pms-api.md`, "Reads by key") |
 
 - **Response:** `mediaContainerWithMetadata` → `MediaContainer.Metadata[]` (app reads `[0]`).
 - **App reads (detail):** title/year/contentRating/summary/tagline/studio/
@@ -161,8 +161,8 @@ and `Directory[].key` — **confirmed** (Directory items are `librarySection`, n
   - Path param is named `ids` and is an **array** (comma-separated) — the app can batch several
     ratingKeys in one call (`/library/metadata/1,2,3`) if ever useful.
   - **D-2** applies to the streams it reads (see below). No request-side divergence.
-- **Second call site** (`fetch_item_streams`, show → first episode) uses the same operation,
-  consuming only the `Stream[]` subset. Same notes.
+- Show pages use the same operation for the episode the hero plays. `backfill_episode` reads its
+  primary stream facts and alternate media versions for the detail page and playback preview.
 
 ### 5. `libraryMetadataGetRelated` — related shelves for an item
 - **Method / canonical path:** `GET /library/metadata/{ids}/related`  ✅ matches app
@@ -218,8 +218,8 @@ and `Directory[].key` — **confirmed** (Directory items are `librarySection`, n
   | name | in | required | type | app sends | note |
   |---|---|---|---|---|---|
   | `partId` | path | yes | **integer** | yes (parsed from part key) | ✅ |
-  | `audioStreamID` | query | no | integer | only when audio switched | ✅ |
-  | `subtitleStreamID` | query | no | integer | always (0 = subs off) | ✅ |
+  | `audioStreamID` | query | no | integer | only when audio switched, or an applied remembered audio is written back | ✅ |
+  | `subtitleStreamID` | query | no | integer | when the selection names one (0 = subs off); omitted by an audio-only write-back with no subtitle selected | ✅ |
   | `allParts` | query | no | integer(0/1) | yes (`1`) | ✅ |
 
 - **Response:** no body (200) / 400 if the stream doesn't belong to the part.

@@ -39,10 +39,10 @@
 //! shell, read a file, call an arbitrary URL or control webOS outside this SDL process. Both
 //! directions are initiated by the television as pinned, authenticated HTTPS POSTs.
 
-// `lab.json`'s reader, `is_trigger_key` and `menu_row_enabled` live in `plx_platform::labcfg` (platform):
+// `lab.json`'s reader, `is_trigger_key` and `menu_row_enabled` live in `plx_os::labcfg` (the os layer):
 // `ui/` and `screens/` ask those two questions and may not name this module.
 #[cfg(feature = "lab-diagnostics")]
-use plx_platform::labcfg::config;
+use plx_os::labcfg::config;
 
 #[cfg(feature = "lab-diagnostics")]
 pub(crate) mod control;
@@ -114,11 +114,12 @@ pub(crate) fn command_done(_id: u32, _ok: bool) {
 /// It sits at the TOP of the chain, above every modal, on purpose — the screen a tester most
 /// wants a snapshot of is the playback failure read-out, whose own arm `continue`s on every key.
 #[inline]
-pub(crate) fn key_press(_sym: u32, _wcode: u32, _ps: &plx_media::route::PlaybackSession) -> bool {
+pub(crate) fn key_press(_sym: u32, _wcode: u32, _ps: &plx_media::route::PlaybackSession,
+    _pa: &plx_media::player::adapter::PlayerAdapter) -> bool {
     #[cfg(feature = "lab-diagnostics")]
     {
-        if plx_platform::labcfg::is_trigger_key(_sym, _wcode) {
-            request_upload("key", _ps);
+        if plx_os::labcfg::is_trigger_key(_sym, _wcode) {
+            request_upload("key", _ps, _pa);
             return true;
         }
     }
@@ -133,10 +134,12 @@ pub(crate) fn key_press(_sym: u32, _wcode: u32, _ps: &plx_media::route::Playback
 /// a worker.
 ///
 /// The session is a PARAMETER for the reason every other `player::diag` caller's is (phase 9):
-/// there is no `route::decision::SESSION` global left to read it out of, and the loop owns it.
-pub(crate) fn request_upload(_reason: &str, _ps: &plx_media::route::PlaybackSession) {
+/// there is no `route::decision::SESSION` global left to read it out of, and the loop owns it. So
+/// is the player adapter, whose display sink answers `diag`'s window facts.
+pub(crate) fn request_upload(_reason: &str, _ps: &plx_media::route::PlaybackSession,
+    _pa: &plx_media::player::adapter::PlayerAdapter) {
     #[cfg(feature = "lab-diagnostics")]
-    upload::request(_reason, _ps);
+    upload::request(_reason, _ps, _pa);
 }
 
 /// The app's current route, by the name the heartbeat uses. Stored for the next snapshot's
@@ -147,17 +150,40 @@ pub(crate) fn note_route(_r: &'static str) {
     upload::note_route(_r);
 }
 
-/// Expire the toast. Called once per frame from the update block.
-#[inline]
-pub(crate) fn update(_now: u32) {
+/// App-owned retained visible toast. A zero-sized, allocation-free facade without the feature.
+#[derive(Default)]
+pub(crate) struct ToastObserver {
     #[cfg(feature = "lab-diagnostics")]
-    toast::update(_now);
+    view: upload::ToastView,
+}
+
+/// Capture coherent IO state plus expiry; the App emits owned Surface/Lifecycle damage if true.
+#[inline]
+pub(crate) fn update(_observer: &mut ToastObserver, _now: u32) -> bool {
+    #[cfg(feature = "lab-diagnostics")]
+    {
+        let next = upload::capture();
+        if next != _observer.view {
+            _observer.view = next;
+            return true;
+        }
+    }
+    false
 }
 
 /// Draw the toast, over everything, on every route. `stats` is the diagnostics read-out's frame
 /// when it is on screen: the toast sits immediately below it, and neither may cover the other.
 #[inline]
-pub(crate) fn draw(_stats: Option<plx_ui::Rect>) {
+pub(crate) fn draw(_observer: &ToastObserver, _stats: Option<plx_ui::Rect>) {
     #[cfg(feature = "lab-diagnostics")]
-    toast::draw(_stats);
+    toast::draw(&_observer.view, _stats);
+}
+
+#[cfg(all(test, not(feature = "lab-diagnostics")))]
+mod tests {
+    #[test]
+    fn disabled_toast_observer_is_zero_sized_and_inert() {
+        assert_eq!(std::mem::size_of::<super::ToastObserver>(), 0);
+        assert!(!super::update(&mut super::ToastObserver::default(), 0));
+    }
 }

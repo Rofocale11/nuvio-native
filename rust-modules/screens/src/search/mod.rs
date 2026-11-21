@@ -20,7 +20,7 @@ use plx_data::search::{Item, Kind};
 use crate::registry::{AppFx, HomeTab, PageMemory, SearchLike, SearchReq};
 use plx_data::stores::{StoreCmd, StoreId};
 use plx_data::stores::search::SearchCmd;
-use plx_ui::cards::{CardEvent, SectionFrame, SectionSpec, Shelf, Stack, StackEvent, StackMemory, StackPage};
+use plx_ui::cards::{CardEvent, PageEdge, SectionFrame, SectionSpec, Shelf, Stack, StackEvent, StackMemory, StackPage};
 use cards::RowCards;
 use plx_ui::consts::{SCR_H, SCR_W};
 use plx_ui::frame::Budget;
@@ -104,6 +104,14 @@ pub struct SearchScreen {
     /// "did a store notice reach the top screen" probes stay readable now that `Route::Search`
     /// mounts this screen unconditionally.
     notices: u32,
+    /// The Under posters policy the poster rows were last drawn with (`step` compares it: Settings
+    /// changes the setting while it covers the page).
+    caption_policy: plx_ui::caption_policy::CaptionPolicy,
+    /// The page ask last sent for each row (window start, direction, cards held), by
+    /// [`layout::ordinal`]. Not part of the state hash. It only records the last ask so a
+    /// `PageCancel` can name its window: every ask the shelf emits is forwarded, a repeat
+    /// included. The shelf paces the repeats and the store takes an identical ask idempotently.
+    page_sent: [Option<(usize, bool, usize)>; 5],
 }
 
 impl SearchScreen {
@@ -114,7 +122,8 @@ impl SearchScreen {
             recent_clear_pending: false, publication: None, content_dirty: true,
             fade: plx_ui::xfade::Xfade::new(), ground: plx_ui::widgets::PageGround::new(),
             owner_row: None, owner: String::new(), owner_alpha: Spring::at(0.0), restored: None, render: Default::default(),
-            notices: 0 }
+            notices: 0, caption_policy: crate::registry::caption_policy_of(plx_plex::plex::session::UnderPosters::DEFAULT),
+            page_sent: [None; 5] }
     }
     fn key(&self, elem: u32) -> FocusKey<u32> { FocusKey { entry: self.entry, elem } }
     fn real_query(&self) -> bool { plx_data::search::terms(self.draft.query()).is_some() }
@@ -170,6 +179,7 @@ impl SearchScreen {
         if !self.rows.is_empty() {
             self.rows.clear();
             self.rows_gen = self.rows_gen.wrapping_add(1);
+            self.page_sent = [None; 5];
         }
     }
 
@@ -256,11 +266,17 @@ impl SearchScreen {
     }
 
     fn activate<H: SearchLike>(&mut self, elem: u32, held: bool, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
-        if let Some(tab) = elem.checked_sub(plx_ui::dispatch::STRIP_BASE) {
-            let request = match tab {
-                0 => SearchReq::Tab(HomeTab::Home), 1 => SearchReq::Tab(HomeTab::Movies),
-                2 => SearchReq::Tab(HomeTab::Shows), 3 => return Handled::Yes,
-                4 => SearchReq::Account, _ => return Handled::No,
+        use plx_ui::widgets::{TAB_KEY_CHIP, TAB_KEY_HOME, TAB_KEY_MOVIES, TAB_KEY_SEARCH, TAB_KEY_SHOWS, TAB_KEY_WATCHLIST};
+        if elem >= plx_ui::dispatch::STRIP_BASE {
+            let request = match elem {
+                TAB_KEY_HOME => SearchReq::Tab(HomeTab::Home),
+                TAB_KEY_MOVIES => SearchReq::Tab(HomeTab::Movies),
+                TAB_KEY_SHOWS => SearchReq::Tab(HomeTab::Shows),
+                TAB_KEY_WATCHLIST => SearchReq::Tab(HomeTab::Watchlist),
+                // The Search mark is the page the user is already on: nothing to request.
+                TAB_KEY_SEARCH => return Handled::Yes,
+                TAB_KEY_CHIP => SearchReq::Account,
+                _ => return Handled::No,
             };
             self.keyboard(false, true, fx);
             fx.push(Fx::App(AppFx::Search(request)));
@@ -329,6 +345,12 @@ impl SearchScreen {
 impl<H: SearchLike> Machine<H> for SearchScreen {
     type Ev = ScreenEvent<H>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
+        // The poster rows draw the Under posters policy, which Settings changes while it covers the
+        // page: noticed on whichever event comes first, and answered with page damage (a returning
+        // page raises none of its own).
+        if crate::registry::moved(&mut self.caption_policy, crate::registry::captions::policy_for(H::screen_inputs(cx))) {
+            fx.invalidate(Provenance::Nav);
+        }
         let store_changed = matches!(ev, ScreenEvent::StoreChanged(store, _) if *store == StoreId::Search.ord());
         if store_changed { self.notices += 1; }
         let acknowledged = matches!(ev, ScreenEvent::Mount) || store_changed;
@@ -370,7 +392,12 @@ impl<H: SearchLike> Machine<H> for SearchScreen {
                 InputKind::Wheel { dy } => {
                     if !self.editing && dy.is_finite() {
                         let max = self.stack.max_scroll(&*self, cx);
-                        self.stack.scroll_to((self.stack.target() - dy * plx_ui::table::ROW_H).clamp(0.0, max));
+                        // A notch of the remote's wheel (a whole step) moves a table row, as it
+                        // always has; the pointer's edge glide (a fraction every frame, in rows a
+                        // second) moves the page's poster rows, the unit every other page glides
+                        // by. By a table row it crawled at a seventh of their speed.
+                        let unit = if dy.fract() == 0.0 { plx_ui::table::ROW_H } else { plx_ui::consts::ROW_PITCH };
+                        self.stack.scroll_to((self.stack.target() - dy * unit).clamp(0.0, max));
                         fx.invalidate(Provenance::Input);
                     }
                 }
@@ -394,7 +421,7 @@ impl<H: SearchLike> Machine<H> for SearchScreen {
                     }
                     if *key == Key::Up && cx.focus.current == Some(self.key(FIELD)) {
                         self.keyboard(false, true, fx);
-                        self.reseat(FocusTarget::Elem(self.key(plx_ui::dispatch::STRIP_BASE + 3)), fx);
+                        self.reseat(FocusTarget::Elem(self.key(plx_ui::widgets::TAB_KEY_SEARCH)), fx);
                         return Handled::Yes;
                     }
                     if *key == Key::Back {
@@ -423,7 +450,38 @@ impl SearchScreen {
     fn stack_on<H: SearchLike>(&mut self, ev: &ScreenEvent<H>, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>)
         -> Option<CardEvent<u32>> {
         let got = self.with_stack(|stack, page| stack.on(page, ev, cx, fx));
+        if matches!(ev, ScreenEvent::Tick(_)) { self.page_rows(&got, cx, fx); }
         match got { Some(StackEvent::Card(_, card)) => Some(card), _ => None }
+    }
+    /// Ask the store to slide a row's window when focus is near the edge it can go on past: the
+    /// trailing edge on the row's own `Want`, the leading edge when the window has hits before it.
+    /// The trailing edge is also asked for an unfocused row that paints a pending cell on its axis
+    /// (`Shelf::page_ask`): Search's `more()` is not gated on focus, so a short row asks too.
+    fn page_rows<H: SearchLike>(&mut self, got: &Option<StackEvent<Sec, u32>>, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
+        let view = H::search(cx);
+        for row in 0..self.rows.len() {
+            let Some(shelf) = view.shelves().get(row) else { continue };
+            let k = self.section(row);
+            let wanted = matches!(got, Some(StackEvent::Card(key, CardEvent::Want(_))) if *key == k);
+            let (offset, held) = (shelf.window.start, shelf.items.len());
+            let slot = layout::ordinal(self.rows[row].kind) as usize;
+            // An ask whose edge focus has left is withdrawn before the slide can commit.
+            if self.with_stack(|stack, page| stack.page_cancel(page, cx, k, offset)).is_some() {
+                if let Some((start, ..)) = self.page_sent[slot].take() {
+                    self.store(SearchCmd::PageCancel { kind: self.rows[row].kind, seen: start }, fx);
+                }
+            }
+            let edge = self.with_stack(|stack, page| stack.page_ask(page, cx, k, wanted, offset));
+            if self.page_sent[slot].is_some_and(|(start, _, len)| (start, len) != (offset, held)) { self.page_sent[slot] = None; }
+            if let Some(edge) = edge {
+                let ask = (offset, edge == PageEdge::Before, held);
+                // Every ask the shelf emits goes to the store, a repeat of the one before included:
+                // the shelf already pays for each with its ladder, and the store takes an identical
+                // ask idempotently, so one it refused for a reason that passes is taken by the next.
+                self.page_sent[slot] = Some(ask);
+                self.store(SearchCmd::Page { kind: self.rows[row].kind, before: ask.1, seen: (offset, held) }, fx);
+            }
+        }
     }
     /// Run `f` on the stack and the page it lays out (the stack is out of the page meanwhile).
     fn with_stack<R>(&mut self, f: impl FnOnce(&mut Stack<Sec>, &Self) -> R) -> R {
@@ -456,7 +514,7 @@ impl SearchScreen {
         let _clip = f.clip(painter, Rect::new(0.0, floor, SCR_W, SCR_H - floor));
         let cx = f.cx;
         let view = H::search(cx);
-        let Some(src) = self.row_cards(view, row) else { return };
+        let Some(src) = self.row_cards(view, row, crate::registry::captions::policy_for(H::screen_inputs(cx))) else { return };
         let Some((frame, shelf)) = self.row_frame(cx, row) else { return };
         shelf.redraw_focused(f, painter, &src, frame, Some(key));
     }
@@ -527,10 +585,11 @@ impl SearchScreen {
         Some((self.stack.shelf_frame(self, cx, k)?, self.stack.shelf(k)?))
     }
     /// Result row `row`'s cards over `view`; `None` when the view has no such shelf.
-    fn row_cards<'a>(&'a self, view: plx_data::search::view::SearchView<'a>, row: usize) -> Option<RowCards<'a>> {
+    fn row_cards<'a>(&'a self, view: plx_data::search::view::SearchView<'a>, row: usize, policy: plx_ui::caption_policy::CaptionPolicy) -> Option<RowCards<'a>> {
         let model = self.rows.get(row)?;
-        Some(RowCards { kind: model.kind, elems: &model.elems, items: &view.shelves().get(row)?.items,
-            sources: view.scope().sources() })
+        let shelf = view.shelves().get(row)?;
+        Some(RowCards { policy, kind: model.kind, elems: &model.elems, items: &shelf.items,
+            sources: view.scope().sources(), window: shelf.window, epoch: shelf.epoch })
     }
     fn tick<H: SearchLike>(&mut self, tick: plx_machine::machine::Tick, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         fx.push(Fx::App(AppFx::StoreWork(plx_data::stores::StoreWork::BrowseDiscovery)));
@@ -592,7 +651,7 @@ fn group(id: GroupId, kind: GroupKind, len: usize, extent: Rect, elem: ElemKind,
 /// `render.rs` (the cards fade in with the results).
 fn new_stack(entry: EntryId) -> Stack<Sec> {
     let floor = plx_ui::widgets::TOP_BAR_BOTTOM;
-    Stack::new(entry).hold_hint(plx_ui::hold_hint::Kind::Search).reveal_on_move(true).clipped(Rect::new(0.0, floor, SCR_W, SCR_H - floor))
+    Stack::new(entry).hold_hint().reveal_on_move(true).clipped(Rect::new(0.0, floor, SCR_W, SCR_H - floor))
 }
 
 impl<H: SearchLike> StackPage<H> for SearchScreen {
@@ -610,12 +669,15 @@ impl<H: SearchLike> StackPage<H> for SearchScreen {
         h
     }
     fn sections(&self, _cx: &Cx<'_, H>, out: &mut Vec<SectionSpec<Sec>>) {
-        out.push(SectionSpec::new(Sec::Head, plx_ui::cards::Kind::Custom { height: layout::CONTENT_TOP, focusable: true }, FIELD_GROUP));
+        // The sections are named for what they ARE (the accessibility ids: `field.0`, `recents.<n>`,
+        // `clear.0`, `movies.card.<i>`), not by position: the recents come and go, and a result row
+        // is the page's one row of its kind (`layout::name`), wherever the results place it.
+        out.push(SectionSpec::new(Sec::Head, plx_ui::cards::Kind::Custom { height: layout::CONTENT_TOP, focusable: true }, FIELD_GROUP).named("field"));
         if !self.recents.is_empty() {
             let shown = self.recents.len().min(layout::RECENT_CAP) as f32;
             out.push(SectionSpec::new(Sec::Recents, plx_ui::cards::Kind::Custom {
-                height: plx_ui::table::HDR_H + shown * plx_ui::table::ROW_H, focusable: true }, RECENTS_GROUP));
-            out.push(SectionSpec::new(Sec::Clear, plx_ui::cards::Kind::Custom { height: 0.0, focusable: true }, CLEAR_GROUP));
+                height: plx_ui::table::HDR_H + shown * plx_ui::table::ROW_H, focusable: true }, RECENTS_GROUP).named("recents"));
+            out.push(SectionSpec::new(Sec::Clear, plx_ui::cards::Kind::Custom { height: 0.0, focusable: true }, CLEAR_GROUP).named("clear"));
         }
         for row in &self.rows {
             let elem = if matches!(row.kind, Kind::Movie | Kind::Show | Kind::Episode) { ElemKind::Card } else { ElemKind::Bare };
@@ -625,14 +687,20 @@ impl<H: SearchLike> StackPage<H> for SearchScreen {
                 plx_ui::cards::Kind::Shelf { style: layout::style(row.kind), heading: layout::HEAD_TO_ROW }, row.group)
                 .seated(Seat::Projected)
                 .edges([EdgeRule::Geometric, EdgeRule::Geometric, EdgeRule::Stop, EdgeRule::Stop])
-                .of_kind(elem));
+                .of_kind(elem)
+                .named(layout::name(row.kind)));
         }
     }
     fn fallback(&self, _cx: &Cx<'_, H>, out: &mut Vec<Sec>) { out.push(Sec::Head); }
+    /// The poster rows follow the Under posters setting; the Episode still row and the Person
+    /// headshot row are not posters and keep the legacy band.
+    fn caption_policy(&self, cx: &Cx<'_, H>, k: Sec) -> Option<plx_ui::caption_policy::CaptionPolicy> {
+        matches!(k, Sec::Row(kind, _) if layout::is_poster(kind)).then(|| crate::registry::captions::policy_for(H::screen_inputs(cx)))
+    }
     fn cards<'a>(&'a self, cx: &'a Cx<'_, H>, k: Sec) -> Option<RowCards<'a>> {
         let Sec::Row(kind, _) = k else { return None };
         let row = self.rows.iter().position(|row| row.kind == kind)?;
-        self.row_cards(H::search(cx), row)
+        self.row_cards(H::search(cx), row, crate::registry::captions::policy_for(H::screen_inputs(cx)))
     }
     /// Only a library item opens an item menu on a hold; a collection hit opens its page.
     fn card_has_menu(&self, cx: &Cx<'_, H>, _k: Sec, elem: &u32) -> bool {
@@ -693,7 +761,7 @@ impl<H: SearchLike> StackPage<H> for SearchScreen {
     /// Recents and the Clear control are part of the head's block: the page rests at its top.
     fn reveal_with(&self, k: Sec) -> Option<Sec> { matches!(k, Sec::Recents | Sec::Clear).then_some(Sec::Head) }
     fn reveal_margin(&self, _k: Sec) -> f32 { layout::CONTENT_TOP }
-    fn shelf_foot(&self, _k: Sec) -> f32 { plx_ui::consts::UNDER_LABEL_AIR }
+    fn shelf_foot(&self, _cx: &Cx<'_, H>, _k: Sec) -> f32 { plx_ui::consts::UNDER_LABEL_AIR }
     fn wide_extent(&self, _k: Sec) -> bool { false }
     /// A shown element that went away is replaced by the one now at its slot (the last of a
     /// shrunken group), else the field.
@@ -727,6 +795,7 @@ impl<H: SearchLike> Screen<H> for SearchScreen {
     fn redraw_focused(&self, f: &mut DrawFrame<'_, '_, H>, focus: Option<plx_machine::machine::FocusKey<u32>>) {
         SearchScreen::redraw_focused::<H>(self, f, focus)
     }
+    fn glides(&self) -> bool { true }
     fn name(&self) -> &'static str { "search" }
     fn state(&self) -> &dyn LogicalState { self }
     fn crumb(&self, _: &Cx<'_, H>) -> Option<Cow<'_, str>> { None }

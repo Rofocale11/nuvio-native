@@ -1,58 +1,11 @@
-//! Boot-time helpers of the app core: the desktop window size, the panic logger, the replay
-//! budget, the direct-server trigger, the cursor and the loop-rate tick. Moved out of `app.rs`
-//! verbatim in phase 1a of the UI restructure (a pure move; `pub(crate)` widening only).
+//! Boot-time helpers of the app core: the panic logger, the window a stored setting asks for, the
+//! replay budget, the direct-server trigger and the loop-rate tick. Moved out of `app.rs`
+//! verbatim in phase 1a of the UI restructure (a pure move; `pub(crate)` widening only). The SDL
+//! shell's own steps (the window, the GL context, the display's density) moved on to
+//! `plx_shell_sdl`, and the LG SDL's two boot hooks to `system`.
 
 use super::*;
-
-/// The window size a DESKTOP should open at, in points: the authored 1920x1080 canvas divided by
-/// the smallest whole number that fits the usable display area.
-///
-/// **An exact divisor, never a best fit.** `surface::scale` will letterbox any drawable it is
-/// given, so an arbitrary size would *work* — it would just be soft, because every glyph and icon
-/// mask in this app is rasterized for a 1:1 surface (`gfx::snap`, and the crispness contract in
-/// `theme.rs`) and a fractional scale resamples all of it. 1/1, 1/2 and 1/3 keep whole texels whole.
-///
-/// The television is untouched by any of this: it takes the panel, and the canvas IS the surface.
-/// A Mac is the case the `surface` doc was written against — 1920x1080 exceeds the usable area of
-/// every laptop display Apple ships, so asking for it flatly would put the title bar above the
-/// screen and the bottom of the interface under the Dock.
-///
-/// Falls back to the canvas size if SDL cannot answer, which is the behaviour this replaced.
-#[cfg(feature = "hostsim")]
-pub(crate) fn desktop_window_size() -> (c_int, c_int) {
-    // `PLXNATIVE_WIN=<w>x<h>` overrides the fit entirely — `make sim-shot SIM_W=1920 SIM_H=1080`.
-    // It exists because the fit below is chosen for a HUMAN looking at a window, and a screenshot
-    // is not that: on a 1x display the divisor lands on 2 and every shot comes back 960x540, which
-    // is half the canvas the UI is authored at. A hairline, a 1px edge-sheen and a snapped glyph
-    // are exactly the things that do not survive that, so a shot taken to JUDGE the interface has
-    // to be asked for at full size. Off-screen edges are fine for a headless grab: the drawable is
-    // the window's own framebuffer, not the part of it the compositor happens to show.
-    if let Some(v) = std::env::var_os("PLXNATIVE_WIN") {
-        let v = v.to_string_lossy().to_lowercase();
-        if let Some((w, h)) = v.split_once('x') {
-            if let (Ok(w), Ok(h)) = (w.trim().parse::<c_int>(), h.trim().parse::<c_int>()) {
-                if w > 0 && h > 0 {
-                    return (w, h);
-                }
-            }
-        }
-    }
-    let mut r = [0 as c_int; 4]; // SDL_Rect: x, y, w, h
-    let ok = unsafe { SDL_GetDisplayUsableBounds(0, r.as_mut_ptr()) } == 0;
-    let (uw, uh) = (r[2], r[3]);
-    if !ok || uw <= 0 || uh <= 0 {
-        return (SCR_W, SCR_H);
-    }
-    // A little headroom under the usable bounds: a window flush against them reads as a fullscreen
-    // that went wrong rather than as a deliberate size.
-    for div in 1..=3 {
-        let (w, h) = (SCR_W / div, SCR_H / div);
-        if w <= (uw as f32 * 0.95) as c_int && h <= (uh as f32 * 0.95) as c_int {
-            return (w, h);
-        }
-    }
-    (SCR_W / 3, SCR_H / 3)
-}
+use super::platform::{OpenAsk, Placement, Platform};
 
 /// Log every Rust panic (message + source location + thread) to the event log AND the
 /// persistent crash log BEFORE it unwinds. A panic that crosses an extern "C" boundary
@@ -64,8 +17,9 @@ pub(crate) fn desktop_window_size() -> (c_int, c_int) {
 /// generated. `crashtrace.c` says so itself. Two deliberate SIGSEGVs produced the signal status and
 /// an empty `/var/log/reports/librdx/`.
 ///
-/// The line this hook writes is also the crash channel's PANIC input: `telemetry::crashreport`
-/// reads the log on the next launch, hashes the message and sends the location only.
+/// The record this hook writes (the panic line and its `time:` line) is also the crash channel's
+/// PANIC input: `telemetry::crashreport` reads the log on the next launch, hashes the message and
+/// sends the location and the bounded crash time, never the message.
 pub(crate) fn install_panic_logger() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -86,6 +40,7 @@ pub(crate) fn install_panic_logger() {
         let _ = record_panic_in_crash_log(
             &plx_base::paths::in_runtime_dir(plx_base::paths::runtime_file::CRASH),
             &line,
+            plx_telemetry::telemetry::crashreport::now_secs(),
         );
         default(info); // preserve default behaviour (stderr -> plxnative-stderr.log)
     }));
@@ -102,8 +57,19 @@ pub(crate) fn install_panic_logger() {
 /// link, 0640, never truncated) rather than a bare `OpenOptions` at the umask's mode, so a name
 /// planted in the shared `/tmp` is refused instead of written through. `Err` is for the hook to
 /// ignore: a panic hook has nowhere to report a failure to.
-fn record_panic_in_crash_log(path: &std::path::Path, line: &str) -> std::io::Result<()> {
-    plx_base::eventlog::append_record(path, &plx_base::eventlog::scrub::scrub_local(line))
+///
+/// **The record is two lines in ONE write:** the panic line and the `time: <unix seconds>` line the
+/// C tracer also writes under a signal record ([`plx_telemetry::telemetry::crashreport::crash_time_record`]
+/// is the one spelling). The crash importer sends it as the event's `timestamp`, so the report says
+/// when the panic happened rather than when the next launch found it. `0` (a clock that reads
+/// nothing) writes no time line.
+fn record_panic_in_crash_log(path: &std::path::Path, line: &str, unix_secs: u64) -> std::io::Result<()> {
+    let mut record = plx_base::eventlog::scrub::scrub_local(line);
+    if unix_secs > 0 {
+        record.push('\n');
+        record.push_str(&plx_telemetry::telemetry::crashreport::crash_time_record(unix_secs));
+    }
+    plx_base::eventlog::append_record(path, &record)
 }
 
 #[cfg(test)]
@@ -127,15 +93,22 @@ mod panic_log_tests {
     fn the_panic_text_is_scrubbed_like_every_event_log_line() {
         let dir = scratch("scrub");
         let path = dir.join("crash.log");
-        record_panic_in_crash_log(&path, LINE).unwrap();
+        record_panic_in_crash_log(&path, LINE, 1_750_000_000).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("SECRETTOKEN"), "{written}");
         assert!(!written.contains("192-168-1-50") && !written.contains("plex.direct"), "{written}");
         assert!(written.starts_with("*** RUST PANIC [demux] at src/ff.rs:1204: "), "the record's shape survives: {written}");
-        assert!(written.ends_with('\n') && written.matches('\n').count() == 1, "one newline-terminated record");
-        // And the crash report parser still reads the scrubbed record.
+        assert!(
+            written.ends_with("\ntime: 1750000000\n") && written.matches('\n').count() == 2,
+            "the panic line, then its time line, newline-terminated: {written}"
+        );
+        // And the crash report parser still reads the scrubbed record, with the time it was given.
         let reports = plx_telemetry::telemetry::crashreport::parse(&written);
         assert_eq!(reports.len(), 1, "{written}");
+        assert!(
+            matches!(&reports[0], plx_telemetry::telemetry::crashreport::Report::Panic(p) if p.crash_time == Some(1_750_000_000)),
+            "{reports:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -147,14 +120,14 @@ mod panic_log_tests {
         let path = dir.join("crash.log");
         std::fs::write(&path, b"*** SIGNAL 11 earlier\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        record_panic_in_crash_log(&path, "*** RUST PANIC [t] at src/a.rs:1: boom").unwrap();
+        record_panic_in_crash_log(&path, "*** RUST PANIC [t] at src/a.rs:1: boom", 1_750_000_000).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o640);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "*** SIGNAL 11 earlier\n*** RUST PANIC [t] at src/a.rs:1: boom\n"
+            "*** SIGNAL 11 earlier\n*** RUST PANIC [t] at src/a.rs:1: boom\ntime: 1750000000\n"
         );
         let fresh = dir.join("fresh.log");
-        record_panic_in_crash_log(&fresh, "*** RUST PANIC [t] at src/a.rs:1: boom").unwrap();
+        record_panic_in_crash_log(&fresh, "*** RUST PANIC [t] at src/a.rs:1: boom", 1_750_000_000).unwrap();
         assert_eq!(std::fs::metadata(&fresh).unwrap().mode() & 0o7777, 0o640);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -170,11 +143,11 @@ mod panic_log_tests {
 
         let linked = dir.join("symlinked.log");
         symlink(&victim, &linked).unwrap();
-        assert!(record_panic_in_crash_log(&linked, LINE).is_err());
+        assert!(record_panic_in_crash_log(&linked, LINE, 1_750_000_000).is_err());
 
         let hard = dir.join("hardlinked.log");
         std::fs::hard_link(&victim, &hard).unwrap();
-        assert!(record_panic_in_crash_log(&hard, LINE).is_err());
+        assert!(record_panic_in_crash_log(&hard, LINE, 1_750_000_000).is_err());
 
         let meta = std::fs::metadata(&victim).unwrap();
         assert_eq!(meta.mode() & 0o7777, 0o600, "never widened");
@@ -191,11 +164,10 @@ mod panic_log_tests {
 /// * `plex::session::install_auto_quality_ready` — `route::auto_quality_ready`, the gate a fresh
 ///   session record's default quality is seeded from (unset, `plex` reads `true`, the gate's value);
 /// * `plex::session::install_account_clear_cleanup` — `telemetry::cleanup_after_account_clear`, the
-///   telemetry/consent legacy-file sweep a durable sign-out runs. It exists only where the sweep does
-///   (ARM, not the simulator, not a test build); unset, `plex` reads it as already retired.
+///   telemetry/consent legacy-file sweep a durable sign-out runs. It is installed on every platform:
+///   the sweep retires files only where the storage helper owns them; unset, `plex` reads it as retired.
 pub(crate) fn install_plex_seams() {
     plx_plex::plex::session::install_auto_quality_ready(plx_media::route::auto_quality_ready);
-    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
     plx_plex::plex::session::install_account_clear_cleanup(plx_telemetry::telemetry::cleanup_after_account_clear);
 }
 
@@ -262,7 +234,7 @@ mod seam_order_tests {
             "one production hand-in; a second could name a different version"
         );
         assert_eq!(
-            source.matches(concat!("enter_application(", "pms_host,pms_port)")).count(),
+            source.matches(concat!("enter_application(", "platform, pms_host, pms_port)")).count(),
             1,
             "enter_application has one caller, run_application"
         );
@@ -291,7 +263,7 @@ mod seam_order_tests {
         let telemetry = body
             .find(".then(pre_boot_diagnostics)")
             .expect("telemetry's boot load");
-        let boot = body.find("boot(pms_host").expect("application boot");
+        let boot = body.find("boot(platform, pms_host").expect("application boot");
         assert!(
             eraser < telemetry && eraser < boot,
             "the eraser must be installed before telemetry loads and before anything can play"
@@ -301,13 +273,13 @@ mod seam_order_tests {
     /// The storage diagnostics worker probes `app_dir()` on its own thread, so it starts only after the
     /// live identity preamble has written the first two event-log lines. Reads the source like the
     /// test above, for the same reason: no host test can run `enter_application`. It lived in
-    /// `plx_platform::storage::diagnostics` until that crate stopped being able to see this file.
+    /// `plx_os::storage::diagnostics` until that crate stopped being able to see this file.
     #[test]
     fn worker_start_follows_the_live_boot_identity_preamble() {
         let source = include_str!("mod.rs");
         assert_eq!(
             source
-                .matches("plx_platform::storage::diagnostics::start(")
+                .matches("plx_os::storage::diagnostics::start(")
                 .count(),
             1,
             "every start site must stay behind the identity preamble"
@@ -335,9 +307,9 @@ mod seam_order_tests {
             .find(".then(pre_boot_diagnostics)")
             .expect("identity preamble");
         let diagnostics = body
-            .find("plx_platform::storage::diagnostics::start(")
+            .find("plx_os::storage::diagnostics::start(")
             .expect("diagnostics start");
-        let boot = body.find("boot(pms_host").expect("application boot");
+        let boot = body.find("boot(platform, pms_host").expect("application boot");
         assert!(identity < diagnostics && diagnostics < boot);
     }
 
@@ -359,32 +331,132 @@ mod seam_order_tests {
         let init = body.find(concat!("plx_net::net::", "global_init()")).expect("construct's libcurl init");
         assert!(user_agent < init, "set_user_agent must come before net::global_init");
     }
-}
 
-/// Hide the Magic Remote's on-screen pointer. A webOS-only concept: there is no such cursor to
-/// hide on a desktop, and `SDL_webOSCursorVisibility` exists in no SDL but LG's fork.
-///
-/// One door rather than a branch at each of the five call sites, so the platform question is
-/// asked once and the call sites read the same on both.
-///
-/// Resolved at runtime rather than linked: webOS 3.4 ships SDL 2.0.3, which has none of LG's
-/// `SDL_webOS*` extensions, and a strong reference there is a lazily-bound PLT slot that kills
-/// the process on the first D-pad press (`tools/fwcompat.py --release 3.4.0`).
-#[inline]
-pub(crate) unsafe fn hide_cursor() {
-    #[cfg(not(feature = "hostsim"))]
-    {
-        type CursorVisibility = unsafe extern "C" fn(c_int) -> c_int;
-        static SYM: std::sync::OnceLock<Option<CursorVisibility>> = std::sync::OnceLock::new();
-        let f = SYM.get_or_init(|| {
-            let p = plx_base::dynlib::Handle::self_handle().sym("SDL_webOSCursorVisibility")?;
-            (!p.is_null()).then(|| std::mem::transmute::<*mut std::ffi::c_void, CursorVisibility>(p))
-        });
-        if let Some(f) = f {
-            f(0);
+    /// The Interface resolution is read from the stored session, so the session has to be read
+    /// BEFORE the window is created (`Shell::open`, the one place the window size is applied) and the
+    /// window request has to come from it. SDL itself comes up before the session is read, as it always
+    /// has (`plx_shell_sdl::init` pins the order of its own steps). Reads the source for the reason the
+    /// tests above give.
+    #[test]
+    fn the_stored_session_is_read_before_the_window_is_created() {
+        let source = include_str!("boot.rs");
+        let body = source
+            .split_once(concat!("pub(crate) unsafe fn ", "construct("))
+            .expect("construct")
+            .1;
+        let load = body
+            .find(concat!("plx_plex::plex::session::", "load()"))
+            .expect("construct reads the stored session");
+        let request = body
+            .find(concat!("requested_drawable(", "&session)"))
+            .expect("the window request is derived from the session");
+        let window = body.find(concat!("shell.", "open(")).expect("construct opens the window");
+        assert!(load < request && request < window, "session read, then request, then Shell::open");
+        let init = body.find(concat!("shell.", "init(")).expect("construct brings the platform's SDL up");
+        assert!(init < load, "SDL comes up before the session is read, the order boot has always had");
+    }
+
+    /// Automatic is the native canvas on every set and asks for no smaller window. The other
+    /// options ask for exactly their size.
+    #[test]
+    fn the_setting_maps_to_the_requested_window() {
+        use plx_plex::plex::session::UiResolution as R;
+        for major in [1, 2, 3] {
+            assert_eq!(super::drawable_for_setting(major, R::Auto), None);
+            assert_eq!(super::drawable_for_setting(major, R::Hd900), Some((1600, 900)));
+            assert_eq!(super::drawable_for_setting(major, R::Sd540), Some((960, 540)));
         }
+        assert_eq!(super::drawable_for_setting(3, R::Hd720), Some((1280, 720)));
+        // webOS 4+, or a set that never said, keeps the canvas whatever a record carried over holds
+        for major in [0, 4, 5, 6, 22] {
+            for mode in R::LADDER {
+                assert_eq!(super::drawable_for_setting(major, mode), None, "major {major} {mode:?}");
+            }
+        }
+        // a record that predates the setting, or holds a spelling this build does not know, is Automatic
+        let old: plx_plex::plex::session::Session = serde_json::from_str(r#"{"client_id":"c"}"#).unwrap();
+        assert_eq!(super::drawable_for_setting(3, old.ui_resolution()), None);
+        let unknown: plx_plex::plex::session::Session =
+            serde_json::from_str(r#"{"client_id":"c","ui_resolution":"4320p"}"#).unwrap();
+        assert_eq!(super::drawable_for_setting(3, unknown.ui_resolution()), None);
+        // the retired explicit 1080p reads as Automatic
+        let retired: plx_plex::plex::session::Session =
+            serde_json::from_str(r#"{"client_id":"c","ui_resolution":"1080p"}"#).unwrap();
+        assert_eq!(super::drawable_for_setting(3, retired.ui_resolution()), None);
+    }
+
+    /// A persisted size the set will not give must never brick launch: a refused smaller window is
+    /// retried ONCE at the native canvas, and a refused native window has nowhere left to fall.
+    #[test]
+    fn a_refused_smaller_window_retries_once_at_the_native_canvas() {
+        assert_eq!(super::window_fallback((1600, 900)), Some((super::SCR_W, super::SCR_H)));
+        assert_eq!(super::window_fallback((960, 540)), Some((super::SCR_W, super::SCR_H)));
+        assert_eq!(super::window_fallback((super::SCR_W, super::SCR_H)), None, "the native canvas has no fallback");
+    }
+
+    /// The smaller-window retry is armed before the first window is asked for, from the size that
+    /// request carries: `construct` evaluates `window_fallback(` as part of the placement it hands
+    /// `Shell::open`. The retry loop itself, the destroy of a half-made window before it, and the
+    /// density fit before the drawable probe are the shell crate's (`plx_shell_sdl::Window::open`,
+    /// which pins their order). Reads the source for the reason the tests above give.
+    #[test]
+    fn the_smaller_window_fallback_is_armed_before_the_window_is_opened() {
+        let source = include_str!("boot.rs");
+        let body = source.split_once(concat!("pub(crate) unsafe fn ", "construct(")).expect("construct").1;
+        let retry = body.find(concat!("window_fallback(", "size)")).expect("asks for the fallback size");
+        let open = body.find(concat!("shell.", "open(")).expect("opens the window");
+        assert!(retry < open, "the retry is armed before the first attempt");
     }
 }
+
+/// The window to ask for when it is not the 1920x1080 canvas, `None` for the canvas (1:1): whatever
+/// `/tmp/plxnative-drawable=<W>x<H>` says when that trigger is armed (debug builds only; it
+/// outranks the setting and is bounded to 640x360..=1920x1080 so a typo cannot ask for nonsense),
+/// else, on webOS 1-3 only, the install-wide Settings > System > Interface resolution choice.
+/// **Automatic is the canvas on every set**, and webOS 4+ is always the canvas; a smaller window is
+/// only ever a webOS 1-3 owner's pick (or the debug trigger).
+///
+/// What was measured, with the heartbeat framedrop A/B (not `profile-tv` counters, so no cause is
+/// claimed): on a 2016 55UH650V (webOS 3.4.3, Mali-T760) at 1280x720, average 46.9 -> 54.5 fps and
+/// frames over 33 ms from 7.1% to 0.5%; on a 2017 OLED C7V (webOS 3.9.3, Mali-T820) frames over
+/// 16.7 ms from 36% at 1080p to 2% at 1280x720 and 16% at 1600x900. The same owner found 720p text
+/// "disturbingly soft" on the C7V, which is why this is opt-in rather than a webOS-release rule.
+/// `surface::probe` reads back what webOS granted and `scale`/`viewport` fit the canvas into it.
+#[cfg(not(feature = "hostsim"))]
+fn requested_drawable(session: &plx_plex::plex::session::Session) -> Option<(c_int, c_int)> {
+    if let Some(v) = plx_base::devtrig::read("drawable") {
+        let parsed = v.trim().split_once('x').and_then(|(w, h)| {
+            Some((w.trim().parse::<c_int>().ok()?, h.trim().parse::<c_int>().ok()?))
+        });
+        let ok = parsed.filter(|&(w, h)| (640..=SCR_W).contains(&w) && (360..=SCR_H).contains(&h));
+        log(&format!("surface: drawable trigger {:?} -> {:?}", v.trim(), ok));
+        if ok.is_some() {
+            return ok;
+        }
+    }
+    let chosen = session.ui_resolution();
+    let major = plx_os::tv::device::info().major;
+    let size = drawable_for_setting(major, chosen);
+    log(&format!("surface: webOS major {major}, Interface resolution {chosen:?} -> {size:?}"));
+    size
+}
+
+/// Where to retry when the set refuses a window of size `asked`: the native canvas, unless that is
+/// what was asked, which has nowhere left to fall back to.
+#[cfg(any(not(feature = "hostsim"), test))]
+fn window_fallback(asked: (c_int, c_int)) -> Option<(c_int, c_int)> {
+    (asked != (SCR_W, SCR_H)).then_some((SCR_W, SCR_H))
+}
+
+/// The window an Interface resolution choice asks for on firmware `major`: `None` for Automatic,
+/// the native canvas, and `None` on every set the setting is not offered on (webOS 4+ or unknown,
+/// [`plx_os::tv::device::offers_ui_resolution`]) whatever is stored, so a record carried over
+/// from another set cannot shrink the interface where the owner has no way to change it back.
+#[cfg(any(not(feature = "hostsim"), test))]
+fn drawable_for_setting(major: u32, chosen: plx_plex::plex::session::UiResolution) -> Option<(c_int, c_int)> {
+    if plx_os::tv::device::offers_ui_resolution(major) { chosen.size() } else { None }
+}
+
 /// Advance the once-per-second LOOP-RATE window: bump `iters_ct` and, when a full second has
 /// elapsed, recompute `loop_shown`, reset the window, and return `true` so the caller logs the
 /// heartbeat with its own route/overlay tag. Shared by the player and home/detail draw paths.
@@ -519,7 +591,7 @@ pub(crate) fn direct_trigger_server() -> Result<plx_plex::plex::ServerId, String
 }
 
 // ---- boot, and the loop's own between-frame state ---------------------------------------------
-/// Which screen the boot gate landed on — see the gate itself in `plex_run`, which is where the
+/// Which screen the boot gate landed on — see the gate itself in `boot`, which is where the
 /// order of its four cases is argued.
 pub(crate) enum BootTo {
     Home,
@@ -558,9 +630,11 @@ pub(super) fn activate_server_owned(
     let _ = bridge.hubs_run(plx_data::stores::hubs::HubsCmd::Reset).changed;
     bridge.person_run(plx_data::stores::person::PersonCmd::Reset);
     bridge.collection_run(plx_data::stores::collection::CollectionCmd::Reset);
-    bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Reset);
+    // before the stores reset: a stop the previous identity left in flight must not land on this one
+    plx_media::route::retire_pending_stops();
+    let mut endpoints = bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Reset).endpoints;
     bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::Reset);
-    let mut endpoints = bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints;
+    endpoints.merge(bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints);
     endpoints.merge(bridge.browse_discover_pump().endpoints);
     log("pms: catalog activation queued");
     endpoints
@@ -590,19 +664,24 @@ pub(super) fn install_pms_owned(
 /// Everything before the loop: SDL and the window, GL, text, the poster workers, the boot gate
 /// (login / token / session / picker), every dev trigger read once, and the `App` literal —
 /// `plex_run`'s former body up to `while app.running`, moved verbatim in phase 1b-ii. An early
-/// exit is the process exit code `plex_run` returns.
+/// refusal returns its `Exit` (the entry ends the process with its code: `port::plex_run` on the
+/// television, the simulator's `main` after `plx_platform_desktop::run` on a desktop; a hosted entry reports it
+/// and stays alive).
 ///
-/// `mt`, THE main-thread token, is minted once by `plex_run` itself (`plx_base::task::MainThread::
-/// assume()` — that function IS the SDL main thread) and MOVES into `App.adapters.player` here,
+/// `mt`, THE main-thread token, is minted once by `enter_application` (`app/mod.rs`:
+/// `plx_base::task::MainThread::assume()`, the thread that runs it IS the SDL main thread), which both
+/// entries reach through `run_application` (`port::plex_run` on the television, `plx_platform_desktop::run`
+/// on a desktop), and MOVES into `App.adapters.player` here,
 /// from where a `&mut PlayerAdapter` is the proof it is still held: the ACB/Starfish seam takes
 /// `&MainThread` (which is `!Send`, so `task::spawn` rejects any closure that captured one), and
 /// the native session slot takes the adapter itself. See `task::MainThread` and `player::adapter`.
 pub(crate) unsafe fn boot(
+    platform: &'static Platform,
     pms_host: *const c_char,
     pms_port: c_int,
     mt: plx_base::task::MainThread,
     preflight: super::bootstrap::Preflight,
-) -> Result<App, c_int> {
+) -> Result<App, Exit> {
     // The Up Next still prefetch `route::pump_play` asks for is `ui`'s, which `route` may not name,
     // so it is handed over here, before any playback can land. Replay boots take it too.
     plx_media::route::install_up_next_still_warm(super::playback::warm_up_next_still);
@@ -612,14 +691,14 @@ pub(crate) unsafe fn boot(
             let host = std::ffi::CStr::from_ptr(pms_host).to_string_lossy();
             match super::bootstrap::Initial::capture_home(&host, pms_port) {
                 Ok(initial) => Some(initial),
-                Err(reason) => { log(&format!("rec: REFUSED — {reason}")); return Err(1); }
+                Err(reason) => { log(&format!("rec: REFUSED — {reason}")); return Err(Exit::refused(1)); }
             }
         }
         super::bootstrap::Preflight::Replay { initial, .. } => Some((initial.clone(), None)),
     };
     match initial {
-        Some((initial, deferred)) => App::from_init(initial, preflight, pms_host, pms_port, mt, deferred),
-        None => construct(pms_host, pms_port, mt, preflight, None, None),
+        Some((initial, deferred)) => App::from_init(platform, initial, preflight, pms_host, pms_port, mt, deferred),
+        None => construct(platform, pms_host, pms_port, mt, preflight, None, None),
     }
 }
 
@@ -633,88 +712,77 @@ pub(super) fn apply_deferred_capture(rec: &mut super::recorder::Recplay,
     Ok(())
 }
 
+/// **Boot's restore**: the mirrors from the record, then the ten live per-profile cells for the seat
+/// the process starts with, `Unseated` (no profile is published yet), through the one
+/// `route::restore_profile_rows` the seat trigger (`bridge::SeatWatch`) calls at every seat change.
+/// Every cell then holds the fallback (the frozen install-wide key, then the default), which is the
+/// value boot always set. Split out of [`construct`] so the cells it sets can be graded without an
+/// SDL window (`run.rs`' `lifecycle_regression_tests`).
+///
+/// Restored before any route can resolve a stream. A legacy file with no quality resolves to
+/// Original; a new file can choose Auto only through route's explicit readiness gate
+/// (session::load records that decision once). The dev quality override is honoured unless the
+/// harness is `controlled`.
+pub(super) fn restore_player_preferences(session: &plx_plex::plex::session::Session, controlled: bool) {
+    plx_media::route::restore_install_rows(session);
+    plx_media::route::restore_profile_rows(session, &plx_plex::plex::session::Seat::Unseated,
+        plx_media::route::Overrides {
+            quality: if controlled { None } else { crate::dev::playback_quality_override() },
+        });
+}
+
+/// **The stored session resumed, as boot does it**: `ResumeStored` makes the owner seat the stored
+/// profile (`release_held_handoff` publishes it, which is what the seat trigger sees) and emit
+/// `Ready`; the handoff is returned for the caller to install. The same function the stored boot
+/// runs, so a host test grades the boot and not a copy of it.
+pub(super) fn resume_stored(pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge, tap: &mut dyn plx_ui::dispatch::Tap<super::bridge::AppHost>)
+    -> Option<plx_session::auth::ReadyCreds> {
+    super::bridge::execute_session_command(pages, plx_session::auth::SessionCmd::ResumeStored);
+    pages.frame_with(bridge, plx_machine::machine::Tick::default(), Vec::new(), Vec::new(), tap, false);
+    bridge.take_session_ready()
+}
+
 pub(crate) unsafe fn construct(
-    pms_host: *const c_char, pms_port: c_int, mt: plx_base::task::MainThread,
+    platform: &'static Platform, pms_host: *const c_char, pms_port: c_int, mt: plx_base::task::MainThread,
     preflight: super::bootstrap::Preflight, initial: Option<super::bootstrap::Initial>,
     deferred: Option<plx_plex::plex::session::DeferredLoad>,
-) -> Result<App, c_int> {
+) -> Result<App, Exit> {
     let controlled = preflight.controlled();
     if let Some(initial) = &initial {
         plx_data::stores::tape::init(initial.person_credits(), preflight.replay());
-        initial.home.restore(&mt).map_err(|_| 1)?;
-        plx_plex::plex::Client::restore_generation_seed(initial.primary_client).map_err(|_| 1)?;
+        initial.home.restore(&mt).map_err(|_| Exit::refused(1))?;
+        plx_plex::plex::Client::restore_generation_seed(initial.primary_client).map_err(|_| Exit::refused(1))?;
     }
-    SDL_SetMainReady();
-    // DEAD END, measured 2026-07-31 — do not re-try this. The obvious answer to "a parked TV
-    // should blank itself" is to stop inhibiting the platform screensaver here (and re-allow it
-    // per route, since webOS BACKGROUNDS the app to run one and `0x103` suspends the
-    // buffer-feed, so it could never be on during playback). It does not work, for a reason
-    // upstream of this app: the TV's SDL 2.0.4 fork carries the
-    // `SDL_VIDEO_ALLOW_SCREENSAVER` hint STRING but implements no wayland idle-inhibit
-    // (`strings libSDL2-2.0.so.0` finds no `idle_inhibit`/`suspend_screensaver` symbol), so
-    // this call and `SDL_EnableScreenSaver` are both no-ops. Soaked 34 min on Home with the
-    // TV's own `screenSaverEnabled: on`: no screensaver, no `LIFECYCLE: background`, CPU flat,
-    // our UI still at full brightness on the panel. webOS does not blank a foreground native
-    // app, and nothing reachable from SDL changes that. The line stays because it costs
-    // nothing and states the intent; it is not what keeps the screensaver away.
-    SDL_SetHint(c"SDL_VIDEO_ALLOW_SCREENSAVER".as_ptr(), c"0".as_ptr());
-    if SDL_Init(SDL_INIT_VIDEO) != 0 {
-        log("SDL_Init failed");
-        return Err(1);
-    }
-    {
-        let d = SDL_GetCurrentVideoDriver();
-        if !d.is_null() {
-            log(&format!(
-                "video driver: {}",
-                std::ffi::CStr::from_ptr(d).to_string_lossy()
-            ));
-        }
-    }
-    // The television has a real GLES2 driver (a shim over libmali). macOS has none at all —
-    // Apple ships desktop GL only, capped at 4.1 core — so asking for ES here fails context
-    // creation outright. 4.1 core is the closest thing that exists, and it is a superset for
-    // everything this renderer does: a real VBO (never client arrays) and RGBA/UNSIGNED_BYTE
-    // textures, both core-profile-legal. The shader sources are adapted at compile time by
-    // `gfx::glsl_preamble`, which reads the driver's GLSL version rather than assuming.
-    if cfg!(feature = "hostsim") {
-        SDL_GL_SetAttribute(A_CTX_PROFILE_MASK, CTX_PROFILE_CORE);
-        SDL_GL_SetAttribute(A_CTX_MAJOR, 4);
-        SDL_GL_SetAttribute(A_CTX_MINOR, 1);
-    } else {
-        SDL_GL_SetAttribute(A_CTX_PROFILE_MASK, CTX_PROFILE_ES);
-        SDL_GL_SetAttribute(A_CTX_MAJOR, 2);
-        SDL_GL_SetAttribute(A_CTX_MINOR, 0);
-    }
-    // full 32-bit RGBA so the video plane shows through
-    SDL_GL_SetAttribute(A_RED, 8);
-    SDL_GL_SetAttribute(A_GREEN, 8);
-    SDL_GL_SetAttribute(A_BLUE, 8);
-    SDL_GL_SetAttribute(A_ALPHA, 8);
-    SDL_GL_SetAttribute(A_BUFFER_SIZE, 32);
-    // ...and NO depth or stencil, which SDL would otherwise give us anyway: its defaults are
-    // 16 bits of depth and 0 of stencil, and asking for neither had simply never been written
-    // down. **This renderer has no use for either.** There is no `GL_DEPTH_TEST`, no
-    // `glDepthFunc`, no `glDepthMask` and no `glClear(GL_DEPTH_BUFFER_BIT)` anywhere in the
-    // crate — every screen is painter's-algorithm 2-D, drawn back to front — and the one
-    // scissor user (`gfx::clip_set`) is a scissor, not a stencil.
-    //
-    // On a TILER this is not merely 4 MB of address space. Midgard allocates the depth buffer
-    // per tile alongside colour and, unless the driver proves it dead, RESOLVES it to memory at
-    // end-of-frame: 1920x1080x2 bytes written per presented frame for a buffer nothing ever
-    // reads. `system.rs` logs what the config actually came back with — a request is not a
-    // grant, and the only honest confirmation is `FB bits: … depth=0`.
-    SDL_GL_SetAttribute(A_DEPTH, 0);
-    SDL_GL_SetAttribute(A_STENCIL, 0);
-    // The television is placed at 0,0 at exactly canvas size and takes the panel. A desktop
-    // window is centred (`SDL_WINDOWPOS_CENTERED`) at whatever fits — see `desktop_window_size`.
-    #[cfg(feature = "hostsim")]
-    let (wx, wy, ww_req, wh_req) = {
-        let (w, h) = desktop_window_size();
-        (0x2FFF_0000u32 as c_int, 0x2FFF_0000u32 as c_int, w, h)
+    // SDL up: the screensaver hint, the platform's two steps around `SDL_Init`, the GL context request.
+    // The platform's (`Shell::init`; `plx_shell_sdl::init` is the one SDL implementation, and it pins the
+    // order inside it) and FIRST: before the stored session is read and before the window exists.
+    platform.shell.init(&mt)?;
+    // **The stored session is read HERE, before the window.** The window size is a setting
+    // (Settings > System > Interface resolution, install-wide: `Session::ui_resolution`), and
+    // the window's creation (`Shell::open`) is the only moment it can be applied, so the record has to be read
+    // first. `peek_settled` would not do: it only reads the cache, which the session owner fills
+    // after boot, so its first call answers "not yet". The seams `load` consults (`install_plex_seams`) are installed by
+    // `enter_application`, before `boot`. A replay or captured boot brings its own session.
+    let session = match &initial {
+        Some(initial) => initial.session.persisted.clone(),
+        None => plx_plex::plex::session::load(),
     };
+    // The television is placed at 0,0 at exactly canvas size (unless a webOS 1-3 owner picked a smaller
+    // Interface resolution, `requested_drawable`) and takes the panel. A desktop window is centred at
+    // whatever fits the display: `Placement::Desktop`, which the shell plans and corrects for the
+    // display's pixel density once a window exists (`plx_shell_sdl::window`).
+    // **A stored size the set will not give must never brick launch.** If the window or its GL
+    // context is refused at a smaller size the owner chose, the shell frees whatever was made and
+    // retries ONCE at the native canvas (`fallback`); only a refused native window is fatal. On a
+    // desktop the request is the desktop's own size, not a setting, so there is no retry there.
+    #[cfg(feature = "hostsim")]
+    let placement = Placement::Desktop;
     #[cfg(not(feature = "hostsim"))]
-    let (wx, wy, ww_req, wh_req) = (0, 0, SCR_W, SCR_H);
+    let placement = {
+        let size = requested_drawable(&session).unwrap_or((SCR_W, SCR_H));
+        Placement::Panel { size, fallback: window_fallback(size) }
+    };
     // The title is furniture a television never draws (no window manager, no decoration) and
     // the first thing a desktop shows, so the two builds spell it differently: the device keeps
     // the process-shaped name every log, `pidof` recipe and skill already uses.
@@ -722,24 +790,19 @@ pub(crate) unsafe fn construct(
     let title = c"PlxNative";
     #[cfg(not(feature = "hostsim"))]
     let title = c"plxnative";
-    // A frame dump's drawable is exactly the window's size in points: ALLOW_HIGHDPI (0x2000) would
-    // make a Retina display's drawable 3840x2160 for a 1920x1080 window, which the master cannot
-    // be, and which differs from the canonical Linux host. (Absent from every shipping build.)
+    // A frame dump's drawable is exactly the window's size in points: it is the one desktop window
+    // that does not ask for ALLOW_HIGHDPI, so its window is the 1920x1080 points of the canonical
+    // Linux host on a Retina display too, and the shell's density fit finds nothing to correct.
+    // (Absent from every shipping build.)
     #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
-    let window_flags = if crate::dev::framedump::requested() { SDL_WINDOW_FLAGS & !0x2000 } else { SDL_WINDOW_FLAGS };
+    let high_dpi = !crate::dev::framedump::requested();
     #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
-    let window_flags = SDL_WINDOW_FLAGS;
-    let win = SDL_CreateWindow(title.as_ptr(), wx, wy, ww_req, wh_req, window_flags);
-    if win.is_null() {
-        log("CreateWindow failed");
-        return Err(1);
-    }
-    let ctx = SDL_GL_CreateContext(win);
-    if ctx.is_null() {
-        log("GL ctx failed");
-        return Err(1);
-    }
-    plx_base::surface::probe(win);
+    let high_dpi = true;
+    // The window and its GL context: created (with the retry above), corrected for the display's
+    // density, and its drawable probed (`surface::probe` reads it once, for good). The `Surface` it
+    // returns is the `App`'s for the rest of the process.
+    let surface = platform.shell.open(&mt, &OpenAsk { title, placement, high_dpi })?;
+    let win = surface.window();
     // vsync on → the frame rate locks to the panel refresh. `/tmp/plxnative-novsync` uncaps it so
     // `fps=` reports the true GPU render rate. WSLg's X11/GLX swap accepts interval 1 without
     // blocking, so the software budget in `run` follows the same switch.
@@ -750,7 +813,7 @@ pub(crate) unsafe fn construct(
     #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
     let dumping = false;
     let vsync_enabled = !dumping && (controlled || !crate::dev::scenarios::novsync_armed());
-    SDL_GL_SetSwapInterval(if vsync_enabled { 1 } else { 0 });
+    surface.set_swap_interval(if vsync_enabled { 1 } else { 0 });
     #[cfg(all(feature = "hostsim", target_os = "linux"))]
     let wslg_frame_pacing = vsync_enabled
         && std::env::var_os("WSL_DISTRO_NAME").is_some()
@@ -789,27 +852,32 @@ pub(crate) unsafe fn construct(
     crate::textinput::bind(win);
     // …and the same handshake for the ROOT press: `tv::home::go_home`'s fallback leg minimizes
     // this window, and the window is created here, a long way from where BACK is decided.
-    plx_platform::tv::window::bind_window(win);
-    let wflags = SDL_GetWindowFlags(win);
+    platform.shell.bind_window(win);
+    let keyboard = plx_shell_sdl::text::keyboard_probe(win);
     log(&format!(
-        "keyboard: support={} active={} focus={} winflags=0x{wflags:x}",
-        SDL_HasScreenKeyboardSupport(),
-        SDL_IsTextInputActive(),
-        i32::from(wflags & SDL_WINDOW_INPUT_FOCUS != 0)
+        "keyboard: support={} active={} focus={} winflags=0x{:x}",
+        keyboard.support,
+        keyboard.active,
+        i32::from(keyboard.wflags & SDL_WINDOW_INPUT_FOCUS != 0),
+        keyboard.wflags
     ));
 
-    plx_platform::tv::window::grab(win);
+    platform.shell.grab_surface(win);
     // EXPERIMENT (`/tmp/plxnative-opaque`), no-op without the trigger: build the full-surface
     // wl_region once, so `opaque_route` below can declare the UI plane opaque on every screen
     // that has nothing behind it. See `system.rs`'s section on it.
-    plx_platform::tv::window::arm_opaque_region();
-    plx_gfx::gfx::init_gl();
-    plx_gfx::text::init_text();
-    plx_gfx::gfx::init_image();
+    platform.shell.arm_opaque_region();
+    // A required shader the driver refuses is a refusal like any other (`Exit::from(GfxFault)`):
+    // the same status the process always ended with, returned instead of `exit_now`'d from inside GL.
+    plx_gfx::gfx::init_gl()?;
+    plx_gfx::text::init_text()?;
+    plx_gfx::gfx::init_image()?;
     plx_gfx::gfx::init_blur();
     // The transport takes the client's `User-Agent` as a value (it names no Plex layer): hand it
     // over before any request can be made, so the first one already carries it.
-    plx_net::net::set_user_agent(plx_plex::plex::identity::user_agent());
+    if plx_net::net::set_user_agent(plx_plex::plex::identity::user_agent()).is_err() {
+        plx_base::eventlog::log("net: the client's User-Agent holds a control character; none is sent");
+    }
     // One-time libcurl bind + init (main thread) before any threaded HTTPS call. A false here
     // means this device has no libcurl we can bind, so plex.tv sign-in will not work — the app
     // still runs, and `net::global_init` has already said so in the event log.
@@ -938,10 +1006,6 @@ pub(crate) unsafe fn construct(
     // dev: /tmp/plxnative-pickuser=<index> — force the boot picker even on an automated boot and
     // auto-select that roster tile once it's up (headless exercise of the who's-watching flow).
     let pick_user: Option<usize> = if controlled { None } else { crate::dev::scenarios::pickuser_index() };
-    let session = match &initial {
-        Some(initial) => initial.session.persisted.clone(),
-        None => plx_plex::plex::session::load(),
-    };
     // The remembered server keys of the session this boot runs on, handed over before any request
     // can leave: a captured session was never READ through the cache that projects them.
     plx_plex::plex::session::project_server_keys(&session, false);
@@ -956,20 +1020,16 @@ pub(crate) unsafe fn construct(
     // once plain and once as the app, and logs each full outcome (`toast-probe …`).
     #[cfg(feature = "devtriggers")]
     crate::dev::scenarios::toast_probe::arm_at_boot();
+    #[cfg(feature = "devtriggers")]
+    crate::dev::scenarios::arm_hud_text_metrics();
     // dev: /tmp/plxnative-clockfact=nokey|keychanged|engaged[:<year>] — plants a wrong-clock fact
     // (`net::keypin`) so the Home/Library read-out and the toast can be looked at with no
     // television. Armed after the projection above, whose sign-out arm only clears bound hosts.
     #[cfg(feature = "devtriggers")]
     crate::dev::scenarios::clock_fact::arm_at_boot();
-    // dev: /tmp/plxnative-hintoff — the hold hint taught for this run, on every screen kind, read
-    // once here on the frame thread (the hint's latches are thread-local). The site demo film is
-    // shot with it: the capsule is a one-time teaching overlay, and a film has no viewer to teach.
-    #[cfg(feature = "devtriggers")]
-    if plx_base::devtrig::flag("hintoff") {
-        plx_ui::hold_hint::teach_all_for_dev();
-    }
+
     #[cfg(not(test))]
-    plx_platform::i18n::initialize(session.language, controlled);
+    plx_os::i18n::initialize(session.language, controlled);
     let forced_login = !controlled && crate::dev::scenarios::login_forced();
     let dev_primary = (!forced_login && !dev_token.is_empty()).then(|| {
         let origin = crate::dev::scenarios::pms_origin()
@@ -985,38 +1045,42 @@ pub(crate) unsafe fn construct(
         None => captured_session_for_boot(session.clone(), dev_primary,
             captured_dev_sources(&dev_servers.unwrap_or_default())),
     };
-    let mut bridge = if controlled {
-        super::bridge::Bridge::controlled_home(plx_base::diag::heartbeat::now_us,
+    let (mut runtime, mut retained) = if controlled {
+        super::bridge::BridgeRetained::controlled_home(plx_base::diag::heartbeat::now_us, platform.shell,
             initial.as_ref().expect("controlled initialization"), &mt, preflight.replay())
     } else {
-        super::bridge::Bridge::new(plx_base::diag::heartbeat::now_us, session_init,
+        super::bridge::BridgeRetained::new(plx_base::diag::heartbeat::now_us, platform.shell, session_init,
             plx_telemetry::telemetry::consent::current().unwrap_or_default(), &mt)
     };
+    let mut bridge = runtime.bridge(&mut retained);
     // Construct the one dispatcher before bootstrap commands; move this same queue into App.
     let mut pages = plx_ui::dispatch::Dispatcher::with_transition(Box::new(
         plx_ui::containers::transition::PageDip::new(),
     ));
-    // Install-wide playback preference, restored before any route can resolve a stream.
-    // A legacy file with no value resolves to Original; a new file can choose Auto only
-    // through route's explicit readiness gate (session::load records that decision once).
-    plx_media::route::restore_quality(
-        if controlled { session.playback_quality() }
-        else { crate::dev::playback_quality_override().unwrap_or_else(|| session.playback_quality()) },
-    );
-    plx_media::route::restore_direct_play_mode(session.direct_play_mode());
-    plx_media::route::restore_subtitle_size(session.subtitle_size());
-    plx_media::route::restore_subtitle_position(session.subtitle_position());
-    plx_media::route::restore_next_episode_mode(session.next_episode_mode());
-    plx_media::route::restore_skip_interval(session.skip_interval());
-    plx_media::route::restore_deck_press(session.deck_press());
-    // The subtitle tone rides the same file and the same moment: a preference, restored once.
-    plx_media::player::restore_subtitle_tone(session.subtitle_tone());
-    plx_media::player::restore_audio_enhancements(session.audio_enhancements());
-    // dev: /tmp/plxnative-audioenh=off|boost|loudness — force the PERSISTED enhancement
-    // preference right after it was restored from whatever the install actually has saved, so a
-    // harness case's starting preference never depends on what an earlier run's pick left behind.
-    // Unlike every other boot override on this page, this one calls the real persisting setter —
-    // see `dev::scenarios::arm_audio_enhancements`'s own doc for why.
+    // Controlled replay uses only its explicit captured install fact. The Session's frozen
+    // canonical projection does not bind this preference, and ambient cells are not authority.
+    pages.input.hold_hint = match &initial {
+        Some(initial) => initial.install_hold_hint.expect("preflight requires install hold-hint fact").input(),
+        None => {
+            let taught = session.hold_hint_taught();
+            plx_machine::machine::HoldHintRead { learned: false, card: taught.card, pill: taught.pill, context: 0 }
+        }
+    };
+    #[cfg(feature = "devtriggers")]
+    if !controlled {
+        if plx_base::devtrig::flag("hintfresh") {
+            pages.input.hold_hint = Default::default();
+        }
+        if plx_base::devtrig::flag("hintoff") {
+            pages.input.hold_hint.apply(plx_machine::machine::HoldHintEvent::Learned);
+        }
+    }
+    restore_player_preferences(&session, controlled);
+    // dev: /tmp/plxnative-audioenh=off|boost|loudness — force the enhancement preference right after
+    // the restore. Nobody is seated yet, so this sets the live cell alone (the door refuses to save
+    // for nobody), which is all a dev-token boot, which never seats, gets. A boot that seats a
+    // profile runs the arm again, writing THAT profile's record, at the seat change
+    // (`bridge::SeatWatch`). See `dev::scenarios::arm_audio_enhancements`'s own doc.
     if !controlled { crate::dev::scenarios::arm_audio_enhancements(); }
     let primary_binding = initial.as_ref().map(|initial| initial.primary_client);
     let activate_session = |bridge: &mut super::bridge::Bridge,
@@ -1085,10 +1149,7 @@ pub(crate) unsafe fn construct(
             // install_pms can read any per-profile stores. Stored boot does not re-save its
             // credentials. This is the normal bounded dispatcher drain over the same owner
             // and queue later moved into App, not a recursive bootstrap reducer.
-            super::bridge::execute_session_command(pages, plx_session::auth::SessionCmd::ResumeStored);
-            pages.frame_with(bridge, plx_machine::machine::Tick::default(), Vec::new(), Vec::new(),
-                rec, false);
-            if let Some(ready) = bridge.take_session_ready() {
+            if let Some(ready) = resume_stored(pages, bridge, rec) {
                 let endpoints = install_pms_owned(bridge, &ready.origin, &ready.address,
                     &ready.token, ready.tier, ready.pin.as_ref(), &ready.install);
                 super::bridge::execute_endpoint_outcomes(pages, endpoints);
@@ -1127,8 +1188,8 @@ pub(crate) unsafe fn construct(
         activate_session(&mut bridge, &mut pages, &mut super::recorder::Recplay::Off)
     };
     if !controlled {
-        plx_media::player::acb_init(&mt);
-        plx_media::ff::boot(); // Live playback resource boot; controlled Home cannot invoke ABI probes.
+        (platform.media.early_init)(&mt); // every backend set: the platform's boot facts (webOS: the plane owner's)
+        plx_media_codecs::ffi::boot(); // Codec resource boot; controlled Home cannot invoke ABI probes.
     }
                        // dev: /tmp/plxnative-logintest validates the plex.tv account path end-to-end on the device — a
                        // real typed create_pin() through the libcurl transport + DTO deserialize. Logs only the
@@ -1153,7 +1214,7 @@ pub(crate) unsafe fn construct(
     let mut glass = plx_ui::frame::glass::GlassPlan::new();
     if !controlled {
         crate::dev::scenarios::arm_glassload(&mut glass);
-        crate::dev::scenarios::arm_navblur(&mut glass);
+        bridge.retained.blur_dissolve = crate::dev::scenarios::arm_navblur(&mut glass);
     }
     // dev: the two OVERDRAW surfaces (`ui::overdraw`, docs/backdrop-blur-profiling.md Part 5).
     // `plxnative-overdraw` arms the CPU-side per-draw-class ledger — how much screen-visible
@@ -1166,11 +1227,8 @@ pub(crate) unsafe fn construct(
     if !controlled {
         crate::dev::scenarios::arm_overdraw();
         crate::dev::scenarios::arm_drawmask();
+        crate::dev::scenarios::arm_cardsplit();
     }
-    // dev: /tmp/plxnative-heroground — draw the hero's photograph and BOTH of its scrim fields
-    // in one pass instead of the art plus four blended gradient quads over it. Absent, the
-    // shipped four-quad path draws, which is what makes this an A/B on one binary.
-    if !controlled { crate::dev::scenarios::arm_heroground(); }
     // dev: /tmp/plxnative-nobudget — the frame budget's A/B CONTROL leg (spec §8.1). Read here
     // with the other boot triggers; applied to the one `Budget` below, once the tree exists.
     let nobudget = !controlled && crate::dev::scenarios::nobudget_armed();
@@ -1189,8 +1247,8 @@ pub(crate) unsafe fn construct(
         plx_media::player::seed_dev_track_names();
     }
     if let Some(initial) = &initial {
-        plx_machine::idle::set_enabled(!plx_base::devtrig::listed(&initial.triggers, "noidle"));
-    } else { crate::dev::scenarios::arm_noidle(); }
+        pages.present.set_enabled(!plx_base::devtrig::listed(&initial.triggers, "noidle"));
+    } else { crate::dev::scenarios::arm_noidle(&mut pages.present); }
     // dev: /tmp/plxnative-detailosc (read once at boot, like the other triggers) makes the detail scroll
     // perpetually swing hero<->bottom so the FPS heartbeat samples the transition, not the ends.
     let detail_osc = !controlled && crate::dev::scenarios::detailosc_armed();
@@ -1380,6 +1438,8 @@ pub(crate) unsafe fn construct(
     // nothing is presenting, so the first beat of a playback reports no rate rather than a
     // fabricated one.
     let play_prev: Option<(i64, u32)> = None;
+    #[cfg(feature = "play-feed")]
+    let vpres_prev = plx_media::player::VplaneMark::default();
     let running = true;
     // Dev-only panel proof: advance a red/green counter phase only after SDL_GL_SwapWindow
     // returns. Hold each colour for 30 swaps: per-buffer alternation blends yellow at 60 Hz,
@@ -1403,11 +1463,17 @@ pub(crate) unsafe fn construct(
     let adapters = super::Adapters {
         player: plx_media::player::adapter::PlayerAdapter::new(mt),
     };
+    // The platform installs its drivers, and the session is told what they form: the set and the
+    // resolver, together, for every platform (`platform::publish_composition`).
+    let (player, adapters) = {
+        let mut player = player;
+        let mut adapters = adapters;
+        let composed = (platform.media.compose)(&mut adapters.player, controlled);
+        super::platform::publish_composition(&mut player.session, &adapters.player, composed);
+        (player, adapters)
+    };
     let repause_at = 0i64;
-    // ui::press click state: a grid-card OK is deferred (press-in on down, activate on the
-    // spring-back after key-up) so `ok_armed` marks "a press is in flight, commit it from the
-    // per-frame loop when press::take_commit fires". Only ever set on Home's grid.
-    let ok_armed = false;
+
     // Which route name was last REPORTED as an event. Not `route` itself: several `Route`
     // values share one name (every `Route::Player` is "player"), and an overlay
     // opening is not a screen change.
@@ -1439,7 +1505,9 @@ pub(crate) unsafe fn construct(
     bridge.refresh_browse_directory();
     let ask_first_run = || !controlled && (crate::dev::scenarios::firstrun_armed()
         || (!automated_boot()
-            && plx_data::stores::browse::onboard::asks(bridge.browse_directory())));
+            && plx_data::stores::browse::onboard::asks(
+                bridge.browse_directory(), &plx_plex::plex::session::peek(),
+                &plx_plex::plex::session::current_profile_key())));
     // The sign-in's telemetry question is PRESENTED on the container tree, and the tree lives on
     // the `App` this function is still assembling — so this boot arm records that it owes the
     // question and `maybe_ask_consent` is called once the struct exists, a few dozen lines down.
@@ -1498,7 +1566,7 @@ pub(crate) unsafe fn construct(
     // Why the app needs this at all: the synthetic tier boots with NO Plex session, so after a
     // stream ends there is no detail page, no Play control and no key path back into the
     // player. Everything else was already in place — `teardown` clears the URL and `ended` on a
-    // real stop, and `engine::start_bufferfeed` re-reads `player::playurl::playurl()` whenever
+    // real stop, and `engine::start_bufferfeed` re-reads `plx_play_feed::playurl::playurl()` whenever
     // `route::url()` is empty — so a replay is a second trip through the entry below.
     let replay_left: u32 = if controlled { 0 } else { replay_budget(crate::dev::scenarios::replay_trigger_value().as_deref()) };
     let grid_tried = false;
@@ -1532,10 +1600,11 @@ pub(crate) unsafe fn construct(
     let pause_script: Option<(u32, Option<u32>, Option<u32>)> = None;
     let pause_resume_at: Option<u32> = None;
     let prev = 0u32;
-    // Home data refresh, armed on every player exit (Stop/BACK/EOS): the hubs are refetched a
-    // beat later so the final timeline PUT lands first — Continue Watching then shows the new
-    // resume point / next episode instead of the state from boot.
-    let refresh_hubs_at = 0u32;
+    // Home data refresh, armed on every player exit (Stop/BACK/EOS): the hubs are refetched once
+    // the stop report has settled (`route::timeline_stop_landed`), so the `stopped` timeline POST
+    // lands first — Continue Watching then shows the new resume point / next episode instead of
+    // the state from boot.
+    let refresh_hubs = false;
 
     let ev = [0u8; 128];
     // dev/testing remote: drain any tokens written to /tmp/plxnative-remote and push
@@ -1546,7 +1615,13 @@ pub(crate) unsafe fn construct(
     // has been initialised and, unlike the earlier boot/discovery work, the SDL loop below is
     // ready to dispatch a delivered command within one frame. Compile-time no-op otherwise.
     if !controlled { crate::lab::start_control(); }
+    // **The HUD compiles here, at boot, outside any frame**, and the mounter is seeded with it (`run::boot_hud`;
+    // a controlled run defers it to the first player frame).
+    let hud = super::run::boot_hud(&mut bridge, controlled);
+    // End the bootstrap capability before moving its physical owners into App.
+    drop(bridge);
     let mut app = App {
+        platform,
         last_input,
         loop_t,
         iters_ct,
@@ -1554,6 +1629,10 @@ pub(crate) unsafe fn construct(
         #[cfg(feature = "devtools")]
         fps_shown,
         play_prev,
+        #[cfg(feature = "play-feed")]
+        vpres_prev,
+        hud,
+        dev_hud: Default::default(),
         running,
         window_activity: super::window_activity::WindowActivity::new(),
         #[cfg(feature = "devtools")]
@@ -1561,37 +1640,47 @@ pub(crate) unsafe fn construct(
         down_sym,
         modal_repeat,
         diagnostics: crate::app::diagnostics::Diagnostics::default(),
+        lab_toast: Default::default(),
         player,
         adapters,
         repause_at,
-        ok_armed,
+        decoder_parked: false,
+        foreground_retry: None,
+
         last_route_reported,
         ptr,
         menu_play_await: None,
+        deeplink: Default::default(),
         prev,
-        refresh_hubs_at,
-        refresh_detail: None,
+        refresh_hubs,
+        return_hold: Default::default(),
         plaintext_upgrade: Default::default(),
+        reread: Default::default(),
         ev,
         remote,
-        win,
+        surface,
         #[cfg(all(feature = "hostsim", target_os = "linux"))]
         wslg_frame_pacing,
         t0,
         instr,
         measure_fault_logged: false,
-        input: plx_ui::input::Input::new(),
+
         rec: super::recorder::Recplay::Off,
         boot_initial: initial,
         telemetry_guard: None,
-        present: plx_machine::present::Present::new(),
+        #[cfg(test)]
+        drop_probe: Default::default(),
+
         glass,
         // **The application's page stack runs the route DIP** (§6.2). It ran `Immediate` until
         // phase 12 while `ui::nav` held a second fader and the loop applied its own route change
         // at THAT floor; `PageDip` is the same schedule in the container that owns the op.
         pages,
         inputs: Vec::new(),
-        bridge,
+        #[cfg(feature = "devtriggers")]
+        a11y_pending: Default::default(),
+        runtime,
+        bridge: retained,
         // Every dev-trigger arm's own state (spec: `dev/scenarios.rs`'s module doc).
         scenarios: crate::dev::scenarios::Scenarios {
             #[cfg(feature = "devtriggers")]
@@ -1631,6 +1720,7 @@ pub(crate) unsafe fn construct(
             acct_rest: None,
             shots: Default::default(),
             auto_tried,
+            playurl_armed: None,
             replay_left,
             grid_tried,
             settings_tried,
@@ -1692,17 +1782,25 @@ pub(crate) unsafe fn construct(
         #[cfg(feature = "devtriggers")]
         plx_base::eventlog::log("budget: pre-phase-11 admission (quota only) by /tmp/plxnative-nobudget");
     }
+    // dev: /tmp/plxnative-watchlist-live — the owner's switch that lets a debug build write to the
+    // real plex.tv Watchlist; latched here, and logged once when it is on.
+    plx_plex::plex::watchlist::announce_live_writes();
+    // dev: /tmp/plxnative-discover (or the plextv redirect) — resolve where Discover lives NOW, so
+    // the event log says whether this boot's person and Watchlist reads reach a stand-in, the real
+    // provider, or nothing, before any request is made.
+    plx_plex::plex::account::announce_discover();
     if controlled {
         let initial = app.snapshot_init().expect("controlled constructor retains initial inputs");
-        initial.validate().map_err(|reason| { log(&format!("rec: REFUSED — {reason}")); 1 })?;
+        initial.validate().map_err(|reason| { log(&format!("rec: REFUSED — {reason}")); Exit::refused(1) })?;
         let replay = preflight.replay();
         app.rec = super::recorder::Recplay::controlled(preflight, &initial)
-            .map_err(|reason| { log(&format!("rec: REFUSED — {reason}")); 1 })?;
-        app.rec.arm_landgate(app.bridge.landgate());
+            .map_err(|reason| { log(&format!("rec: REFUSED — {reason}")); Exit::refused(1) })?;
+        let mut bridge = app.runtime.bridge(&mut app.bridge);
+        app.rec.arm_landgate(bridge.landgate());
         log("bootstrap: captured pre-effect initial state");
         if let Some(deferred) = deferred {
-            apply_deferred_capture(&mut app.rec, app.bridge.landgate(), deferred)
-                .map_err(|reason| { log(&format!("rec: REFUSED — {reason}")); 1 })?;
+            apply_deferred_capture(&mut app.rec, bridge.landgate(), deferred)
+                .map_err(|reason| { log(&format!("rec: REFUSED — {reason}")); Exit::refused(1) })?;
             log("bootstrap: captured session persistence applied");
         }
         if !replay {
@@ -1710,18 +1808,18 @@ pub(crate) unsafe fn construct(
         }
         if !replay { super::adapters::poster::init(); }
         app.rec.tick(initial.clock_start, 0.0);
-        app.rec.prepare_resources(&mut app.bridge);
-        if !matches!(activate_session(&mut app.bridge, &mut app.pages, &mut app.rec), BootTo::Home) {
+        app.rec.prepare_resources(&mut bridge);
+        if !matches!(activate_session(&mut bridge, &mut app.pages, &mut app.rec), BootTo::Home) {
             log("bootstrap: controlled Home activation refused");
-            return Err(1);
+            return Err(Exit::refused(1));
         }
         let tree = app.pages.state_hash();
-        app.rec.resource_requests(app.bridge.take_resource_requests());
-        if let Some(reason) = app.rec.failure().or_else(|| app.bridge.controlled_failure()) {
+        app.rec.resource_requests(bridge.take_resource_requests());
+        if let Some(reason) = app.rec.failure().or_else(|| bridge.controlled_failure()) {
             log(&format!("bootstrap: REFUSED — {reason}"));
-            return Err(1);
+            return Err(Exit::refused(1));
         }
-        super::run::recorder_end_frame(&mut app.rec, &app.bridge, &app.input.press,
+        super::run::recorder_end_frame(&mut app.rec, &bridge,
             "home", "", "bootstrap", tree);
         if let Some(ms) = app.rec.clock_start() {
             super::clock::set_replay(ms);
@@ -1752,10 +1850,10 @@ pub(crate) unsafe fn construct(
             // Preflight refuses the still-unsupported first-run surface before resource boot.
             if plx_screens::consent::should_show(&initial.consent, initial.automated) {
                 log("bootstrap: REFUSED — unsupported initial consent route");
-                return Err(1);
+                return Err(Exit::refused(1));
             }
         } else {
-            maybe_ask_consent(&mut app.pages);
+            maybe_ask_consent(&mut app.pages, &mut app.runtime.consent.machine.ask);
         }
     }
     Ok(app)

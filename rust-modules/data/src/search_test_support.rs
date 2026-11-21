@@ -5,6 +5,11 @@ use super::*;
 /// **No library is enumerated**, which by [`section_is_fav`]'s unknown rule makes every hit a
 /// favourite — so every test below that does not care about ranking grades the round-robin
 /// merge exactly as it did before favourites existed. The ranking tests build their own table.
+pub(super) fn fixture_slots() -> Vec<usize> {
+    crate::pms::registry_keys_for_test().slots().map(|sid| sid.raw() as usize).collect()
+}
+pub(super) fn fixture_nsrc() -> usize { fixture_slots().len() }
+
 pub(super) const NO_FAVS: &[(ServerId, i64, bool)] = &[];
 
 /// [`merge`] with no favourite table, for the tests whose subject is the merge itself.
@@ -22,16 +27,20 @@ pub(super) use plx_plex::plex::{Hub, MediaContainer, Metadata, Tag};
 pub(super) struct Owner {
     pub(super) state: SearchState,
     pub(super) adapter: Arc<SearchAdapter>,
+    /// The fake server this fixture's runner answers every request with ([`Owner::serve`]). With
+    /// none, a request waits on [`SearchState::jobs`] unanswered, as a fetch no worker has finished.
+    pub(super) io: Option<Arc<Mutex<dyn tail::Io + Send>>>,
 }
 
 impl Default for Owner {
     fn default() -> Self {
-        Self { state: SearchState::default(), adapter: Arc::new(SearchAdapter::default()) }
+        Self { state: SearchState::default(), adapter: Arc::new(SearchAdapter::default()), io: None }
     }
 }
 
 impl Owner {
     pub(super) fn set_query(&mut self, q: &str) {
+        observe_inputs(&mut self.state, &self.adapter, &fixture_input().input());
         set_query(&mut self.state, &self.adapter, q);
     }
     pub(super) fn set_query_from_directory(
@@ -39,6 +48,7 @@ impl Owner {
         q: &str,
         directory: crate::stores::browse::DirectoryView<'_>,
     ) {
+        observe_inputs(&mut self.state, &self.adapter, &fixture_input().input());
         set_query_from_directory(&mut self.state, &self.adapter, q, directory);
     }
     pub(super) fn run_with_directory(
@@ -60,15 +70,40 @@ impl Owner {
     pub(super) fn land(&self, i: usize, gen: u32, what: Option<Projection>) {
         land(&self.adapter, i, gen, what);
     }
+    /// Answer every request from now on with `fake`, on the calling thread right after each pump, so
+    /// a pump is deterministic: the fixture plays the runner. The returned handle reads and steers
+    /// the fake.
+    pub(super) fn serve(&mut self, fake: tail_tests::Fake) -> Arc<Mutex<tail_tests::Fake>> {
+        let fake = Arc::new(Mutex::new(fake));
+        self.io = Some(fake.clone());
+        fake
+    }
+    /// Run the requests the last step emitted against the fake server ([`Owner::serve`]) and post
+    /// their answers; returns how many ran. Without a fake they stay on the outbox.
+    pub(super) fn run_jobs(&mut self) -> usize {
+        let Some(io) = self.io.clone() else { return 0 };
+        let jobs = std::mem::take(&mut self.state.jobs);
+        let n = jobs.len();
+        for job in jobs {
+            let crate::stores::StoreJob::Search(job, port) = job else { panic!("not a search job") };
+            let mut io = io.lock().unwrap_or_else(|e| e.into_inner());
+            finish_with_io(&port, job.addr, &mut *io, job.req);
+        }
+        n
+    }
     pub(super) fn pump(&mut self, dt: f32) -> bool {
-        self.state.pump(&self.adapter, dt)
+        let changed = self.state.pump(&self.adapter, dt);
+        self.run_jobs();
+        changed
     }
     pub(super) fn pump_with_directory(
         &mut self,
         dt: f32,
         directory: crate::stores::browse::DirectoryView<'_>,
     ) -> bool {
-        self.state.pump_with_directory(&self.adapter, dt, directory)
+        let changed = self.state.pump_with_directory(&self.adapter, dt, directory);
+        self.run_jobs();
+        changed
     }
     pub(super) fn favs(&self) -> Vec<(ServerId, i64, bool)> {
         favs(&self.state)
@@ -98,17 +133,17 @@ pub(super) fn fresh() -> Fresh {
     Fresh(g)
 }
 
-/// Park every source's fetch, so no host test spawns a worker: one would dial a `Client` whose
-/// port belongs to nobody, and a stray background thread also perturbs the process-wide fd
-/// count `stream.rs`'s tests assert on. Call it before every `pump()`.
+/// Park every source's fetch, so the pump emits no request: the tests that call it grade landings
+/// they inject themselves, and a request on the outbox would be one more thing for them to account
+/// for. Call it before every `pump()`.
 pub(super) fn hold_off(owner: &mut Owner) {
-    for s in &mut owner.state.src {
-        s.retry_cd = RETRY_FRAMES;
+    for i in fixture_slots() {
+        source_mut(&mut owner.state, i).retry_cd = RETRY_FRAMES;
     }
     owner.state.armed = false;
 }
 
-/// A registered loopback slot. The port is never dialled — `hold_off` parks every spawn — so
+/// A registered loopback slot. The port is never dialled — no request is run against it — so
 /// this exists only to give [`slots`] a roster to fan out over. `register_for_test`, not the
 /// public `register`: the latter mints and PERSISTS a device uuid.
 pub(super) fn register(owner: &mut Owner, n: usize) {
@@ -124,8 +159,10 @@ pub(super) fn register(owner: &mut Owner, n: usize) {
     // Test setup finishes before any seeded mailbox/status. Production learns this boundary
     // from its first pump; fixtures that inject a landing directly must mark the just-built
     // roster as already observed so that first pump grades the landing rather than setup.
-    owner.state.visible = plx_plex::plex::server_roster_gen();
-    assert_eq!(nsrc(), n);
+    owner.state.clients = crate::pms::registry_keys_for_test();
+    owner.state.visible = owner.state.clients.roster_gen();
+    owner.state.live = Arc::new(owner.state.clients.slots().map(|sid| sid.raw() as usize).collect());
+    assert_eq!(fixture_nsrc(), n);
 }
 
 pub(super) fn hub(id: &str, kind: &str) -> Hub {

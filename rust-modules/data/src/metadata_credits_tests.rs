@@ -119,7 +119,7 @@ fn the_credit_index_space_runs_every_actor_then_every_crew_member() {
 
 #[test]
 fn crew_display_translates_owned_roles_without_changing_identity_or_character_names() {
-    use plx_platform::i18n::{LocaleContext, Preference};
+    use plx_os::i18n::{LocaleContext, Preference};
     let person = |name: &str, role: &str| Cast {
         tag: name.into(), role: role.into(), thumb: String::new(), id: 1, tag_key: String::new(),
     };
@@ -134,6 +134,9 @@ fn crew_display_translates_owned_roles_without_changing_identity_or_character_na
         (Preference::En, ["Director", "Writer", "Director, Writer"]),
         (Preference::Es, ["Director", "Guionista", "Director y guionista"]),
         (Preference::Be, ["Рэжысёр", "Сцэнарыст", "Рэжысёр, сцэнарыст"]),
+        (Preference::Fr, ["Réalisateur", "Scénariste", "Réalisateur, scénariste"]),
+        (Preference::De, ["Regie", "Drehbuch", "Regie, Drehbuch"]),
+        (Preference::Hu, ["Rendező", "Forgatókönyvíró", "Rendező, forgatókönyvíró"]),
     ] {
         let locale = LocaleContext::resolve(preference, None, None, None, None);
         assert_eq!(detail.credit_role_in(0, &locale), Some("Director"), "server character is not a job identity");

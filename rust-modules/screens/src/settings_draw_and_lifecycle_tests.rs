@@ -4,7 +4,6 @@
 use super::*;
 #[allow(unused_imports)]
 use super::test_support::*;
-use plx_machine::machine::Measure as _;
 
 /// Spec §14 phase 8: `Family::Settings`'s scrim/entrance composition reads
 /// `DrawFrame::nav_page_alpha` rather than the `ui::nav` statics — these two pin the
@@ -44,7 +43,7 @@ fn nested_draw_preserves_navigation_at_rest_and_through_push_and_pop() {
     use std::{cell::RefCell, rc::Rc};
 
     let navigation = NavPresentation {
-        page_alpha: 0.21, chrome_alpha: 0.37, view_tab: Some(2), blur_amount: 0.63,
+        page_alpha: 0.21, chrome_alpha: 0.37, view_tab: Some(2), blur_amount: 0.63, chrome_lift: 0.0,
     };
     let cases: &[(&str, f32, f32, bool, &[u32])] = &[
         ("rest after pop", 0.0, 0.0, false, &[2]),
@@ -58,7 +57,7 @@ fn nested_draw_preserves_navigation_at_rest_and_through_push_and_pop() {
         let seen = Rc::new(RefCell::new(Vec::new()));
         let instance = |id| Instance {
             id: InstanceId(id),
-            screen: Box::new(DrawProbe { id, seen: Rc::clone(&seen) }) as Box<dyn Screen<InnerHost>>,
+            screen: Box::new(DrawProbe { id, wake: order.last() == Some(&id), seen: Rc::clone(&seen) }) as Box<dyn Screen<InnerHost>>,
             inflight: Vec::new(),
             staged: false,
             staged_effects: Vec::new(),
@@ -76,7 +75,7 @@ fn nested_draw_preserves_navigation_at_rest_and_through_push_and_pop() {
             entry: EntryId(0), id: InstanceId(0), kind: Family::Settings,
             inner, ids: Minter::default(),
             push: Push { route: plx_ui::route_screen::RoutePush::at(pos), open: target == 1.0,
-                leaving: popping.then(|| instance(3)) },
+                leaving: popping.then(|| instance(3)), leaving_page: popping.then_some(SettingsPage::Root) },
             ground: RouteGround::new(), ground_ready: false, remembered: Vec::new(),
         };
         let outer = cx(None);
@@ -84,6 +83,14 @@ fn nested_draw_preserves_navigation_at_rest_and_through_push_and_pop() {
         let mut f = DrawFrame::with_navigation(&c, Painter::root(), navigation);
         let before = LogicalState::hash(&surface);
         surface.draw_pages(&mut f, Painter::root());
+        let mut owner = plx_machine::present::Present::new();
+        let mut unrelated = plx_machine::present::Present::new();
+        for p in [&mut owner, &mut unrelated] { p.take(0); p.acknowledge(0); }
+        f.apply_frame_requests(&mut owner);
+        assert!(owner.peek(1), "{label}: even a leaving child must forward its deferred demand");
+        assert!(!unrelated.peek(1));
+        assert!(!owner.page_damaged());
+        assert!(!owner.page_moving());
         assert_eq!(LogicalState::hash(&surface), before, "{label}: draw changed logical state");
         actual.push((label, seen.borrow().clone()));
         expected.push((label, order.iter().map(|&id| (id, navigation)).collect::<Vec<_>>()));
@@ -120,8 +127,7 @@ fn opening_settings_never_writes_the_session_file() {
     let sess = scratch_session("surface-no-session-write");
     let file = sess.path();
     let before = std::fs::metadata(&file).expect("the scratch session exists");
-    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root,
-        plx_data::pms::HubsSnapshot::empty_for_test().view());
+    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root);
     step(&mut s, ScreenEvent::Mount, None);
     let after = std::fs::metadata(&file).expect("the scratch session still exists");
     assert_eq!(
@@ -133,55 +139,30 @@ fn opening_settings_never_writes_the_session_file() {
     assert_eq!(before.len(), after.len(), "and nothing about its contents moved either");
 }
 
-/// **Every detail sub-line the root Settings page draws must fit the width its own row gives
-/// it.** `ui/table.rs`'s row draw elides `row.detail` against `text_w = text_right - label_x -
-/// trailing`, and `trailing` is NOT one number: a `.toggle` row spends it on the "On"/"Off" word
-/// plus a gap, a `.chevron` row spends it on the chevron glyph alone, so a toggle row's budget is
-/// tighter than a chevron row's. `CHECK_W`, `GAP` and `CONTENT_PAD`, the constants that would let
-/// this test replay `text_w` exactly, are private to `ui::table` (by design — see that module's
-/// doc on why the geometry is not a public surface), so plumbing the true per-row budget from
-/// here is impractical; this is the documented fallback the task asked for instead.
-///
-/// So: this measures every detail line the root page draws (`MEASURE`, the same `Measure`
-/// capability the real draw uses, at `theme::size::CAPTION`, the same rung `ui/table.rs` elides
-/// the sub-line at) and asserts none of them is wider than "Privacy, licences, source code,
-/// trademarks and contact." — the Legal notices row's detail, which is already on screen today
-/// and known to fit. It is a DIRECTIONAL check, not a simulation of the table's own arithmetic:
-/// the Legal notices row is a `.chevron` row, so its budget is the more GENEROUS of the two kinds
-/// this table draws, and a `.toggle` row (Automatically Sign In, Play trailers automatically)
-/// passing this bound is evidence its line got shorter, not proof it clears the tighter toggle
-/// budget specifically. The device capture is still what finally settles a real elide.
+/// **The signed-in root carries no sub-line** (Settings v2): every sentence a row used to state
+/// under its label is said beside the table while the row has focus, and fits there in every
+/// shipped language (`settings_v2_tests`).
 #[test]
-fn every_root_detail_line_fits_a_known_good_width() {
+fn the_signed_in_root_carries_no_sub_line_and_its_sentences_fit_elsewhere() {
     let _g = plx_base::testlock::serial();
     let _sess = multi_user_session("root-detail-widths");
-    let page = RootPage::new(EntryId(0), plx_data::stores::browse::DirectoryView::empty_for_test());
-    let sz = theme::size::CAPTION;
-    let known_good = "Privacy, licences, source code, trademarks and contact.";
-    let budget = MEASURE.width_str(known_good, sz, false);
-
-    let mut checked = 0;
+    let page = RootPage::new(EntryId(0), plx_data::stores::browse::DirectoryView::empty_for_test(), &crate::registry::capture_fixture());
+    // Settings v2: a root row is a label and a value, a switch or a chevron; its sentence is said
+    // in the left column while it has focus (`sentence_for`, fit in `settings_v2_tests`), and a
+    // server's switch (which states a status) is the only row that may keep a sub-line.
+    let mut rows = 0;
     for sec in &page.form.table.sections {
         for row in &sec.rows {
-            if row.detail.is_empty() {
-                continue;
-            }
-            checked += 1;
-            let w = MEASURE.width_str(&row.detail, sz, false);
-            assert!(
-                w <= budget,
-                "{:?}'s detail {:?} measures {w} — wider than {known_good:?} at {budget}, the \
-                 known-fitting line it is being held to",
-                row.label,
-                row.detail,
-            );
+            rows += 1;
+            assert!(row.detail.is_empty(), "{:?} still carries the sub-line {:?}", row.label, row.detail);
         }
     }
     assert_eq!(
-        checked, 9,
-        "expected a detail line on exactly Favorite libraries, Video & playback, Audio & \
-         subtitles, Language, Automatically Sign In, Play trailers automatically, Privacy & \
-         data, Legal notices, and About PlxNative — got {checked}; \
-         did the signed-in multi-user fixture stop building one of these rows?"
+        rows, 11,
+        "Favorite libraries, Under posters, Video & playback, Audio & subtitles, Language, \
+         Automatically Sign In, Play trailers automatically, Privacy & data, Diagnostics, Legal \
+         notices and About PlxNative (this host is not webOS 1-3, so no Interface resolution row; \
+         its fit is `settings_text_fit_tests`) - got {rows}; did the signed-in multi-user fixture \
+         stop building one of these rows?"
     );
 }

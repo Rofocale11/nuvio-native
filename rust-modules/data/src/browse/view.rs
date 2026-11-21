@@ -2,9 +2,14 @@
 //! a frame can keep this publication across page arrivals, re-queries and account resets.
 //! Source rosters and section hubs are separate publications, not implied by this view.
 
+#[cfg(test)]
+#[path = "view_roster_tests.rs"]
+mod roster_tests;
+
 use std::ops::Range;
 
 use super::{Arc, GenreEntry, SecFetch, SecItems, ServerId, SortEntry};
+use crate::pms::PmsMovie;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ListingId {
@@ -29,10 +34,18 @@ struct ListingData {
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
     letters: Arc<Vec<(String, i64)>>,
+    /// Do `letters` describe the listing the query now asks for ([`super::SecState::letters_current`])?
+    letters_current: bool,
+    /// The bands of the sort the grid is ordered by, while the counts on hand describe the listing the
+    /// query now asks for ([`super::SecState::shown_bands`]); `None` for a title sort, a sort with no
+    /// ladder, counts not yet landed or a listing with no rail.
+    bands: Option<Arc<super::bands::BandRail>>,
     sort_idx: usize,
     sort_desc: bool,
     genre: Option<Arc<GenreEntry>>,
     unwatched: bool,
+    membership_stale: bool,
+    relist: bool,
     cursor: Option<Arc<super::Cursor>>,
 }
 
@@ -53,6 +66,21 @@ impl ListingSnapshot {
         self
     }
     #[cfg(any(test, feature = "test-support"))]
+    pub fn with_relist(mut self) -> Self {
+        if let Some(data) = &mut self.data {
+            data.relist = true;
+        }
+        self
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_membership_stale(mut self) -> Self {
+        if let Some(data) = &mut self.data {
+            data.membership_stale = true;
+        }
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_fetch(mut self, fetch: SecFetch, total: i64) -> Self {
         if let Some(data) = &mut self.data {
             data.fetch = fetch;
@@ -70,7 +98,8 @@ impl ListingSnapshot {
         self
     }
 
-    /// A requery's publication: the same section under a new query generation.
+    /// A QUERY EDIT's publication: the same section under a new `ListingId::query`. A membership
+    /// re-query does not move it (`BrowseState::requery_stale` bumps only the fetch generation).
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_query(mut self, query: u32) -> Self {
         if let Some(data) = &mut self.data {
@@ -106,6 +135,54 @@ impl ListingSnapshot {
         self
     }
 
+    /// A fixture listing sorted by the server sort `key` (the fixture's one sort is `titleSort`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sort_key(self, key: &str) -> Self {
+        self.with_sorts(&[(key, key)], 0)
+    }
+
+    /// A fixture listing offering `sorts` (key, title), sorted by the one at `index`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sorts(mut self, sorts: &[(&str, &str)], index: usize) -> Self {
+        if let Some(data) = &mut self.data {
+            data.sorts = Arc::new(sorts.iter().map(|(key, title)| SortEntry {
+                desc_key: String::new(),
+                key: (*key).into(),
+                title: (*title).into(),
+                default_desc: false,
+            }).collect());
+            data.sort_idx = index;
+        }
+        self
+    }
+
+    /// A fixture listing whose value sort has these band counts (`BandRail::new`), shown as current.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_bands(mut self, rail: super::bands::BandRail) -> Self {
+        if let Some(data) = &mut self.data {
+            data.bands = Some(Arc::new(rail));
+        }
+        self
+    }
+
+    /// A fixture listing sorted in the given direction.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sort_desc(mut self, descending: bool) -> Self {
+        if let Some(data) = &mut self.data {
+            data.sort_desc = descending;
+        }
+        self
+    }
+
+    /// A fixture listing with the Unwatched filter on or off.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_unwatched(mut self, on: bool) -> Self {
+        if let Some(data) = &mut self.data {
+            data.unwatched = on;
+        }
+        self
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn absent() -> Self {
         Self { data: None }
@@ -136,15 +213,19 @@ impl ListingSnapshot {
                 sorts: Arc::new(vec![SortEntry {
                     desc_key: String::new(),
                     key: "titleSort".into(),
-                    title: plx_platform::i18n::msg::browse_library_title().into(),
+                    title: plx_os::i18n::msg::browse_library_title().into(),
                     default_desc: false,
                 }]),
                 genres: Arc::new(Vec::new()),
                 letters: Arc::new(letters),
+                letters_current: true,
+                bands: None,
                 sort_idx: 0,
                 sort_desc: false,
                 genre: None,
                 unwatched: false,
+                membership_stale: false,
+                relist: false,
                 cursor: None,
             }),
         }
@@ -211,8 +292,21 @@ impl<'a> ListingView<'a> {
     pub fn genres(self) -> &'a [GenreEntry] {
         self.0.data.as_ref().map_or(&[], |s| s.genres.as_slice())
     }
+    /// The per-letter counts of THIS listing: empty while the list on hand was counted under other
+    /// terms than the grid has now (or none has landed), so a stale list can never size a jump.
     pub fn letters(self) -> &'a [(String, i64)] {
-        self.0.data.as_ref().map_or(&[], |s| s.letters.as_slice())
+        self.0.data.as_ref().filter(|s| s.letters_current).map_or(&[], |s| s.letters.as_slice())
+    }
+    /// The bands of THIS listing's value sort, laid out in the listing's own order for the direction it
+    /// is sorted in: each band's first item and size, the unlabelled items before the first band
+    /// (`lead`, the no-value items of an ascending sort) and after the last (`tail`). `None` while the
+    /// counts on hand were made for other terms or another sort, or when there is no ladder for the
+    /// sort, so a stale list can never size a jump. Only the sorts the rail is ready for have one
+    /// (`BandFamily::rail_ready`). The one exception is a calendar sort's previous-day bands, shown
+    /// until the new day's read lands (the rail does not blink out at midnight).
+    pub fn bands(self) -> Option<&'a super::bands::Offsets> {
+        let rail = self.0.data.as_ref()?.bands.as_deref()?;
+        Some(rail.listed(self.sort_desc()))
     }
     pub fn sort_index(self) -> usize {
         self.0.data.as_ref().map_or(0, |s| s.sort_idx)
@@ -232,18 +326,40 @@ impl<'a> ListingView<'a> {
     pub fn unwatched(self) -> bool {
         self.0.data.as_ref().is_some_and(|s| s.unwatched && s.library_type.filters())
     }
+    /// A read-back changed a row this listing's query depends on, so the server would now list
+    /// something else. Cleared by the re-query ([`crate::stores::browse::LibraryWork::Requery`]).
+    pub fn membership_stale(self) -> bool {
+        self.0.data.as_ref().is_some_and(|s| s.membership_stale)
+    }
+    /// The server created or removed items and the re-list is out: the rows shown are the old
+    /// listing's, which the replacement wanted window replaces in place (`BrowseCmd::ListingsChanged`).
+    pub fn relisting(self) -> bool {
+        self.0.data.as_ref().is_some_and(|s| s.relist)
+    }
     pub fn library_type(self) -> super::LibraryType {
         self.0.data.as_ref().map_or(super::LibraryType::default(), |s| s.library_type)
     }
+    /// Is the A-Z LETTERS rail offered? The sort is the listing's Title entry
+    /// ([`SortEntry::is_title_order`]: `titleSort` for the section's own listing, the server's declared
+    /// composite for seasons and episodes), ascending (the order the counts sum in), and there are
+    /// letters of THIS listing to jump to. Before the menu has landed no sort is sent and the server's
+    /// default order is that Title order (measured for seasons and episodes), so it counts as one.
+    /// Unwatched and a genre do not hide it: the letters are asked with the grid's own terms and shown
+    /// only while they describe them ([`Self::letters`]). A value sort has no letters rail, whatever
+    /// the letters on hand; its bands are [`Self::bands_available`].
     pub fn rail_available(self) -> bool {
         self.id().is_some()
             && self
                 .sorts()
                 .get(self.sort_index())
-                .is_none_or(|s| s.key == "titleSort" && !self.sort_desc())
-            && !self.unwatched()
-            && self.genre().is_none()
+                .is_none_or(|s| s.is_title_order(self.library_type()) && !self.sort_desc())
             && self.letters().len() > 1
+    }
+    /// Is a rail of BANDS offered? The grid is ordered by a value sort with bands
+    /// (`BandFamily::rail_ready`), and the counts of THIS listing put items in at least two of them
+    /// ([`Self::bands`]). The title sort has the letters ([`Self::rail_available`]) and never both.
+    pub fn bands_available(self) -> bool {
+        self.id().is_some() && self.bands().is_some_and(|bands| bands.populated() >= 2)
     }
     pub fn letter_start(self, index: usize) -> usize {
         self.letters()
@@ -289,10 +405,11 @@ impl Iterator for ChangedPageRanges<'_, '_> {
 impl super::BrowseState {
     pub fn listing_snapshot(&self) -> ListingSnapshot {
         let sec = self.cur();
+        let kind = self.sections().get(sec).map(|section| section.kind);
         let id = self.sections().get(sec).and_then(|section| {
             Some(ListingId {
                 epoch: self.table_epoch(),
-                query: self.query_gen(),
+                query: self.listing_query(),
                 sid: self.section_sid(sec)?,
                 section: section.key,
             })
@@ -309,11 +426,15 @@ impl super::BrowseState {
                     items: state.items.clone(),
                     sorts: state.sorts.clone(),
                     genres: state.genres.clone(),
-                    letters: state.letters.clone(),
+                    letters: state.shown_letters().unwrap_or(&state.letters).clone(),
+                    letters_current: state.letters_current(),
+                    bands: kind.and_then(|kind| state.shown_bands(kind)).cloned(),
                     sort_idx: state.sort_idx,
                     sort_desc: state.sort_desc,
                     genre: state.genre.clone(),
                     unwatched: state.unwatched,
+                    membership_stale: state.membership_stale,
+                    relist: state.relist,
                     cursor: state.cursor.clone(),
                 }),
         }
@@ -344,13 +465,115 @@ struct DirectoryData {
 pub struct DirectorySnapshot {
     preferred: [Option<usize>; 2],
     kind_fetch: [SecFetch; 2],
-    stamp: Option<(u32, u32, usize, usize)>,
+    stamp: Option<(u32, u32, usize, usize, ServerId)>,
     data: Arc<DirectoryData>,
+    /// The first posters in the widest cache the Browse store holds (the current library's listing,
+    /// then its shelves, then every other library's), at most [`SAMPLE_POSTERS`], for a page that
+    /// illustrates the library without being on it ([`DirectoryView::sample`]).
+    sample: Vec<PosterAt>,
+    /// The first poster of each kind (movie, show) anywhere the Browse store holds rows, for a page
+    /// that illustrates a kind without being on a library of it ([`DirectoryView::kind_poster`]).
+    kind_posters: [Option<PosterAt>; 2],
+    /// Whether each kind's preferred library has had its shelves read and committed
+    /// ([`DirectoryView::kind_shelves_published`]).
+    kind_shelves: [bool; 2],
     source: Option<usize>,
     source_fetch: SecFetch,
     discovery: SecFetch,
+    refreshing: bool,
     sections_gen: u32,
     tabs_gen: u32,
+    pin_commit: super::PinCommit,
+}
+
+/// Where a retained poster sits: an O(1) handle on the immutable rows that hold it, and its place
+/// in them, so the snapshot keeps no copy of the row and reads it where it lies.
+#[derive(Clone)]
+enum PosterAt {
+    /// Row `.1` of a section's listing.
+    Listing(SecItems, usize),
+    /// Card `.2` of shelf `.1` of a section's committed shelves.
+    Shelf(Arc<Vec<super::section_hubs::Shelf>>, usize, usize),
+}
+
+impl PosterAt {
+    fn get(&self) -> Option<&PmsMovie> {
+        match self {
+            Self::Listing(items, i) => items.get(*i),
+            Self::Shelf(shelves, shelf, i) => shelves.get(*shelf)?.items.get(*i),
+        }
+    }
+}
+
+/// How many posters [`DirectoryView::sample`] can hand a page: what the Settings fan draws.
+pub const SAMPLE_POSTERS: usize = 4;
+
+/// The index of `kind` in [`DirectorySnapshot::kind_posters`], for a kind a poster tile names.
+fn kind_slot(kind: std::os::raw::c_int) -> Option<usize> {
+    match kind {
+        crate::pms::KIND_MOVIE => Some(0),
+        crate::pms::KIND_SHOW => Some(1),
+        _ => None,
+    }
+}
+
+/// The first movie and the first show with a poster path of their own, in the widest cache the
+/// Browse store has: the current library first (its listing, then its shelves), then every other
+/// section's (a library the user left keeps its recent window and its shelves). A title with no
+/// poster path has no art to show, so it is not a candidate.
+fn scan_kind_posters(state: &super::BrowseState) -> ([Option<PosterAt>; 2], Vec<PosterAt>) {
+    let mut found: [Option<PosterAt>; 2] = [None, None];
+    let mut sample: Vec<PosterAt> = Vec::new();
+    let cur = state.cur();
+    let states = state.states();
+    for section in std::iter::once(cur).chain((0..states.len()).filter(|i| *i != cur)) {
+        let Some(st) = states.get(section) else { continue };
+        // A library lists titles of its own type, so its rows can only be a poster of that kind.
+        if let Some(sec) = state.sections().get(section) {
+            scan_listing(&st.items, if sec.kind == super::SecKind::Show { 1 } else { 0 }, &mut found);
+        }
+        for i in 0..st.items.len {
+            if sample.len() >= SAMPLE_POSTERS {
+                break;
+            }
+            if st.items.get(i).is_some_and(|m| !m.thumb.is_empty()) {
+                sample.push(PosterAt::Listing(st.items.clone(), i));
+            }
+        }
+        let shelves = &st.hubs.committed;
+        for (s, shelf) in shelves.iter().enumerate() {
+            for (i, m) in shelf.items.iter().enumerate() {
+                note_poster(&mut found, m, || PosterAt::Shelf(Arc::clone(shelves), s, i));
+                if sample.len() < SAMPLE_POSTERS && !m.thumb.is_empty() {
+                    sample.push(PosterAt::Shelf(Arc::clone(shelves), s, i));
+                }
+            }
+        }
+        if found.iter().all(Option::is_some) && sample.len() >= SAMPLE_POSTERS {
+            break;
+        }
+    }
+    (found, sample)
+}
+
+/// A listing's rows are candidates for `slot` (its library's own kind) until one is found; a kind
+/// already found costs nothing, so the scan stops at the first row with a poster path.
+fn scan_listing(items: &SecItems, slot: usize, found: &mut [Option<PosterAt>; 2]) {
+    for i in 0..items.len {
+        if found[slot].is_some() {
+            return;
+        }
+        if let Some(m) = items.get(i) {
+            note_poster(found, m, || PosterAt::Listing(items.clone(), i));
+        }
+    }
+}
+
+/// `m` is the poster of its kind if none is yet and it has a poster path of its own.
+fn note_poster(found: &mut [Option<PosterAt>; 2], m: &PmsMovie, at: impl FnOnce() -> PosterAt) {
+    if let Some(slot) = kind_slot(m.kind).filter(|slot| found[*slot].is_none() && !m.thumb.is_empty()) {
+        found[slot] = Some(at());
+    }
 }
 
 impl Default for DirectorySnapshot {
@@ -360,22 +583,28 @@ impl Default for DirectorySnapshot {
             kind_fetch: [SecFetch::Loading; 2],
             stamp: None,
             data: Arc::default(),
+            sample: Vec::new(),
+            kind_posters: [None, None],
+            kind_shelves: [false; 2],
             source: None,
             source_fetch: SecFetch::Loading,
             discovery: SecFetch::Loading,
+            refreshing: false,
             sections_gen: 0,
             tabs_gen: 0,
+            pin_commit: super::PinCommit::default(),
         }
     }
 }
 
 impl DirectorySnapshot {
-    pub fn capture_from(&mut self, state: &mut super::BrowseState) {
+    pub fn capture_from(&mut self, state: &mut super::BrowseState, keys: &plx_plex::plex::ClientKeys) {
         let stamp = (
             state.table_epoch(),
             state.source_list_gen(),
             state.cur(),
             state.sources().len(),
+            keys.current(),
         );
         if self.stamp != Some(stamp) {
             self.data = Arc::new(DirectoryData {
@@ -390,14 +619,20 @@ impl DirectorySnapshot {
             });
             self.stamp = Some(stamp);
         }
-        self.source = state.cur_source_idx();
-        self.source_fetch = state.cur_source_state();
+        (self.kind_posters, self.sample) = scan_kind_posters(state);
+        self.source = state.cur_source_idx(keys.current());
+        self.source_fetch = state.cur_source_state(keys.current());
         self.discovery = state.discovery_state();
+        self.refreshing = state.sources().iter().any(|source| source.reachable() && !source.sections_done);
         self.sections_gen = state.sections_gen();
         self.tabs_gen = state.tabs_gen();
+        self.pin_commit = state.pin_commit();
         for (i, kind) in [super::SecKind::Movie, super::SecKind::Show].into_iter().enumerate() {
             self.preferred[i] = state.tab_of_kind(kind).and_then(|tab| state.tab_section(tab));
             self.kind_fetch[i] = state.kind_state(kind);
+            self.kind_shelves[i] = self.preferred[i]
+                .and_then(|section| state.states().get(section))
+                .is_some_and(|st| st.hubs.is_published());
         }
     }
 
@@ -411,18 +646,59 @@ impl DirectorySnapshot {
         Self {
             preferred: [None; 2],
             kind_fetch: [fetch; 2],
-            stamp: Some((epoch, 0, 0, 1)),
+            stamp: Some((epoch, 0, 0, 1, sid)),
             data: Arc::new(DirectoryData {
                 sources: vec![(sid, source)],
                 sections: Vec::new(),
                 favorites: Vec::new(),
             }),
+            sample: Vec::new(),
+            kind_posters: [None, None],
+            kind_shelves: [false; 2],
             source: Some(0),
             source_fetch: fetch,
             discovery: fetch,
+            refreshing: fetch == SecFetch::Loading,
             sections_gen: 0,
             tabs_gen: 0,
+            pin_commit: super::PinCommit::default(),
         }
+    }
+
+    /// This directory with `kind`'s library's shelves read and committed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_kind_shelves_published(mut self, kind: super::SecKind) -> Self {
+        self.kind_shelves[if kind == super::SecKind::Show { 1 } else { 0 }] = true;
+        self
+    }
+
+    /// This directory with `items` as the current library's listing (what [`DirectoryView::sample`] reads).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sample(mut self, items: Vec<crate::pms::PmsMovie>) -> Self {
+        let items = super::SecItems::from_vec(items.into_iter().map(Some).collect());
+        for (i, m) in (0..items.len).filter_map(|i| items.get(i).map(|m| (i, m))) {
+            note_poster(&mut self.kind_posters, m, || PosterAt::Listing(items.clone(), i));
+            if self.sample.len() < SAMPLE_POSTERS && !m.thumb.is_empty() {
+                self.sample.push(PosterAt::Listing(items.clone(), i));
+            }
+        }
+        self
+    }
+
+    /// This directory with `cards` as the first shelf a library OTHER than the current one has
+    /// committed (what [`DirectoryView::kind_poster`] reads after the current listing).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_shelf_sample(mut self, cards: Vec<crate::pms::PmsMovie>) -> Self {
+        let shelves = Arc::new(vec![super::section_hubs::Shelf { items: cards, ..Default::default() }]);
+        for (s, shelf) in shelves.iter().enumerate() {
+            for (i, m) in shelf.items.iter().enumerate() {
+                note_poster(&mut self.kind_posters, m, || PosterAt::Shelf(Arc::clone(&shelves), s, i));
+                if self.sample.len() < SAMPLE_POSTERS && !m.thumb.is_empty() {
+                    self.sample.push(PosterAt::Shelf(Arc::clone(&shelves), s, i));
+                }
+            }
+        }
+        self
     }
 
     pub fn same_publication(&self, other: &Self) -> bool {
@@ -430,6 +706,7 @@ impl DirectorySnapshot {
             && self.source == other.source
             && self.source_fetch == other.source_fetch
             && self.discovery == other.discovery
+            && self.refreshing == other.refreshing
             && self.sections_gen == other.sections_gen
             && self.tabs_gen == other.tabs_gen
             && self.preferred == other.preferred
@@ -457,17 +734,22 @@ impl DirectorySnapshot {
         Self {
             preferred,
             kind_fetch: [SecFetch::Ready; 2],
-            stamp: Some((epoch, 0, current, source_count)),
+            stamp: Some((epoch, 0, current, source_count, ServerId::UNSET)),
             data: Arc::new(DirectoryData {
                 sources,
                 sections,
                 favorites,
             }),
+            sample: Vec::new(),
+            kind_posters: [None, None],
+            kind_shelves: [false; 2],
             source: None,
             source_fetch: SecFetch::Ready,
             discovery: SecFetch::Ready,
+            refreshing: false,
             sections_gen: 0,
             tabs_gen: 0,
+            pin_commit: super::PinCommit::default(),
         }
     }
 
@@ -493,6 +775,37 @@ impl<'a> DirectoryView<'a> {
 
     #[allow(dead_code)] // Wave 0 publication contract; consumer lanes take these accessors.
     pub fn section_count(self) -> usize { self.sections().len() }
+    /// The first `n` (at most [`SAMPLE_POSTERS`]) posters the Browse store holds: the cached items a
+    /// page outside the Library shows as the libraries' posters (Settings > Favorite libraries). They
+    /// come from the SAME widest cache [`Self::kind_poster`] reads (the current library's listing,
+    /// then its shelves, then every other library's retained rows and shelves), never from the
+    /// current listing alone: a page entered from Home, which lists shelves and not a library, has
+    /// no listing of its own yet. Fewer than `n` while the cache holds fewer titles with a poster
+    /// path; none before anything has landed. Reads what the store holds and starts no fetch.
+    pub fn sample(self, n: usize) -> impl Iterator<Item = &'a crate::pms::PmsMovie> {
+        self.0.sample.iter().take(n).filter_map(PosterAt::get)
+    }
+    /// **The first poster of `kind`** (`pms::KIND_MOVIE` or `KIND_SHOW`, with a poster path of its
+    /// own) in the widest cache the Browse store holds: the current library's listing and shelves,
+    /// then those of every other library it still holds rows of. A page that illustrates a kind
+    /// without being on a library of it (Settings > Under posters) reads this, so a user whose last
+    /// opened library lists only Movies still sees a real show. `None` only when nothing the store
+    /// holds is a poster of that kind (a new install, offline, a server with one kind of library).
+    /// Reads what the store already holds and starts no fetch.
+    pub fn kind_poster(self, kind: std::os::raw::c_int) -> Option<&'a PmsMovie> {
+        self.0.kind_posters.get(kind_slot(kind)?)?.as_ref()?.get()
+    }
+    /// **Has the library a page would show for `kind` had its shelves read and committed?** True once
+    /// the store has published that library's hubs, even when they hold no title of the kind, so a
+    /// page that asked for the shelves to find a poster (Settings > Under posters) knows the answer
+    /// is in and stops asking. False while the read is out, staged or has failed, and for a kind with
+    /// no library.
+    pub fn kind_shelves_published(self, kind: super::SecKind) -> bool {
+        self.0.kind_shelves[match kind {
+            super::SecKind::Movie => 0,
+            super::SecKind::Show => 1,
+        }]
+    }
     #[allow(dead_code)]
     pub fn source_list_gen(self) -> u32 { self.0.stamp.map_or(0, |stamp| stamp.1) }
     #[allow(dead_code)]
@@ -573,19 +886,28 @@ impl<'a> DirectoryView<'a> {
     pub fn source_fetch(self) -> SecFetch {
         self.0.source_fetch
     }
+    /// A reachable server still has a library-directory read outstanding.
+    pub fn refreshing(self) -> bool { self.0.refreshing }
     pub fn discovery(self) -> SecFetch {
         self.0.discovery
     }
+    /// The outcome of the last Favorite libraries commit the store ran ([`super::PinCommit`]).
+    pub fn pin_commit(self) -> super::PinCommit {
+        self.0.pin_commit
+    }
     /// Press-time section, not necessarily the committed one during a page fade.
+    /// Includes `section` itself even when unpinned so jumping to an unpinned library from
+    /// Sort & Filter still surfaces its pill in the Library header while viewing it.
     pub fn rows_for(self, section: usize) -> impl Iterator<Item = &'a super::SrcRow> {
         let kind = self.sections().get(section).map(|s| s.kind);
         self.sections()
             .iter()
-            .filter(move |s| Some(s.kind) == kind && s.row.pinned)
+            .filter(move |s| Some(s.kind) == kind && (s.row.pinned || s.row.section == section))
             .map(|s| &s.row)
     }
 
-    /// Favourite libraries represented by the current type pill, with their table indices.
+    /// The libraries the header names for `section`'s type, with their table indices: its favourites,
+    /// and `section` itself when that library on view is not one.
     pub fn favorite_sections_for(
         self,
         section: usize,
@@ -597,6 +919,69 @@ impl<'a> DirectoryView<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// **A page that illustrates a kind reads the widest cache**: the current library lists only
+    /// movies, and the first show with a poster is a card of ANOTHER library's retained listing.
+    #[test]
+    fn kind_poster_reads_the_current_library_first_then_every_other_one() {
+        let _g = plx_base::testlock::serial();
+        let mut state = super::super::BrowseState::default();
+        super::super::seed_two_source_table_for_owner_test(&mut state);
+        let titled = |title: &str, kind, thumb: &str| crate::pms::PmsMovie {
+            title: title.into(), kind, thumb: thumb.into(), ..Default::default()
+        };
+        let put = |state: &mut super::super::BrowseState, sec: usize, rows: Vec<crate::pms::PmsMovie>| {
+            state.state_mut(sec).expect("seeded section").items = SecItems::from_vec(rows.into_iter().map(Some).collect());
+        };
+        let cur = state.cur();
+        let other = (0..state.sections().len()).find(|i| *i != cur).unwrap();
+        put(&mut state, cur, vec![
+            titled("No art", crate::pms::KIND_MOVIE, ""),
+            titled("Alpha", crate::pms::KIND_MOVIE, "/a"),
+            titled("Episode", crate::pms::KIND_EPISODE, "/e"),
+        ]);
+        // This projection test has a synthetic table and no registry current slot.
+        let mut keys = plx_plex::plex::ClientKeys::default();
+        keys.refill_roster(ServerId::UNSET, 0, 0,
+            state.sources().iter().map(|source| source.sid), |_| None, |_| None, |_| None);
+        let mut snapshot = DirectorySnapshot::default();
+        snapshot.capture_from(&mut state, &keys);
+        let title = |kind| snapshot.view().kind_poster(kind).map(|m| m.title.clone());
+        assert_eq!(title(crate::pms::KIND_MOVIE).as_deref(), Some("Alpha"), "the first movie WITH a poster path");
+        assert_eq!(title(crate::pms::KIND_SHOW), None, "nothing cached is a show: no art anywhere");
+        assert_eq!(title(crate::pms::KIND_EPISODE), None, "only the two kinds a poster tile names");
+        put(&mut state, other, vec![titled("Other film", crate::pms::KIND_MOVIE, "/o"), titled("Sitcom", crate::pms::KIND_SHOW, "/s")]);
+        snapshot.capture_from(&mut state, &keys);
+        let title = |kind| snapshot.view().kind_poster(kind).map(|m| m.title.clone());
+        assert_eq!(title(crate::pms::KIND_MOVIE).as_deref(), Some("Alpha"), "the current library still wins its kind");
+        assert_eq!(title(crate::pms::KIND_SHOW).as_deref(), Some("Sitcom"), "the show comes from the other library's rows");
+    }
+
+    /// **A page waiting for a library's shelves can tell when the answer is in**: false until the
+    /// store has committed that library's hubs (staged is not published), then true, even when the
+    /// hubs hold nothing; and false for a kind with no library.
+    #[test]
+    fn kind_shelves_are_published_only_once_the_libraries_hubs_are_committed() {
+        let _g = plx_base::testlock::serial();
+        let mut state = super::super::BrowseState::default();
+        super::super::seed_two_source_table_for_owner_test(&mut state);
+        // This projection test has a synthetic table and no registry current slot.
+        let mut keys = plx_plex::plex::ClientKeys::default();
+        keys.refill_roster(ServerId::UNSET, 0, 0,
+            state.sources().iter().map(|source| source.sid), |_| None, |_| None, |_| None);
+        let mut snapshot = DirectorySnapshot::default();
+        snapshot.capture_from(&mut state, &keys);
+        let kind = [super::super::SecKind::Movie, super::super::SecKind::Show].into_iter()
+            .find(|kind| snapshot.view().preferred(*kind).is_some()).expect("the seeded table lists a library of some kind");
+        let section = snapshot.view().preferred(kind).unwrap();
+        assert!(!snapshot.view().kind_shelves_published(kind), "nothing read yet");
+        state.state_mut(section).unwrap().hubs.stage_for_test(Vec::new());
+        snapshot.capture_from(&mut state, &keys);
+        assert!(!snapshot.view().kind_shelves_published(kind), "a landed read is only staged");
+        state.state_mut(section).unwrap().hubs.commit_staged(true);
+        snapshot.capture_from(&mut state, &keys);
+        assert!(snapshot.view().kind_shelves_published(kind), "committed, even with no shelf in it");
+    }
+
     use super::*;
 
     #[test]
@@ -643,10 +1028,14 @@ mod tests {
         state.source_mut(0).unwrap().sid = ServerId::from_raw(0);
         state.source_mut(1).unwrap().sid = ServerId::from_raw(1);
         state.set_cur(0);
+        // Synthetic registry current is source 0; section selection may move independently.
+        let mut keys = plx_plex::plex::ClientKeys::default();
+        keys.refill_roster(ServerId::from_raw(0), 0, 0,
+            state.sources().iter().map(|source| source.sid), |_| None, |_| None, |_| None);
         let mut directory = DirectorySnapshot::default();
-        directory.capture_from(&mut state);
+        directory.capture_from(&mut state, &keys);
         let old = directory.clone();
-        directory.capture_from(&mut state);
+        directory.capture_from(&mut state, &keys);
         assert!(Arc::ptr_eq(&old.data, &directory.data));
         let view = old.view();
         assert_eq!(view.sections()[0].key, view.sections()[2].key);
@@ -654,7 +1043,7 @@ mod tests {
         assert_eq!(view.sources().len(), 2);
         assert_eq!(view.current(), Some(0));
         assert_eq!(view.source().unwrap().0, view.sections()[0].sid.unwrap());
-        assert_eq!(view.source_fetch(), state.cur_source_state());
+        assert_eq!(view.source_fetch(), state.cur_source_state(keys.current()));
         assert_eq!(view.discovery(), state.discovery_state());
         assert_eq!(
             view.rows_for(0).cloned().collect::<Vec<_>>(),
@@ -664,19 +1053,32 @@ mod tests {
             view.rows_for(1).cloned().collect::<Vec<_>>(),
             state.source_rows_for(1)
         );
+        // A library on view that is not a favourite (section 2: the friend's films default Off) is
+        // named beside the favourites of its type, and only while it is on view; the view and the
+        // store's oracle agree on it.
+        assert!(!state.pinned_for_test(2));
+        assert_eq!(
+            view.rows_for(2).map(|row| row.section).collect::<Vec<_>>(),
+            vec![0, 2],
+        );
+        assert_eq!(view.rows_for(0).map(|row| row.section).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            view.rows_for(2).cloned().collect::<Vec<_>>(),
+            state.source_rows_for(2)
+        );
         assert_eq!(view.rows_for(999).count(), 0);
         state.source_mut(0).unwrap().name = "Changed".into();
         state.bump_source_facts_gen();
-        directory.capture_from(&mut state);
+        directory.capture_from(&mut state, &keys);
         assert_eq!(directory.view().sources()[0].1.name, "Changed");
         assert_ne!(old.view().sources()[0].1.name, "Changed");
         state.set_cur(1);
-        directory.capture_from(&mut state);
+        directory.capture_from(&mut state, &keys);
         assert_eq!(directory.view().current(), Some(1));
         assert!(directory.view().sections()[1].row.current);
         assert!(!directory.view().sections()[0].row.current);
         state.reset();
-        directory.capture_from(&mut state);
+        directory.capture_from(&mut state, &keys);
         assert_ne!(directory.view().epoch(), old.view().epoch());
         assert!(directory.view().sections().is_empty());
         assert!(directory.view().current().is_none());
@@ -694,14 +1096,15 @@ mod tests {
             section.sorts = Arc::new(vec![SortEntry {
                 desc_key: String::new(),
                 key: "titleSort".into(),
-                title: plx_platform::i18n::msg::browse_library_title().into(),
+                title: plx_os::i18n::msg::browse_library_title().into(),
                 default_desc: false,
             }]);
             section.genres = Arc::new(vec![GenreEntry {
                 id: "7".into(),
                 title: "Drama".into(),
             }]);
-            section.letters = Arc::new(vec![("A".into(), 3), ("B".into(), 4)]);
+            let key = section.letters_key();
+            section.land_letters(key, vec![("A".into(), 3), ("B".into(), 4)]);
             (section.sorts.clone(), section.genres.clone(), section.letters.clone())
         };
         let initial = owner.listing_snapshot();
@@ -726,12 +1129,20 @@ mod tests {
         assert_eq!(initial.view().letter_start(99), 7);
         owner.set_genre_by_id(Some("7"));
         owner.set_unwatched(true);
+        // The counts of the listing the grid now shows (the letters job asks with its terms).
+        super::super::seed_letter_counts_for_owner_test(&mut owner, &[("A", 2), ("B", 1)]);
+        let narrowed = owner.listing_snapshot();
+        assert!(narrowed.view().unwatched());
+        assert_eq!(narrowed.view().genre().unwrap().id, "7");
+        assert!(narrowed.view().rail_available(), "Unwatched and a genre no longer hide the rail");
+        assert_eq!(narrowed.view().letter_start(1), 2);
+        assert_eq!(narrowed.view().rail_available(), owner.rail_available());
         owner.set_sort_by_key("titleSort", true);
         let filtered = owner.listing_snapshot();
         assert!(filtered.view().unwatched());
         assert!(filtered.view().sort_desc());
         assert_eq!(filtered.view().genre().unwrap().id, "7");
-        assert!(!filtered.view().rail_available());
+        assert!(!filtered.view().rail_available(), "a descending title sort hides it");
         assert!(initial.view().genre().is_none());
         assert!(!initial.view().unwatched());
         assert!(initial.view().rail_available());
@@ -762,7 +1173,7 @@ mod tests {
             retained,
             &state.cur_state().unwrap().items.pages
         ));
-        state.set_watched_local(before.sid, &before.rk, false);
+        state.apply_view_local(&crate::viewstate::ViewAt::leaf(before.sid, &before.rk), crate::viewstate::ViewEdit::Watched(false));
         assert!(state.listing_snapshot().view().item(0).unwrap().unwatched);
         assert_eq!(first.view().item(0).unwrap().unwatched, before.unwatched);
         state.requery();

@@ -195,6 +195,24 @@ certificate releases the cleanup barrier. Checks are coalesced and driven by com
 quanta, not sleep, retry-count or elapsed-time policy. Emergency descent remains available while
 cleanup is pending.
 
+The Plex dashboard (`/status/sessions`) keeps a third, separate record. Every
+`X-Plex-Session-Identifier` that ever reported `playing` to `/:/timeline` keeps its row for minutes
+after its last report, whatever the encoder `/stop` and the close did (measured on PMS 1.43.5:
+about three minutes), so one playback showed a row for every encoder it had used (13 in one
+measured session). The periodic timeline reporter therefore sends the id it last reported under a `state=stopped` with
+`continuing=1`, at the current position, immediately before the first report under the id that
+replaced it (an ABR commit, a seek's retranscode, the Original-to-HLS fallback, an Engine reload
+that moved to a new encoder); Plex's own TV client sends the same pair before it restarts a stream
+for a quality change. The final teardown does the same for the last reported id when it differs
+from the id the final `stopped` goes out under; the stop worker reads that id only after the
+reporter has been joined, so a tick still in flight at the stop counts. An id that never reported
+(a candidate that was never committed, or one replaced between two ticks) is never named.
+
+The cleanup ledger above is unchanged and independent of this report: its stop, ping and close act
+on the physical encoder and its Streaming Resource, not on the dashboard row. They run on their own
+schedule, the stop at the landing and ping/close on completed quanta, while the `stopped` report
+waits for the next reporter tick (up to ten seconds), so the ledger does not depend on it.
+
 For the initial phase of an upward experiment, one playhead-funded reserve clock, bounded by `E`,
 covers:
 
@@ -440,12 +458,12 @@ No new private quality transaction starts while the user is paused. If Pause rac
 read, the socket retains both its ordinary liveness deadline and a scheduled re-check of the owning
 reserve clock. The re-check spends nothing while user Pause holds, but it is already armed if
 Resume makes that clock advance during the blocked read. A user Pause changes the feed gate only
-after Starfish accepts `Pause`, and an ordinary Resume does the same after `Play`. Resume during an
-internal HLS runway hold is the deliberate exception: the feed gate opens without `Play` or an ACB
-state change so recovery media can refill the queues while the native clock stays held; the
-measured re-prime later owns `Play` and its ACB mirror. The native playback clock is not restarted
-until that recovery transaction ends, so a candidate and the playhead cannot both spend the same
-discretionary balance.
+after Starfish accepts `Pause`, and a non-HLS Resume does the same after `Play`. HLS Resume opens
+the feed gate without `Play` or an ACB state change so media can refill while the native clock
+stays held; the pump's re-prime later owns `Play` and its ACB mirror. A viewer Resume requires a
+balanced decoder prime; an active internal hold additionally requires its recovery certificate.
+The native playback clock is not restarted until any recovery transaction ends, so a candidate
+and the playhead cannot both spend the same discretionary balance.
 There is one terminal exception derived from the actuator set rather than from time. A downshift
 candidate at the ladder floor has no robust rollback guarantee left to protect and no cheaper
 response to buy when either the completed current bag has `B < R_o`, or the main thread has already
@@ -481,8 +499,8 @@ projection. At the ladder floor the only useful response continues; above it the
 larger object may be abandoned so recovery can fetch a smaller one. An already held recovery clock
 arms no second abort loop. In every case network, demux and feeding remain active.
 
-Runtime resume does not use the historical `R_s` at all. A hold starts a fresh ordered recovery
-epoch. For complete active-rung acquisitions after that pause,
+Runtime resume does not use the historical `R_s` at all. An automatic rebuffer hold starts a fresh
+ordered recovery epoch. For complete active-rung acquisitions after that pause,
 
 ```text
 P_0 = 0
@@ -496,7 +514,7 @@ new completed segment beside an old debt. Candidate media is not credited as rec
 after a rung commit the epoch restarts and the next ordinary acquisition describes the encoder
 that will sustain playback.
 
-Resume requires all of:
+Automatic rebuffer resume requires all of:
 
 - Starfish accepted its ordinary decoder prime;
 - at least one complete segment landed in the current recovery epoch;
@@ -508,12 +526,35 @@ Resume requires all of:
 
 The epoch is discarded after successful `Play`; old slow acquisitions cannot raise a later
 runtime floor. `R_s` remains only a retrospective fresh-Load/seek certificate and ABR diagnostic. A
-user Pause/Play cannot bypass an active internal hold. Failed `Pause`/`Play` calls do not mutate
+viewer Resume on a healthy held HLS timeline requires the ordinary balanced decoder prime,
+without waiting for historical `R_s`: that retrospective boundary can exceed everything the
+paused native pipeline and AU queues can hold (#1216). Feeding reopens first; the pump owns the
+single accepted `Play` and ACB mirror. A user Pause/Play cannot bypass an active internal hold or
+an unsettled candidate transaction. Failed `Pause`/`Play` calls do not mutate
 state as though the clock moved.
 
 HTTP bodies with a declared `Content-Length` count as completed only after all declared bytes
 arrive. A short body cannot be credited with the segment's full `EXTINF`, which previously allowed
 the model to resume on media that did not exist.
+
+A direct-play (progressive) stream has no rungs and no segments, so none of the above can credit
+it, but a link slower than the file starves it the same way: once its queues are empty the picture
+plays in slow motion at the delivered rate, and when the link recovers Starfish catches up by
+dropping frames. At Quality=Original (chosen explicitly, or inherited by a profile saved before Auto
+existed; a fresh install starts on Auto) it takes the same internal hold (one Pause, the
+Buffering read-out, the same `try_prime` Play) with a certificate of its own. The hold begins when
+the clock debt fires (the native position callback has fallen behind the wall by more than 100 ms,
+net of a 5 % drift allowance, counted only while the app's video queue holds under 1 MiB) or the
+native clock has stopped over a remnant it will never spend (the dead link), and it releases on
+the end of the stream or a video or audio queue at its byte cap, the reserve the stream played
+with when healthy. On a link that cannot carry the file at all the hold cycles for as long as the
+link stays short (it is held for `1 - delivered/required` of the time), because Original offers no
+other answer; that replaces slow motion and catch-up drops, it is not smooth 1x play. A trailer
+preview, the looped sample, a viewer Pause, a seek and a progressive re-encode under a fixed quality
+ceiling are never held. **An Auto playback that is running Original is not held**: Auto's Original
+supervisor (section 7) switches such a stream to HLS when its reserve runs low, and a hold standing
+in front of that exit could hold it off, so Auto keeps exactly its own exits (its HLS route is held
+as above).
 
 ## 6. Original is a mode, not the top HLS rung
 
@@ -672,8 +713,11 @@ Neither a failed nor an insufficient experiment is polled alongside every HLS se
 experiment the gate records the greater of the source result and HLS's recent estimate. It rearms
 only after live HLS's conservative bound rises strictly above that record. Thus wall-clock time and
 an unchanged demand-capped stream cannot cause another request; a confidence-separated link-regime
-change can. The probe itself is a finite `Range: bytes=0-(N-1)` request and is accepted only with a
-matching `206 Content-Range`, so completing the measurement also completes the HTTP response.
+change can. The probe itself is a finite `Range: bytes=0-(N-1)` request and is accepted with a
+matching `206 Content-Range`, so completing the measurement also completes the HTTP response, or
+with a `200` from byte zero: PMS's transcoder (`start.mkv`, a remux Original) ignores Range, the
+probe starts at zero and only counts bytes, and the demuxer's open or seek still refuses a `200` to
+its Range.
 
 A completed terminal comparison follows the HLS actuator that supplied its counterfactual. An
 upward HLS commit retains the exact source lower bound but invalidates the comparison; the first

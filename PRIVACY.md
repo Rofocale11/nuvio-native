@@ -1,6 +1,6 @@
 # PlxNative Privacy Policy
 
-Applies to PlxNative 0.6.0. Last updated 4 September 2026.
+Applies to PlxNative 0.6.0. Last updated 9 November 2026.
 
 ## Who is responsible for PlxNative data
 
@@ -14,6 +14,18 @@ account features, the app communicates directly with Plex services. Plex process
 received by those services under [Plex’s own Privacy
 Policy](https://www.plex.tv/about/privacy-legal/). PlxNative’s developer does not receive that
 information.
+
+Continue Watching artwork. For each title in a Continue Watching row, PlxNative asks Plex’s catalog
+(discover.provider.plex.tv) for the title’s own cover artwork. The request carries the title’s Plex
+catalog identifier (which your Plex Media Server lists with the title), the language of the app, the
+app’s client identifier and, only when the profile has one, its Plex account token, so it tells
+Plex which titles are in the Continue Watching row of the profile in use. Your Plex Media Server then fetches
+the picture itself from the image host that Plex’s answer names. The request is made when a
+title’s card is first shown and this television has no saved answer for it; again when the saved
+answer is more than a day old and the card is shown; again on a later start or after a profile
+switch when an earlier attempt saved nothing, and when the card is shown again after Plex’s catalog
+could not be reached (at most once every 45 seconds while it cannot be reached); and again after the saved artwork was removed to make room, by signing out, or
+by changing the app’s language. PlxNative’s developer does not receive these requests.
 
 ## Plex Media Servers
 
@@ -75,11 +87,57 @@ internal component labels, app and webOS versions, television model and hardware
 details needed to reproduce and symbolicate the failure.
 
 A native crash report may also contain the last 16 window diagnostic steps: entering or leaving
-background, querying the native window, and beginning or completing the first frame after return.
+background, releasing the borrowed window surface, querying the native window, noticing that the system
+has replaced the window's surface (a fixed label, never the surface's address), finishing the background
+or return step, and beginning or completing the first frame after return. While the app is being sent to
+the background or brought back it also records the video player's teardown and video-window steps:
+unloading, destroying or retaining the player's native object, releasing the video plane, and creating
+and destroying the video window. The create step is recorded once the create call has returned, whether
+or not it produced a window, so it does not mean the window was obtained. These teardown and video-window
+steps are not recorded when the player is merely restarted (a trailer preview, a seek or a quality change).
 These steps include technical timestamps, fixed labels, whether playback was active, whether display/surface handles were
 available, and SDL's version numbers. They contain no window addresses or viewing content.
 They are collected only while crash reporting is enabled and accompany a crash rather than being
 sent as usage events. Disabling crash reports removes the local trace.
+
+When the television's own crash reporter leaves nothing for a crash that was a native fault (a
+signal such as a segmentation fault), PlxNative sends a simpler report built from its own crash
+log instead. It carries the same kernel name and release, webOS and hardware compatibility
+details as a native report (plus the same `probe` fact and the exact firmware `build` described
+for playback-error reports below), and the file name (never the folder) and build identifier of each
+library (a library of the television's firmware or one bundled with PlxNative) the faulting
+address and the return address were in, with the library's load address and size. A library that
+has no build identifier (the television's own C library has none), or whose file could not be matched to the one that crashed, is still named, with its load
+address and size and an all-zero placeholder identifier, as the native report lists it. It carries the
+time of the crash, to the second, as the television's clock read it when the crash was logged (it
+is left out when that clock reads an implausible time), which thread it happened on (the thread's number,
+whether it was the main thread, and the thread's own name, a technical label set by PlxNative or a library),
+whether the app was running, shutting down or exiting, and how many seconds it had been running; none of
+this is personal data. It also says in
+one fixed word why the primary report is missing: `no_envelope` (no usable report was left:
+the crash reporter left none, or left one that was malformed and was deleted before the comparison,
+which looks the same) or `envelope_unmatched` (it left reports, none of them this crash). No path, library
+folder or other file content is sent.
+
+When the crash was a Rust panic rather than a fault, the fallback report is smaller still: the
+source file and line of the panic, a hash of the panic message (the message itself is never sent),
+the app version and build identifier of PlxNative, the `environment` label of the build (`production`
+or `development`), the time of the panic (read and bounded as above), the same kernel name and release,
+webOS and hardware compatibility details (including the `probe` fact and the firmware `build`) that the fault fallback report carries, and
+the Crash report ID below. It carries none of the library details above.
+
+A main-thread freeze (the app not responding for five seconds or more while it is open on screen) is reported like a crash, under the same choice: code addresses and register values, one of three duration ranges (5 to 10 s, 10 to 30 s, 30 s or more) or "unrecovered", the step of the app's own frame loop the app was in when it stopped responding (`freeze.leg`: one fixed word from a list of eleven naming a phase of the loop, never anything about what was on screen or playing: `event-ingest`, `results`, `dev-scenarios`, `playback-pump`, `land-results`, `navcommit`, `dispatcher-frame`, `update`, `prepare-window`, `present-and-swap` or `frame-report`), and the details above, without stopping the app.
+
+When another part of the television's software ends PlxNative by calling `exit()` (for example the system closing it), the app records the call and reports it like a crash, under the same choice: the exit status (a number), which thread made the call (its number, whether it was the main thread, and its own name, a technical label set by PlxNative or a library), the library the call came from (its file name, never the folder, with its build identifier, load address and size, as for a crash report above) and the code address of the call, the time of the call to the second, and the details above.
+
+A report built from the crash log (a fault, a Rust panic, a freeze or an `exit()` call, as above) is
+sent the next time the app starts, which after an update is a newer build than the one that left
+the record. When the record names a different build of PlxNative than the one sending it, the report's
+`release` (the app version it is filed under) is left out rather than filed under the newer
+version, and it carries two tags instead: `crash.uploaded_by`, the app version that sent it, and
+`crash.build_id`, the build identifier of the build that crashed. Both are an app version and a
+binary build identifier, which these reports already carried; nothing new is collected. A report from the same
+build as the one sending it, or one whose build cannot be compared, carries `release` and neither tag.
 
 Every crash and error report carries a **Crash report ID**: a random identifier created on this
 television when you turn crash reports on, sent as the report's `user.id`. It exists so that
@@ -91,17 +149,30 @@ Settings shows it while crash reports are on. Turning crash reports off, or sign
 the local identifier; enabling them later creates a new one. Reports already sent keep the old
 identifier, so copy it down first if you intend to ask for their deletion.
 
+While crash reports are on, PlxNative also sends one small **session record** for each stretch of
+use, even when nothing crashed, so that crash-free sessions can be counted per release: the start
+time, its length, how it ended (exited, crashed or ended abnormally), a crash count, the Crash
+report ID, the app version and the build's `environment` label — no content, title, account or
+server. A session ends after 15 minutes without a key press while nothing is playing, when the app
+goes to the background, or after 4 hours. Its start and last activity time are kept on this
+television until it ends, so a crash can be attributed on the next launch; turning crash reports
+off, or signing out, deletes that and any record waiting to be sent.
+
 The same independent choice also covers a handled playback-error report when playback reaches its
-explicit terminal error screen. That report contains a fixed failure kind, delivery and quality
+explicit terminal error screen, or when a trailer preview behind a detail page fails. That report contains a fixed failure kind, delivery and quality
 classes, coarse raster, rate, HTTP and buffer classes, whether a first picture appeared, and at
 most 32 typed playback transitions with bucketed elapsed times. It contains no title, ratingKey,
 URL, path, playhead, duration, exact bitrate, server identity, address, token, account or profile,
 and is not joined to the product analytics identifier or `playback_id`. It carries the same Crash
 report ID as a crash report, and the same television model, SoC, hardware revision, webOS release
-and the `rtkmem`/`install` sandbox facts a crash report carries. Buffering, seeking, holding
+and the `rtkmem`/`install` sandbox facts a crash report carries, plus the exact firmware `build`
+beside the webOS release. It also carries a `probe` fact:
+two fixed words, each `ok`, `no_keys`, `unreadable` or `unprobed` (the boot probe had not run yet), one for each of the two firmware information
+files the television model and webOS release are read from (`probe` is `ok/ok` when both
+answered), saying why that model, SoC or release is empty when it is. Buffering, seeking, holding
 a low quality, or rejecting an adaptive-bitrate candidate does not by itself send a report.
 The closed diagnostic vocabulary includes terminal kinds such as `playback_interrupted` and
-`original_rollback`; HLS direction `refresh`; delivery reason `original_open_rollback`; and
+`original_rollback`; HLS direction `refresh`; delivery reasons `original_open_rollback`, `quality_pick` and `refusal_recovery`; and
 Original-check outcomes `started`, `succeeded`, `no_body`, `deadline`, `transport`,
 `inconclusive`, `server_state` and `refused`.
 
@@ -113,6 +184,67 @@ error, and `reopen_failed` when the retry after it was refused as well) — and 
 running, so a connection cut at a fixed time is visible as one bucket). Both appear as a tag and
 in the playback context; both are `none` / `unknown` when no transfer failure was recorded.
 
+Every playback-error report also carries `demux_exit`, one more closed field naming the first step
+of reading the media stream that failed, whatever the report's `kind` — `none` /
+`https_reserve_failed` / `https_open_failed` / `http_open_failed` / `open_input_failed` /
+`find_stream_info_failed` / `no_video_stream` / `no_framing` / `load_mismatch` / `no_audio_au` /
+`no_usable_video` / `dts_core_missing` / `hls_failed` / `hls_not_ready` / `demux_panicked` /
+`no_access_units` / `load_refused` / `other` (the first step that failed, never a file name,
+address or error text). It appears as a tag and in the playback context, and is `none` when no
+such step was recorded; the stalls `no_audio_au`, `no_usable_video` and `dts_core_missing` are
+reported under `playback_interrupted`, not `media_source`.
+
+The report also carries `pipeline_error`, which explains a `tv_pipeline` failure: the whole number
+the television's own video pipeline gave with its first error in that playback (for example `601`
+for a resource-allocation refusal), `0` when it gave none, and otherwise any 32-bit integer. It is
+a number and nothing else — the firmware's accompanying text is not sent, because it can name
+addresses or files. It appears as a tag and in the playback context.
+
+A report also tells the attempt that failed apart from the playback it happened in, because a
+playback that switched quality part-way can fail on the new attempt after playing fine before it.
+`delivery` and `started` describe the playback as a whole; three more fields describe the attempt:
+`attempted_delivery`, the way of delivering the video that was being opened when it failed
+(`unknown` / `original_direct` / `original_remux` / `hls` / `progressive_transcode`, the same
+vocabulary as `delivery`); `attempt_started`, `yes` or `no` for whether that attempt had put a
+picture on screen before it failed; and `http_status`, the exact HTTP status number the media server
+answered with (`100` to `599`), or `0` when none was recorded. The status is a number and nothing
+else — the server's accompanying text is not sent. All three appear as a tag and in the playback
+context; `http` keeps its coarse class beside the number.
+
+Two more closed fields say why that attempt was made and which one it was, because a failure after
+a Retry or a handoff reads differently from the first open: `attempt_origin`, one of `fresh` (the
+Play the viewer pressed) / `user_retry` (Retry, or *Switch to Auto and play*, on the failure
+screen) / `quality_change` (a quality the viewer picked, including one picked on the failure
+screen) / `viewer_reconfigure` (a playback speed or audio-processing change the viewer requested) / `auto_handoff` (a change of delivery the app made on its own) / `recovery` (the app
+reopening the video after an attempt failed to open) / `resume` (reopening where playback left off
+after the app returned to the foreground) / `preview` (the trailer that plays quietly behind a
+detail page, which the viewer did not press Play for); and `attempt_ordinal`, which open of this
+playback it was, `1` to `9` and then `9+`, counting the first open, every retry and every handoff.
+The count starts again at `1` with each new Play and is kept only in memory. Both appear as a tag
+and in the playback context. A trailer preview that fails is reported with the same fields and one
+more, below: it is marked `preview`, it counts as the first open, it names direct play as the
+attempted delivery (the only route a preview ever opens), and its `started` and `attempt_started`
+fields say whether the trailer actually showed a picture before it failed. Sentry files it in an
+issue of its own, apart from playback failures.
+
+A trailer preview that the app refuses to open, because a preview only ever plays an unmodified
+direct play (the failure kind `preview_not_direct`), also names which condition refused it, as one
+closed tag, `preview_refusal`: `no_part` (the item has no media file to play), `not_direct` (a direct
+play was not available, so the route would have been a transcode or a remux, whatever the reason:
+the server's answer, the connection's or the quality setting's rules, or a track the television
+cannot play as it is) or `adaptive` (a direct play was available, but Auto quality chose a
+bandwidth-adapted stream instead). The first condition that fails in that order is the one named.
+No other failure carries it, and it appears as a tag only, not in the playback context. It is one
+of those three words and nothing the server said.
+
+The report also names `backend` — `unknown` / `feed` / `uri` — and `terminal_stage` —
+`unknown` / `planning` / `open` / `decode` / `presentation` / `release`. These describe only the
+current logical request and its addressed terminal attempt. A new plan failure cannot inherit the
+previous URI or buffer-feed attempt's backend or failure stage. When no current physical attempt
+was proven, the backend is `unknown`; a known plan refusal can still name `planning`. They appear
+as closed tags and in the playback context. No attempt or request identifier, release disposition,
+URL or source text is sent with them.
+
 When the failure is the media server **refusing to play or convert the item** (`decision_refused`),
 that report also carries four closed fields about the refusal — and never the server's own
 explanation, which is free text that can name files, paths and servers and stays on the television:
@@ -123,6 +255,16 @@ reported by its documented class, never as itself); the delivery the app had ask
 because the refused plan never installed a route); and the source file's video codec
 (`unknown` / `h264` / `hevc` / `av1` / `vp9` / `mpeg2` / `other`) and audio codec (`unknown` /
 `aac` / `ac3` / `eac3` / `truehd` / `dts` / `flac` / `mp3` / `opus` / `other`).
+
+When the app recovers from the television refusing a video before its first picture (by having
+the server convert the refused stream, by having the server encode the video and convert the audio,
+by falling back to adaptive streaming, or by restoring the route it replaced), the same choice
+also covers one small `refusal_recovered` report per play, which contains only the codec class of the refused stream (the video's or audio's closed codec
+list above, or `unknown`), a channel bucket for refused audio (`unknown` / `1-2` / `3-6` / `7+`),
+the whole error number the television's video pipeline gave or the word `timeout` or `stall`, and
+which rung played (`facet` / `hls` / `rollback` / `encode`), beside the Crash report ID and the
+television facts above (including the exact firmware `build`, for example `6.5.3-47`), and nothing else of the
+playback: no title, ratingKey, URL, path, server, picture size, trace or timing.
 
 The same choice also covers a **sign-in problem report** when signing in fails. It contains the
 `kind` of sign-in step that failed — or, when the failure was inside the app rather than on the
@@ -163,10 +305,14 @@ automatically.
 ## Optional product analytics
 
 Product analytics is a separate choice and is off until you choose to share it. If enabled,
-PlxNative sends typed screen and feature events and broad sign-in and playback outcome classes to
-PostHog in Germany. Reports carry a random Analytics ID created when you turn product analytics on
-and may include the app version, webOS version, television model and SoC, and whether the selected
-server is local, remote or relayed. Turning product analytics off, or signing out, deletes the
+PlxNative sends typed screen and feature events, broad sign-in and playback outcome classes and,
+when you leave a screen, broad classes of how smoothly the app ran on it (`route.left`: late
+frames, frozen frames, the app not responding, a remote key pressed repeatedly with nothing
+happening) to PostHog in Germany. The last is performance data about the app, never what you
+watched or searched for, and it carries no counts, durations or key names, only the classes below.
+Reports carry a random Analytics ID created when you turn product analytics on and may include the
+app version, webOS version, television model and SoC, and whether the selected server is local,
+remote or relayed. Turning product analytics off, or signing out, deletes the
 local identifier; enabling it later creates a new one.
 
 Signing in happens before this choice is asked. The sign-in events from before your answer
@@ -186,9 +332,9 @@ Every product analytics event also carries this bounded compatibility and connec
 | `webos_api` | the webOS API version reported by nyx |
 | `webos_codename` | the webOS firmware family reported by nyx |
 | `device_model` | the LG model/platform class reported by nyx |
-| `soc` | the SoC/board class reported by nyx |
+| `soc` | the SoC/board class reported by nyx or, when nyx names none, the leading board-family token (at most eight lowercase letters and digits, such as `k5lp`) of the television's machine name |
 | `hardware_revision` | the hardware revision class reported by nyx |
-| `server_connection` | `local` / `remote` / `relay` / `unknown` — omitted entirely on an event with no one server, such as `app.launch`, `route.entered` or a `signin.*` event |
+| `server_connection` | `local` / `remote` / `relay` / `unknown` — omitted entirely on an event with no one server, such as `app.launch`, `route.entered`, `route.left` or a `signin.*` event |
 | `ip_version` | `v4` / `v6` / `unknown` — omitted entirely on an event with no one server, same as `server_connection` |
 | `rtkmem` | `ok` / `missing` / `n/a` — the k5lp/k3lp `/dev/rtkmem` jail pre-flight |
 | `install` | `devmode` / `homebrew` / `unknown` — never the install path |
@@ -197,6 +343,7 @@ Every product analytics event also carries this bounded compatibility and connec
 |---|---|
 | `app.launch` | *(none)* |
 | `route.entered` | `screen` — one of a fixed list of screen names |
+| `route.left` | `screen` — one of a fixed list of screen names; `slow_frames` — the share of presented frames that missed a refresh: `0` / `<1%` / `1-5%` / `5-20%` / `20%+` — never a count; `frozen_frames` — frames over 700 ms: `0` / `1` / `2-3` / `4+`; `hang` — seconds per hour the app did not respond for over 250 ms: `0` / `<1` / `1-10` / `10+` — never the interval; `dead_presses` — times one remote key was pressed four times in a second with nothing happening: `0` / `1` / `2+` — never which key |
 | `signin.completed` | *(none)* |
 | `signin.started` | *(none)* |
 | `signin.failed` | `kind` — `pin_create` / `authorization` / `discovery` / `other` |
@@ -205,7 +352,7 @@ Every product analytics event also carries this bounded compatibility and connec
 | `enhancement.refused` | `boost_dialog` — `true` / `false`; `normalize_loudness` — `true` / `false` |
 | `playback.requested` | `playback_id` — a random number minted per attempt, never stored and never reused |
 | `playback.started` | `playback_id` — a random number minted per attempt, never stored and never reused; `mode` — `direct` / `transcode` / `unknown` — `unknown` when no route was installed, as for a plan the server or a playback setting refused; `raster` — `sd` / `hd` / `fhd` / `uhd` / `unknown` — never the raster; `fps` — a fixed rung: `24`/`25`/`30`/`50`/`60`/`100`/`other`/`unknown` — never the measured rate; `video` — a codec name from a fixed table; anything else is `other`; `audio` — a codec name from a fixed table; anything else is `other`; `startup` — `<1s` / `1-3s` / `3-10s` / `10s+` — never the interval |
-| `playback.failed` | `playback_id` — a random number minted per attempt, never stored and never reused; `mode` — `direct` / `transcode` / `unknown` — `unknown` when no route was installed, as for a plan the server or a playback setting refused; `kind` — `decision_refused` / `playback_policy` / `no_video_transcode_target` / `no_video_track` / `media_source` / `playback_interrupted` / `tv_pipeline` / `original_rollback` / `jail_missing_rtkmem` / `load_timeout` / `unspecified` |
+| `playback.failed` | `playback_id` — a random number minted per attempt, never stored and never reused; `mode` — `direct` / `transcode` / `unknown` — `unknown` when no route was installed, as for a plan the server or a playback setting refused; `kind` — `decision_refused` / `playback_policy` / `no_video_transcode_target` / `no_video_track` / `media_source` / `playback_interrupted` / `tv_pipeline` / `original_rollback` / `jail_missing_rtkmem` / `load_timeout` / `release_timeout` / `resolve_failed` / `preview_not_direct` / `server_stopped` / `unspecified`; `video` — a codec name from a fixed table; anything else is `other`; `audio` — a codec name from a fixed table; anything else is `other`; `pipeline_error` — the TV pipeline's first error number as a class: `0` (none) / `100` / `200` / `601` / `other`; `refusal` — `sync` (the TV's Load call itself refused) / `async` (the pipeline refused it before the first picture) / `none` |
 | `playback.cancelled` | `playback_id` — a random number minted per attempt, never stored and never reused; `mode` — `direct` / `transcode` / `unknown` — `unknown` when no route was installed, as for a plan the server or a playback setting refused |
 | `playback.abandoned` | `playback_id` — a random number minted per attempt, never stored and never reused; `mode` — `direct` / `transcode` / `unknown` — `unknown` when no route was installed, as for a plan the server or a playback setting refused |
 | `playback.quality` | `playback_id` — a random number minted per attempt, never stored and never reused; `rebuffers` — `0` / `1` / `2-3` / `4+`; `buffering` — `none` / `<2s` / `2-10s` / `10s+` — never the interval |
@@ -234,7 +381,7 @@ report is sent only when you press Send report; quote the Report ID it showed to
 ## Contact and non-affiliation
 
 Privacy questions may be sent to `support@plxnative.com`. Security vulnerabilities may be reported
-privately through GitHub Security Advisories for `GLinnik21/plx-native`.
+privately through GitHub Security Advisories for `plxnative/plx-native`.
 
 PlxNative is an independent, unofficial application. It is not produced by, endorsed by, or
 affiliated with Plex, Inc. or LG Electronics Inc.

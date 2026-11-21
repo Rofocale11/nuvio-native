@@ -16,14 +16,18 @@ impl plx_machine::machine::Host for SessionHost {
     type Fx = AppFx;
     type Msg = AppMsg;
     type Elem = u32;
-    type Views<'a> = auth::SessionRead<'a>;
+    type Views<'a> = (auth::SessionRead<'a>, &'a crate::registry::ScreenInputs);
     type Init = super::super::family::NoInit;
     type Memory = ();
 }
 
+impl crate::registry::ScreenInputsLike for SessionHost {
+    fn screen_inputs<'a>(cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs { cx.views.1 }
+}
+
 impl AuthLike for SessionHost {
     fn auth<'a>(cx: &Cx<'a, Self>) -> auth::SessionRead<'a> {
-        cx.views
+        cx.views.0
     }
 }
 
@@ -36,6 +40,7 @@ pub fn snapshot(phase: Phase, users: Vec<auth::UserTile>) -> auth::owner::Sessio
         png: Arc::from(Vec::<u8>::new()),
         code_replaced: false,
         users: Arc::from(users),
+        seated: Arc::from(""),
         error: Arc::from(""),
         pin_denied: false,
         profile: None,
@@ -72,10 +77,11 @@ pub fn cx_with<'a>(
     snapshot: &'a auth::owner::SessionSnapshot,
 ) -> Cx<'a, SessionHost> {
     Cx {
-        views: snapshot.read(),
+        views: (snapshot.read(), crate::registry::publication_fixture()),
         tick: Tick::default(),
         measure: &MEASURE,
         press: PressRead::default(),
+        modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
         focus: FocusRead {
             current: focus,
             ..Default::default()
@@ -93,6 +99,7 @@ pub fn cx(focus: Option<FocusKey<u32>>) -> Cx<'static, SessionHost> {
 pub fn bare(pad: Pad) -> ProfilesScreen {
     ProfilesScreen {
         entry: EntryId(0),
+        roster_seated: false,
         row: AvatarRow::new(),
         footer_pop: CtlPop::new(),
         spin_ms: 0.0,
@@ -100,6 +107,7 @@ pub fn bare(pad: Pad) -> ProfilesScreen {
         ground: RouteGround::new(),
         pad,
         users: Arc::from(Vec::<auth::UserTile>::new()),
+        seated: Arc::from(""),
         phase: Phase::Profiles,
         error: Arc::from(""),
         back_resumes: false,

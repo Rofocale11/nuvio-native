@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONSTRUCTORS = {
     'Label': (0,), 'Button': (0,), 'TextView': (0,), 'Row': (0,), 'Section': (0,),
     'Header': (0,), 'StatusOverlay': (1,), 'DocumentScreen': (1,), 'KeyHint': (0, 2),
-    'Field': (0, 1), 'ValueChip': (0, 1),
+    'Field': (0, 1),
 }
 # Associated functions and enum variants that carry display text: `Owner::name(...)`.
 PATHS = {('Kicker', 'Context'): (0,), ('Busy', 'Readout'): (1,), ('TileLabel', 'titled'): (0, 1),
@@ -315,10 +315,11 @@ def scan(source: str, calls: dict[str, tuple[int, ...]] | None = None,
 
 
 # The layer crates split out of rust-modules/src whose files this gate reads (docs/module-layers.md).
-# `platform` holds three of the listed product files below (webos.rs, tv/device.rs, devcaps/dv.rs);
+# `os` holds two of the listed product files below (tv/device.rs, devcaps/dv.rs) and the webOS platform
+# crate (W7b) the third, `webos.rs`;
 # `gfx` holds `overdraw.rs`, which this gate read as `ui/overdraw.rs` before the split, and `ui`
 # is the whole of what this gate read as `rust-modules/src/ui`.
-LAYER_SRCS = ('rust-modules/platform/src', 'rust-modules/gfx/src', 'rust-modules/ui/src')
+LAYER_SRCS = ('rust-modules/os/src', 'rust-modules/gfx/src', 'rust-modules/ui/src')
 # The constants table reads EVERY layer crate, not only the three above: a prose `const` is followed
 # across files, and `rust-modules/src` held all of them before the split. Without `plex` (which
 # also took `PlaybackQuality::label`, the quality row's text, out of the listed `route/decision.rs`)
@@ -328,7 +329,9 @@ CONST_SRCS = (*LAYER_SRCS, 'rust-modules/base/src', 'rust-modules/machine/src', 
               'rust-modules/session/src',
               'rust-modules/media/src',
               'rust-modules/appkit/src',
-              'rust-modules/screens/src')
+              'rust-modules/screens/src',
+              'rust-modules/platform-webos/src',
+              'rust-modules/platform-desktop/src')
 
 
 def missing_roots(root: Path) -> list[str]:
@@ -341,7 +344,7 @@ def missing_roots(root: Path) -> list[str]:
 
 def source_paths(root: Path):
     src = root / 'rust-modules/src'
-    platform = root / LAYER_SRCS[0]
+    os_src = root / LAYER_SRCS[0]
     for base, folders in ((root / LAYER_SRCS[2], ('',)), (root / 'rust-modules/appkit/src', ('',)), (root / 'rust-modules/screens/src', ('',))):
         for folder in folders:
             for path in sorted((base / folder).rglob('*.rs')):
@@ -349,10 +352,12 @@ def source_paths(root: Path):
     for rel in ('app/chrome.rs', 'app/diagnostics.rs', 'app/playback.rs', 'lab/toast.rs'):
         yield src / rel
     # `player/{ass, mod, shared, sidecar}.rs` and `route/{decision, plan}.rs` moved with the media split.
-    for rel in ('player/ass.rs', 'player/mod.rs', 'player/shared.rs', 'player/sidecar.rs', 'route/decision.rs', 'route/plan.rs'):
+    for rel in ('player/ass.rs', 'player/mod.rs', 'player/shared.rs', 'player/sidecar.rs', 'route/decision.rs', 'route/decision_memory.rs', 'route/plan.rs', 'route/plan_memory.rs'):
         yield root / 'rust-modules/media/src' / rel
-    for rel in ('webos.rs', 'tv/device.rs', 'devcaps/dv.rs'):
-        yield platform / rel
+    for rel in ('tv/device.rs', 'devcaps/dv.rs'):
+        yield os_src / rel
+    # `webos.rs` was `os`'s until the webOS platform crate took it.
+    yield root / 'rust-modules/platform-webos/src/webos.rs'
     # `metadata.rs` and `person.rs` were listed under `rust-modules/src` until the data split.
     for rel in ('metadata.rs', 'person.rs'):
         yield root / 'rust-modules/data/src' / rel

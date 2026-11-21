@@ -2,18 +2,19 @@
 //! row's third occupant). It appears when the playing episode reaches a FINAL credits marker (one
 //! that runs to the end of the item) and the PlayQueue has another episode behind it, under the
 //! default Next episode preference (Up Next countdown): the next episode's still, its address and
-//! name, and a countdown that starts it on its own.
+//! name, and both Watch Credits and Next Episode. Authorized Automatic credits uses the same
+//! controls with five presented seconds instead of the legacy ten-second clock.
 //!
 //! The data is `route::up_next()` — lifted from the `continuous=1` PlayQueue that every playback
 //! already creates, so nothing here asks the server what plays next.
 //!
 //! It TAKES THE PLACE of the transport's Subtitles/Audio discs — the same control row the Skip
 //! button uses, the same right edge — with the still and its caption stacked directly above. The
-//! countdown is the primary button's own fill sweep (`Button::progress`), so the control and the
+//! countdown is on the primary button (Classic's fill sweep, or the package's ring, bar or numeric label), so the control and the
 //! timer are one object rather than a button beside a rail.
 //!
 //! **Two buttons, and they are deliberately not equals** (the design's own note): *Next Episode*
-//! takes the [`ctrl_slot`](crate::player_hud::ctrl_slot) width — the floor that keeps the row
+//! takes the row's floor width (`hud_format/compile.rs`, through `classic::stand_in_w`) — the floor that keeps the row
 //! from visibly shrinking when it appears — while *Watch Credits* takes only its own label's, since
 //! a second full-width capsule would read as a pair of equals when one continues watching and the
 //! other does nothing at all. They are laid out in that spatial order, so LEFT reaches Watch
@@ -26,7 +27,8 @@
 //! **The row's cursor is not kept here.** It is `hud_nav.btn`, exactly as it is for the discs, so
 //! LEFT/RIGHT need no special case and [`ControlSlot::items`](crate::player_hud::ControlSlot)
 //! answers for the clamp. This module owns the countdown and nothing else — which is also why the
-//! cancel rule lives at `app.rs`'s one frame block rather than being spread across the key arms.
+//! shared cancel rule is applied by the app's legacy-clock block and the player screen's automatic
+//! policy. The screen retains a declined segment across grant and timer-mode changes.
 //!
 //! *(A full-screen post-play CARD — show poster, DISPLAY title, countdown ring — was built for the
 //! cross-show case and lives at commit `84ff9328`. It is not here because its trigger does not
@@ -34,6 +36,8 @@
 //! never hands us a different show. Sourcing it from Continue Watching is the owner's call.)*
 #![allow(dead_code)]
 use plx_media::route::UpNext;
+use plx_ui::hstack::{Align, HStack, Item};
+use plx_ui::vstack::{Anchor, VStack};
 use plx_ui::label::{HAlign, Label};
 use plx_ui::theme;
 use plx_ui::widgets::{draw_card, Button, ControlGround};
@@ -47,6 +51,11 @@ pub const COUNTDOWN_MS: u32 = 10_000;
 
 /// The row's two items, in the order they are DRAWN — so `hud_nav.btn` and the arrow keys agree
 /// without a translation table (LEFT lands on 0 because 0 is the left one).
+///
+/// These are the two FIXED control ids of Up Next, `watch_credits` and `play_next`: ordinals 0 and
+/// 1 of the row, so the engine addresses them as `control_elem(BTN_CREDITS)` and
+/// `control_elem(BTN_NEXT)`. They carry no [`HudCommand`](crate::player_hud::command::HudCommand) and no package may rebind them, because
+/// the countdown's meaning depends on which of the two is focused ([`countdown_may_run`]).
 pub const BTN_CREDITS: c_int = 0;
 pub const BTN_NEXT: c_int = 1;
 /// Where the focus ring parks when the row appears: the PRIMARY, which here is the right-hand item
@@ -75,10 +84,23 @@ pub struct Countdown {
     cancelled: bool,
 }
 
+/// The one active clock's presentation, shared by the legacy and automatic pair.
+#[derive(Clone, Copy)]
+pub struct CountdownView {
+    remaining_ms: Option<u32>,
+    duration_ms: u32,
+}
+impl CountdownView {
+    pub fn automatic(progress: Option<f32>) -> Self {
+        let duration_ms = crate::skip_policy::COUNTDOWN_US / 1000;
+        Self { remaining_ms: progress.map(|p| ((1.0 - p.clamp(0.0, 1.0)) * duration_ms as f32) as u32), duration_ms }
+    }
+}
+
 /// Whether this owns the control row this frame. The precedence itself lives in ONE place —
-/// [`crate::player_hud::slot_for`] — so this is just a read of the resolved slot.
+/// [`crate::player_hud::slot_for_preferences`] — so this is just a read of the resolved slot.
 pub fn is_shown(slot: crate::player_hud::ControlSlot) -> bool {
-    matches!(slot, crate::player_hud::ControlSlot::UpNext(_))
+    slot.is_up_next_pair()
 }
 
 /// Per-frame tick: arm the countdown the moment the tile appears, and forget everything about it
@@ -88,6 +110,10 @@ pub fn is_shown(slot: crate::player_hud::ControlSlot) -> bool {
 /// episode on its own. Focus only ever [`cancel`]s it.
 impl Countdown {
 pub fn tick(&mut self, slot: crate::player_hud::ControlSlot, now: u32) {
+    if matches!(slot, crate::player_hud::ControlSlot::AutomaticUpNext(_)) {
+        self.deadline = 0;
+        return;
+    }
     if !is_shown(slot) {
         // segment over (or the queue emptied): drop the deadline AND the cancel latch, so the
         // next episode's credits arm normally instead of inheriting this one's refusal
@@ -112,14 +138,17 @@ pub fn tick(&mut self, slot: crate::player_hud::ControlSlot, now: u32) {
 /// `bare_transport` is the third way and the one that reads as an omission until it bites: an
 /// OVERLAY — a track menu, the Info card, the Chapters strip — is the only way of taking hold
 /// of the transport that never moves the focus ring. Worse,
-/// [`crate::player_hud::draw_hud`] draws the control row only for the BARE transport, so with
+/// the renderer (`player_hud::render`) draws the control row only for the BARE transport, so with
 /// the Info card open the tile is not on screen at all. Without this term a countdown that was
 /// already running when the card opened kept its clock behind a panel nobody could see it through
 /// and cut to the next episode out of nowhere — the same failure `HudState::raise_for_offer`
 /// exists to forbid, reached by the other door. A panel one presses OPEN is exactly as much
 /// "engaging the transport" as an arrow key.
-pub fn countdown_may_run(bare_transport: bool, row_focused: bool, btn: c_int) -> bool {
-    bare_transport && row_focused && btn == BTN_NEXT
+///
+/// `play_next_focused` is whether the focused control is `play_next` (`btn == BTN_NEXT`): the
+/// rule needs the identity of ONE control, not an index into a row.
+pub fn countdown_may_run(bare_transport: bool, row_focused: bool, play_next_focused: bool) -> bool {
+    bare_transport && row_focused && play_next_focused
 }
 
 impl Countdown {
@@ -133,6 +162,10 @@ pub fn cancel(&mut self) {
 /// True while the countdown is running (drives holding the HUD up, so the timer is never invisible).
 pub fn armed(&self) -> bool {
     self.deadline != 0
+}
+
+pub fn view(&self, now: u32) -> CountdownView {
+    CountdownView { remaining_ms: self.armed().then(|| self.remaining_ms(now)), duration_ms: COUNTDOWN_MS }
 }
 
 /// Milliseconds left (0 when disarmed or elapsed).
@@ -167,7 +200,7 @@ pub fn expired(&self, now: u32) -> bool {
 }
 
 /// The descriptor to start, cloned off the `&'static` store. Cloning is mandatory, not tidiness:
-/// `route::request_play_up_next` clears `UP_NEXT` as its first act, so handing it a borrow of the
+/// `route::request_play_queue_item` clears `UP_NEXT` as its first act, so handing it a borrow of the
 /// static would be a use-after-free the borrow checker cannot see through a `'static` lifetime.
 pub fn take(&mut self, ps: &plx_media::route::PlaybackSession) -> Option<UpNext> {
     self.cancel();
@@ -215,56 +248,42 @@ pub struct Layout {
     pub next: Rect,
 }
 
-/// PURE — the whole column from the two MEASURED pill widths, so the draw and the pointer hit-test
-/// are one arrangement and the arrangement is host-testable. Measuring is the impure half and lives
-/// in [`layout`]: `text_width` is `TTF_SizeUTF8`, which the host suite cannot even link against.
-pub fn layout_of(next_w: f32, credits_w: f32) -> Layout {
-    use crate::player_hud::{CTRL_H, CTRL_RIGHT, CTRL_Y};
-    let next = Rect::new(CTRL_RIGHT - next_w, CTRL_Y, next_w, CTRL_H);
-    let credits = Rect::new(next.x - PILL_GAP - credits_w, next.y, credits_w, next.h);
-    let caption = Rect::new(
-        CTRL_RIGHT - CAPTION_W,
-        CTRL_Y - BTN_GAP - CAPTION_H,
-        CAPTION_W,
-        CAPTION_H,
-    );
+/// **The offer's column from the two pill widths**, right-anchored at
+/// `anchor.right` on the row `anchor.top` / `anchor.h` describe. PURE, so the draw and the pointer hit-test
+/// are one arrangement and the arrangement is host-testable (measuring the pills is the caller's, since
+/// `text_width` is `TTF_SizeUTF8`, which the host suite cannot even link against). The layout compiler
+/// (`hud_format::compile`) calls it with the anchor of the segments its package's Up Next replaces,
+/// so a package's offer and the classic one are the one arrangement.
+pub fn layout_at(anchor: crate::player_hud::geometry::RowAnchor, next_w: f32, credits_w: f32) -> Layout {
+    use crate::player_hud::geometry::RowAnchor;
+    let RowAnchor { right: ctrl_right, top: ctrl_y, h: ctrl_h } = anchor;
+    // The two pills are one run, right-anchored at the control row's edge, `PILL_GAP` apart.
+    let pills = [Item::new(credits_w), Item::new(next_w)];
+    let row = HStack::new(&pills, PILL_GAP, Align::Trailing(ctrl_right));
+    let (credits_x, _) = row.span(0).unwrap_or_default();
+    let (next_x, _) = row.span(1).unwrap_or_default();
+    let next = Rect::new(next_x, ctrl_y, next_w, ctrl_h);
+    let credits = Rect::new(credits_x, next.y, credits_w, next.h);
+    // The column, bottom-up from the control row: still, caption, row. The unequal gaps are what
+    // group them (the caption hugs the still; the buttons get more air), carried as the caption's
+    // own `after`. The still's height is its 16:9 frame at the primary's width.
     let still_h = (next_w * 9.0 / 16.0).round();
-    let still = Rect::new(
-        CTRL_RIGHT - next_w,
-        caption.y - CAP_GAP - still_h,
-        next_w,
-        still_h,
-    );
+    let column = [
+        Item::new(still_h),
+        Item::new(CAPTION_H).after(BTN_GAP),
+        Item::new(ctrl_h),
+    ];
+    let col = VStack::new(&column, CAP_GAP, Anchor::Bottom(ctrl_y + ctrl_h));
+    let (still_y, _) = col.span(0).unwrap_or_default();
+    let (caption_y, _) = col.span(1).unwrap_or_default();
+    let caption = Rect::new(ctrl_right - CAPTION_W, caption_y, CAPTION_W, CAPTION_H);
+    let still = Rect::new(ctrl_right - next_w, still_y, next_w, still_h);
     Layout {
         still,
         caption,
         credits,
         next,
     }
-}
-
-/// [`layout_of`] over the two measured widths. The primary takes the same control-row slot the
-/// Subtitles/Audio pair occupies — never narrower than the pair it replaces, so the row does not
-/// visibly shrink when it appears — while *Watch Credits* takes only its own label's width:
-/// deliberately NOT a second `ctrl_slot`, because that floor exists to hold the row's right edge
-/// steady, which is the primary's job, and two equal capsules would say the two choices are
-/// equivalent.
-pub fn layout(row: &mut crate::player_hud::TransportRow, measure: &dyn plx_machine::machine::Measure) -> Layout {
-    layout_of(
-        crate::player_hud::ctrl_slot(row, plx_platform::i18n::msg::widgets_next_episode(), measure).w,
-        plx_ui::widgets::Button::pill_w_measured(plx_platform::i18n::msg::widgets_next_credits_c(), theme::size::BODY, false, false, measure),
-    )
-}
-
-/// [`layout`] without writing the row's width memo — what `ControlSlot::item_rect` places the two
-/// buttons at. Only the two BUTTONS are pointer targets: the still and its caption are not, since
-/// with two actions in the row a click on the artwork has no single obvious meaning, and guessing
-/// one is how a stray click starts an episode the user did not ask for.
-pub fn layout_peek(row: &crate::player_hud::TransportRow, measure: &dyn plx_machine::machine::Measure) -> Layout {
-    layout_of(
-        crate::player_hud::ctrl_slot_w(row, plx_platform::i18n::msg::widgets_next_episode(), measure),
-        plx_ui::widgets::Button::pill_w_measured(plx_platform::i18n::msg::widgets_next_credits_c(), theme::size::BODY, false, false, measure),
-    )
 }
 
 /// The caption — `"Up Next · S2, E4 · Laura"`. PRIMARY and bold, not secondary: it sits at y≈760
@@ -277,90 +296,192 @@ fn caption(u: &UpNext) -> String {
     } else {
         u.ep_title.clone()
     };
-    plx_platform::i18n::msg::widgets_next_caption(&episode)
+    plx_os::i18n::msg::widgets_next_caption(&episode)
 }
 
-pub fn draw(
+/// Which of the offer's two pieces of decor a package draws (`up_next.still`, `up_next.caption`). The
+/// two buttons are always drawn: they are the offer's targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decor {
+    pub still: bool,
+    pub caption: bool,
+}
+
+impl Decor {
+    /// classic's: the still and its caption
+    pub const BOTH: Self = Self { still: true, caption: true };
+}
+
+/// The app-owned countdown presentations a package can select; timing and cancellation are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CountdownFace { FillSweep, Ring, Bar, Numeric }
+
+impl CountdownFace {
+    pub fn named(name: &str) -> Self {
+        match name { "ring" => Self::Ring, "bar" => Self::Bar, "numeric" => Self::Numeric, _ => Self::FillSweep }
+    }
+}
+
+/// The two fixed buttons keep their app commands, with independently declared rest and focus treatments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ButtonLook {
+    pub rest: plx_ui::widgets::TransportRest,
+    pub focus: plx_ui::widgets::TransportFocus,
+}
+
+impl ButtonLook {
+    pub const CLASSIC: Self = Self { rest: plx_ui::widgets::TransportRest::Film, focus: plx_ui::widgets::TransportFocus::Accent };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Look { pub credits: ButtonLook, pub next: ButtonLook, pub countdown: CountdownFace }
+
+impl Look {
+    pub const CLASSIC: Self = Self { credits: ButtonLook::CLASSIC, next: ButtonLook::CLASSIC, countdown: CountdownFace::FillSweep };
+}
+
+/// **Draw the offer** over a [`Layout`] the caller already has: the compiled package's rects
+/// (`Standin::up_next`), placed at compile time, so nothing here measures a button.
+pub fn draw_over(
     ps: &plx_media::route::PlaybackSession,
-    row: &mut crate::player_hud::TransportRow,
-    up: &Countdown,
+    l: &Layout,
+    decor: Decor,
+    look: Look,
+    row: &crate::player_hud::motion::HudMotion,
+    timer: CountdownView,
     p: Painter,
     focused: bool,
     btn: c_int,
-    now: u32,
     measure: &dyn plx_machine::machine::Measure,
-) {
+    press: plx_machine::machine::PressRead<u32>,
+) -> bool {
     let Some(u) = plx_media::route::up_next(ps) else {
-        return;
+        return false;
     };
-    let l = layout(row, measure);
-    let (pop_credits, pop_next) = (row.scale(BTN_CREDITS), row.scale(BTN_NEXT));
     // NOT scaled: `CARD_FOCUS_SCALE` is the terminal value of a focus spring the shelves drive, and
     // passing it as a constant drew the still permanently 7% oversized — overhanging the column on
     // both sides. The still is decoration on a focusable row, not a focusable tile itself, so it
     // keeps the card treatment (sheen + resting shadow) at rest scale.
-    draw_card(
-        p,
-        l.still,
-        plx_media::route::item_sid(plx_media::route::cur_sid(ps)).raw(),
-        &u.thumb,
-        (480, 270),
-        10.0,
-        false,
-        1.0,
-    );
-
-    let elided = plx_gfx::text::elide_by(&caption(u), l.caption.w, false, |t| {
-        measure.width_str(t, theme::size::CAPTION, true)
-    });
-    if let Ok(cs) = CString::new(elided) {
-        Label::new(cs.as_ptr(), theme::size::CAPTION, theme::TEXT_PRIMARY)
-            .bold()
-            .h(HAlign::Right)
-            .draw(p, l.caption);
+    if decor.still {
+        draw_card(
+            p,
+            l.still,
+            plx_media::route::item_sid(plx_media::route::cur_sid(ps)).raw(),
+            &u.thumb,
+            (480, 270),
+            10.0,
+            false,
+            1.0,
+        );
     }
 
+    if decor.caption {
+        let elided = plx_gfx::text::elide_by(&caption(u), l.caption.w, false, |t| {
+            measure.width_str(t, theme::size::CAPTION, true)
+        });
+        if let Ok(cs) = CString::new(elided) {
+            Label::new(cs.as_ptr(), theme::size::CAPTION, theme::TEXT_PRIMARY)
+                .bold()
+                .h(HAlign::Right)
+                .draw(p, l.caption);
+        }
+    }
+
+    if !draw_buttons(l, look, row, timer, p, focused, btn, press) { return false; }
+    p.opacity() >= 0.5 && [l.credits, l.next].into_iter().all(|r| {
+        let (rect, _, clip) = p.to_screen(r);
+        let hit = rect.intersect(clip);
+        hit.w > 0.0 && hit.h > 0.0
+    })
+}
+
+/// The fixed command pair's presentation, factored so a host census can exercise every countdown without a decoder.
+#[allow(clippy::too_many_arguments)]
+fn draw_buttons(l: &Layout, look: Look, row: &crate::player_hud::motion::HudMotion, timer: CountdownView,
+    p: Painter, focused: bool, btn: c_int, press: plx_machine::machine::PressRead<u32>) -> bool {
+    let (pop_credits, pop_next) = (row.scale(BTN_CREDITS, press), row.scale(BTN_NEXT, press));
     let e = Env::inert();
     // The focus pop is the CONTROL ROW's, not this card's: these two stand in the transport's own
-    // slot and share its cursor, so they share its springs (`TransportRow::scale`).
-    Button::new(plx_platform::i18n::msg::widgets_next_credits_c().as_ptr(), theme::size::BODY, l.credits)
+    // slot and share its cursor, so they share its springs (`HudMotion::scale`).
+    let credits = Button::new(plx_os::i18n::msg::widgets_next_credits_c().as_ptr(), theme::size::BODY, l.credits)
         .focused(focused && btn == BTN_CREDITS)
         // Both buttons on this card stand on LIVE CREDITS — the video plane, under this card's own
         // scrim — so both take the unkeyed ground (`ControlGround`). It is what the app's
         // `ControlStyle::Keyline` was hand-rolling for exactly this surface, and the right way
         // round: a light film over the scrim rather than a darker plate cut into the picture.
         .ground(ControlGround::Unkeyed)
-        .scale(pop_credits)
-        .draw(&e, p);
+        .scale(pop_credits);
+    styled(credits, look.credits).draw(&e, p);
 
-    // The primary IS the countdown — its fill sweeps left→right and, at the far edge, the episode
-    // starts. Driven straight off the remaining MILLISECONDS and redrawn every frame, so the sweep
-    // is continuous; the label carries no seconds, because the pill's width is derived from its
-    // label and a ticking numeral would resize the button and slide its centred text every second.
-    let Ok(label) = CString::new(plx_platform::i18n::msg::widgets_next_episode()) else {
-        return;
+    // The primary IS the countdown. Classic keeps its continuous fill sweep and original label;
+    // a package can instead trace the ring, use the shared progress rail, or replace the primary label
+    // with its numeric countdown. The compiler reserves the widest numeric label before drawing,
+    // so neither the button nor its neighbouring controls resize as the seconds change.
+    let label = if let Some(left) = timer.remaining_ms.filter(|_| look.countdown == CountdownFace::Numeric) {
+        plx_os::i18n::msg::player_up_next_seconds_left(i64::from(left.div_ceil(1000)))
+    } else { plx_os::i18n::msg::widgets_next_episode().to_owned() };
+    let Ok(label) = CString::new(label) else {
+        return false;
     };
     let mut b = Button::new(label.as_ptr(), theme::size::BODY, l.next)
         .focused(focused && btn == BTN_NEXT)
         .ground(ControlGround::Unkeyed)
         .scale(pop_next);
-    if up.armed() {
+    if let Some(left) = timer.remaining_ms {
         // It animates from a CLOCK, so `plx_machine::idle`'s spring instrumentation cannot see it — the trap
         // `Xfade::tick` and `Spinner::draw` both shipped frozen in. The player route bypasses the
         // frame gate outright today, so this changes nothing now; it is what keeps that reversible.
         // A HELD clock (`remaining_ms`) draws one fixed fill, so there is nothing to redraw — the
         // same exception `widgets::Spinner` makes.
         if !plx_machine::motion::phase_clocks_held() {
-            plx_machine::idle::invalidate();
+            plx_machine::motion::report::note_motion();
         }
-        b = b.progress(1.0 - (up.remaining_ms(now) as f32 / COUNTDOWN_MS as f32).clamp(0.0, 1.0));
+        let progress = 1.0 - (left as f32 / timer.duration_ms as f32).clamp(0.0, 1.0);
+        b = match look.countdown {
+            CountdownFace::FillSweep => b.progress(progress),
+            CountdownFace::Ring => b.progress_ring(progress),
+            CountdownFace::Bar => b.progress_bar(progress),
+            CountdownFace::Numeric => b,
+        };
     }
-    b.draw(&e, p);
+    styled(b, look.next).draw(&e, p);
+    true
+}
+
+/// Preserve the native widget path exactly for the Classic looks; other packages name transport faces.
+fn styled(button: Button<'_>, look: ButtonLook) -> Button<'_> {
+    if look == ButtonLook::CLASSIC { button } else { button.rest_face(look.rest).focus_face(look.focus) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn up_next_presentation_distinguishes_every_declared_countdown() {
+        let _serial = plx_base::testlock::serial();
+        let _en = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let row = crate::player_hud::motion::HudMotion::new();
+        let up = Countdown { deadline: 11_000, ..Countdown::default() };
+        let l = Layout { still: Rect::default(), caption: Rect::default(), credits: Rect::new(100.0, 800.0, 200.0, 64.0), next: Rect::new(316.0, 800.0, 420.0, 64.0) };
+        let now = 3_500;
+        let paint = |face| {
+            let look = Look { countdown: face, ..Look::CLASSIC };
+            let mut runs = Vec::new();
+            let prims = plx_ui::record_walk(|| plx_ui::draw_census::capture(|| {
+                runs = plx_ui::draw_census::capture_runs(|| { draw_buttons(&l, look, &row, up.view(now), Painter::root(), true, BTN_NEXT, Default::default()); });
+            }));
+            (prims, runs)
+        };
+        let fill = paint(CountdownFace::FillSweep);
+        let ring = paint(CountdownFace::Ring);
+        let bar = paint(CountdownFace::Bar);
+        let numeric = paint(CountdownFace::Numeric);
+        assert_ne!(ring.0, fill.0, "ring must not draw the fill-sweep path");
+        assert_ne!(bar.0, fill.0, "bar must not draw the fill-sweep path");
+        let expected = plx_os::i18n::msg::player_up_next_seconds_left(i64::from(up.remaining_ms(now).div_ceil(1000)));
+        assert!(numeric.1.iter().any(|r| r.text == expected), "numeric countdown must paint its measured localized remaining seconds");
+    }
 
     /// The one cancel rule, exhaustively. It is a STEADY STATE, so it has to answer for every
     /// (row focused × which button) pair rather than for a transition: the countdown survives only
@@ -368,16 +489,16 @@ mod tests {
     #[test]
     fn the_countdown_runs_only_while_the_ring_rests_on_the_primary() {
         assert!(
-            countdown_may_run(true, true, BTN_NEXT),
+            countdown_may_run(true, true, true),
             "the resting state the appear edge creates"
         );
         assert!(
-            !countdown_may_run(true, true, BTN_CREDITS),
+            !countdown_may_run(true, true, false),
             "reaching for Watch Credits is reaching for the alternative"
         );
         for b in [BTN_CREDITS, BTN_NEXT] {
             assert!(
-                !countdown_may_run(true, false, b),
+                !countdown_may_run(true, false, b == BTN_NEXT),
                 "focus off the row is the user driving the transport, whatever btn still says"
             );
         }
@@ -392,7 +513,7 @@ mod tests {
         for b in [BTN_CREDITS, BTN_NEXT] {
             for focused in [false, true] {
                 assert!(
-                    !countdown_may_run(false, focused, b),
+                    !countdown_may_run(false, focused, b == BTN_NEXT),
                     "a tile behind a panel counts down where it cannot be seen or refused"
                 );
             }
@@ -406,7 +527,7 @@ mod tests {
     #[test]
     fn the_primary_is_the_right_hand_item_and_the_countdown_survives_it() {
         assert_eq!(PRIMARY_BTN, BTN_NEXT);
-        assert!(countdown_may_run(true, true, PRIMARY_BTN));
+        assert!(countdown_may_run(true, true, PRIMARY_BTN == BTN_NEXT));
     }
 
     /// Geometry, from the design's own column: the two pills share a baseline and the control row's
@@ -416,11 +537,11 @@ mod tests {
     /// the host suite cannot link SDL2_ttf at all.
     #[test]
     fn the_column_is_right_anchored_on_one_edge() {
-        // the real orders of magnitude: `ctrl_slot`'s floor is 236, and "Watch Credits" measures a
+        // the real orders of magnitude: the row's floor is 232, and "Watch Credits" measures a
         // little under it — which is the asymmetry the design is making a point of
-        let l = layout_of(243.0, 226.0);
+        let l = layout_at(crate::player_hud::classic::ROW_ANCHOR, 243.0, 226.0);
         let (n, c, t, cap) = (l.next, l.credits, l.still, l.caption);
-        let right = crate::player_hud::CTRL_RIGHT;
+        let right = crate::player_hud::classic::ROW_ANCHOR.right;
         assert_eq!(n.x + n.w, right, "the primary holds the row's right edge");
         assert_eq!(t.x + t.w, right, "…and the still shares it");
         assert_eq!(
@@ -475,5 +596,28 @@ mod tests {
             "Up Next \u{b7} Laura",
             "no address, no empty ordinal"
         );
+    }
+}
+
+#[cfg(test)]
+mod automatic_pair_clock_tests {
+    use super::*;
+    use crate::player_hud::ControlSlot;
+    #[test]
+    fn automatic_pair_uses_one_five_second_face_and_never_the_legacy_deadline() {
+        let marker = plx_data::metadata::Marker { kind: plx_data::metadata::MarkerKind::Credits,
+            start_ms: 100_000, end_ms: 120_000, final_seg: true };
+        let mut legacy = Countdown::default();
+        legacy.tick(ControlSlot::UpNext(marker), 1_000);
+        assert!(legacy.armed());
+        legacy.tick(ControlSlot::AutomaticUpNext(marker), 11_000);
+        assert!(!legacy.armed());
+        assert!(!legacy.expired(11_000));
+        let auto = CountdownView::automatic(Some(0.4));
+        assert_eq!(auto.duration_ms, 5_000);
+        assert_eq!(auto.remaining_ms, Some(3_000));
+        assert_eq!(CountdownView::automatic(None).remaining_ms, None);
+        legacy.tick(ControlSlot::UpNext(marker), 12_000);
+        assert_eq!(legacy.view(12_000).remaining_ms, Some(10_000));
     }
 }

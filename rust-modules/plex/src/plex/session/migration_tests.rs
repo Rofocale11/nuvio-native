@@ -1,6 +1,7 @@
 //! Canonical schema and the shipping client/coordinator path, using synthetic helper transport.
 use super::*;
-use plx_platform::storage::{client, state, wire::*};
+use plx_os::storage::{client, state, wire::*};
+use plx_os::tv::authority::Authority;
 use persistence::CanonicalRead;
 
 fn fixture() -> Session {
@@ -44,7 +45,7 @@ fn v1_routine_public_edit_does_not_upgrade_or_reencrypt_auth() {
     });
     public.preferences["future_public"] = "keep".into();
     let mut session = join_canonical(&public, &protected).unwrap();
-    session.auto_sign_in = false;
+    session.prefs.auto_sign_in = false;
     let mut requests = Vec::new();
     let response = loaded(
         &public,
@@ -251,16 +252,16 @@ fn malformed_hero_hint_is_discarded_without_losing_credentials() {
     let mut value = serde_json::to_value(fixture()).unwrap();
     value["last_hero_blur"] = serde_json::json!({"future":"shape"});
     let session: Session = serde_json::from_value(value).unwrap();
-    assert!(session.last_hero_blur.is_none());
+    assert!(session.prefs.last_hero_blur.is_none());
     assert_eq!(session.account_token, "synthetic-account");
     let (_, auth) = split_canonical(&session).unwrap();
     let mut public = state::PublicPayload::default();
     public.preferences =
         serde_json::json!({"auto_sign_in":"bad","last_library":null,"last_hero_blur":"bad"});
     let session = join_canonical(&public, &auth).unwrap();
-    assert!(!session.auto_sign_in);
-    assert!(session.last_library.is_empty());
-    assert!(session.last_hero_blur.is_none());
+    assert!(!session.prefs.auto_sign_in);
+    assert!(session.prefs.last_library.is_empty());
+    assert!(session.prefs.last_hero_blur.is_none());
 }
 
 struct Opener {
@@ -290,7 +291,7 @@ struct MigrationFixture {
     pending: Option<String>,
     data: Option<String>,
     cleared: bool,
-    blocked: Option<plx_platform::storage::StoreError>,
+    blocked: Option<plx_os::storage::StoreError>,
     verified: bool,
     wrong_readback: bool,
     commits: usize,
@@ -320,7 +321,7 @@ impl persistence::MigrationStore for MigrationFixture {
             return CanonicalRead::Blocked(error);
         }
         if self.cleared {
-            return CanonicalRead::Cleared { revision: 1, language: plx_platform::i18n::Preference::System };
+            return CanonicalRead::Cleared { revision: 1, kept: Default::default() };
         }
         match &self.data {
             Some(payload) => CanonicalRead::Data {
@@ -413,8 +414,8 @@ fn live_load_and_update_use_the_canonical_authority() {
         persistence::write_session(&session, SaveAuthority::Routine),
         persistence::CanonicalCommit::Durable { revision: 1, .. }
     ));
-    let _ = super::peek();
-    plx_base::storage_worker::drain_for_test();
+    assert_eq!(super::peek().account_token, "", "peek alone fills nothing");
+    super::refresh_blocking_for_test();
     assert_eq!(
         super::peek().account_token,
         "synthetic-account",
@@ -423,7 +424,7 @@ fn live_load_and_update_use_the_canonical_authority() {
     assert!(super::update(|current| {
         assert_eq!(current.account_token, "synthetic-account");
         let mut next = current.clone();
-        next.auto_sign_in = true;
+        next.prefs.auto_sign_in = true;
         Some(next)
     }));
     let CanonicalRead::Data { payload, revision } = persistence::load() else {
@@ -448,15 +449,15 @@ fn canonical_cleared_blocked_and_existing_data_all_outrank_reappeared_legacy() {
             ..Default::default()
         },
         MigrationFixture {
-            blocked: Some(plx_platform::storage::StoreError::HelperUnavailable),
+            blocked: Some(plx_os::storage::StoreError::HelperUnavailable),
             ..Default::default()
         },
         MigrationFixture {
-            blocked: Some(plx_platform::storage::StoreError::AuthLocked),
+            blocked: Some(plx_os::storage::StoreError::AuthLocked),
             ..Default::default()
         },
         MigrationFixture {
-            blocked: Some(plx_platform::storage::StoreError::InvalidSchema),
+            blocked: Some(plx_os::storage::StoreError::InvalidSchema),
             ..Default::default()
         },
         MigrationFixture {
@@ -641,8 +642,8 @@ fn locked_boot_exposes_only_public_preferences_and_never_offline_profiles() {
     else {
         panic!("locked snapshot")
     };
-    assert!(session.auto_sign_in);
-    assert_eq!(session.last_library.len(), 1);
+    assert!(session.prefs.auto_sign_in);
+    assert_eq!(session.prefs.last_library.len(), 1);
     assert!(session.account_token.is_empty());
     assert!(session.user.token.is_empty());
     assert!(session.profiles.is_empty());
@@ -654,7 +655,7 @@ struct Db8 {
     puts: usize,
     gets: usize,
 }
-impl plx_platform::storage::keymanager::Rpc for Db8 {
+impl plx_os::storage::keymanager::Rpc for Db8 {
     fn call(&mut self, uri: &str, payload: &Value) -> Result<Value, ErrorCode> {
         match uri {
             "luna://com.palm.db/get" => {
@@ -685,7 +686,7 @@ impl plx_platform::storage::keymanager::Rpc for Db8 {
 
 #[test]
 fn production_client_coordinator_and_helper_backend_reconcile_committed_lost_reply() {
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
         "com.nuvionative.app.storage".into(),
@@ -733,7 +734,7 @@ fn production_client_coordinator_and_helper_backend_reconcile_committed_lost_rep
         panic!("helper snapshot")
     };
     let mut next = session.clone();
-    next.auto_sign_in = false;
+    next.prefs.auto_sign_in = false;
     assert!(matches!(
         persistence::commit_session_with(
             &next,
@@ -765,18 +766,24 @@ fn production_client_coordinator_and_helper_backend_reconcile_committed_lost_rep
 /// production coordinator and the real helper backend, without reviving any credential.
 #[test]
 fn helper_signout_retains_the_language_and_only_the_delete_all_reset_removes_it() {
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    // Fork Rofocale11: Nuvio Native installs as `com.nuvionative.app`, so its DB8 storage kind is
+    // `com.nuvionative.app.storage`. Upstream's `com.beb.plxnative.storage` names a different
+    // record, so this helper migration test must run against the fork's own namespace. Keep the
+    // fork's string; take only upstream's `plx_platform` -> `plx_os` crate rename.
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
-    let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
+    let session = Session { language: plx_os::i18n::Preference::Be, ..fixture() }.with_ui_resolution(UiResolution::Hd720);
     assert!(matches!(
         persistence::commit_session_with(&session, false, SaveAuthority::FreshReauthentication, 4, &mut transport),
         persistence::CanonicalCommit::Durable { .. }));
     assert!(matches!(persistence::commit_clear_with(&mut transport),
         persistence::CanonicalCommit::Durable { .. }));
     assert!(matches!(persistence::load_helper_with(&mut transport),
-        CanonicalRead::Cleared { language: plx_platform::i18n::Preference::Be, .. }),
-        "sign-out must keep the install-wide language readable");
+        CanonicalRead::Cleared {
+            kept: Retained { language: plx_os::i18n::Preference::Be, ui_resolution: UiResolution::Hd720 }, ..
+        }),
+        "sign-out must keep the install-wide language and Interface resolution readable");
     let client::Load::Present(cleared) = client::load_with(&mut transport).unwrap() else {
         panic!("helper snapshot")
     };
@@ -784,8 +791,10 @@ fn helper_signout_retains_the_language_and_only_the_delete_all_reset_removes_it(
     assert!(matches!(persistence::reset_cleared_language_with(&mut transport),
         persistence::CanonicalCommit::Durable { .. }));
     assert!(matches!(persistence::load_helper_with(&mut transport),
-        CanonicalRead::Cleared { language: plx_platform::i18n::Preference::System, .. }),
-        "Delete all local data must reset the language");
+        CanonicalRead::Cleared {
+            kept: Retained { language: plx_os::i18n::Preference::System, ui_resolution: UiResolution::Hd720 }, ..
+        }),
+        "Delete all local data must reset the language (the cleared tenure accepts the removal of `language` alone)");
     let client::Load::Present(reset) = client::load_with(&mut transport).unwrap() else {
         panic!("helper snapshot")
     };
@@ -821,23 +830,34 @@ fn stored_preferences(transport: &mut dyn client::Transport) -> Value {
 /// reloaded the way the next boot reads it.
 #[test]
 fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite() {
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    // Fork Rofocale11: Nuvio Native installs as `com.nuvionative.app`, so its DB8 storage kind is
+    // `com.nuvionative.app.storage`. Upstream's `com.beb.plxnative.storage` names a different
+    // record, so this helper migration test must run against the fork's own namespace. Keep the
+    // fork's string; take only upstream's `plx_platform` -> `plx_os` crate rename.
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
+    let base = fixture();
     let session = Session {
-        subtitle_size: SubtitleSize::Large,
-        subtitle_position: SubtitlePosition::High,
-        skip_interval: SkipInterval::Seconds30,
-        ..fixture()
+        prefs: Preferences {
+            subtitle_size: SubtitleSize::Large,
+            subtitle_position: SubtitlePosition::High,
+            skip_interval: SkipInterval::Seconds30,
+            ..base.prefs.clone()
+        },
+        ..base
     };
     commit_fresh(&session, &mut transport);
     let stored = stored_preferences(&mut transport);
     assert_eq!(stored["subtitle_size"], "large");
 
     let back = Session {
-        subtitle_size: SubtitleSize::default(),
-        subtitle_position: SubtitlePosition::default(),
-        skip_interval: SkipInterval::default(),
+        prefs: Preferences {
+            subtitle_size: SubtitleSize::default(),
+            subtitle_position: SubtitlePosition::default(),
+            skip_interval: SkipInterval::default(),
+            ..session.prefs.clone()
+        },
         ..session
     };
     assert!(matches!(
@@ -846,9 +866,9 @@ fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite
     let persistence::CanonicalRead::Opened { session: opened, .. } = persistence::load_helper_with(&mut transport) else {
         panic!("the session opens")
     };
-    assert_eq!(opened.subtitle_size, SubtitleSize::default(), "size stays at the default");
-    assert_eq!(opened.subtitle_position, SubtitlePosition::default(), "position stays at the default");
-    assert_eq!(opened.skip_interval, SkipInterval::default(), "skip interval stays at the default");
+    assert_eq!(opened.prefs.subtitle_size, SubtitleSize::default(), "size stays at the default");
+    assert_eq!(opened.prefs.subtitle_position, SubtitlePosition::default(), "position stays at the default");
+    assert_eq!(opened.prefs.skip_interval, SkipInterval::default(), "skip interval stays at the default");
 }
 
 /// **Issue #380: a learned server key belongs to the account that learned it.** The key rides in
@@ -859,19 +879,26 @@ fn a_preference_returned_to_its_default_is_not_resurrected_by_the_public_rewrite
 /// a session with no key.
 #[test]
 fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_none() {
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    // Fork Rofocale11: Nuvio Native installs as `com.nuvionative.app`, so its DB8 storage kind is
+    // `com.nuvionative.app.storage`. Upstream's `com.beb.plxnative.storage` names a different
+    // record, so this helper migration test must run against the fork's own namespace. Keep the
+    // fork's string; take only upstream's `plx_platform` -> `plx_os` crate rename.
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
-    let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
+    let session = Session { language: plx_os::i18n::Preference::Be, ..fixture() };
     commit_fresh(&session, &mut transport);
 
     // A pin write: public-only, the auth half untouched.
     let learned = Session {
-        server_key_pins: vec![ServerKeyPin {
-            machine_id: "machine".into(),
-            pin: plx_base::spki::pin_from_spki_der(b"synthetic spki"),
-            extensions: Default::default(),
-        }],
+        prefs: Preferences {
+            server_key_pins: vec![ServerKeyPin {
+                machine_id: "machine".into(),
+                pin: plx_base::spki::pin_from_spki_der(b"synthetic spki"),
+                extensions: Default::default(),
+            }],
+            ..session.prefs.clone()
+        },
         ..session.clone()
     };
     let client::Load::Present(before) = client::load_with(&mut transport).unwrap() else { panic!("helper snapshot") };
@@ -900,7 +927,7 @@ fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_
     let persistence::CanonicalRead::Opened { session: opened, .. } = persistence::load_helper_with(&mut transport) else {
         panic!("the new account's session opens")
     };
-    assert!(opened.server_key_pins.is_empty(), "no key carried over from the previous account");
+    assert!(opened.prefs.server_key_pins.is_empty(), "no key carried over from the previous account");
 }
 
 /// **Issue #385: an answer to "Connect without encryption?" belongs to the account that gave it.**
@@ -911,10 +938,14 @@ fn helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_
 /// again rather than handed its earlier answer.
 #[test]
 fn helper_signout_forgets_the_plaintext_answers_and_signing_back_in_asks_again() {
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    // Fork Rofocale11: Nuvio Native installs as `com.nuvionative.app`, so its DB8 storage kind is
+    // `com.nuvionative.app.storage`. Upstream's `com.beb.plxnative.storage` names a different
+    // record, so this helper migration test must run against the fork's own namespace. Keep the
+    // fork's string; take only upstream's `plx_platform` -> `plx_os` crate rename.
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(), state::Flavor::Stable, "com.nuvionative.app.storage".into());
     let mut transport = |request: Request| Ok(backend.dispatch(request));
-    let session = Session { language: plx_platform::i18n::Preference::Be, ..fixture() };
+    let session = Session { language: plx_os::i18n::Preference::Be, ..fixture() };
     commit_fresh(&session, &mut transport);
 
     // An answer write: public-only, the auth half untouched.
@@ -983,7 +1014,7 @@ fn pending_import_retries_only_its_recorded_envelope_and_never_another_legacy_fi
     );
     assert!(matches!(
         boot.state,
-        CanonicalRead::Blocked(plx_platform::storage::StoreError::AuthLocked)
+        CanonicalRead::Blocked(plx_os::storage::StoreError::AuthLocked)
     ));
     assert_eq!(store.pending.as_ref(), Some(&envelope));
     assert_eq!(store.commits, 0);
@@ -1026,7 +1057,7 @@ fn check_v1_extension_bootstrap_roundtrip(keys: &[String]) {
     }
     let extensions = auth["extensions"].clone();
     let protected = serde_json::to_string_pretty(&auth).unwrap();
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
         "com.nuvionative.app.storage".into(),
@@ -1083,7 +1114,7 @@ fn check_v1_extension_bootstrap_roundtrip(keys: &[String]) {
     assert!(ready.profiles.is_empty());
     assert_eq!(serde_json::to_value(&ready.extensions).unwrap(), extensions);
     session = ready;
-    session.auto_sign_in = !session.auto_sign_in;
+    session.prefs.auto_sign_in = !session.prefs.auto_sign_in;
     assert!(matches!(
         persistence::commit_session_with(
             &session,
@@ -1126,7 +1157,7 @@ fn helper_migration_keeps_opened_session_typed_through_exact_readback() {
         "typed-helper-readback",
         &serde_json::to_value(&expected).unwrap(),
     );
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
         "com.nuvionative.app.storage".into(),
@@ -1206,8 +1237,8 @@ mod published_06 {
         }
     }
 
-    fn helper(record: Option<Value>) -> plx_platform::storage::backend::Backend<Db8> {
-        plx_platform::storage::backend::Backend::new(
+    fn helper(record: Option<Value>) -> plx_os::storage::backend::Backend<Db8> {
+        plx_os::storage::backend::Backend::new(
             Db8 { record, ..Default::default() },
             state::Flavor::Stable,
             "com.beb.plxnative.storage".into(),
@@ -1215,7 +1246,7 @@ mod published_06 {
     }
 
     fn boot(
-        backend: &mut plx_platform::storage::backend::Backend<Db8>,
+        backend: &mut plx_os::storage::backend::Backend<Db8>,
         opener: &mut Opener,
         candidates: &[std::path::PathBuf],
     ) -> persistence::Bootstrap {
@@ -1311,7 +1342,7 @@ fn fallback_written_file_migrates_into_recovered_missing_db8() {
         serde_json::to_value(session_from_read(&read_legacy_locked())).unwrap(),
         serde_json::to_value(&expected).unwrap()
     );
-    let mut backend = plx_platform::storage::backend::Backend::new(
+    let mut backend = plx_os::storage::backend::Backend::new(
         Db8::default(),
         state::Flavor::Stable,
         "com.beb.plxnative.storage".into(),
@@ -1374,4 +1405,108 @@ fn pending_revocation_prevents_missing_canonical_from_importing_a_marked_snapsho
     assert!(matches!(result.state, CanonicalRead::Missing));
     assert_eq!(store.commits, 0);
     assert!(source.path.exists());
+}
+
+// Which store is canonical is the platform's statement (`plx_os::tv::authority`). The dispatchers
+// take the authority and the helper's transport, so every host runs the helper arm over a
+// transport of its own, and the files arm over one that fails the test if it is reached.
+
+/// The transport the files arm must never reach.
+fn no_helper(_: Request) -> Result<Response, client::ClientError> {
+    panic!("a files authority never talks to the storage helper")
+}
+
+/// The helper arm over the production backend, which holds the record the way DB8 does: the app's
+/// own state root stays empty.
+#[test]
+fn a_helper_authority_reads_and_clears_through_the_helper_and_keeps_no_file() {
+    let _serial = plx_base::testlock::serial();
+    let state = TempCanonicalState::new("authority-helper");
+    let mut backend = plx_os::storage::backend::Backend::new(
+        Db8::default(), state::Flavor::Stable, "com.beb.plxnative.storage".into());
+    let mut transport = |request: Request| Ok(backend.dispatch(request));
+    assert!(matches!(persistence::load_via(Authority::Helper, &mut transport), CanonicalRead::Missing));
+    commit_fresh(&fixture(), &mut transport);
+    let CanonicalRead::Opened { session, .. } = persistence::load_via(Authority::Helper, &mut transport) else {
+        panic!("the helper holds the session")
+    };
+    assert_eq!(session.account_token, "synthetic-account");
+    assert!(matches!(persistence::commit_cleared_via(Authority::Helper, &mut transport),
+        persistence::CanonicalCommit::Durable { .. }));
+    assert!(matches!(persistence::load_via(Authority::Helper, &mut transport), CanonicalRead::Cleared { .. }));
+    assert_eq!(
+        with_io_for_test(|| persistence::cleanup_after_confirmed_clear_via(Authority::Helper, &mut transport, Vec::new())),
+        persistence::ClearCleanupOutcome::Confirmed);
+    assert_eq!(std::fs::read_dir(&state.dir).unwrap().count(), 0, "the helper arm leaves no record file under the state root");
+}
+
+/// The files arm for a platform with no helper (the desktop, a host test, Tizen): the record is the
+/// 0600 file under the state root, and the helper is never asked.
+#[test]
+fn a_files_authority_keeps_the_record_in_files_and_never_asks_the_helper() {
+    let _serial = plx_base::testlock::serial();
+    let state = TempCanonicalState::new("authority-files");
+    let session = fixture();
+    let payload = serde_json::to_string(&session).unwrap();
+    assert!(matches!(persistence::load_via(Authority::Files, &mut no_helper), CanonicalRead::Missing));
+    assert!(matches!(persistence::commit_data_via(Authority::Files, &mut no_helper, payload),
+        persistence::CanonicalCommit::Durable { revision: 1, .. }));
+    assert!(matches!(
+        persistence::write_session_via(Authority::Files, &mut no_helper, &session, SaveAuthority::Routine),
+        persistence::CanonicalCommit::Durable { revision: 2, .. }));
+    assert!(matches!(persistence::migrate_session_via(Authority::Files, &mut no_helper, &session),
+        persistence::CanonicalCommit::Durable { revision: 3, .. }));
+    let CanonicalRead::Data { revision: 3, payload: stored } = persistence::load_via(Authority::Files, &mut no_helper) else {
+        panic!("the files hold the session")
+    };
+    assert_eq!(serde_json::from_str::<Session>(&stored).unwrap().account_token, "synthetic-account");
+    assert!(state.dir.join("session.json").exists());
+    assert!(matches!(persistence::commit_cleared_via(Authority::Files, &mut no_helper),
+        persistence::CanonicalCommit::Durable { revision: 4, .. }));
+    assert!(matches!(persistence::load_via(Authority::Files, &mut no_helper), CanonicalRead::Cleared { revision: 4, .. }));
+    assert_eq!(
+        with_io_for_test(|| persistence::cleanup_after_confirmed_clear_via(Authority::Files, &mut no_helper, Vec::new())),
+        persistence::ClearCleanupOutcome::Confirmed);
+    let boot = persistence::bootstrap_via(Authority::Files, &mut no_helper, &mut opener(), Vec::new());
+    assert!(matches!(boot.state, CanonicalRead::Cleared { revision: 4, .. }), "the record the files hold is read as it is");
+}
+
+/// At this layer a helper that cannot answer is a blocked canonical store: no read, write or
+/// migration is answered from the record files, and a legacy file is neither imported nor retired.
+/// (The session layer above writes its own marked fallback after a non-durable commit; that file is
+/// not the record and is not exercised here.)
+#[test]
+fn a_helper_authority_never_answers_from_the_record_files_when_the_helper_cannot_answer() {
+    use plx_os::storage::StoreError;
+    let _serial = plx_base::testlock::serial();
+    let state = TempCanonicalState::new("authority-helper-down");
+    let legacy = LegacyFile::new("authority-helper-down", &serde_json::to_value(fixture()).unwrap());
+    let session = fixture();
+    let requests = std::cell::Cell::new(0usize);
+    let mut down = |_: Request| {
+        requests.set(requests.get() + 1);
+        Err(client::ClientError::Unavailable)
+    };
+    let unavailable = persistence::CanonicalCommit::Failed(StoreError::HelperUnavailable);
+    assert!(matches!(persistence::load_via(Authority::Helper, &mut down),
+        CanonicalRead::Blocked(StoreError::HelperUnavailable)));
+    assert_eq!(persistence::commit_data_via(Authority::Helper, &mut down, serde_json::to_string(&session).unwrap()),
+        unavailable);
+    assert_eq!(requests.get(), 2);
+    assert_eq!(persistence::commit_data_via(Authority::Helper, &mut down, "not a session".into()),
+        persistence::CanonicalCommit::Failed(StoreError::InvalidSchema),
+        "a payload the helper cannot take is refused before it is sent");
+    assert_eq!(requests.get(), 2);
+    assert_eq!(persistence::write_session_via(Authority::Helper, &mut down, &session, SaveAuthority::Routine), unavailable);
+    assert_eq!(persistence::migrate_session_via(Authority::Helper, &mut down, &session), unavailable);
+    assert_eq!(persistence::commit_cleared_via(Authority::Helper, &mut down), unavailable);
+    assert_eq!(requests.get(), 5, "each of those asked the helper, and only the helper");
+    let boot = persistence::bootstrap_via(Authority::Helper, &mut down, &mut opener(), vec![legacy.path.clone()]);
+    assert!(matches!(boot.state, CanonicalRead::Blocked(StoreError::HelperUnavailable)));
+    assert!(boot.migration.is_none(), "a helper that is down authorizes no import");
+    assert_eq!(
+        persistence::cleanup_after_confirmed_clear_via(Authority::Helper, &mut down, vec![legacy.path.clone()]),
+        persistence::ClearCleanupOutcome::AuthorityNotConfirmed);
+    assert!(legacy.path.exists(), "an unconfirmed clear retires nothing");
+    assert_eq!(std::fs::read_dir(&state.dir).unwrap().count(), 0, "no record file was created under the state root");
 }

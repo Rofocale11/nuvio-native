@@ -13,7 +13,9 @@
 # fails, and each step's whole output is printed when it ends). So a step in this file must:
 #   * write only to a directory it made itself (`mktemp -d`, `tempfile`), never to a fixed path in
 #     /tmp or $TMPDIR, the checkout, `$HOME` or `~/.cache`; and a fixture that edits "the repo" edits
-#     a private copy of it;
+#     a private copy of it. The one exception is `check-c-unit`'s access leg
+#     (ci/access-interpose-test.c): its probe paths are the GPU driver's, fixed by the driver, so it
+#     takes a flock on /tmp;
 #   * bind port 0 (an ephemeral port), never a fixed one;
 #   * not take `tools/check-lock.py`'s real lock (ci/test_check_lock.py uses a throwaway path), not
 #     run cargo, and not assume it is the only `make` running;
@@ -21,11 +23,64 @@
 # `ci/test_check_collisions.py` runs these steps side by side to check the first rule; a step that
 # breaks one of them shows up there rather than as a flake in somebody else's `make check`.
 #
-# ORDER is only the START order: the sixteen slowest steps (measured 2026-10-07) come first, so the
-# last one to start is a short one; the run lasts as long as the longest step plus the queue. A new
-# step goes at the END; move it up only after measuring (`make check-python-rest` prints each step's
-# wall and CPU time and the slowest three).
+# ORDER is only the START order: the nine slowest steps of the CI run measured 2026-11-14 (the first
+# block below) come first, then the thirteen others of the sixteen slowest measured 2026-10-07 (three of
+# those sixteen are among the nine), so the last one to start is a short one; the run lasts as long as
+# the longest step plus the queue. A new step goes at the END; move it up only after measuring
+# (`make check-python-rest` prints each step's wall and CPU time and the slowest three).
 
+# The nine slowest steps (CI, 2026-11-14: machine-shape 225 s, build-gc 98 s, arm-profile 71 s, check-elf 56 s,
+# transition-arguments 47 s, disk-budget 44 s, disk-preflight 44 s, tv-lock 43 s, collisions 40 s) start first:
+# test_check_machine_shape.py sat 110th and ended the job at 413 s (it starts ~190 s in, then runs 225 s).
+
+# The machine-shape gate (ci/machines.ini, docs/sans-io.md): a state machine listed there keeps its state private (a `pub`,
+# `pub(crate)` or `pub(super)` field of the listed struct fails, as does a stale entry), so its one writer stays `step` and a new
+# way to change it is a new event. It also REPORTS, and never fails on, each machine's `bool` and `Option<..>` field counts: a
+# report-only flag ratchet. Pure lexing, no cargo; the self-tests run on synthetic trees in a private temp dir.
+python3 ci/test_check_machine_shape.py
+# tools/build-gc.sh against disposable repositories, fleet dirs and caches: every OTHER reclaim mode refuses under a held FFmpeg lock, a
+# live checkout is spared, `--auto`'s order is the planner's (and its `--worktrees` stage spares a lane inside the idle window, and one holding an ignored file that is not build output),
+# `--worktrees` judges a lane against `origin/main` without refreshing its index, and `--evict PLAN` deletes exactly what the plan
+# names after re-probing it: it refuses paths that are not derived build trees, skips a tree that turned live, goes on under an
+# FFmpeg lock, and never takes a /tmp tree that only looks old. `--evict` runs only inside the fixture's own directories.
+python3 ci/test_build_gc.py
+# `ARM_PROFILE`: a plain local build compiles the ARM staticlib with the fast `tvdev` profile and
+# everything that ships or runs in CI keeps fat-LTO `release`; resolved through print-bench-config.
+python3 ci/test_arm_profile.py
+python3 ci/test_check_elf.py
+python3 ci/test_transition_arguments.py
+# tools/disk-budget.py, the disk budget's inventory and planner (docs/disk-budget.md): the ladder's order, stopping at the line,
+# refusing only when the whole ladder cannot free the build's estimate plus the reserve, and NEVER planning the current checkout
+# below rung 6 (nor, there, the tree being built), a live, tracked, pkg/, vendor/ or non-PlxNative tree; private-byte accounting under hard links; `origin/main` merged detection
+# (squash merges, a stale local main, nothing written to the repository); `report` changes nothing; the plan file `build-gc.sh --evict`
+# reads (format, order, the stale slot, rung-6 `current`), `settle`, the cargo seed never planned, a /tmp tree aged by ctime so a
+# backdated fixture is never a candidate, the probes (`probe`, `tmp-trees`), and that collecting an inventory never rewrites a
+# lane's index. Synthetic inventories plus private temp repositories, a stubbed lsof, no real /tmp scan.
+python3 ci/test_disk_budget.py
+# The disk budget at every build entry: `make disk-preflight` is `tools/disk-budget.py preflight` and an ORDER-ONLY prerequisite of
+# every Makefile target that runs cargo. Static: the Makefile is parsed and every target whose recipe runs cargo (directly or through a
+# script) must be in `make -s print-disk-entries`, with the prerequisite after the `|`, before the build starts, and the recursive
+# `$(MAKE)` lines carrying PLX_DISK_BUDGET_DONE. Dynamic, on a fixture repository with PLX_GC_TEST_FREE_KIB and stubbed lsof/pgrep:
+# at comfort nothing starts and the planner is not imported; below the reserve with nothing to evict it refuses with the reason; below
+# comfort it evicts idle trees and never the tree being built; the marker and PLX_MIN_FREE_MB=0 are no-ops; the auto lock is
+# taken, a live holder is waited on for a bounded time (one --wait-secs deadline for the whole preflight) and no plan is made while it runs (a finished or stale holder is taken over); the inventory cache; a pretend emergency is never planned over real
+# trees; the cold store's unpark of an absent parked tree: the cheap no-gos (config removed, volume unmounted) come before any lock wait, the
+# lock is held to claim the copy and not across it (two trees restore at once), a claimed or dead-claimed tree, and the free-space rule. `make -n` and `make -s print-*` only, no cargo.
+python3 ci/test_disk_preflight.py
+python3 ci/test_build_root.py
+# The TV lock's own protocol suite, with NO television: the device half runs under a local sh in a temp dir, and the
+# HEADS-UP cases run the real `acquire`/`break` as children with their own lane, lease directory and lock path (one
+# line on a new lease, including your own expired one, none on a live renew or a refusal). It also runs the pre-flight's
+# verdict table (IDLE / IN USE / UNKNOWN) on fixture replies, cuts a hung probe off at PLX_TV_PREFLIGHT_SECS, and runs
+# `with` for real: it refuses to start on IN USE, PLX_TV_IN_USE_OK overrides, and its renewer's whole process tree dies
+# with it. That spawns and kills background processes, so it takes about 20 s, not milliseconds. Then the PostToolUse hook
+# that turns the HEADS-UP and IN USE lines into reminders: payload shapes, the failure and unrelated cases, malformed
+# stdin. Both host-only.
+tools/tv-lock.sh selftest
+# Nothing that runs at once may collide: two checkouts running the scratch-writing steps (test-compat.py,
+# the C unit tests) at once, and a mix of different steps run together as the runner runs this file,
+# each against one shared TMPDIR; and no test source binds a fixed port.
+python3 ci/test_check_collisions.py
 # The `check` lock wrapper's own suite: two shared runs at once and a third waiting (naming both
 # holders), a SIGKILLed holder freeing its slot, PLX_CHECK_SLOTS=1 serializing, exclusive mode for
 # the benchmarks (blocks and is blocked by shared runs, not starved by a stream of them, two
@@ -39,12 +94,6 @@ python3 ci/test_build_bench.py
 # one record per day (a same-day re-run replaces it), nothing written for a failed benchmark, a red `check` costing only
 # its own rows, a noisy day marked and kept, nothing identifying in the runner block. Synthetic documents, no cargo.
 python3 ci/test_build_history.py
-python3 ci/test_build_gc.py
-python3 ci/test_check_elf.py
-# Nothing that runs at once may collide: two checkouts running the scratch-writing steps (test-compat.py,
-# the C unit tests) at once, and a mix of different steps run together as the runner runs this file,
-# each against one shared TMPDIR; and no test source binds a fixed port.
-python3 ci/test_check_collisions.py
 # `tools/tv-config.sh`, the ONE resolver for the TV address and Wake-on-LAN MAC (this checkout's
 # .tv-host/.tv-mac, the main checkout's, then ~/.config/plxnative/), and every reader of it
 # (tv-ssh, wake-tv, the Makefile's TV, tests/run.py, stream-screen.py), against a throwaway repo
@@ -55,12 +104,19 @@ python3 -W ignore tools/test_tv_sched_trace.py
 python3 tools/test_check_parallel.py
 python3 ci/test_tv_session.py
 python3 ci/test_source_bundle.py
+python3 ci/test_renderer_sources.py
+python3 ci/test_shipped_faces.py
 # The restructure's structure gates (spec §15.2): greps with counted allowlists under
 # ci/allow/. tests/test_harness.py runs the same script; this line is the one a reader sees.
 ci/check-deps.sh
 # Catalog completeness is checked by the Rust build; these check the UI text entry points too.
 make --no-print-directory check-localization
+# A UI language is a locales/ directory plus its languages.json entry: no hand-written list of
+# languages in Rust, "each language" loops read i18n::SHIPPED (docs/localization.md).
+python3 ci/check-language-lists.py
+python3 ci/test_check_language_lists.py
 python3 tests/test_mock_pms_library.py
+python3 tests/test_mock_pms_discover.py
 # `tools/tv-ssh`, the ssh/scp front door every TV caller shares, against FAKE ssh/sshpass on
 # PATH: key accepted -> sshpass never run; key refused -> sshpass; unreachable -> no password
 # attempt; no address or password on any line; and the Makefile's echoed commands stay silent about both.
@@ -74,6 +130,10 @@ python3 ci/test_tv_ssh.py
 python3 tools/plxnative-lab selftest
 # `make test-fast` (the opt-in incremental loop) is fenced off from every other target.
 python3 ci/test_test_fast.py
+# `make test-hostsim` / `make check-nodef`, the managed replacements for the `/tmp/<dir>` cargo recipes
+# AGENTS.md used to hand out: neither can put a cargo tree outside the checkout, and a filter that
+# matches no test fails instead of passing with "0 tests".
+python3 ci/test_managed_targets.py
 # The C unit tests (crash tracer, its signal handler, the shim's private log files), each compiled into
 # a private directory.
 make --no-print-directory check-c-unit
@@ -112,14 +172,18 @@ python3 tools/test_tv_capture_bench.py
 python3 ci/check-package.py --selftest
 # The module-layer gate (docs/module-layers.md): every reference one module makes to another
 # must point DOWN the target crate graph in ci/module-layers.ini, and only the webOS port may
-# name the webOS modules (`[port webos]`), unless it is one of the counted migration entries in
+# name the webOS modules (`[platform webos]`), unless it is one of the counted migration entries in
 # ci/allow/layers.txt, which only shrinks. This is what keeps the module graph from growing new
 # cycles while the crate split is under way, and webOS from spreading. ~3 s, no cargo.
 python3 ci/test_module_graph.py
 python3 ci/check-module-layers.py
-# The statics gate (spec §0 done-criterion 1): static mut under ui/ and screens/ is zero except
-# the named render caches in ci/allow/statics.txt and the legacy modules still awaiting their
-# phase in ci/allow/statics-migration.txt — a counted list that only shrinks.
+# tools/rename-os-layer.py, Wave R's rename tool: forward, --reverse, --check and --equivalence on synthetic trees and a throwaway git repo. ~1 s, no cargo.
+python3 ci/test_rename_os_layer.py
+# The statics gate (spec §0 done-criterion 1): a static mut under ui/, screens/, appkit/ and the
+# gated data modules must be named in ci/allow/statics.txt or sit in a legacy module still awaiting
+# its phase in ci/allow/statics-migration.txt (a counted list that only shrinks). A static mut that
+# OWNS HEAP is refused anywhere under rust-modules unless ci/allow/statics.txt names it with the
+# thread that owns it (ci/check-statics-heap.py); a frame-loop render cache is a thread_local!.
 ci/check-statics.sh
 # The module-cycle ratchet: the top-level module cycle may shrink, never grow. The checker runs on the
 # real tree against ci/module-cycle-baseline.json (~1.5 s); its self-test uses a synthetic crate.
@@ -127,6 +191,8 @@ python3 ci/test_module_cycle.py
 python3 ci/check-module-cycle.py
 python3 tests/player_pointer.py --selftest
 python3 tests/test_replay_fixtures.py
+# The accessibility-id harness tool (tools/a11y.py): token grammar, state-file wait, id matching.
+python3 tests/test_a11y_tool.py
 python3 tools/prune-gh-caches.py --selftest
 # The demo library and the screenshot scene manifest (make screenshots). Offline: the cases
 # that serve the catalog skip, and say so, where the derived artwork cache is absent.
@@ -141,7 +207,7 @@ tools/plxnative-sample selftest
 # that `up` requires after launch. No SSH or television access occurs in this self-test.
 python3 tools/mock-guest.py --selftest
 tools/tv-session.sh selftest
-# The three PreToolUse/PostToolUse hooks' own suites (~0.6s together). They were not in this
+# The PreToolUse/PostToolUse hooks' own suites. They were not in this
 # target until 2026-08-26, which meant the guard that decides whether a private value may
 # leave this machine was covered by a test nobody ran on a normal check -- the same shape as
 # the bug that produced the leak it exists to prevent, where the check computed its answer and
@@ -150,6 +216,7 @@ python3 .claude/hooks/outbound-guard-test.py
 python3 .claude/hooks/release-config-check-test.py
 python3 .claude/hooks/tv-lock-guard-test.py
 python3 .claude/hooks/cloud-unshallow-test.py
+python3 .claude/hooks/watchlist-live-guard-test.py
 # The PMS probe's own offline suite (~3ms). It talks to the maintainer's real server with a
 # real token, so its redaction and its session CLEANUP are the two things that must not
 # regress -- and both are only covered here. It sat outside this target until 2026-08-27,
@@ -185,20 +252,23 @@ python3 tools/test_ci_history.py
 # tools/ci-summary.py (the page's "now" block with its order and selection, the two slowest lists and regressions) against synthetic series: step up and down,
 # noisy flat, missing days, the re-run wall rule, PR/push separation; no network.
 python3 tools/test_ci_summary.py
+# tools/ci-test-results.py (the per-test outcomes of a host unit job's log, for the flaky-test list on the CI page) on libtest output
+# as tools/cargo-test-parallel.py and plain cargo print it; no network.
+python3 tools/test_ci_test_results.py
 # `make test-crate` (the crate-only loop: it must carry the full suite's feature set) and the parallel
 # test runner every unit recipe goes through (a failing binary fails the gate, a missing binary is not
 # a pass, every `test result:` line is printed), both against a fake cargo; nothing is compiled.
 python3 ci/test_test_crate.py
 python3 ci/test_cargo_test_parallel.py
-# `ARM_PROFILE`: a plain local build compiles the ARM staticlib with the fast `tvdev` profile and
-# everything that ships or runs in CI keeps fat-LTO `release`; resolved through print-bench-config.
-python3 ci/test_arm_profile.py
 # `HOST_THREADS`: rustc's parallel front end for the local host test builds only; off for CI, RELEASE,
 # SYMBOLS and every non-debug flavour, and named by no ARM, simulator, clippy or workflow line.
 python3 ci/test_host_threads.py
 # ...and the other half of that rule: a timing run (tests/run.py --fps*, profile-graphics, tv-sched-trace)
 # refuses a deployed `tvdev` binary and builds with ARM_PROFILE=release; functional runs do not. No TV.
 python3 tests/test_arm_profile_guard.py
+# The harness half of the TV lock's pre-flight: tests/run.py stops on an `IN USE:` line (giving back a lease it
+# took, keeping one it inherited) unless PLX_TV_IN_USE_OK=1, as `tv-lock.sh with` does. A fake lock script in a temp dir; no TV.
+python3 tests/test_run_in_use.py
 # The production C dispatch gate (src/starfish.c `sf_ready_object`), compiled and run on the host. It
 # had a test file and no gate: nothing ran it until the step manifest was checked against the tree.
 python3 tests/test_native_load_gate.py
@@ -230,3 +300,153 @@ python3 ci/check-placeholders.py
 # fail if the gate line below is dropped from this file).
 python3 ci/test_check_dump_consumers.py
 python3 ci/check-dump-consumers.py
+# The Plex request registry (ci/plex-requests.ini, rust-modules/plex/src/plex/): every request the plex
+# layer can make is a section that says what it is, its reason and its evidence, and a paged site reaches
+# paged_path or PageReq. This is what stops a new request from landing without a paging decision. It also keeps
+# the Discover host at its one definition (account.rs), so no request skips the harness's stand-in. Pure
+# lexing, no cargo; the self-tests run on synthetic trees in a private temp dir.
+python3 ci/test_check_plex_requests.py
+python3 ci/check-plex-requests.py
+# The list-cap registry (ci/list-caps.ini, rust-modules/*/src and rust-modules/src): every cap-shaped bound on
+# a collection (.take(N), .truncate, a length .min(N), a MAX/CAP/LIMIT constant, a [..N] cut) is classed work,
+# preview-with-route, format, not-a-list or an open reach cap, so a hard cap on what the user can reach cannot
+# land unseen. Pure lexing, no cargo; the self-tests run on synthetic trees in a private temp dir.
+python3 ci/test_check_list_caps.py
+python3 ci/check-list-caps.py
+# The User-Agent gate: boot installs the process's one User-Agent (`net::set_user_agent`), and rust-modules/net/src/net.rs
+# is the only file that applies it (`apply_user_agent`, `user_agent_header_line`). A second CURLOPT_USERAGENT or a literal
+# `User-Agent` header in non-test Rust or in src/**/*.c fails, so a fourth transport cannot send its own name, and so does a
+# file with more `curl_easy_init` calls than `apply_user_agent` calls (or more hand-built request lines than
+# `user_agent_header_line` calls), so a new transport cannot forget to send it. Pure lexing,
+# no cargo (rust-modules/net/src/net/headers.rs may name the header only to REFUSE a caller's own `User-Agent:` line); the
+# self-test runs on synthetic trees in a private temp dir.
+python3 ci/test_check_user_agent.py
+python3 ci/check-user-agent.py
+
+# The link conditioner and the mock's paging contract (rate, determinism, per-class, run-time change; the
+# mock's own --selftest rides along): real loopback sockets on port 0, a few seconds.
+python3 tests/test_link_conditioner.py
+# The fault-injecting TCP proxy for real-looking network loss (pass/blackhole/reset/refuse, control endpoint,
+# the mock's --advertise-port): loopback sockets on port 0, ~8 s.
+python3 tests/test_netloss_proxy.py
+# The conditioned paging test's analysis on synthetic logs (the run itself needs a window and minutes: not here).
+python3 tests/paging_link.py --selftest
+
+# ci/check-debug-files.py (the Sentry upload step's "debug-files check must show symbols" gate), exercised against a stub CLI.
+python3 ci/test_check_debug_files.py
+# The ASS header fixture generator's Matroska parsing and validation, on synthetic input (no ffmpeg run).
+python3 ci/test_ass_header_fixture.py
+python3 ci/test_dependencies.py
+# ci/deps-update.py: update-source schema, tag/version handling per source type (fixtures), bump rewriting, dependency-graph snapshot shape, deps-update.yml security shape. No network.
+python3 ci/test_deps_update.py
+# THIRD-PARTY-NOTICES.md section 2.4's package tables are generated from rust-modules/Cargo.lock (ci/gen-third-party-notices.py;
+# inputs in ci/third-party-crates.json): the gate fails when a dependency bump moved a version, a crate entered the lock
+# unclassified, or the std snapshot's toolchain is not the one rust-modules/rust-toolchain.toml pins. Reads files only, no cargo; the self-test
+# runs on synthetic locks and data.
+python3 ci/test_gen_notices.py
+python3 ci/gen-third-party-notices.py --check
+# The soft-float guard: `-C target-feature=-soft-float` (what gives our crates VFP on the armv7 target) is an UNSTABLE
+# feature flag on stable rustc, so a release may stop honouring it. check-vfp.py compiles a tiny float probe with the
+# Makefile's exact codegen flags and fails on any __aeabi_f* libcall or a missing VFP op, with a negative control; its
+# self-test drives the scan and verdict on canned assembly and, where the pinned toolchain is installed, the real probe.
+# --skip-if-missing only so a runner without Rust is not red here: CI's host-lint job runs it strict.
+python3 ci/test_check_vfp.py
+python3 ci/check-vfp.py --skip-if-missing
+# RUST_INPUTS (the Makefile's hand-kept list of directories whose edits rebuild the app library) must search the library
+# crate `rust-modules/platform-webos` (the crate `$(RUST_LIB)` is compiled from, which the app does not reach) and every
+# crate that one or the app reaches through `path` dependencies: a crate left out is one whose edits `make` never sees, so
+# `make ipk` packages the previous library and says nothing. Reads manifests only, no cargo; the self-test plants a missing
+# crate in a temp tree.
+python3 ci/test_check_rust_inputs.py
+python3 ci/check-rust-inputs.py
+python3 ci/test_check_machine_writer.py
+python3 ci/check-machine-shape.py
+# tools/pr-land.py (gate / wait / merge / restack) against a fake `gh` on PATH and an injected sleeper: a failed, pending, missing, draft, behind
+# or head-moved PR never reaches `gh pr merge` (#387), the polling and backoff, the head-oid race, the verify against a temporary
+# origin, and a planted secret refused before any `gh` call. Real gh JSON as fixtures; temp dirs only, no network, no sleeping on the poll or race timers (one test lets a hung gh hit a 1 s timeout).
+python3 tools/test_pr_land.py
+# tools/review-eval.py (the pr-reviewer agent graded against past pull requests whose bugs are known): the case list's checks, the
+# replayed repository (no ref leads to the fix), the reviewer's task never carrying the answer key, and the score. Temp repositories only;
+# the last class reads the real tools/review-eval/cases.json and skips commits a shallow checkout lacks.
+python3 tools/test_review_eval.py
+python3 .claude/hooks/tv-lock-notify-test.py
+# The custom agents' files (AGENTS.md, "Harness-specific files"): every `.agents/agents/<name>.md` carries a matching frontmatter
+# `name`, an explicit `model:` (one documented exemption), a description, a RELATIVE `.claude/agents/<name>.md` symlink that resolves
+# to it and a `.codex/agents/<name>.toml` wrapper. CI's path filter ignores those files, so this is the only reader. Reads the real
+# tree once; the cases run on synthetic trees in a private temp dir.
+python3 ci/test_agent_files.py
+# `decomp.sh`'s (.agents/skills/decompile-tv-lib) output filter, which `fn` and `xref` pipe Ghidra headless's log through: it kept only
+# the FIRST line of each multi-line println (a decompiled body, an `xref` string ending in a newline), so `fn` printed headers and
+# no code. Fixtures of real headless output with Ghidra's own multi-line records mixed in, through `decomp.sh filter` and through
+# `fn` / `xref` against a fake `analyzeHeadless`. No Ghidra, no Java, no firmware; POSIX awk, so BSD awk and mawk both pass.
+python3 ci/test_decomp_filter.py
+
+# tests/mkv_audio_lead.py (the late-audio tests' fixture reorderer) reading Tracks: only TrackEntry children are parsed, never the CRC-32 ffmpeg writes
+# there, whose checksum bytes can look like a huge field (the flaky "Exceeds the limit (4300 digits)" crash). Synthetic MKV, no ffmpeg, milliseconds.
+python3 tests/test_mkv_audio_lead.py
+
+# The ledger ratchet (ci/check-ledger-ratchet.py): no count under ci/allow/ -- a family's entry total (workers/, globals/, forks/,
+# fxlanes/) or a top-level list's -- and no key of tests/test_harness.py's PINNED_LEDGER_TOTALS / PINNED_ALLOWLIST_COUNTS may be
+# above the merge-base with the base branch (GITHUB_BASE_REF on a pull request, else origin/main; no base = a skip that says so),
+# for every counter the base has. A top-level file, family directory or pin key the base lacks is a new gate's own list (no existing
+# gate reads a file name that did not exist), so it is named in the ok line and not compared; a new area file inside a family the
+# base has still counts toward that family. Every other check here compares a ledger with numbers in the SAME tree, so one diff could
+# add a line, its `# count:` header and its pin together. Entry lines are counted, never the header. `git ls-tree`/`git show` only,
+# no cargo; the test runs it against fixture repositories (a count that rises, falls, is renamed or moves inside a family; a new
+# file, family or pin key; a new area file; a pin; no base) and checks that the CI job that runs it fetches the full history.
+python3 ci/test_ledger_ratchet.py
+python3 ci/check-ledger-ratchet.py
+
+# tools/pms-band-probe.py, the A-Z rail's read-only PMS probe: its request guard (GET only, and only the server root, /library/sections and
+# /library/sections/{id}/{all|genre|year|decade|firstCharacter}; every /:/ route, metadata route and write route refused, the token never
+# a query term) and its verdict arithmetic. Offline: no server, no token file, no port, nothing written. The measuring run needs a real
+# PMS and is never part of a gate; tests/mock_pms.py --band-fixture is the server it can be pointed at.
+python3 tools/pms-band-probe.py --selftest
+
+# Player HUD registry tooling: pure capture/matrix/bundle/release contracts.
+python3 tests/test_hud_capture.py
+python3 tests/test_hud_dispatch.py
+python3 tests/test_hud_preview.py
+python3 tests/test_hud_bundle.py
+python3 tests/test_hud_release.py
+python3 ci/test_sim_backend.py
+python3 tests/test_hud_dev.py
+
+python3 ci/test_check_ports.py
+python3 ci/test_step_scope.py
+python3 ci/test_machine_readonly.py
+python3 ci/test_readonly_dependencies.py
+python3 ci/test_readonly_generated.py
+
+# tools/cold-store.py, the opt-in cold store that parks idle build trees on a second volume: unconfigured it creates no file anywhere; each
+# reason `available()` can give (no config, no ditto, an unmounted /Volumes root, the same device as the build tree, under min_free_gib, a
+# failing probe write); park then unpark restores every path, size, nanosecond mtime, mode and hard-link group; unpark fills only an absent
+# tree (an existing one, or one a build made while it copied, wins) and only when the copy beats a rebuild; the claim an unpark takes on its
+# index record (hidden from a second unparker, from recover's adoption and from the park pass; given back on a failed copy; put back when its
+# process is dead; counted in what a later claim's free-space question sees); the three residue states of a
+# dead parker (complete cold copy, origin absent, origin present) plus a live owner and a nameless tree; the prune rules; a pretend
+# free-space/clock override refused unless every root is named. Temp dirs, a faked two-volume device check and a shutil stand-in for `ditto`
+# (one darwin-only test drives the real one); touches no real cache, config or volume.
+python3 ci/test_cold_store.py
+python3 ci/test_verdict_data_captured_inputs_source_oracle.py
+# Current owned hold-hint codec source controls; runtime oracles also execute in the Rust suite.
+python3 tests/test_owned_hold_hint_codec.py
+# Actual App owner declarations and fixture-constructor retirement; negative source controls.
+python3 ci/test_runtime_ownership_contract.py
+# Rust lifetime probes compile extracted production declarations (no cargo or shared artifacts).
+python3 ci/test_runtime_ownership_borrows.py
+# The disk-low hook (.claude/hooks/disk-low-notify.py, PostToolUse + PostToolUseFailure on Bash): its thresholds equal tools/disk-budget.py's
+# constants, the level / throttle / reclaim-dedupe logic on a fake free-space reading and a recording launcher, the text (facts, one line of
+# systemMessage, under the 10,000 character cap), the settings.json registrations, and a real process with a stub standing in for
+# `build-gc.sh --auto` (detached, own session, output in the log). Never starts the real build-gc; temp dirs only; no sleeping on a timer.
+python3 .claude/hooks/disk-low-notify-test.py
+# The PLATFORM build axis (Makefile `PLATFORM`, ci/platform_axis.py --list): default `webos`, the three names accepted from the command line
+# and the environment, anything else refused at parse time, `sim`/`sim-*`/`macapp`/`macapp-zip` implying `desktop` (read from a dry run in a
+# scratch tree, where an explicit value still wins), `print-rust-target` unmoved by it, both new queries leaving a built `pkg/` alone, and
+# that the selector is not named `platform.py`: scripts in ci/ import the stdlib `platform`, so a probe from ci/, every existing consumer and
+# a shadow control are run. No cargo; the scratch trees are private temp dirs.
+python3 ci/test_platform_axis.py
+# The platform crates' manifests (W7b): `plx_platform_webos` and `plx_platform_desktop` each forward EVERY feature of the application
+# crate with its defaults and name none on the dependency edge (a dependency feature would unify over a whole default pass: the
+# desktop's `hostsim` would turn it into a simulator pass), with no `version` on it (the certificates refuse one). Manifests only, no cargo.
+python3 ci/test_platform_features.py

@@ -46,7 +46,7 @@
 use super::*;
 #[allow(unused_imports)]
 use super::test_support::*;
-use crate::registry::{self, AppFx, AppMsg};
+use crate::registry::{self, AppMsg};
 use plx_ui::containers::modal::{Phase, Style};
 use plx_ui::dispatch::{CxParts, Dispatcher, NoTap, Rig, Split};
 use plx_ui::fixture::{key, tick, FixtureMeasure};
@@ -78,10 +78,8 @@ impl Mounter<InnerHost> for SurfaceMounter {
         match arg {
             SettingsPage::About => mount_page(entry, SettingsPage::About, cx, fx),
             SettingsPage::ConsentStage(stage) => Box::new(RouteSurface::new(entry, id,
-                Family::FirstRunConsent, SettingsPage::ConsentStage(*stage),
-                plx_data::pms::HubsSnapshot::empty_for_test().view())),
-            other => Box::new(RouteSurface::new(entry, id, Family::Settings, *other,
-                plx_data::pms::HubsSnapshot::empty_for_test().view())),
+                Family::FirstRunConsent, SettingsPage::ConsentStage(*stage))),
+            other => Box::new(RouteSurface::new(entry, id, Family::Settings, *other)),
         }
     }
 }
@@ -94,6 +92,9 @@ pub struct SurfaceRig {
     /// How many times BACK reached the root of the ROOT stack (the platform's Home).
     roots: u32,
     pub(super) preference_commands: Vec<registry::PreferenceCmd>,
+    pub(super) preferences: Option<plx_plex::plex::session::ProfilePrefs>,
+    /// The television keyboard raises (`true`) and lowers (`false`) that reached the platform, in order.
+    keyboard: Vec<bool>,
 }
 
 impl SurfaceRig {
@@ -104,17 +105,23 @@ impl SurfaceRig {
             stores: plx_data::stores::Stores::default(),
             directory: Default::default(),
             roots: 0,
-            preference_commands: Vec::new(),
+            preference_commands: Vec::new(), preferences: None,
+            keyboard: Vec::new(),
         }
     }
 }
 
 impl Rig<InnerHost> for SurfaceRig {
+    fn system_keyboard(&mut self, up: bool) {
+        self.keyboard.push(up);
+    }
     fn split(&mut self) -> Split<'_, InnerHost> {
-        self.stores.capture_browse(&mut self.directory);
+        self.stores.capture_seeded_browse_for_test(&mut self.directory, plx_plex::plex::current_server());
+        let mut inputs = crate::registry::capture_fixture();
+        if let Some(preferences) = &self.preferences { inputs.preferences = Some(preferences.clone()); }
         Split {
             mounter: &mut self.mounter,
-            views: self.directory.view(),
+            views: crate::registry::InnerViews::new(self.directory.view(), Box::leak(Box::new(inputs))),
             measure: &self.measure,
         }
     }
@@ -138,11 +145,30 @@ impl Rig<InnerHost> for SurfaceRig {
     fn app_fx(
         &mut self,
         _from: MachineId,
-        effect: AppFx,
+        effect: crate::registry::InlineAppFx,
         _parts: &CxParts<u32>,
         _out: &mut Effects<'_, InnerHost>,
     ) {
-        if let AppFx::Preferences(command) = effect { self.preference_commands.push(command); }
+        match effect {
+            crate::registry::InlineAppFx::Session(plx_session::auth::SessionCmd::AnswerPlaintext { machine_id, choice, .. }) => {
+                let account = plx_plex::plex::grant::account_key(&plx_plex::plex::session::peek().account_token);
+                plx_plex::plex::grant::record(&account, &machine_id, choice).expect("fixture grant answer");
+            }
+            _ => {}
+        }
+    }
+    fn run_yielded_app_command(&mut self, d: &mut Dispatcher<InnerHost>,
+        report: &mut plx_ui::dispatch::FrameReport, tap: &mut dyn plx_ui::dispatch::Tap<InnerHost>) -> Option<u32> {
+        let command = d.take_app_command()?;
+        let outcome = match &command.effect {
+            Ok(_) => plx_machine::machine::AppCommandOutcome::Completed,
+            Err(outcome) => *outcome,
+        };
+        if let Ok(crate::registry::ExternalAppFx::Preferences(command)) = command.effect {
+            self.preference_commands.push(command);
+        }
+        Some(d.resume_app_command(self, command.id, outcome,
+            vec![], report, tap).unwrap())
     }
     fn log(&mut self, _line: &str) {}
     fn prepare(&mut self, _b: &mut Budget, _present: &mut Present) {}
@@ -333,7 +359,7 @@ fn composed_owner_favourites_footer_survives_left_down_and_idle_frames() {
     // the real Onboard Tick can poll discovery without spawning network work.
     let mut rig = SurfaceRig::new();
     rig.stores.browse.borrow_mut().seed_registered_table_for_test([a, b]);
-    rig.stores.capture_browse(&mut rig.directory);
+    rig.stores.capture_seeded_browse_for_test(&mut rig.directory, a);
     let pins = rig.directory.view().favorite_sections().to_vec();
     let (mut d, mut rig, id) = consent_opened_on(SettingsPage::Favourites, rig);
     seat(&mut d, id, 0);
@@ -352,14 +378,14 @@ fn composed_owner_favourites_footer_survives_left_down_and_idle_frames() {
         frame(&mut d, &mut rig, ms + 16, vec![]);
         assert_eq!(d.focus().unwrap().elem, registry::BAND);
     }
-    rig.stores.capture_browse(&mut rig.directory);
+    rig.stores.capture_seeded_browse_for_test(&mut rig.directory, a);
     assert_eq!(rig.directory.view().favorite_sections(), pins,
         "draft navigation cannot persist pins");
     assert_eq!(d.nav.input_owner(), Some(InputOwner::Entry(id)));
 }
 
 /// **The composition, at depth.** Signed out, the Settings root's rows are Video & playback
-/// / Language / Privacy & data / Legal notices / About, so OK on Legal notices pushes the Legal index; LEFT off that index's
+/// / Language / Privacy & data / Diagnostics / Legal notices / About, so OK on Legal notices pushes the Legal index; LEFT off that index's
 /// column then runs the whole chain — edge rule, synthetic BACK, the surface's own pop —
 /// and lands back on the Settings root with the surface still up and still owning input.
 #[test]
@@ -439,6 +465,29 @@ fn left_at_the_surfaces_own_root_dismisses_it() {
     );
 }
 
+/// **The Player HUD page's address field reaches the television's keyboard through the family's surface**: OK on the row
+/// raises it for the SURFACE's instance (the inner page's delivery is re-addressed), BACK lowers it and leaves the page
+/// where it was rather than popping it.
+#[test]
+fn the_hud_pages_address_field_raises_and_lowers_the_television_keyboard() {
+    let _g = plx_base::testlock::serial();
+    let _sess = scratch_session("composed-hud-address-keyboard");
+    let (mut d, mut rig, id) = consent_opened(SettingsPage::PlayerHud);
+    let before = path(&d, id);
+    assert!(before.starts_with("settings/"), "{before}");
+    let rows = d.focus().map(|k| k.elem);
+    assert!(rows.is_some(), "the page seats a row");
+    // With no store behind the rig the page lists the gallery row and its address row, and seats the first.
+    frame(&mut d, &mut rig, 32, vec![key(Key::Down, tick(32))]);
+    frame(&mut d, &mut rig, 48, vec![key(Key::Ok, tick(48))]);
+    assert_eq!(rig.keyboard, [true], "OK on the address row raises the keyboard");
+    assert!(path(&d, id).contains("editing=true"), "{}", path(&d, id));
+    frame(&mut d, &mut rig, 64, vec![key(Key::Back, tick(64))]);
+    assert_eq!(rig.keyboard, [true, false], "BACK lowers it");
+    assert!(path(&d, id).contains("editing=false"), "the page is still there: {}", path(&d, id));
+    assert_eq!(d.nav.input_owner(), Some(InputOwner::Entry(id)), "BACK closed the field, not the surface");
+}
+
 /// **Regression, end to end: OK on Settings' second row must not reopen Legal already seated on
 /// Legal's own second row.** Traced to every page in this family sharing the surface's outer
 /// `EntryId` and `GroupId(0)` (`RouteSurface::run_inner`, `FocusTarget`'s doc on `machine.rs`): a
@@ -469,15 +518,16 @@ fn a_real_push_seats_the_new_page_fresh_and_a_pop_restores_the_row_that_opened_i
         path(&d, id)
     );
 
-    // Mounting the surface already seats row 0 (its own `Enter::Fresh`); three real DOWNs
-    // move focus — and the engine's remembered cursor for `(id, GroupId(0))` — to row 3.
-    for i in 1..=3u32 {
+    // Mounting the surface already seats row 0 (its own `Enter::Fresh`); four real DOWNs
+    // move focus — and the engine's remembered cursor for `(id, GroupId(0))` — to row 4,
+    // Legal notices (Settings v2: Diagnostics is the root's own row, between Privacy & data and it).
+    for i in 1..=4u32 {
         frame(&mut d, &mut rig, 16 * i, vec![key(Key::Down, tick(16 * i))]);
     }
     let legal_row = d.focus().expect("a row is focused after a real DOWN");
-    assert_eq!(legal_row.elem, root_key(RootId::Legal), "the third DOWN is Legal notices in the signed-out fixture");
+    assert_eq!(legal_row.elem, root_key(RootId::Legal), "the fourth DOWN is Legal notices in the signed-out fixture");
 
-    frame(&mut d, &mut rig, 64, vec![key(Key::Ok, tick(64))]);
+    frame(&mut d, &mut rig, 96, vec![key(Key::Ok, tick(96))]);
     assert!(
         path(&d, id).contains("/legal:"),
         "OK on Legal notices pushed the index: {}",
@@ -520,13 +570,14 @@ fn a_real_push_seats_the_new_page_fresh_and_a_pop_restores_the_row_that_opened_i
 #[test]
 fn playback_picker_seats_the_saved_option_and_restores_its_parent_row() {
     let _g = plx_base::testlock::serial();
-    let _sess = scratch_session("composed-playback-picker-seat");
+    let _sess = seated_scratch_session("composed-playback-picker-seat");
     let previous_quality = plx_media::route::quality();
     let previous_mode = plx_media::route::direct_play_mode();
     plx_media::route::restore_quality(plx_media::route::Quality::P480);
     plx_media::route::restore_direct_play_mode(plx_media::route::DirectPlayMode::Auto);
     for back in [Key::Back, Key::Left] {
         let (mut d, mut rig, id) = consent_opened(SettingsPage::Playback);
+        rig.preferences = Some(plx_plex::plex::session::ProfilePrefs { playback_quality: Some(plx_media::route::Quality::P480), direct_play_mode: Some(plx_media::route::DirectPlayMode::Auto), ..Default::default() });
         // A real DOWN/UP gives the engine an explicit parent cursor at Default quality.
         frame(&mut d, &mut rig, 32, vec![key(Key::Down, tick(32))]);
         frame(&mut d, &mut rig, 48, vec![key(Key::Up, tick(48))]);
@@ -625,7 +676,7 @@ fn account_preference_landing_seats_the_first_rows_and_retry_landing() {
 fn force_warning_engine_focus_confirms_only_the_chosen_answer() {
     use plx_machine::machine::{Edge, InputKind};
     let _g = plx_base::testlock::serial();
-    let _sess = scratch_session("composed-force-warning");
+    let _sess = seated_scratch_session("composed-force-warning");
     let previous = plx_media::route::direct_play_mode();
     plx_media::route::restore_direct_play_mode(plx_media::route::DirectPlayMode::Auto);
     let ok = |ms| {
@@ -655,9 +706,9 @@ fn force_warning_engine_focus_confirms_only_the_chosen_answer() {
         assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 1 }), "the picker's Forced option");
         assert!(!path(&d, id).contains("confirm=true"), "the chosen answer closes the warning");
         if confirm {
-            assert!(matches!(rig.preference_commands.pop(), Some(registry::PreferenceCmd::DirectPlay {
-                mode: plx_media::route::DirectPlayMode::Forced, ..
-            })), "Enable Force emits the admitted persistence request");
+            assert!(matches!(rig.preference_commands.pop(), Some(registry::PreferenceCmd::Choose(
+                plx_media::route::Choice::DirectPlay(plx_media::route::DirectPlayMode::Forced), _)
+            )), "Enable Force emits the admitted persistence request");
         } else {
             assert!(rig.preference_commands.is_empty(), "Cancel must never request persistence");
         }
@@ -692,10 +743,10 @@ fn audio_subtitles_pushed_from_the_root_seats_its_first_row_when_rows_land() {
     plx_plex::plex::session::publish_profile_for_test(Some(user.clone()), 72);
     let (request, snapshot) = PreferenceRequest::fixture_for_test(user, 72, AudioPreferences::default());
     let (mut d, mut rig, id) = opened();
-    // Audio & Subtitles is the signed-in root's third row (Favorite libraries, Video & playback,
-    // Audio & subtitles): walk DOWN twice.
+    // Audio & Subtitles is the signed-in root's fourth row (Favorite libraries, Under posters,
+    // Video & playback, Audio & subtitles): walk DOWN three times.
     let mut ms = 32;
-    for _ in 0..2 {
+    for _ in 0..3 {
         frame(&mut d, &mut rig, ms, vec![key(Key::Down, tick(ms))]);
         ms += 16;
     }
@@ -732,7 +783,8 @@ pub fn settle_frames(d: &mut Dispatcher<InnerHost>, rig: &mut SurfaceRig, from_m
 
 /// Walk focus to `elem` with real DOWN presses (a `set_focus` seat sends the page no `FocusMoved`).
 pub fn walk_to(d: &mut Dispatcher<InnerHost>, rig: &mut SurfaceRig, mut ms: u32, elem: u32) -> u32 {
-    for _ in 0..12 {
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(d.focus().map(|k| k.elem)) {
         if d.focus().map(|k| k.elem) == Some(elem) {
             return ms;
         }
@@ -819,4 +871,75 @@ fn a_pop_after_the_list_changed_reseats_on_the_row_the_page_landed_on() {
     assert_eq!(d.focus().map(|k| k.elem), Some(root_key(RootId::Language)),
         "the stale remembered key reseats on the page's landing (next survivor), not row 0");
     assert_eq!(sel_of(&d, id), root_key(RootId::Language));
+}
+
+/// **P1c: the Settings trailer toggle is the seated profile's, through the one write door.** The row
+/// shows the SEATED profile's switch (here `u-1`'s own ON over the TV's off); OK asks the host for
+/// `Choice::TrailerAutoplay` and shows the pick while the write is out; a refused write (the host
+/// replies false: nobody seated, a failed save) puts the row back on the stored value, and a durable
+/// one keeps the pick, in `u-1`'s record and never in the TV's key (a third press, ON again, writes
+/// `u-1`'s record and leaves the TV's old key off: the screen never writes the legacy key).
+#[test]
+fn the_trailer_toggle_is_the_seated_profiles_and_claims_nothing_until_saved() {
+    use plx_plex::plex::session::{put_own, TrailerAutoplayPref};
+    /// Puts the cell and the profile mirror back even when an assertion fails mid-test.
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            plx_media::route::unseed_profile_prefs_for_test();
+            plx_media::player::preview::restore_trailer_autoplay(true);
+        }
+    }
+    let _g = plx_base::testlock::serial();
+    let sess = multi_user_session("composed-trailer-toggle");
+    let _restore = Restore;
+    let stamp = sess.seated("u-1", "acct");
+    let mut saved: plx_plex::plex::session::Session = (*plx_plex::plex::session::peek()).clone();
+    saved.prefs.trailer_autoplay = false; // the TV's old, frozen key
+    assert!(put_own::<TrailerAutoplayPref>(&mut saved.prefs.profile_prefs, "u-1", &stamp, true));
+    plx_plex::plex::session::save(&saved);
+    plx_media::route::seed_profile_prefs_for_test(&plx_plex::plex::session::peek());
+    let (mut d, mut rig, id) = opened();
+    let mut ms = settle_frames(&mut d, &mut rig, 16);
+    assert!(path(&d, id).contains("trailer_autoplay=true"), "u-1's own ON over the TV's off: {}", path(&d, id));
+    ms = walk_to(&mut d, &mut rig, ms, root_key(RootId::TrailerAutoplay));
+
+    // A refused write: the row shows the pick meanwhile, then goes back.
+    frame(&mut d, &mut rig, ms + 16, vec![key(Key::Ok, tick(ms + 16))]);
+    let Some(registry::PreferenceCmd::Choose(plx_media::route::Choice::TrailerAutoplay(false), reply)) =
+        rig.preference_commands.pop() else { panic!("OK on the switch asks the host to choose it OFF") };
+    assert!(path(&d, id).contains("trailer_autoplay=false"), "the pick shows while the write is out: {}", path(&d, id));
+    reply.send(false).unwrap();
+    ms = settle_frames(&mut d, &mut rig, ms + 16);
+    assert!(path(&d, id).contains("trailer_autoplay=true"), "a refused write claims nothing: {}", path(&d, id));
+    assert!(rig.preference_commands.is_empty());
+
+    // A durable one: the host's door persists for the seated profile, then replies true.
+    frame(&mut d, &mut rig, ms + 16, vec![key(Key::Ok, tick(ms + 16))]);
+    let Some(registry::PreferenceCmd::Choose(plx_media::route::Choice::TrailerAutoplay(false), reply)) =
+        rig.preference_commands.pop() else { panic!("the second OK asks again") };
+    assert!(plx_media::route::confirm::<TrailerAutoplayPref>(false), "the door saves it for u-1");
+    reply.send(true).unwrap();
+    ms = settle_frames(&mut d, &mut rig, ms + 16);
+    assert!(path(&d, id).contains("trailer_autoplay=false"), "a durable write keeps the pick: {}", path(&d, id));
+    plx_base::storage_worker::drain_for_test();
+    let after = plx_plex::plex::session::peek();
+    assert!(!after.prefs.trailer_autoplay, "the TV's key is as it was");
+    let own = plx_plex::plex::session::own_prefs(&after.prefs.profile_prefs, "u-1", &stamp).expect("u-1's record");
+    assert_eq!(own.trailer_autoplay, Some(false));
+
+    // A third press picks ON, which differs from the TV's old OFF key: a write of the legacy key
+    // from the screen would now show there, so this is what pins "the top-level key is never written".
+    frame(&mut d, &mut rig, ms + 16, vec![key(Key::Ok, tick(ms + 16))]);
+    let Some(registry::PreferenceCmd::Choose(plx_media::route::Choice::TrailerAutoplay(true), reply)) =
+        rig.preference_commands.pop() else { panic!("the third OK asks to choose it ON") };
+    assert!(plx_media::route::confirm::<TrailerAutoplayPref>(true), "the door saves it for u-1");
+    reply.send(true).unwrap();
+    settle_frames(&mut d, &mut rig, ms + 16);
+    plx_base::storage_worker::drain_for_test();
+    assert!(path(&d, id).contains("trailer_autoplay=true"), "the third pick is kept: {}", path(&d, id));
+    let after = plx_plex::plex::session::peek();
+    assert!(!after.prefs.trailer_autoplay, "the TV's key is still off: the Settings toggle never writes it");
+    let own = plx_plex::plex::session::own_prefs(&after.prefs.profile_prefs, "u-1", &stamp).expect("u-1's record");
+    assert_eq!(own.trailer_autoplay, Some(true));
 }

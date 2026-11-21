@@ -28,9 +28,10 @@ normal build.
 
 Five pieces of this feature already exist, and the design is mostly wiring them together.
 
-* **One log sink.** Every diagnostic line in the app goes through `plx_base::eventlog::log(&str)`,
-  which is also where `redact_tokens` already strips `X-Plex-Token=…`. A ring buffer tapped there
-  sees *everything* the app knows and inherits the redaction that is already the shipped policy.
+* **The app event-log sink.** Messages sent through `plx_base::eventlog::log(&str)` enter the
+  diagnostic ring after the shipped credential scrubber. Opt-in firmware playback messages go to
+  the separate local playback trace and are absent from lab snapshots; see
+  [Playback diagnostics](playback-diagnostics.md).
 * **One structured state snapshot, already audited for secrets.** `player::Diag` (`player/mod.rs`,
   ~50 fields) is the exact list this ask enumerates — playback stage, load payload video/audio
   codec, video w/h, position/duration, fed bytes, feed state, `http_status`, `net_rx`, callback
@@ -38,7 +39,7 @@ Five pieces of this feature already exist, and the design is mostly wiring them 
   bool or enum **by rule**: `app/diagnostics.rs`'s module doc is a written no-URL / no-credential /
   no-identity contract for exactly this data, because it is already photographed and posted into
   public issue threads. A snapshot built from `Diag` is redacted by construction.
-* **Device identity.** `tv::device::info()` (release, codename, api, name, from `/var/run/nyx/os_info.json`),
+* **Device identity.** `tv::device::info()` (release, codename, api, name, from `/var/run/nyx/os_info.json`; the release alone from `/usr/lib/os-release` when that file cannot be read),
   `devcaps::caps()` (the SoC's own codec table), `paths::app_id()`/`flavour()`,
   `env!("PLX_VERSION")` (the reported app version — `X.Y.Z` for a release build, and the next
   MINOR with the patch reset for every other one, `X.(Y+1).0-dev`; see `rust-modules/build.rs`).
@@ -169,7 +170,7 @@ by forgetting a flag.
 | file | what it owns |
 | --- | --- |
 | `lab/mod.rs` | the feature boundary, boot/config gating and the main-thread control mailbox seam |
-| `labcfg/config.rs` | (a `platform` module, so `ui/` and `screens/` can ask `labcfg::is_trigger_key` and `labcfg::menu_row_enabled`) reads `lab.json` **from the app directory** (`paths::in_app_dir("lab.json")`) once at boot: `{endpoint, session, secret, pin, control, trigger_wcodes[]}`. Absent or malformed → the feature is inert and says so in one log line. Missing `control` is false, so an older package remains upload-only. |
+| `labcfg/config.rs` | (a `os` module, so `ui/` and `screens/` can ask `labcfg::is_trigger_key` and `labcfg::menu_row_enabled`) reads `lab.json` **from the app directory** (`paths::in_app_dir("lab.json")`) once at boot: `{endpoint, session, secret, pin, control, trigger_wcodes[]}`. Absent or malformed → the feature is inert and says so in one log line. Missing `control` is false, so an older package remains upload-only. |
 | `lab/control.rs` | one persistent pinned HTTPS long-poll worker, ordered command parsing, the main-thread mailbox, dispatch acknowledgement and bounded reconnect backoff |
 | `base/src/eventlog/ring.rs` | the bounded buffer: `VecDeque<(u32 t_ms, String)>`, capped by **both** 4000 records and 768 KB of text, evicting oldest, counting evictions. One `Mutex`. |
 | `lab/snapshot.rs` | envelope construction from `Diag` + `webos` + `devcaps` + `paths` + uptime. Pure and host-testable. |
@@ -440,7 +441,7 @@ not pretending the old filesystem contract exists.
 
 * `make check` is green in both configurations. **Take the counts yourself** — this repository has
   rotted four written test counts already and the fifth is not going to be this one:
-  `cd rust-modules && cargo +nightly test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_platform -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_appkit -p plx_screens -- --list | grep -c ': test'`, with and without
+  `cd rust-modules && cargo test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp -- --list | grep -c ': test'`, with and without
   `--features lab-diagnostics`. What the feature's own tests cover: the ring's two caps and its
   `dropped` delta, the `lab.json` parse and each refusal it names, the five scrub rewrites and the
   outright refusal (including the bare address and the household name the device test found), the

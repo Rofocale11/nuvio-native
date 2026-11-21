@@ -4,7 +4,7 @@
 
 Report privately, **not** as a public issue:
 
-- **GitHub Security Advisories** — <https://github.com/GLinnik21/plx-native/security/advisories/new>
+- **GitHub Security Advisories** — <https://github.com/plxnative/plx-native/security/advisories/new>
   (preferred: it is private, it threads, and it produces a CVE if one is warranted)
 - or e-mail **support@plxnative.com** with `PlxNative security` in the subject.
 
@@ -39,7 +39,8 @@ looking at:
   `/tmp` is refused and never chmod'ed or truncated. Stated plainly, the residual exposure: another
   native app on the same television that runs in the app's group can read all three files, and the
   stderr log (whatever aborts and the television's own libraries print), the crash log's C-side
-  records (a faulting address, registers, one memory-map line) and the C-side lines the shim and
+  records (a faulting address, registers, the crash's wall-clock second, and the memory-map lines
+  holding the faulting pc, the lr and our own binary) and the C-side lines the shim and
   the Starfish seam write into the event log are not passed through that scrubber. A credential in
   any of them is a valid report too.
 - **TLS.** Certificate verification is on for every HTTPS request, with one bounded exception and

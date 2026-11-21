@@ -21,7 +21,14 @@ impl Host for TestHost {
     type Init = FixtureArg;
     type Memory = PageMemory;
 }
+impl crate::registry::ScreenInputsLike for TestHost {
+    fn screen_inputs<'a>(_cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        crate::registry::empty_fixture()
+    }
+}
+
 impl LibraryLike for TestHost {
+    fn clock_facts<'a>(_cx: &Cx<'a, Self>) -> Option<&'a plx_plex::plex::ClockFacts> { None }
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> {
         cx.views.listing
     }
@@ -66,16 +73,16 @@ impl Fixture {
         fixture
     }
     fn rebuild(&mut self) {
-        self.stores.browse_run(BrowseCmd::Reset);
+        self.stores.browse_run_for_test(BrowseCmd::Reset);
         self.stores.browse.borrow_mut().seed_registered_table_for_test(self.sids);
-        self.stores.capture_browse(&mut self.directory);
-        self.stores.browse_run(BrowseCmd::SetCur(0));
+        self.stores.capture_seeded_browse_for_test(&mut self.directory, self.sids[0]);
+        self.stores.browse_run_for_test(BrowseCmd::SetCur(0));
         self.stores.browse.borrow_mut().seed_items_for_test(12);
         self.capture();
         assert_eq!(self.directory.view().current(), Some(0));
     }
     fn capture(&mut self) {
-        let publication = self.stores.capture_browse(&mut self.directory);
+        let publication = self.stores.capture_seeded_browse_for_test(&mut self.directory, self.sids[0]);
         self.listing = publication.listing;
         self.hubs = publication.section_hubs;
     }
@@ -90,6 +97,7 @@ impl Fixture {
             measure: &FixtureMeasure,
             focus: Default::default(),
             press: Default::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             owner: InputOwner::Entry(EntryId(81)),
         }
     }
@@ -153,10 +161,10 @@ fn apply(
     out.into_iter()
         .filter_map(|effect| match effect.fx {
             Fx::App(AppFx::Store(_, StoreCmd::Browse(command))) => {
-                Some(stores.browse_run(command))
+                Some(stores.browse_run_for_test(command))
             }
             Fx::App(AppFx::Store(_, StoreCmd::Hubs(command))) => {
-                Some(stores.hubs.run_with_directory(command, directory).changed)
+                Some(stores.hubs.run_with_directory(command, directory, &plx_data::pms::registry_keys_for_test()).changed)
             }
             Fx::App(AppFx::Store(_, StoreCmd::Metadata(command))) => {
                 Some(stores.metadata.run(command))
@@ -165,10 +173,10 @@ fn apply(
                 Some(stores.person.run(command))
             }
             Fx::App(AppFx::Store(_, StoreCmd::Search(command))) => {
-                Some(stores.search_run(command, directory))
+                Some(stores.search_run_for_test(command, directory))
             }
             Fx::App(AppFx::Store(_, StoreCmd::ViewState(command))) => {
-                Some(stores.viewstate_run(command, directory))
+                Some(stores.viewstate_run(command, directory, &plx_data::pms::registry_keys_for_test(), 0).changed)
             }
             _ => None,
         })
@@ -193,7 +201,7 @@ fn newest_section_replaces_old_grid_work_and_commits_only_the_last_section() {
     let _guard = plx_base::testlock::serial();
     let mut fixture = Fixture::new();
     let mut page = fixture.screen();
-    let original = page.toolbar_chip(FILTER, &fixture.cx()).value;
+    let original = page.filter_active(&fixture.cx());
     fixture.step(
         &mut page,
         ScreenEvent::App(AppMsg::LibraryEdit {
@@ -201,7 +209,7 @@ fn newest_section_replaces_old_grid_work_and_commits_only_the_last_section() {
             edit: QueryEdit::Unwatched(true),
         }),
     );
-    assert_ne!(page.toolbar_chip(FILTER, &fixture.cx()).value, original);
+    assert_ne!(page.filter_active(&fixture.cx()), original);
     fixture.step(
         &mut page,
         ScreenEvent::App(AppMsg::LibrarySelect(fixture.address(2))),
@@ -210,7 +218,7 @@ fn newest_section_replaces_old_grid_work_and_commits_only_the_last_section() {
         page.pending.grid().is_none(),
         "the outgoing section's grid request must be discarded"
     );
-    assert_eq!(page.toolbar_chip(FILTER, &fixture.cx()).value, original);
+    assert_eq!(page.filter_active(&fixture.cx()), original);
     fixture.step(
         &mut page,
         ScreenEvent::App(AppMsg::LibrarySelect(fixture.address(1))),
@@ -220,13 +228,34 @@ fn newest_section_replaces_old_grid_work_and_commits_only_the_last_section() {
         Some(1),
         "chrome acknowledges the newest press immediately"
     );
-    assert!(page.page_fade.is_swapping());
+    assert!(page.grid_fade.is_swapping());
     assert_eq!(fixture.flush(&mut page), vec![true]);
     assert_eq!(fixture.directory.view().current(), Some(1));
     assert!(
         !fixture.listing.view().unwatched(),
         "discarded grid work cannot alter the arriving query"
     );
+}
+
+#[test]
+fn closing_sources_menu_does_not_replace_a_newer_library_choice() {
+    let _guard = plx_base::testlock::serial();
+    let mut fixture = Fixture::new();
+    let mut page = fixture.screen();
+    fixture.step(
+        &mut page,
+        ScreenEvent::App(AppMsg::LibrarySelect(fixture.address(1))),
+    );
+    fixture.step(
+        &mut page,
+        ScreenEvent::App(AppMsg::LibraryMenuSelect {
+            origin: fixture.address(0),
+            target: fixture.address(2),
+        }),
+    );
+    assert_eq!(page.view_section(&fixture.cx()), Some(1));
+    assert_eq!(fixture.flush(&mut page), vec![true]);
+    assert_eq!(fixture.directory.view().current(), Some(1));
 }
 
 #[test]
@@ -270,7 +299,7 @@ fn a_target_that_moves_after_the_press_is_refused_at_the_store_drain() {
             edit: QueryEdit::Unwatched(true),
         }),
     );
-    fixture.stores.browse_run(BrowseCmd::SetCur(2));
+    fixture.stores.browse_run_for_test(BrowseCmd::SetCur(2));
     fixture.stores.browse.borrow_mut().seed_items_for_test(12);
     fixture.capture();
     assert_eq!(fixture.directory.view().current(), Some(2));
@@ -319,7 +348,7 @@ fn foreign_grid_targets_neither_relabel_chips_nor_mutate_the_current_query() {
     let mut fixture = Fixture::new();
     for index in [1, 2] {
         let mut page = fixture.screen();
-        let before = page.toolbar_chip(FILTER, &fixture.cx()).value;
+        let before = page.filter_active(&fixture.cx());
         let query = fixture.listing.view().id().unwrap().query;
         fixture.step(
             &mut page,
@@ -328,7 +357,7 @@ fn foreign_grid_targets_neither_relabel_chips_nor_mutate_the_current_query() {
                 edit: QueryEdit::Unwatched(true),
             }),
         );
-        assert_eq!(page.toolbar_chip(FILTER, &fixture.cx()).value, before);
+        assert_eq!(page.filter_active(&fixture.cx()), before);
         assert_eq!(fixture.flush(&mut page), vec![false]);
         assert!(!fixture.listing.view().unwatched());
         assert_eq!(fixture.listing.view().id().unwrap().query, query);
@@ -390,7 +419,8 @@ fn back_before_commit_cancels_both_halves_and_their_outgoing_fades() {
         }),
     );
     assert!(page.pending.section().is_some() && page.pending.grid().is_some());
-    assert!(page.page_fade.is_swapping() && page.grid_fade.is_swapping());
+    assert!(page.grid_fade.is_swapping(), "a library switch fades the grid only; the header stays");
+    assert!(!page.page_fade.is_swapping());
     let out = fixture.step(&mut page, back());
     assert!(
         out.is_empty(),

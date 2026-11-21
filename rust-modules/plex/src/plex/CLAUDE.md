@@ -108,12 +108,12 @@ place the rule is spelled. The dashed `*.plex.direct` names are the only origins
 can ever apply to, and a custom server-access URL behind a proxy with its own certificate would
 otherwise rewrite the machine's single entry on every discovery. Plaintext, a failed verification,
 a mismatched `machineIdentifier`, an origin without a pin and a relay route (skipped as a
-conservative choice) learn nothing. It lives in `Session::server_key_pins`, one entry per
+conservative choice) learn nothing. It lives in `Preferences::server_key_pins`, one entry per
 `machineIdentifier`, session-level like `plaintext_consent` (NOT in `ServerRef`/`SourceRef`/
 `ProfileCreds`, which are cloned per profile), soft-parsed and skipped while empty.
 **It is in the PUBLIC preferences, so sign-out forgets it by an explicit rule, not with the
 credentials:** `Mutation::ClearTenure` retains `public.preferences` whole except the keys in
-`storage::state::ACCOUNT_BOUND_PREFERENCES` (`server_key_pins` and `plaintext_consent`, issue #385), so sign-out — and "Delete all
+`storage::state::ACCOUNT_BOUND_PREFERENCES` (the account's own lists, `server_key_pins` and `plaintext_consent`, issue #385, and every profile's remembered browsing and playback memory: `track_memory`, `subtitle_offsets`, `library_sorts` and `last_library`; read the constant for the current set), so sign-out — and "Delete all
 local data", which runs it first — leaves the stored record with no learned key, and the next account to sign in opens with none
 (`migration_tests::helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_none`;
 for the answers, `helper_signout_forgets_the_plaintext_answers_and_signing_back_in_asks_again`).
@@ -141,9 +141,10 @@ or a plaintext URL. `net::keypin::apply` sets the pin FIRST and checks it: `VERI
 only after libcurl accepted the pin, so a libcurl that refuses the option leaves the request strict
 and failed, and `confirm` then compares the presented leaf's key itself (via `CERTINFO`) in case a TLS
 backend accepts the option and never enforces it. Every key-mode handle also sets
-`CURLOPT_FRESH_CONNECT` and `CURLOPT_FORBID_REUSE`, so it always does its own handshake (a reused
-keep-alive connection has no certificate to confirm) at the price of one handshake per key-mode
-request. A key-mode answer is never learned from (`peer_pin` is never read), so key mode cannot
+`CURLOPT_FRESH_CONNECT`, `CURLOPT_FORBID_REUSE` and `CURLOPT_SSL_SESSIONID_CACHE` = 0, so it always
+does its own FULL handshake (a reused keep-alive connection and a resumed TLS session both present no
+certificate to confirm; libcurl 8.12+ keeps the session cache on the multi, so a media source's next
+attempt would resume the last one's) at the price of one full handshake per key-mode request. A key-mode answer is never learned from (`peer_pin` is never read), so key mode cannot
 rewrite what it is checking against.
 **One table, filled once:** `net::keypin` is process-wide, keyed by lowercase `host:port`, with
 replace semantics. `session::replace_cache` is the single choke point that projects the session
@@ -152,8 +153,8 @@ into it (`session::project_server_keys`: each machine's key bound to the hosts o
 machine registered at runtime; a key `session::learn_server_key` learns reaches the table only when its
 queued write is applied and projected (the projection is the only production source of a key; `register_lazy` only binds hosts);
 sign-out empties it (revoked/missing/cleared sessions project nothing). Both stacks share
-the decision and the option code: the control plane in `net::request_tls_evidence`, the media plane
-in `curlio::CurlSource::start_range_until`, which every open, reopen and seek goes through. After a
+the decision and the option code: the control plane in `net::request_tls_sink` (wrapped by `request_tls_evidence`), the media plane
+in `net::range_io::CurlSource::start_range_until`, which every open, reopen and seek goes through. After a
 key-mode success the host is LATCHED for 10 minutes on the monotonic clock (later requests skip the
 doomed strict handshake; the timer does not slide; a strict success or a changed pin clears it; rc 90
 in key mode clears it and is the failure). The log carries one line when a host first engages, with
@@ -192,7 +193,7 @@ three attempts. A name mismatch, a self-signed leaf (18/19), plex.tv or any othe
 mode. After a success the host is latched in the same `keypin` state for 10 minutes on the monotonic
 clock (later requests skip the doomed strict handshake, the timer does not slide, a strict success or
 a refusal by the bundle clears it); both stacks share the decision, the control plane in
-`net::request_tls_evidence` and the media plane in `curlio::CurlSource::start_range_until`. Unlike key
+`net::request_tls_sink` (wrapped by `request_tls_evidence`) and the media plane in `net::range_io::CurlSource::start_range_until`. Unlike key
 mode a roots-mode answer IS strictly verified, so it may teach `peer_pin`. The log carries one line when
 the fallback engages, one when it first succeeds and one when the bundle refuses too, naming only the
 verify result.
@@ -283,7 +284,7 @@ re-discovery, requested by `grant::UpgradeRetry::due`), on a refusal (which also
 a `PlaintextAsk` captured) and on a roster commit that does not install its (machine, origin) —
 a roster commit moves no generation — and a stored `SourceRef` naming a
 plaintext origin registers tokenless until discovery re-mints. Ending a grant re-grades the
-registry (`servers::regrade_credentials` blanks every client a grant was carrying, `ON_GRANT`);
+registry (`servers::regrade_credentials` blanks every client a grant was carrying, and `mark_on_grant` sets the per-slot `on_grant` flag);
 `grant::UpgradeRetry` re-discovers a granted server on the hub-retry backoff and the HTTPS
 registration retires the grant (`auth::retire_grant_on_https`).
 
@@ -299,8 +300,15 @@ be registered. Direct identity candidates settle as one race, and a relay fallba
 local/remote probe opportunity. **The race does not wait for a route that cannot change the
 answer** (`auth::race_decided`): once a verified, credential-eligible winner exists, a candidate
 that cannot outrank it (`candidate_score` is a function of the candidate alone) is left behind, and
-a better-ranked one that has not answered gets `ProbeDeadlines::grace` (1.5 s) from the first
-win, not its own 5 s/10 s deadline. Waiting for every candidate made a healthy sign-in cost a
+a higher-scored or better-tier route that has not answered gets `ProbeDeadlines::grace`
+(1.5 s) from the first verified answer, not its own 5 s/10 s deadline. An IPv6
+route at the same location, scheme and score as the current IPv4 winner gets only
+250 ms **from that IPv4 route's own verified reply**, even if a different higher
+tier remains outstanding. Another address of the same family and score cannot
+displace the accepted route or extend its window. These are per-route eligibility
+deadlines, enforced both when a reply arrives and while deciding which pending
+routes to wait for. Candidate ranking is IPv6-first within location/scheme,
+with both families retained and no user preference. Waiting for every candidate made a healthy sign-in cost a
 dead public address's full deadline, so "taking longer than usual" ran on every sign-in
 (`screens/login.rs`'s `DISCOVERY_ESCAPE_AFTER_MS` derives its number from this cost). A race with
 no winner still runs every candidate to its deadline, and the relay phase still starts only then. Authenticated fallback attempts share a separate 20-second budget,
@@ -325,8 +333,10 @@ Three design choices carry the weight, and each is a prevented bug rather than a
   re-point lands at frame N+1 with that worker mid-request. Re-pointing publishes a NEW leaked
   `Client` over the pointer, so the worst case for the old reference is **one request sent to where
   that server used to be** — never a dangling pointer, which is the failure that has no debugger on
-  this device. The leak is bounded: a handful of small structs, written on login / profile switch /
-  server switch, never per frame.
+  this device. The leak is one small struct per registration ever made, written on login / profile switch /
+  server switch, never per frame; ids are never reused and the table grows by segments, with no
+  server-count ceiling short of the `u16` id space. A sign-out removes the revoked slots' rows from
+  the keyed per-server tables (`serverinfo`).
 - **Token generations come from a process-global sequence, so no two clients ever share one.**
   `token_gen` was a single process-wide counter, which cannot express "server B's token changed".
   Its only reader is `app::adapters::poster::built_key`'s memo and that memo compares **one number** — so two
@@ -352,7 +362,11 @@ The whole shared-source feature rests on keeping these apart:
   RANKS favourites first, because a browsing preference is not an authorization boundary and
   removing results would invent a false negative for a film the user owns and can play. The
   unscoped list survives as `browse::all_source_rows`, which is the Favorite libraries editor's, and
-  is the only way a non-favourite comes back. The rules are `pins.rs` (pure); the store is keyed by
+  is the only place a library is switched back on. It is no longer the only way to BROWSE a
+  non-favourite: the Library's Sort & Filter menu lists every reachable library of the viewed type,
+  favourite or not, and its header pill shows while that library is on view. Such a pick is not
+  remembered as the profile's last library (`remembered_section` restores favourites only). The
+  `+N` Sources picker and the tab strip stay favourites-only. The rules are `pins.rs` (pure); the store is keyed by
   the profile's `uuid`; the page that asks once is `AppArg::Onboard` (`Route::Onboard` before
   restructure phase 12 (D1) retired `enum Route`), first-run *Favorite
   libraries* — `ui::onboard` through phase 4, `screens::onboard`'s owned `OnboardScreen` since
@@ -373,6 +387,18 @@ A pinned-but-dead source drawn as a shelf is a spinner that never ends — the d
 a dead source is **absent** from Home and states itself in its own library section instead.
 
 ## Gotchas that bite (all verified in code)
+
+- **`notify.rs` is the PMS server-sent-event feed, and it is not a playback signal.** It parses
+  `/:/eventsource/notifications?filters=playing%2Ctimeline` (`docs/pms-api.md` §9: the parameter is
+  `filters`, the spec's `filter` is wrong; the encoded comma list was measured to deliver `timeline`) into
+  lenient `Notification`s (`Play`, `Library` for finished movie/show timeline entries, `Ping`,
+  `Ignored`; a `timeline` frame is `event: timeline` + one `{"TimelineEntry":{...}}` object, state 5 both opens
+  and closes a sequence so "created" is state 5 with no `metadataState`, and state 9 for a delete is UNVERIFIED,
+  never captured) over `http::stream`, dropping this
+  device's own sessions at the source, and never mints a client id (`client_id` is the persisted
+  one; a new id raises a new-device alert). Its policy lives in `plx_data::stores::notify`: shipped
+  ON (`NOTIFY_ENABLED`), owned servers only. Nothing here may call a stop, an end-of-stream candidate or an Offset
+  publish: a stranger's `stopped` session would otherwise scrobble our other servers.
 
 - **A hub's `title` is PMS's own localized text — except for the standard hubs, which this app
   now overrides client-side at BOTH scopes it draws hubs on.** `hubs.rs`/`models.rs`'s
@@ -474,9 +500,174 @@ a dead source is **absent** from Home and states itself in its own library secti
   across the write's `sync_all`, so **nothing per-frame may take it directly** — but a per-frame
   reader may now call `session::peek()`, because `peek()` is backed by a live in-memory read
   cache, not a per-call file transaction.
-- **`session::peek()` is a write-through cache over the persisted session, not a fresh read.** A
-  hit is one uncontended `Mutex` lock and an `Arc<Session>` clone — no `IO`, no helper round trip —
-  which is what makes it safe to call every frame (`player::preview::enabled` does). The invariants
+- **Every preference key but `language` lives in ONE struct, `session/prefs.rs`'s `Preferences`**
+  (the ten player settings' and `trailer_autoplay`'s FROZEN top-level keys, `profile_prefs` (their per-profile home, below), `auto_sign_in`, `last_hero_blur`, `hold_hint_taught`, the account-bound
+  `plaintext_consent` and `server_key_pins`, the per-profile `last_library` and `library_sorts` (cleared
+  at sign-out like every `ACCOUNT_BOUND = true` row in `prefs::DESCRIPTORS`, but their records carry no
+  account stamp, so the one login that is not a sign-out, a stored session that could not be activated
+  in `app/boot.rs`, would leave them to the next account: `replace_after_reauthentication_guarded_with_outcome`
+  clears both, and the Home pins and recent searches, when the login's owner identity (`owner_identity`, the roster admin's plex.tv id; never the token, which every sign-in mints anew) differs from the stored one or either is unknown), and the two memory-door lists `track_memory` and `subtitle_offsets`), flattened (`#[serde(flatten)] prefs`) into BOTH on-disk
+  forms — the legacy file's `Session` and the canonical preference record — declared before each
+  form's own `extensions`, so the flatten takes its keys first and the unknown-key map still sees
+  only keys nobody models. A new key of that kind is a `Preferences` field (its serde attributes
+  written out where rustfmt and a reviewer see them, copied from a neighbour, never unified: each
+  row keeps its own soft-parse policy), a marker (`setting!` for a `Copy` value, hand-written when
+  `Stored` != `Value` as for quality, `list_row!` for a list) and a line in `prefs::DESCRIPTORS`.
+  Callers read `session.prefs.<field>` or the hand-written getter, and change a value with
+  `session.with_pref::<Marker>(v)` (a `Copy` row; it writes the TOP-LEVEL key, so for the ten
+  per-profile settings it is a fixture builder for the legacy fallback, never what a pick does).
+  **The ten player settings and hero trailer autoplay are per profile** (`prefs/profile_prefs.rs`): a profile's own picks sit
+  in `profile_prefs` (`[{user, account, prefs}]`, `account` the `grant::account_key` stamp, the owner
+  `user: ""`), and what a profile reads is `stored_effective` = its own value, else the frozen
+  top-level key (`Setting::get`, a garbage own value included), else the default. The top-level keys
+  are never copied and never written by a pick (`persist_profile_pref`, for a `Copy` `Setting`, and `persist_profile_hud`, for the HUD package id string,
+  are the only writers and share `persist_profile_with`; they
+  refuse without a seat, across a tenure or credential change and with an empty stamp, and prunes
+  records of other accounts). `profile_prefs` is account-bound (`ACCOUNT_BOUND_PREFERENCES`, so
+  sign-out drops it and the legacy keys stay). Who is seated is `session::Seat`
+  (`Seat::of(profile, stamp)`, `current_seat()`); the live cells follow it in `plx_media::route`.
+  `hold_hint_taught` is Install and never account-bound, so sign-out keeps it: which hold hints
+  (`card`, `pill`) this television has been taught; the application seeds `plx_ui::hold_hint` from
+  it at boot and writes it on the frame tick (`app/hint_taught.rs`, `session::learn_hold_hint_taught`).
+  `auto_sign_in` is Install and never
+  account-bound: `boot_shows_picker` reads it before any profile is seated. `trailer_autoplay` is
+  NOT Install any more (P1c): the DETAIL page's hero reads the seated profile's value, the top-level key
+  is its frozen fallback, and `preview::enabled()` reads the cell (seeded ON). The `trailer_autoplay`
+  FIELD's derived default (here and in `Session`) is OFF while an ABSENT key reads on, so the canonical
+  record's own `Default` sets it. `plaintext_consent` is written as `[]` in the legacy file but
+  omitted from the canonical record while empty (`split_public` drops the key). `prefs_tests` holds
+  the table to the struct (T-fields), to the os layer's `ACCOUNT_BOUND_PREFERENCES` (T-account) and to
+  each row's parse policy (T-parse), both ways; a field with no row, or a row with no field, fails
+  there.
+  The two memory-door lists (`track_memory`: each profile's remembered audio and subtitle picks per
+  show, `prefs/track_memory.rs`; `subtitle_offsets`) have no `Copy` value and no whole-list accessor:
+  their markers implement `Row` only (not `ListRow`), and they are written only through
+  `ProfileMemory::upsert_with`. `track_memory` is account-bound (no stamp, no write; a write prunes
+  every other account's record), its entry strings are bounded (an over-long one reads as absent, a
+  title is cut), and it is capped at 64 entries a profile and held to a 32 KiB HOUSEHOLD budget by
+  eviction, never refusal. It is READ at resolve time (`route::recall_all` into `ResolveEnv::memory`, and
+  only for the SEATED profile: `recall` and `recall_all` ask `session::is_seated_as`, so an unseated
+  boot or a dev token reads none; matched by `route/track_memory.rs`, ranked above the PMS selection by `plan.rs`)
+  and WRITTEN by the track menu: an explicit pick on an episode carries its descriptor
+  (`TrackCommit`'s `memo`), `route::commit_audio_pick` / `commit_subtitle_pick` call `route::remember`
+  when the route accepted the pick, and nothing else writes it (a movie, an unseated boot, an
+  automatic choice and a harness setup commit remember nothing; the harness's
+  `plxnative-trackmemory=clear` removes entries through the same door, and `=fill[:N]` writes N worst-case
+  shows through it to read the DB8 write cost at the budget). A remembered Off beats the
+  account's rule and PMS's embedded selection, but not a server-selected sidecar the app can draw
+  (`plan.rs` `pick_subtitle` withholds the memory from the ladder while the item has one).
+  The subtitle half is one of THREE states (`SubtitleMemo`: `Track`, `Off`, `ForcedOnly { lang }`);
+  **Forced only** is the Subtitles menu's second row (`TrackCommit::SubtitleForcedOnly`,
+  `route::commit_forced_only_pick`), written on an explicit change of mode and never on an OK on the
+  row that already holds it (which recommits what is on screen), with the drawn track's language
+  (else the playing audio's, else the one the session fell back to). It ranks exactly as a remembered
+  Off does: a retry's own pick and a server-selected sidecar the app can draw still outrank it (the
+  withholding in `pick_subtitle` is of the memory, whichever of the three it is), and below those the
+  next episode shows its forced, non-commentary, renderable subtitle in the
+  language of the audio that PLAYS (`route::track_memory::match_forced_only`), or nothing, and never
+  falls to a full track or to the lower rungs. `PlaybackSession::sub_mode` (`SubMode`) holds which
+  state the playback is in, because a stream id cannot say it (a retry carries it in
+  `RetryContext::sub_mode`, and the language the mode falls back to for audio that names none in
+  `ResolveEnv::forced_lang`, since a retry consults no memory). Two derived commits keep the mode true, both through the one commit every
+  pick goes through and neither writing memory: a new audio re-points it (`commit_audio_selection`),
+  and, on a direct play, the first decoded frame re-matches the remembered subtitle once with the
+  container's track names (`route::rematch_subtitle_with_names`, called from `player/pump.rs`; an MP4
+  part's PMS streams carry no `title`, so only the demuxer's tag says which track is forced). That
+  re-match runs BEFORE the write-back's send on the same frame: while a write-back is parked it
+  re-points the parked write's subtitle half (`route::repoint_parked_subtitle`, W5 and W7 apply to the
+  re-matched id) and queues no PUT of its own, so the server hears one write that names the remembered
+  audio and the re-matched subtitle; with nothing parked, or a parked write that went stale first
+  (`decision::memory::parked_write_stale`: the route was replaced, the viewer picked), it PUTs like any subtitle
+  commit, except that over a Part with an external stream (W5) it PUTs nothing. It never
+  replaces a sidecar on screen, and compares with what the landing SHOWS (read from the session after
+  the sidecar restore, `settle_landing_selection`), not with the plan, which names no sidecar. Leaving
+  Forced only is a remembered change even onto the very track it drew.
+  `subtitle_offsets` is account-bound as well (since SO) under different rules: a record without a
+  stamp is read as the signed-in account's own and is stamped at the list's next write
+  (`MemoryEntry::ADOPTS_UNSTAMPED`), at the plex list a write with no account token is still
+  accepted, kept unstamped, and prunes nothing (the media door refuses it: a seat needs a non-empty
+  stamp), and a record stamped for another account reads as nothing and is
+  pruned by the next write. The media half (`route/prefs.rs` `remember`) stamps its mirror write with
+  the stamp the mirror was seeded under (`decision_memory_tests`
+  `a_retune_or_a_forget_reaches_the_stamped_record_the_restore_seeded`).
+- **The contract for a new setting.** Step 4 is a review rule: no test or CI check enforces it.
+  1. **Add the field** to `Preferences`, with explicit serde attributes. Pick the parse policy (a
+     soft scalar, `de_soft_vec` for lists, `de_soft_bool_on` when absence or garbage means on) and
+     the skip predicate.
+  2. **Add the `setting!` line** (`list_row!` for a list, a hand impl when `Stored` != `Value`), and
+     add it to `DESCRIPTORS`. Choose:
+     - **Scope.** `Install` describes the TV (its decoders, its panel only if the owner says so).
+       `Profile` is a person's habit, and is the default for a new player setting. `PerItem` and
+       `PerShow` are memories for content. The scope alone decides whether it persists across episodes.
+     - **Account binding.** `Account` rows are always bound, `Install` rows never; T-account holds both.
+     - **`LIVE`**, whether the media layer applies it to a live cell.
+     - **The settings write.** Optimistic (`How::Optimistic`) only when the viewer watches the effect
+       while choosing.
+  3. **If `LIVE`,** add a `live_cell!` and a `LiveSetting` impl (`normalize`, `after_saved`) to
+     `LIVE_ROWS`. T-live fails until both sides agree.
+  4. **Write only through the door.** `route::choose` for a profile's value (it takes a
+     `LiveSetting`, and only `Profile` rows have a `ProfileSetting`; an `Install` value has no
+     `choose` door and goes through its own ticketed writer, `queue_update_ticket`),
+     `route::remember` for a memory. `queue_update_settled` is for an edit whose landing the caller
+     reports (`plex::grant::persist` does); do not use it to claim "saved" before the write has
+     landed. Never add a second restore list (`restore_install_rows` / `restore_profile_rows` are
+     the only ones).
+  5. **Schema rules.**
+     - Never rename a key. A change of meaning gets a new key.
+     - New data goes only inside `public.preferences` (DB8) or the legacy file's top level. Never add
+       a `PublicPayload` slot, a state or auth field or a `Mutation` variant: they are
+       `deny_unknown_fields`, and an older build would sign the user out.
+     - New keys are additive, and a new list is soft-parsed per element (`de_soft_vec`). T-parse
+       needs a fixture for it, and the A0 characterisation needs a real-shape case.
+     - A new list that can grow has a byte bound, checked against the 256 KiB document (next
+       bullet); the document guard's eviction order (`prefs::shed_memory`) names every list it may evict.
+     - An EXISTING struct keeps its flatten `extensions`; a new struct needs none.
+     - Omit a value at its default (`skip_serializing_if`). Fields of `Preferences` without one are
+       written at their default, kept that way for behaviour preservation; read them from the
+       struct, and a new field follows the omit rule.
+  6. **The Settings row** (labels, i18n, picker) is a screens edit, and `Choice` gains a variant
+     (T-settings).
+- **Which store holds the session is the platform's statement, `plx_os::tv::authority::authority()`**
+  (`Helper`: the LS2/DB8 storage helper, webOS; `Files`: the 0600 record files, the desktop, a host test and
+  any platform with no helper), never the build's CPU or OS. `session/persistence.rs` reads it once per
+  public call (`load`, `commit_data`, `commit_cleared`, `write_session`, `migrate_session`, `bootstrap`,
+  `cleanup_after_confirmed_clear`) and hands it to the `*_via(authority, helper, ..)`
+  form, so a test passes the authority it grades and, for `Helper`, a transport of its own (an in-memory
+  `Backend` or a closure); `cleanup_temporaries` also reads it once but dispatches through
+  `cleanup_temporaries_for(authority)`, which takes no transport, because the `Helper` arm sweeps nothing (DB8
+  has no app-owned rename temporaries); the real `NativeTransport` is named by those seven public forms and by two helpers
+  with no `_via` seam (`reset_cleared_language()`, which `clear_for_erase` calls under `Helper` and which is
+  device-only, and `helper_commit`, which has no caller here), because on a Linux host it waits out a 12 s
+  start deadline with no helper behind it. There is no process-global override.
+  Under `Helper` the dispatchers never answer for a helper that cannot answer (a blocked read stays blocked,
+  and a legacy file is neither imported nor retired on its word); the files a television does keep beside DB8
+  are `session.rs`'s own: the marked fallback `save_legacy_fallback_locked` writes when a commit is not
+  durable, which `read_legacy_filtered_locked` serves as transient state, the legacy migration inputs, and the
+  install-preferences file (`install_preferences::save`, an unmarked `….language.json` beside a session
+  candidate) that `clear_for_erase` writes when a sign-out's helper clear is not durable. `secure::mode()`'s
+  `MemoryOnly` is read before the authority: it holds the session in memory and touches no credential store.
+  `clear_for_erase`, `read_into_cache_locked` and `install_preferences::keeps_language_file` read the same
+  value; the telemetry sweep after a durable clear runs only under `Helper`.
+- **The DB8 document may not pass `MAX_LOGICAL_BYTES` (256 KiB), and per-profile memory is what
+  grows it.** Past the cap EVERY write fails (`LogicalTooLarge`, reported as `InvalidSchema`), so
+  `persistence::commit_session_with` measures the projected document (the os layer's own
+  `state::logical_size`, with the stored envelope, ledger, consent and future keys in hand, for the
+  write it is really about to send: update, one-put replace, or the strict staged write; a first
+  write onto an ABSENT record, a sign-in or a legacy import, is measured against the fresh state the
+  helper starts from; the sealed credentials are sized as the helper will seal them, `Seal`: ACL-only,
+  keymanager, or whichever of the two is larger when a fallback is permitted) and, if it
+  would not fit, sheds from the payload `track_memory`, then `subtitle_offsets`, then
+  `library_sorts` (`prefs::shed_memory`; the same oldest-from-the-largest-record rule as the
+  household budget), only as far as it needs, and logs `prefs: evicted <n> <list> entries to fit
+  the 256 KiB document`. The live session keeps what the payload lost until the next load. It never
+  refuses a write: with nothing sheddable left the os layer still does, as before. The file backend
+  has no cap and no guard. A stored document already AT the cap leaves no room for the strict tier's
+  second copy (old and new halves side by side), which the guard cannot create. A record created on
+  webOS 4.x is ACL-only; a record that already holds a keymanager envelope still stages.
+- **`session::peek()` is a write-through cache over the persisted session, not a fresh read.** It
+  is a pure read of that cache: one uncontended `Mutex` lock and an `Arc<Session>` clone — no `IO`,
+  no helper round trip, no submit, no clock, on a hit or a miss — which is what makes it safe to
+  call every frame. The invariants
   that keep it correct, all in `session.rs`'s module doc and worth knowing before touching either
   the cache or a write path:
   - Cached records come from completed reads or durable writes under `IO`. `Revoked` separately
@@ -485,10 +676,15 @@ a dead source is **absent** from Home and states itself in its own library secti
   - Only `session.rs` writes the session domain of the record; every `persistence::commit_*`/
     `write_session`/`commit_cleared` caller updates the cache through a read install, proven-write
     install, cache drop, or local revocation. Read installs cannot undo revocation.
-  - `peek` never takes `IO`, including on a miss. It returns the previous snapshot and schedules
-    one refresh on `storage_worker`'s bounded FIFO. The worker reads and installs under `IO`,
-    then advances a visible-session generation only if the served content changed. The bridge
-    observes it and invalidates on the frame thread. Cached views also observe it through
+  - `peek` never takes `IO` and never refills the cache, including on a miss: it returns the
+    previous snapshot (or the empty session). The refill belongs to the session owner
+    (`SessionMachine`): the application's frame step asks `refresh_need()` what the cache lacks
+    and delivers `SessionEvent::CacheObserved`, the owner answers with its `SessionFx::RefreshCache`
+    effect, the application's session adapter runs `refresh_cache_job` on `storage_worker`'s
+    bounded FIFO, and the outcome returns as `SessionEvent::CacheRefreshed` (one refresh in
+    flight, owned by the machine rather than a `peek` side channel). The job reads and installs
+    under `IO`, then advances a visible-session generation only if the served content changed. The
+    bridge observes it and invalidates on the frame thread. Cached views also observe it through
     `VisibleSessionWatch` (or include `visible_generation()` in their cache key) and rebuild;
     invalidating drawing alone cannot refresh a retained value. `peek_settled()` keeps transient
     reads distinct from an authoritative empty session. Unchanged retries remain quiet. A queued
@@ -497,17 +693,39 @@ a dead source is **absent** from Home and states itself in its own library secti
     `IO` first (the fence/OCC check), then install their own proven outcome. A miss can therefore
     never overwrite a newer concurrent write.
   - A `Locked`/`Blocked` read (keymanager unavailable, a helper hiccup) is cached only
-    transiently, for `LOCKED_RETRY` (about a second) after completion — never latched forever the way a naive
-    per-field cache once was (the bug PR #120's stopgap shipped and this cache replaced).
+    transiently: `peek` serves the last known state and the owner re-reads it no sooner than
+    `LOCKED_RETRY_MS` (1000) of frame time later, per cache generation (a backoff counted on the
+    frame tick the owner receives, not a wall-clock deadline in `session.rs`) — never latched
+    forever the way a naive per-field cache once was (the bug PR #120's stopgap shipped and this
+    cache replaced).
   - Sign-out (`clear()`) drops the cached `Arc` immediately; the tokens it held must not remain
     reachable in memory after a sign-out just because nothing had overwritten the cache yet.
   - `plex::session::async_persistence`'s Stage B coordinator is unwired and keeps its own,
     separate `CACHE` today; when it is wired up, it must install into/drop the cache above
     (`install_locked`/`drop_cache_locked`, under `IO`) instead of maintaining a second copy of the
     session.
+  - **Under `StoreMode::MemoryOnly` (`plx_os::tv::secure`, the `mode` the platform's `Services.secure` states; `Durable` is the
+    default and what webOS and desktop run) the cache is the ONE authority, not a write-through
+    copy** (`session/memory_only.rs`): reads, guarded edits, revocation and clear all resolve
+    against it, and no credential is committed anywhere, canonical store, sealed or plaintext
+    fallback or revocation marker. The gate sits in `read_live_locked`, `save_locked_with_authority`
+    and `clear_for_erase`, above every `TEST_FILE` and storage-authority branch, so nothing behind them
+    is reachable. A write answers `PersistOutcome::Memory`, which classifies as
+    `CompletionOutcome::Ephemeral`: signed in for this run, so the auth owner goes on to Home, but
+    never a saved-login claim and never a warning. `drop_cache_locked` must not run in this mode
+    (a dropped cell would lose the session); tests reset the cell with `redirect_for_test(None)`.
+    What outlives the process is the install's own file (`install_preferences` version 2: the
+    client id, the language and the Interface resolution, none of which can authorize a login);
+    version 1, which webOS and desktop keep writing byte for byte, is still read. Sign-out keeps
+    that file, "Delete all local data" removes it, and a credential file a previous build left in
+    the data directory is never read, written or deleted. Tests set the mode with
+    `secure::set_mode_for_test` (a serial-lock-guarded override that clears on drop).
 - **Track selection is server-side, via `PUT /library/parts/{id}`** (set the chosen audio/subtitle
   stream + subtitle burn), **not** query params on the stream URL. The server re-selects for the next
   decision; the client re-requests the part. See `[[audio-subtitle-track-switching]]`.
+  `StreamSelection.subtitle_stream_id` is an `Option<i64>`: `Some(0)` is Off, `None` omits the
+  parameter, which an audio-only write-back uses so it never creates an explicit Off (PMS deletes a
+  downloaded subtitle once the selection moves off it, `docs/pms-api.md`).
 - **Subtitles: assume client rendering, not the server.** WebVTT sidecars do **not** deliver on our
   progressive-MKV pipeline (they come back empty / 501), so during a transcode the only server option
   is **burn** — which is why direct-play + our own subtitle renderer (see `player/`) is the real

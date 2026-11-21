@@ -1,12 +1,15 @@
 //! The Tier 2 card-conformance harnesses for the Library page (`cards_conformance_tests.rs`): the
-//! All grid (a `GridPart` over `cards::Grid`) and the section's hub shelves (`cards::Shelf`s above it).
-//! A child module of `library` so it reads the private rect and scale helpers the screen's own
-//! tests read. One `Harness` drives either card set; `Set` says which.
+//! All grid (a `GridPart` over `cards::Grid`, on `LibraryScreen`) and the Recommended page's hub
+//! shelves (`cards::Shelf`s, on `RecommendedScreen`). A child module of `library` so it reads the
+//! private rect and scale helpers the screens' own tests read. One `Harness` drives either card
+//! set; `Set` says which, and the other screen stays idle.
 use super::*;
 use plx_machine::machine::{FocusRead, Host, InputOwner, PressRead, Tick};
 use plx_ui::cards::conformance::{CardHarness, Landing, Nb};
 use plx_ui::fixture::{FixtureArg, FixtureMeasure};
 use plx_ui::screen::By;
+use plx_ui::cards::RowStyle;
+use super::recommended::RecommendedScreen;
 
 struct LibHost;
 #[derive(Clone, Copy)]
@@ -24,7 +27,14 @@ impl Host for LibHost {
     type Init = FixtureArg;
     type Memory = PageMemory;
 }
+impl crate::registry::ScreenInputsLike for LibHost {
+    fn screen_inputs<'a>(_cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        crate::registry::empty_fixture()
+    }
+}
+
 impl LibraryLike for LibHost {
+    fn clock_facts<'a>(_cx: &Cx<'a, Self>) -> Option<&'a plx_plex::plex::ClockFacts> { None }
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> { cx.views.listing }
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> { cx.views.directory }
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> { cx.views.hubs }
@@ -45,9 +55,11 @@ pub(crate) struct Harness {
     hubs: plx_data::stores::browse::HubsSnapshot,
     _stores: Option<plx_data::stores::Stores>,
     screen: LibraryScreen,
+    rec: RecommendedScreen,
     focus: Option<FocusKey<u32>>,
     press: f32,
     ms: u32,
+    page_image: plx_machine::machine::PageImageRead,
 }
 
 pub(crate) fn mount_grid(n: usize) -> Box<dyn CardHarness> { Box::new(Harness::new(Set::Grid, n)) }
@@ -74,14 +86,14 @@ impl Harness {
                 // over a (here unused) 120-item grid.
                 let stores = plx_data::stores::Stores::default();
                 stores.browse.borrow_mut().seed_two_source_table_for_test();
-                stores.capture_browse(&mut directory);
-                stores.browse_run(BrowseCmd::SetCur(0));
+                stores.capture_seeded_browse_for_test(&mut directory, plx_plex::plex::current_server());
+                stores.browse_run_for_test(BrowseCmd::SetCur(0));
                 {
                     let mut browse = stores.browse.borrow_mut();
                     browse.seed_items_for_test(120);
                     browse.seed_shelves_for_test(0, &["movie.recentlyadded.1", "movie.recentlyreleased.1", "movie.toprated.1"], n);
                 }
-                let publication = stores.capture_browse(&mut directory);
+                let publication = stores.capture_seeded_browse_for_test(&mut directory, plx_plex::plex::current_server());
                 (publication.listing, publication.section_hubs, Some(stores))
             }
         };
@@ -92,15 +104,18 @@ impl Harness {
                 .map(|shelf| shelf.items.iter().map(|item| item.rk.clone()).collect()).unwrap_or_default(),
         };
         let mut h = Self { set, n, rks, listing, directory, hubs, _stores: stores,
-            screen: LibraryScreen::new(ENTRY, INSTANCE, SecKind::Movie), focus: None, press: 1.0, ms: 0 };
+            screen: LibraryScreen::new(ENTRY, INSTANCE, SecKind::Movie),
+            rec: RecommendedScreen::new(ENTRY, INSTANCE, SecKind::Movie), focus: None, press: 1.0, ms: 0, page_image: Default::default() };
         h.sync();
         h.screen.initial = false;
+        h.rec.initial = false;
         h
     }
 
     fn cx(&self) -> Cx<'_, LibHost> {
         Cx { views: Views { listing: self.listing.view(), directory: self.directory.view(), hubs: self.hubs.view() },
             tick: Tick { ms: self.ms, dt_us: 16_667 }, measure: &FixtureMeasure,
+            modal: Default::default(), page_image: self.page_image, hold_hint: Default::default(),
             press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
             focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) }
     }
@@ -109,32 +124,55 @@ impl Harness {
         let cx: Cx<'_, LibHost> = Cx {
             views: Views { listing: self.listing.view(), directory: self.directory.view(), hubs: self.hubs.view() },
             tick: Tick { ms: self.ms, dt_us: 16_667 }, measure: &FixtureMeasure,
+            modal: Default::default(), page_image: self.page_image, hold_hint: Default::default(),
             press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
             focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };
-        self.screen.sync(&cx);
+        match self.set {
+            Set::Grid => self.screen.sync(&cx),
+            Set::Shelf => self.rec.sync(&cx),
+        }
     }
 
     fn step(&mut self, ev: ScreenEvent<LibHost>) -> bool {
         let mut present = plx_machine::present::Present::new();
         let mut out = Vec::new();
-        let (_, moving) = plx_machine::idle::scoped_motion(|| {
+        let (_, moving) = plx_machine::motion::report::scoped_motion(|| {
             let cx: Cx<'_, LibHost> = Cx {
                 views: Views { listing: self.listing.view(), directory: self.directory.view(), hubs: self.hubs.view() },
                 tick: Tick { ms: self.ms, dt_us: 16_667 }, measure: &FixtureMeasure,
+                modal: Default::default(), page_image: self.page_image, hold_hint: Default::default(),
                 press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
                 focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };
             let mut fx = Effects::new(&mut out, MachineId::Instance(INSTANCE), &mut present);
-            Machine::<LibHost>::step(&mut self.screen, &ev, &cx, &mut fx);
+            match self.set {
+                Set::Grid => { Machine::<LibHost>::step(&mut self.screen, &ev, &cx, &mut fx); }
+                Set::Shelf => { Machine::<LibHost>::step(&mut self.rec, &ev, &cx, &mut fx); }
+            }
         });
         moving || present.page_moving()
     }
 
     fn key(&self, elem: u32) -> FocusKey<u32> { FocusKey { entry: ENTRY, elem } }
 
+    /// Publish `rks` as the cards and deliver the store-changed event: the way a refetch lands.
+    fn republish(&mut self) -> Result<(), &'static str> {
+        match self.set {
+            Set::Grid => self.listing = listing_of(&self.rks),
+            // The hub shelf's items are republished the way a refetch would land them.
+            Set::Shelf => {
+                let stores = self._stores.as_ref().ok_or("the shelf set has no store")?;
+                stores.browse.borrow_mut().seed_first_shelf_items_for_test(0, &self.rks);
+                self.hubs = stores.capture_seeded_browse_for_test(&mut self.directory, plx_plex::plex::current_server()).section_hubs;
+            }
+        }
+        self.step(ScreenEvent::StoreChanged(plx_data::stores::StoreId::Browse.ord(), 1));
+        Ok(())
+    }
+
     fn cell(&self, elem: u32) -> Option<(usize, usize)> {
         match self.set {
             Set::Grid => self.screen.pair.detail.index_of(elem).map(|i| (0, i)),
-            Set::Shelf => self.screen.shelves.iter().enumerate()
+            Set::Shelf => self.rec.shelves.iter().enumerate()
                 .find_map(|(r, s)| s.elems.iter().position(|e| *e == elem).map(|c| (r, c))),
         }
     }
@@ -143,8 +181,8 @@ impl Harness {
 impl CardHarness for Harness {
     fn cards(&self) -> Vec<u32> {
         match self.set {
-            Set::Grid => self.screen.pair.detail.elems.clone(),
-            Set::Shelf => self.screen.shelves.first().map(|s| s.elems.clone()).unwrap_or_default(),
+            Set::Grid => (0..self.screen.pair.detail.total()).filter_map(|i| self.screen.pair.detail.elem_at(i)).collect(),
+            Set::Shelf => self.rec.shelves.first().map(|s| s.elems.clone()).unwrap_or_default(),
         }
     }
     fn focused(&self) -> Option<u32> { self.focus.map(|k| k.elem) }
@@ -171,7 +209,10 @@ impl CardHarness for Harness {
         }
     }
     fn place(&self, elem: u32, at: At) -> Option<Placed> {
-        Focusable::<LibHost>::place(&self.screen, &elem, &self.cx(), at)
+        match self.set {
+            Set::Grid => Focusable::<LibHost>::place(&self.screen, &elem, &self.cx(), at),
+            Set::Shelf => Focusable::<LibHost>::place(&self.rec, &elem, &self.cx(), at),
+        }
     }
     /// What the draw paints and registers: the grid's rect for the card, the shelves' recorded stop.
     fn drawn_rect(&self, elem: u32, press: f32) -> Option<Rect> {
@@ -188,7 +229,7 @@ impl CardHarness for Harness {
                 let mut cx = self.cx();
                 cx.press = PressRead { scale: press, owner: cx.focus.current, ..Default::default() };
                 let mut frame = plx_ui::screen::DrawFrame::new(&cx, plx_ui::Painter::root());
-                self.screen.record_stops(&mut frame);
+                self.rec.record_stops(&mut frame);
                 frame.into_stops().into_iter().find(|stop| stop.key.elem == elem)?.rect
             }
         })
@@ -199,13 +240,18 @@ impl CardHarness for Harness {
             Set::Grid => self.screen.pair.detail.scale_of(&self.cx(), elem)?,
             Set::Shelf => {
                 let cx = self.cx();
-                let src = self.screen.hub_src(row, &cx);
-                self.screen.shelves[row].cards.scale_of(&cx, &src, &elem)?
+                let src = self.rec.hub_src(row, &cx);
+                self.rec.shelves[row].cards.scale_of(&cx, &src, &elem)?
             }
         })
     }
     fn focus_scale(&self) -> f32 { RowStyle::HOME.focus_scale }
-    fn canon(&self) -> u64 { LogicalState::hash(&self.screen) }
+    fn canon(&self) -> u64 {
+        match self.set {
+            Set::Grid => LogicalState::hash(&self.screen),
+            Set::Shelf => LogicalState::hash(&self.rec),
+        }
+    }
     fn identity(&self, elem: u32) -> String {
         let Some((row, col)) = self.cell(elem) else { return String::new() };
         match self.set {
@@ -216,11 +262,11 @@ impl CardHarness for Harness {
     fn scroll(&self) -> Option<f32> {
         Some(match self.set {
             Set::Grid => self.screen.scroll.pos,
-            Set::Shelf => self.screen.shelves.first()?.cards.scroll(),
+            Set::Shelf => self.rec.shelves.first()?.cards.scroll(),
         })
     }
     fn scroll_max(&self) -> Option<f32> {
-        (self.set == Set::Shelf).then(|| self.screen.shelves.first().map(|s| s.cards.style().max_scroll(self.cards().len()))).flatten()
+        (self.set == Set::Shelf).then(|| self.rec.shelves.first().map(|s| s.cards.style().max_scroll(self.cards().len()))).flatten()
     }
     fn columns(&self) -> Option<usize> { (self.set == Set::Grid).then_some(super::layout::COLS) }
     fn landing(&mut self, l: Landing) -> Result<(), &'static str> {
@@ -230,31 +276,40 @@ impl CardHarness for Harness {
             Landing::InsertAbove => self.rks.insert(0, "landed".into()),
             Landing::RemoveFocused => { self.rks.remove(at); }
         }
-        match self.set {
-            Set::Grid => self.listing = listing_of(&self.rks),
-            // The hub shelf's items are republished the way a refetch would land them.
-            Set::Shelf => {
-                let stores = self._stores.as_ref().ok_or("the shelf set has no store")?;
-                stores.browse.borrow_mut().seed_first_shelf_items_for_test(0, &self.rks);
-                self.hubs = stores.capture_browse(&mut self.directory).section_hubs;
-            }
-        }
-        self.step(ScreenEvent::StoreChanged(plx_data::stores::StoreId::Browse.ord(), 1));
+        self.republish()?;
         let want = self.focus.unwrap();
-        let now = Focusable::<LibHost>::reconcile(&self.screen, want, &self.cx());
+        let now = match self.set {
+            Set::Grid => Focusable::<LibHost>::reconcile(&self.screen, want, &self.cx()),
+            Set::Shelf => Focusable::<LibHost>::reconcile(&self.rec, want, &self.cx()),
+        };
         if now != want { self.focus(now.elem, By::Reconcile); }
         Ok(())
     }
+    fn shift(&mut self, by: usize) -> Result<(), &'static str> {
+        for k in 0..by { self.rks.insert(0, format!("arrived{k}")); }
+        self.republish()
+    }
     fn memory_roundtrip(&mut self) -> Result<Box<dyn CardHarness>, &'static str> {
-        let PageMemory::Library(mem) = Screen::<LibHost>::memory_at(&self.screen, self.focus) else {
+        let memory = match self.set {
+            Set::Grid => Screen::<LibHost>::memory_at(&self.screen, self.focus),
+            Set::Shelf => Screen::<LibHost>::memory_at(&self.rec, self.focus),
+        };
+        let PageMemory::Library(mem) = memory else {
             return Err("memory_at did not return PageMemory::Library");
         };
         let mut fresh = Harness::new(self.set, self.n);
-        fresh.screen.restore(&mem);
+        match self.set {
+            Set::Grid => fresh.screen.restore(&mem),
+            Set::Shelf => fresh.rec.restore(&mem),
+        }
         fresh.sync();
         fresh.screen.initial = false;
+        fresh.rec.initial = false;
         let want = self.focus.ok_or("nothing focused")?;
-        let now = Focusable::<LibHost>::reconcile(&fresh.screen, want, &fresh.cx());
+        let now = match self.set {
+            Set::Grid => Focusable::<LibHost>::reconcile(&fresh.screen, want, &fresh.cx()),
+            Set::Shelf => Focusable::<LibHost>::reconcile(&fresh.rec, want, &fresh.cx()),
+        };
         fresh.focus(now.elem, By::Restore);
         Ok(Box::new(fresh))
     }
@@ -273,7 +328,7 @@ mod pop_tests {
     #[test]
     fn episode_grid_geometry_and_page_window_share_four_column_rows() {
         let mut h = Harness::new(Set::Grid, 80);
-        let layout = Layout::new(false, &[], 20, true).with_episodes(true);
+        let layout = Layout::new(false, 20).with_episodes(true);
         h.screen.pair.detail.set_geometry(layout, 0.0, layout, 0.0);
         let cx = h.cx();
         let (first, next_row) = (h.screen.pair.detail.rect_at(&cx, 0), h.screen.pair.detail.rect_at(&cx, 4));
@@ -330,28 +385,6 @@ mod pop_tests {
         assert_eq!(h.scale(cards[3]), Some(1.0), "…and once settled, the shared scale agrees it is at rest");
     }
 
-    /// The recorded stops follow a scrolled page: focus the last of the hub shelves, let the page
-    /// reveal it, and every card's recorded stop (the pointer's target, read off the real stop
-    /// recording) is the rect `place(Drawn)` answers, at rest and mid-press.
-    #[test]
-    fn the_recorded_shelf_stops_follow_a_scrolled_page() {
-        let _guard = plx_base::testlock::serial();
-        let mut h = Harness::new(Set::Shelf, 12);
-        assert!(h.screen.shelves.len() >= 3, "three hub shelves published");
-        let last = h.screen.shelves.len() - 1;
-        let elem = h.screen.shelves[last].elems[0];
-        h.focus(elem, By::Restore);
-        h.tick(240);
-        assert!(h.screen.scroll.pos > 1.0, "the page scrolled to reveal the last shelf: {}", h.screen.scroll.pos);
-        for press in [1.0_f32, 0.96] {
-            h.set_press(press);
-            let stop = h.drawn_rect(elem, press).expect("the focused card registers a stop");
-            let placed = h.place(elem, At::Drawn).expect("places").rect;
-            let close = |a: f32, b: f32| (a - b).abs() < 0.01;
-            assert!(close(stop.x, placed.x) && close(stop.y, placed.y) && close(stop.w, placed.w) && close(stop.h, placed.h), "press {press}: stop {stop:?} != place {placed:?}");
-        }
-    }
-
     /// A cell focused without a deliberate move is a restore or a reconcile: FULL scale on its
     /// first frame, before and after the tick that adopts it.
     #[test]
@@ -383,6 +416,7 @@ mod pop_tests {
             let cx: Cx<'_, LibHost> = Cx {
                 views: Views { listing: h.listing.view(), directory: h.directory.view(), hubs: h.hubs.view() },
                 tick: Tick { ms: h.ms, dt_us: 16_667 }, measure: &FixtureMeasure,
+                modal: Default::default(), page_image: h.page_image, hold_hint: Default::default(),
                 press: PressRead { scale: h.press, owner: h.focus, ..Default::default() },
                 focus: FocusRead { current: h.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };
             let _discovery = plx_ui::frame::backdrop::discover(std::rc::Rc::new(std::cell::RefCell::new(Default::default())));
@@ -404,4 +438,153 @@ mod pop_tests {
         assert!(ring(handed(&mut h, 1.0)) > 0.99, "a resting focused tile wears the whole shadow and sheen");
         assert!(ring(handed(&mut h, 0.918)) < 0.1, "…and lets go of them under a full press");
     }
+}
+
+/// **A page the stack let go of and rebuilt returns lifted.** BACK onto a Library whose body was
+/// evicted builds a fresh instance, restores its memory and delivers `Enter(Restored)`; the grid
+/// of that instance has never slept, and the dip's image is up when it ticks. Its seat comes back
+/// lifted with the caption band open through the image, and the page that never left is the same.
+mod return_tests {
+    use super::*;
+    use plx_machine::machine::Enter;
+
+    #[test]
+    fn a_rebuilt_library_page_returns_lifted_under_the_dips_image() {
+
+        let full = RowStyle::HOME.focus_scale;
+        let mut left = Harness::new(Set::Grid, 40);
+        let first = left.cards()[0];
+        left.focus(first, By::Dir);
+        left.tick(200);
+        assert!(left.scale(first).unwrap() > 1.05, "premise: the card is left lifted");
+        let memory = Screen::<LibHost>::memory_at(&left.screen, left.focus);
+        let PageMemory::Library(memory) = memory else { panic!("memory_at did not return PageMemory::Library") };
+
+        let mut fresh = Harness::new(Set::Grid, 40);
+        fresh.screen.restore(&memory);
+        fresh.sync();
+        fresh.screen.initial = false;
+        fresh.page_image = plx_machine::machine::PageImageRead::held(ENTRY, INSTANCE);
+        fresh.step(ScreenEvent::Enter(Enter::Restored));
+        fresh.focus(first, By::Restore);
+        assert_eq!(fresh.scale(first), Some(full), "whole on the first frame, before any tick");
+        for frame in 0..20 {
+            fresh.tick(1);
+            assert_eq!(fresh.scale(first), Some(full), "lifted under the held image, frame {frame}");
+        }
+        fresh.page_image = Default::default();
+        for frame in 0..20 {
+            fresh.tick(1);
+            assert_eq!(fresh.scale(first), Some(full), "still lifted once the image is let go, frame {frame}");
+        }
+    }
+}
+
+/// **The page's accessibility ids:** the All grid conforms (every element of every group projects,
+/// ids are unique, each id finds its element), the header's controls answer their names
+/// (`header.sort`, `header.recommended`, `header.libraries`), each card is `grid.card.<i>` with its
+/// ratingKey as the subject, the rail's letters `rail.<i>` exist only while focus is in the grid or
+/// the rail (as their group does), and the plaintext question's answers are the only ids while it
+/// is open.
+#[test]
+fn the_page_answers_its_ids_and_conforms() {
+    assert!(!library_conforms().is_empty());
+}
+
+/// The Library grid page (grid, rail, plaintext question), run through the id conformance with the id
+/// asserts above (`AppArg::Library`; the coverage table calls this, and so does the test above).
+pub(crate) fn library_conforms() -> plx_ui::a11y::Namespaces {
+    use plx_ui::a11y::conform;
+    let mut namespaces = Vec::new();
+    use plx_ui::a11y::{A11yPath, Role};
+    let _guard = plx_base::testlock::serial();
+    let _policy = crate::registry::captions::PolicyPin::default_setting();
+    let mut h = Harness::new(Set::Grid, 5);
+    let rel = |text: &str| A11yPath::parse_relative(text).expect("a well-formed id");
+    let first = h.screen.pair.detail.elem_at(0).expect("the seeded grid holds a key");
+    // unfocused: the rail's group is not declared, so its ids are not there either
+    {
+        let cx = h.cx();
+        namespaces.push(conform::<LibHost, _>(&h.screen, &cx));
+        assert_eq!(Focusable::<LibHost>::a11y_find(&h.screen, &rel("rail.0"), &cx), None);
+    }
+    CardHarness::focus(&mut h, first, By::Dir);
+    let rail = h.screen.pair.master.elems.clone();
+    {
+        let cx = h.cx();
+        namespaces.push(conform::<LibHost, _>(&h.screen, &cx));
+        let screen = &h.screen;
+        let find = |text: &str| Focusable::<LibHost>::a11y_find(screen, &rel(text), &cx);
+        assert_eq!(find("header.sort"), Some(SORTFILTER));
+        assert_eq!(find("header.recommended"), Some(RECOMMENDED));
+        assert_eq!(find("header.libraries"), Some(MORE));
+        for i in 0..5 {
+            let elem = find(&format!("grid.card.{i}")).unwrap_or_else(|| panic!("card {i} resolves"));
+            assert_eq!(Some(elem), screen.pair.detail.elem_at(i));
+            let a = Focusable::<LibHost>::a11y(screen, &elem, &cx).expect("a card projects");
+            assert_eq!((a.role, a.loaded), (Role::Card, true));
+            assert_eq!(a.subject.as_deref(), Some(format!("m{i}").as_str()), "the subject is the ratingKey");
+            assert_eq!(a.label.as_deref(), Some(format!("m{i}").as_str()), "the title is the label");
+        }
+        assert_eq!(find("grid.card.5"), None, "one past the end");
+        assert_eq!(find("grid.0"), None, "a card is `grid.card.<i>`");
+        assert_eq!(find("status.retry"), None, "the read-out is not up");
+        for (i, elem) in rail.iter().enumerate() {
+            assert_eq!(find(&format!("rail.{i}")), Some(*elem), "letter {i}");
+            let a = Focusable::<LibHost>::a11y(screen, elem, &cx).expect("a letter projects");
+            assert_eq!(a.role, Role::Row);
+        }
+        assert_eq!(find(&format!("rail.{}", rail.len())), None, "one past the last letter");
+    }
+    // the plaintext question: its answers are the page's only elements while it is open
+    let mut out = Vec::new();
+    let mut present = plx_machine::present::Present::new();
+    let mut fx = Effects::new(&mut out, MachineId::Instance(INSTANCE), &mut present);
+    h.screen.plaintext_alert.open::<LibHost>("lan-machine", None, MachineId::Instance(INSTANCE), &mut fx);
+    let cx = h.cx();
+    namespaces.push(conform::<LibHost, _>(&h.screen, &cx));
+    let find = |text: &str| Focusable::<LibHost>::a11y_find(&h.screen, &rel(text), &cx);
+    assert_eq!(find("alert.connect"), Some(PLAINTEXT_CONNECT));
+    assert_eq!(find("alert.not_now"), Some(PLAINTEXT_CANCEL));
+    assert_eq!(find("grid.card.0"), None, "the page under a question is no owner's");
+    namespaces
+}
+
+/// **The Recommended page's accessibility ids:** the page conforms, its crumb is `header.crumb`, and
+/// each hub card is `shelf.<row>.card.<global index>` (its place in the listing, `CardSource::global`,
+/// as `cards::card_a11y` names it) with the hub item's ratingKey as the subject.
+#[test]
+fn the_recommended_page_answers_its_ids_and_conforms() {
+    assert!(!recommended_conforms().is_empty());
+}
+
+/// The Recommended page over four hubs, run through the id conformance with the id asserts above
+/// (`AppArg::LibraryRecommended`; the coverage table calls this, and so does the test above).
+pub(crate) fn recommended_conforms() -> plx_ui::a11y::Namespaces {
+    use plx_ui::a11y::conform;
+    let mut namespaces = Vec::new();
+    use plx_ui::a11y::{A11yPath, Role};
+    let _guard = plx_base::testlock::serial();
+    let _policy = crate::registry::captions::PolicyPin::default_setting();
+    let h = Harness::new(Set::Shelf, 4);
+    let cx = h.cx();
+    namespaces.push(conform::<LibHost, _>(&h.rec, &cx));
+    let rel = |text: &str| A11yPath::parse_relative(text).expect("a well-formed id");
+    let find = |text: &str| Focusable::<LibHost>::a11y_find(&h.rec, &rel(text), &cx);
+    assert_eq!(find("header.crumb"), Some(toolbar::CRUMB_ROOT));
+    assert!(!h.rec.shelves.is_empty(), "the seeded hubs are shelves");
+    let published = h.hubs.view();
+    for (row, shelf) in h.rec.shelves.iter().enumerate() {
+        for (col, elem) in shelf.elems.iter().enumerate() {
+            assert_eq!(find(&format!("shelf.{row}.card.{col}")), Some(*elem), "row {row} card {col}");
+            let a = Focusable::<LibHost>::a11y(&h.rec, elem, &cx).expect("a card projects");
+            assert_eq!(a.role, Role::Card);
+            let item = &published.shelves()[row].items[col];
+            assert_eq!(a.subject.as_deref(), Some(item.rk.as_str()), "the subject is the ratingKey");
+        }
+        assert_eq!(find(&format!("shelf.{row}.card.{}", shelf.elems.len())), None, "one past the end of row {row}");
+    }
+    assert_eq!(find(&format!("shelf.{}.card.0", h.rec.shelves.len())), None, "a row that does not exist");
+    assert_eq!(Screen::<LibHost>::a11y_ns(&h.rec), "recommended");
+    namespaces
 }

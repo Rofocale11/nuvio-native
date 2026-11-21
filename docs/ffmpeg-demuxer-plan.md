@@ -1,5 +1,7 @@
 # libavformat demuxer plan — replacing `mkv.rs`
 
+> Superseded for text subtitles: every text track now renders through libass; see `docs/ass-subtitles.md`.
+
 **Status: EXECUTED (all phases A–E landed; 2026-07-18).** `ff.rs` is the only demuxer;
 `mkv.rs`, the `cues_thread`/Cue-index apparatus, the second HTTP connection (`hs2`), and the
 `/tmp/plxnative-demux=mkv` bisect trigger are all deleted. Two knowing deviations from the spec
@@ -32,7 +34,9 @@ Push, into the single `AuQueue`:
 
 - **Video AUs** (`es=1`): H264/HEVC **Annex-B** — every NAL prefixed with a `00 00 00 01` start
   code; **SPS/PPS (H264) or VPS/SPS/PPS (HEVC) prepended at every keyframe**; `key=1` iff the AU
-  is an IDR (H264 NAL type 5) / IRAP (HEVC NAL types 16–23). One `aq_push` = one coded picture.
+  is an IDR (H264 NAL type 5) or an H264 non-IDR I-slice at a random access point (the packet is
+  flagged `AV_PKT_FLAG_KEY`, or an SPS precedes the slice in the AU) / IRAP (HEVC NAL types
+  16–23). One `aq_push` = one coded picture.
 - **Audio AUs** (`es=2`, `key=1` always): **raw** elementary-stream frames — AC3/EAC3 syncframes,
   **raw AAC (no ADTS)** — bytes verbatim from `av_read_frame`, no container framing, no BSF.
 - **PTS in nanoseconds of content time**: `pts_ns = av_rescale_q(pkt.pts, stream.time_base,

@@ -53,7 +53,10 @@
 use std::borrow::Cow;
 
 use crate::consts::{K_SCROLL, SAFE};
-use plx_machine::machine::Measure;
+use crate::hstack::{Align as StackAlign, HStack, Item as HItem};
+use crate::vstack::{Anchor, VFlow, VStack};
+use crate::a11y::{A11y, A11yPath, Role, Seg};
+use plx_machine::machine::{GroupId, Measure};
 use crate::popover::Popover;
 use crate::text_view::TextView;
 use crate::widgets::{Button, ControlStyle, CtlPop, StatusOverlay};
@@ -118,6 +121,23 @@ pub struct Layout {
     pub scroll_max: f32,
 }
 
+/// Where the button row stands in [`panel_items`].
+const PANEL_BUTTONS: usize = 3;
+
+/// **The panel's one vertical run**, read both for its fixed height (`layout_with`'s `fixed_h`, with
+/// a viewport of 0) and for where the answer row stands: the top pad, the text viewport,
+/// [`QUESTION_GAP`], the button row, the bottom pad. The pads and the gap are items of height, so
+/// the stack's own gap is 0.
+fn panel_items(viewport_h: f32) -> [HItem; 5] {
+    [
+        HItem::new(PAD_TOP),
+        HItem::new(viewport_h),
+        HItem::new(QUESTION_GAP),
+        HItem::new(StatusOverlay::CTRL_H),
+        HItem::new(PAD_BOTTOM),
+    ]
+}
+
 /// The panel, **pure**, from the two measured text heights. `body_h` is 0.0 for an alert that asks
 /// its question and nothing more, and the arithmetic is written so that case stays byte-identical
 /// to the layout that existed before a body was possible when the question fits the safe frame.
@@ -129,27 +149,33 @@ pub fn layout(question_h: f32, body_h: f32) -> Layout {
 /// panel and the destructive rect is the zero-width point at the row's centre — nothing draws
 /// there and nothing registers it.
 pub fn layout_with(question_h: f32, body_h: f32, answers: Answers) -> Layout {
-    let body_block = if body_h > 0.0 { BODY_GAP + body_h } else { 0.0 };
-    let text_h = question_h + body_block;
-    let fixed_h = PAD_TOP + QUESTION_GAP + StatusOverlay::CTRL_H + PAD_BOTTOM;
+    // The text block is ONE stack: the question, then the body BODY_GAP under it. The body item is
+    // always there so its rect stands where a present body would (and a zero-height body keeps
+    // today's rect); the BLOCK's height only counts it, and its gap, when the body has any height,
+    // so an alert that asks its question alone is exactly the question.
+    let text = [HItem::new(question_h), HItem::new(body_h)];
+    let stack = VStack::new(&text, BODY_GAP, Anchor::Top(0.0));
+    let body_off = stack.span(1).map_or(0.0, |(y, _)| y);
+    let text_h = if body_h > 0.0 { stack.height() } else { question_h };
+    let fixed_h = VStack::new(&panel_items(0.0), 0.0, Anchor::Top(0.0)).height();
     let overflow = text_h + fixed_h > SAFE.h;
     let viewport_h = text_h.min(SAFE.h - fixed_h);
     let h = fixed_h + viewport_h;
     let panel = Rect::new((Rect::FULL.w - PANEL_W) * 0.5, (Rect::FULL.h - h) * 0.5, PANEL_W, h);
-    let row_w = BUTTON_W * 2.0 + BUTTON_GAP;
-    let x = panel.cx() - row_w * 0.5;
-    let by = panel.y + PAD_TOP + viewport_h + QUESTION_GAP;
+    let by = VStack::new(&panel_items(viewport_h), 0.0, Anchor::Top(panel.y)).span(PANEL_BUTTONS).expect("present").0;
     let (cancel, destructive) = if answers == Answers::One {
-        (Rect::new(panel.cx() - BUTTON_W * 0.5, by, BUTTON_W, StatusOverlay::CTRL_H),
-         Rect::new(panel.cx(), by, 0.0, StatusOverlay::CTRL_H))
+        let lone = [HItem::new(BUTTON_W)];
+        let at = HStack::new(&lone, BUTTON_GAP, StackAlign::Centre(panel.cx())).span(0).expect("present").0;
+        (Rect::new(at, by, BUTTON_W, StatusOverlay::CTRL_H), Rect::new(panel.cx(), by, 0.0, StatusOverlay::CTRL_H))
     } else {
-        (Rect::new(x, by, BUTTON_W, StatusOverlay::CTRL_H),
-         Rect::new(x + BUTTON_W + BUTTON_GAP, by, BUTTON_W, StatusOverlay::CTRL_H))
+        let pair = [HItem::new(BUTTON_W), HItem::new(BUTTON_W)];
+        let at = |i| HStack::new(&pair, BUTTON_GAP, StackAlign::Centre(panel.cx())).span(i).expect("present").0;
+        (Rect::new(at(0), by, BUTTON_W, StatusOverlay::CTRL_H), Rect::new(at(1), by, BUTTON_W, StatusOverlay::CTRL_H))
     };
     Layout {
         panel,
         question: Rect::new(panel.x + PAD_X, panel.y + PAD_TOP, BODY_W, question_h),
-        body: Rect::new(panel.x + PAD_X, panel.y + PAD_TOP + question_h + BODY_GAP, BODY_W, body_h),
+        body: Rect::new(panel.x + PAD_X, panel.y + PAD_TOP + body_off, BODY_W, body_h),
         cancel,
         destructive,
         text_viewport: Rect::new(panel.x + PAD_X, panel.y + PAD_TOP, BODY_W, viewport_h),
@@ -281,7 +307,7 @@ impl DecisionAlert {
         // The body determines the panel's size. A cached ground can contain the OLD outline;
         // dropping it here lets all hosts redraw the measured panel, even inside an own scope.
         crate::popover::host::ground_invalidate();
-        plx_machine::idle::invalidate();
+        // The addressed reconcile/input boundary owns content damage.
         true
     }
     /// One answer or two, as last opened or reconciled.
@@ -300,7 +326,7 @@ impl DecisionAlert {
         // A fresh open is a fresh page under it: re-latch at the next `draw_scrim`.
         self.field.reset();
         self.pop.open();
-        plx_machine::idle::invalidate();
+        // Opening is selected by the owning navigation/input effect.
     }
     /// Measure retained content through the caller's capability, before paint or during replay.
     fn measured(&self, measure: &dyn Measure) -> Layout {
@@ -321,7 +347,7 @@ impl DecisionAlert {
         self.scroll_target = (self.scroll_target + delta as f32 * theme::size::BODY as f32 * 6.0)
             .clamp(0.0, max);
         let _own = crate::popover::own_motion();
-        plx_machine::idle::invalidate();
+        // The input boundary selects this change; update reports the scroll spring.
         self.scroll_target.to_bits()
     }
     pub fn scroll_target_bits(&self) -> u32 { self.scroll_target.to_bits() }
@@ -345,12 +371,12 @@ impl DecisionAlert {
     /// Instant hide — see [`Popover::close`]. Interactive answers take [`dismiss`](Self::dismiss).
     pub fn close(&mut self) {
         self.pop.close();
-        plx_machine::idle::invalidate();
+        // The closing effect owns discrete damage.
     }
     /// The shared exit choreography, in reverse of the entry (`Popover::dismiss`).
     pub fn dismiss(&mut self) {
         self.pop.dismiss();
-        plx_machine::idle::invalidate();
+        // The dismiss effect owns damage; update reports the exit animation.
     }
     /// Open or still fading out — the DRAW gate, never the input gate.
     pub fn visible(&self) -> bool {
@@ -364,7 +390,7 @@ impl DecisionAlert {
     }
     pub fn set_choice(&mut self, choice: Choice) {
         self.choice = self.valid_choice(choice);
-        plx_machine::idle::invalidate();
+        // Selection is an owned input effect, not ambient cache damage.
     }
     pub fn update(&mut self, dt: f32) {
         if !self.visible() {
@@ -380,7 +406,8 @@ impl DecisionAlert {
             dt,
         );
     }
-    pub fn draw_scrim(&mut self) {
+    pub fn draw_scrim<H: plx_machine::machine::Host>(&mut self, f: &mut crate::screen::DrawFrame<'_, '_, H>) {
+        let nav = f.route_navigation();
         if self.visible() {
             // Live over the frozen host — and the first `live` of a frame is what takes the
             // snapshot, before this scrim lands on it. See `popover::host::live`.
@@ -388,21 +415,23 @@ impl DecisionAlert {
             // The panel's field, from the page as it stands before the dim below touches it —
             // idempotent once latched; until the read lands, and on a refusal (the video plane),
             // the flat sheet.
-            let _ = self.field.latch_from_frame(
+            if f.is_visible_pass() && self.field.latch_from_frame(
                 crate::underlay::Grade::Dim,
                 crate::popover::host::page_tex(),
-            );
+            ) == crate::underlay::FrameLatch::Pending { f.request_frame(); }
             // The DECISION role's weight, as the flat ink (`Popover::scrim`): this alert is a
             // `Popover` drawn from inside its page (consent, and the player's repair alert over the
             // video plane), not a `ModalStack` surface, so its DIM has no container field to inherit.
-            self.pop.scrim(theme::underlay::DIM_DECISION);
+            self.pop.scrim(theme::underlay::DIM_DECISION, nav);
         }
     }
-    pub fn draw(
+    pub fn draw<K: Copy>(
         &mut self,
         cancel: &core::ffi::CStr,
         destructive: &core::ffi::CStr,
         measure: &dyn Measure,
+        nav: crate::screen::NavPresentation,
+        press: plx_machine::machine::PressRead<K>,
     ) {
         if !self.visible() {
             return;
@@ -410,19 +439,20 @@ impl DecisionAlert {
         // Everything below is LIVE over the frozen host page — see `popover::host::live`.
         let _live = crate::popover::host::live();
         let l = self.measured(measure);
-        let p = self.pop.content_painter(Popover::RISE);
-        crate::profile::phase("da.panel", || self.pop.panel(p, l.panel, theme::ALERT_PANEL_RAD, Some(&self.field)));
+        let p = self.pop.content_painter(Popover::RISE, nav);
+        crate::profile::phase("da.panel", || self.pop.panel(p, l.panel, theme::ALERT_PANEL_RAD, Some(&self.field), crate::widgets::Ground::Sheet));
         crate::profile::phase("da.text", || {
             let scroll = self.scroll.pos.clamp(0.0, l.scroll_max);
             if l.scroll_max > 0.0 { p.clip(l.text_viewport); }
             let text_painter = p.translate(0.0, -scroll);
             Self::question_view(self.question).with_measure(measure).draw(text_painter, l.question);
-            let mut y = l.body.y;
+            let mut paras = VFlow::new(l.body.y, PARA_GAP);
             for para in &self.body {
                 let view = Self::body_view(para).with_measure(measure);
                 let h = view.measure_h(BODY_W);
-                view.draw(text_painter, Rect::new(l.body.x, y, l.body.w, h));
-                y += h + PARA_GAP;
+                if let Some(at) = paras.push(HItem::new(h)) {
+                    view.draw(text_painter, Rect::new(l.body.x, at.y, l.body.w, at.h));
+                }
             }
             if l.scroll_max > 0.0 {
                 p.clip_clear();
@@ -436,7 +466,7 @@ impl DecisionAlert {
         crate::profile::phase("da.ctl", || {
         Button::new(cancel.as_ptr(), theme::size::BODY, l.cancel)
             .focused(self.choice == Choice::Cancel)
-            .scale(self.controls.scale(0))
+            .scale(self.controls.scale(0, press))
             .draw(&env, p);
         if self.answers == Answers::One {
             return;
@@ -448,7 +478,7 @@ impl DecisionAlert {
         Button::new(destructive.as_ptr(), theme::size::BODY, l.destructive)
             .style(destructive_style)
             .focused(self.choice == Choice::Destructive)
-            .scale(self.controls.scale(1))
+            .scale(self.controls.scale(1, press))
             .draw(&env, p);
         });
     }
@@ -457,10 +487,137 @@ impl DecisionAlert {
 /// The body block's height from each paragraph's measured height: stacked [`PARA_GAP`] apart, and
 /// 0.0 — the no-body geometry — when there are none.
 fn body_h(heights: &[f32]) -> f32 {
-    if heights.is_empty() {
-        return 0.0;
+    VStack::heights(heights, PARA_GAP, Anchor::Top(0.0)).height()
+}
+
+/// **An alert's buttons as an accessibility id names them**: `<prefix>.<cancel>` and
+/// `<prefix>.<affirm>` (the prefix is `alert` unless [`AlertAnswers::under`] renames it), both
+/// [`Role::Button`], in the one group the alert's answers form.
+///
+/// A host of a [`DecisionAlert`] knows its answers' group and element ids, and answers the
+/// `Focusable` a11y hooks from them while the alert is OPEN (the answers are then the only
+/// elements the page has, the page beneath a modal being no owner's), so the projection is written
+/// once, here, and not once per host. The names are the answers' verbs, so a test presses
+/// `alert.connect` or `alert.delete`, never a position.
+///
+/// A host whose alert changes what it asks (the sign-in screen's report card is a one-answer card
+/// or a two-answer one; the same sheet is also the plaintext question) builds this per call from
+/// the sheet that is up, with [`AlertAnswers::counted`] taking the alert's own
+/// [`DecisionAlert::answers`]: with [`Answers::One`] the affirm slot does not exist, so it has no
+/// id, is not listed and is not found.
+#[derive(Clone, Copy, Debug)]
+pub struct AlertAnswers {
+    group: GroupId,
+    cancel: u32,
+    affirm: u32,
+    names: [&'static str; 2],
+    prefix: &'static str,
+    answers: Answers,
+}
+
+impl AlertAnswers {
+    /// The two answers in `group`, with the host's element ids and each answer's static name,
+    /// under `alert`.
+    pub const fn new(group: GroupId, cancel: u32, affirm: u32, cancel_name: &'static str, affirm_name: &'static str) -> Self {
+        Self { group, cancel, affirm, names: [cancel_name, affirm_name], prefix: "alert", answers: Answers::Two }
     }
-    heights.iter().sum::<f32>() + PARA_GAP * (heights.len() - 1) as f32
+
+    /// The same answers with how many the alert offers right now ([`DecisionAlert::answers`]).
+    pub const fn counted(mut self, answers: Answers) -> Self {
+        self.answers = answers;
+        self
+    }
+
+    /// The same answers under a first segment other than `alert` (the player's repair
+    /// confirmation is `repair.cancel` / `repair.confirm`).
+    pub const fn under(mut self, prefix: &'static str) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    /// The element ids the alert offers now: the cancel slot, and the affirm slot when there are two.
+    fn offered(&self) -> impl Iterator<Item = (u32, &'static str)> {
+        let two = self.answers == Answers::Two;
+        [(self.cancel, self.names[0])]
+            .into_iter()
+            .chain(two.then_some((self.affirm, self.names[1])))
+    }
+
+    /// `Focusable::a11y` for one element: an answer's button, else `None`.
+    pub fn a11y(&self, elem: u32) -> Option<A11y<'static>> {
+        let (_, name) = self.offered().find(|(e, _)| *e == elem)?;
+        Some(A11y::new(A11yPath::new().name(self.prefix).name(name), Role::Button))
+    }
+
+    /// `Focusable::a11y_elems`: the answers for their own group, nothing for any other.
+    pub fn elems(&self, g: GroupId, out: &mut Vec<u32>) {
+        if g == self.group {
+            out.extend(self.offered().map(|(e, _)| e));
+        }
+    }
+
+    /// `Focusable::a11y_find`: the answer a path names.
+    pub fn find(&self, path: &A11yPath) -> Option<u32> {
+        let mut segs = path.segs();
+        match (segs.next(), segs.next(), segs.next()) {
+            (Some(Seg::Name(p)), Some(Seg::Name(n)), None) if p == self.prefix => {
+                self.offered().find(|(_, name)| *name == n).map(|(e, _)| e)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod a11y_tests {
+    use super::*;
+
+    const ANSWERS: AlertAnswers = AlertAnswers::new(GroupId(2), 70, 71, "not_now", "connect");
+
+    fn path(id: &str) -> A11yPath {
+        A11yPath::parse_relative(id).expect("a relative path")
+    }
+
+    /// **The answers are `alert.<verb>` buttons**, listed for their own group and no other, and a
+    /// path finds exactly the element its key projects.
+    #[test]
+    fn the_answers_project_list_and_find_each_other() {
+        let mut elems = Vec::new();
+        ANSWERS.elems(GroupId(2), &mut elems);
+        assert_eq!(elems, [70, 71]);
+        elems.clear();
+        ANSWERS.elems(GroupId(3), &mut elems);
+        assert!(elems.is_empty(), "a foreign group lists nothing");
+        for (elem, id) in [(70, "alert.not_now"), (71, "alert.connect")] {
+            let a = ANSWERS.a11y(elem).expect("an answer projects");
+            assert_eq!(a.path, path(id));
+            assert_eq!(a.role, Role::Button);
+            assert_eq!(ANSWERS.find(&path(id)), Some(elem));
+        }
+        assert!(ANSWERS.a11y(72).is_none(), "a key that is not an answer projects nothing");
+        for stray in ["alert", "alert.other", "alert.connect.0", "row.0"] {
+            assert_eq!(ANSWERS.find(&path(stray)), None, "{stray} names no answer");
+        }
+    }
+
+    /// **One answer is only the cancel slot**: the affirm slot of a one-answer card has no id, is
+    /// not listed and is not found, and a host's own prefix replaces `alert`.
+    #[test]
+    fn one_answer_offers_only_the_cancel_slot_and_a_prefix_renames_the_ids() {
+        let one = AlertAnswers::new(GroupId(2), 70, 71, "cancel", "send").counted(Answers::One);
+        let mut elems = Vec::new();
+        one.elems(GroupId(2), &mut elems);
+        assert_eq!(elems, [70]);
+        assert_eq!(one.a11y(70).map(|a| a.path), Some(path("alert.cancel")));
+        assert!(one.a11y(71).is_none());
+        assert_eq!(one.find(&path("alert.cancel")), Some(70));
+        assert_eq!(one.find(&path("alert.send")), None);
+
+        let repair = AlertAnswers::new(GroupId(6), 40, 41, "cancel", "confirm").under("repair");
+        assert_eq!(repair.a11y(41).map(|a| a.path), Some(path("repair.confirm")));
+        assert_eq!(repair.find(&path("repair.cancel")), Some(40));
+        assert_eq!(repair.find(&path("alert.cancel")), None, "the prefix replaces `alert`");
+    }
 }
 
 #[cfg(test)]
@@ -482,9 +639,9 @@ mod tests {
     fn belarusian_delete_question_and_complete_scope_wrap_at_the_existing_text_sizes() {
         let _guard = plx_base::testlock::serial();
         let measure = DisclosureMeasure;
-        let locale = plx_platform::i18n::LocaleContext::resolve(plx_platform::i18n::Preference::Be, None, None, None, None);
-        let question = plx_platform::i18n::msg::settings_consent_delete_question_in(&locale);
-        let body = plx_platform::i18n::msg::settings_consent_delete_scope_in(&locale);
+        let locale = plx_os::i18n::LocaleContext::resolve(plx_os::i18n::Preference::Be, None, None, None, None);
+        let question = plx_os::i18n::msg::settings_consent_delete_question_in(&locale);
+        let body = plx_os::i18n::msg::settings_consent_delete_scope_in(&locale);
         assert!(body.contains("серверы Plex") && body.contains("Sentry") && body.contains("PostHog"));
         let question_view = DecisionAlert::question_view(question).with_measure(&measure);
         let body_view = DecisionAlert::body_view(body).with_measure(&measure);
@@ -493,7 +650,7 @@ mod tests {
         assert!(question_view.measure_h(BODY_W) > measure.line_h(theme::size::TITLE));
         assert!(body_view.measure_h(BODY_W) > 4.0 * measure.line_h(theme::size::BODY));
         let mut alert = DecisionAlert::new();
-        alert.open_with_body(plx_platform::i18n::msg::settings_consent_delete_question_c_in(&locale), body);
+        alert.open_with_body(plx_os::i18n::msg::settings_consent_delete_question_c_in(&locale), body);
         let l = alert.measured(&measure);
         assert_eq!(alert.choice(), Choice::Cancel);
         assert_eq!(l.question.w, 564.0);
@@ -541,15 +698,15 @@ mod tests {
         for _ in 0..90 { alert.update(1.0 / 60.0); }
         assert!(alert.settled());
         let appear = alert.pop.appear();
-        let users = crate::popover::host_users_for_test();
+        let visible = alert.pop.visible();
         assert!(alert.reconcile_card(c"Details", vec!["receipt".into()], Answers::Two));
         assert_eq!(alert.body_for_test(), ["receipt"]);
         assert_eq!(alert.choice(), Choice::Destructive);
         assert_eq!(alert.pop.appear(), appear, "content must not restart the entrance");
-        assert_eq!(crate::popover::host_users_for_test(), users);
-        plx_machine::idle::take_local_damage();
+        assert_eq!(alert.pop.visible(), visible);
+        plx_machine::motion::report::take_local_motion();
         assert!(!alert.reconcile_card(c"Details", vec!["receipt".into()], Answers::Two));
-        assert_eq!(plx_machine::idle::take_local_damage(), 0, "a settled card must stay idle");
+        assert_eq!(plx_machine::motion::report::take_local_motion(), 0, "a settled card must stay idle");
         assert!(alert.reconcile_card(c"Details", vec!["receipt".into()], Answers::One));
         assert_eq!(alert.choice(), Choice::Cancel, "the removed answer hands focus to Close");
         alert.set_choice(Choice::Destructive);
@@ -674,6 +831,15 @@ mod tests {
         alert.close();
     }
 
+    /// The pair is one centred [`HStack`] run: [`BUTTON_GAP`] between the answers, the run centred on
+    /// the panel (the answers' geometry has not moved since the stack took the spacing).
+    #[test]
+    fn the_two_answers_stand_one_button_gap_apart_centred_on_the_panel() {
+        let l = layout(40.0, 90.0);
+        assert_eq!(l.destructive.x - (l.cancel.x + l.cancel.w), BUTTON_GAP);
+        assert_eq!((l.cancel.x + l.destructive.x + l.destructive.w) * 0.5, l.panel.cx());
+    }
+
     /// **A one-answer card centres its one answer** in the cancel slot, keeps the two-answer
     /// panel's height, and a re-open as a question gets both answers back.
     #[test]
@@ -700,5 +866,16 @@ mod tests {
         assert_eq!(body_h(&[]), 0.0);
         assert_eq!(body_h(&[30.0]), 30.0);
         assert_eq!(body_h(&[30.0, 60.0]), 90.0 + PARA_GAP);
+    }
+
+    /// The body rect stands BODY_GAP under the question, and an alert with no body keeps the rect
+    /// where a body would start while taking no room.
+    #[test]
+    fn the_body_stands_one_gap_under_the_question_and_an_absent_body_takes_no_room() {
+        let with = layout(40.0, 90.0);
+        assert!((with.body.y - (with.question.y + 40.0 + BODY_GAP)).abs() < 0.01);
+        let plain = layout(40.0, 0.0);
+        assert!((plain.body.y - (plain.question.y + 40.0 + BODY_GAP)).abs() < 0.01);
+        assert!((with.panel.h - plain.panel.h - (BODY_GAP + 90.0)).abs() < 0.01);
     }
 }

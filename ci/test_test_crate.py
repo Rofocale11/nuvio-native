@@ -56,6 +56,10 @@ if args[0] == "metadata":
     print(json.dumps({"packages": [{"name": n, "dependencies": [{"name": d} for d in deps]}
                                    for n, deps in data["workspace"].items()]}))
 elif "--unit-graph" in args:
+    # Stable cargo refuses -Z; RUSTC_BOOTSTRAP=1 is what lets the query through (the 2026-10 regression).
+    if "-Z" in args and os.environ.get("RUSTC_BOOTSTRAP") != "1":
+        sys.stderr.write("error: the `-Z` flag is only accepted on the nightly channel of Cargo\\n")
+        sys.exit(101)
     units = [{"pkg_id": "path+file:///r/%s#%s@0.0.0" % (n, n), "features": f, "dependencies": [],
               "target": {"kind": ["lib"]}, "mode": "test"} for n, f in data["features"].items()]
     print(json.dumps({"version": 1, "units": units, "roots": []}))
@@ -118,6 +122,15 @@ class CommandShape(unittest.TestCase):
                                      "plx_machine/test-support", "image/png"})
             self.assertNotIn("serde/derive", feats)
 
+    def test_unit_graph_query_works_on_stable_and_the_bootstrap_does_not_leak(self):
+        with World() as w:
+            w.command("ui")  # the fake refuses -Z without RUSTC_BOOTSTRAP=1, like stable cargo
+            out = subprocess.run([sys.executable, str(TOOL), "--suite", SUITE, "--cargo", str(w.dir / "cargo"),
+                                  "--dry-run", "ui"], capture_output=True, text=True,
+                                 env={k: v for k, v in os.environ.items() if k != "RUSTC_BOOTSTRAP"})
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertNotIn("RUSTC_BOOTSTRAP", out.stdout)
+
     def test_names_resolve_with_or_without_the_prefix_and_the_app_crate_is_app(self):
         with World() as w:
             for name in ("ui", "plx_ui"):
@@ -155,6 +168,9 @@ class MakeWiring(unittest.TestCase):
         full = dict(os.environ)
         for k in ("MAKEFLAGS", "MFLAGS"):
             full.pop(k, None)
+        # The recipes are under test; the disk preflight has its own test (ci/test_disk_preflight.py), and a real
+        # `make` would otherwise run it against this machine's disk and, below the comfort line, evict its trees.
+        full["PLX_DISK_BUDGET_DONE"] = "1"
         full.update(env or {})
         return subprocess.run(["make", *args], cwd=ROOT, env=full, capture_output=True, text=True)
 
@@ -184,10 +200,45 @@ class MakeWiring(unittest.TestCase):
         text = (ROOT / "Makefile").read_text()
         suite = re.search(r"^UNIT_SUITE\s*=\s*(.+)$", text, flags=re.M).group(1).split()
         flags = " ".join(f"-p {p}" for p in suite)
-        for target in ("check-cargo-unit-default", "check-cargo-unit-hostsim", "test-fast"):
+        for target in ("check-cargo-unit-default", "test-fast"):
             start = text.index(f"\n{target}:")
             recipe = text[start:start + 6000].split("\n\n")[0]
             self.assertIn(f"test --lib {flags}", recipe, target)
+
+    def test_the_hostsim_pass_is_exactly_the_crates_that_declare_hostsim(self):
+        """The `hostsim` pass runs HOSTSIM_SUITE, a subset of UNIT_SUITE (`make check`'s first run of
+        every binary is the default pass). A crate left out has an identical test set in both passes:
+        no `hostsim` feature in its manifest and no `feature = "hostsim"` in its source. What the guard
+        does not check is the dependency side: the old pass linked those crates' test binaries
+        against hostsim-built `plx_base`, `plx_gfx`, `plx_os`, `plx_media` and `plx_play_feed`
+        (`ENV_STEERABLE` paths, glyph-cache sizes, `ffi_host` present), and none of their tests
+        observes those differences. A crate that gains the feature or a cfg fails here until it is
+        added to HOSTSIM_SUITE (and the recipe's `-p` list)."""
+        text = (ROOT / "Makefile").read_text()
+        unit = re.search(r"^UNIT_SUITE\s*=\s*(.+)$", text, flags=re.M).group(1).split()
+        hostsim = re.search(r"^HOSTSIM_SUITE\s*=\s*(.+)$", text, flags=re.M).group(1).split()
+        self.assertEqual(hostsim, [p for p in unit if p in hostsim], "HOSTSIM_SUITE is UNIT_SUITE's order")
+        self.assertTrue(set(hostsim) <= set(unit))
+        start = text.index("\ncheck-cargo-unit-hostsim:")
+        recipe = text[start:start + 6000].split("\n\n")[0]
+        self.assertIn("test --lib " + " ".join(f"-p {p}" for p in hostsim) + " --features hostsim", recipe)
+        manifests = {"plxnative-modules": ROOT / "rust-modules"}
+        for member in (ROOT / "rust-modules").iterdir():
+            manifest = member / "Cargo.toml"
+            if manifest.is_file():
+                name = re.search(r'^name\s*=\s*"([^"]+)"', manifest.read_text(), flags=re.M)
+                if name:
+                    manifests[name.group(1)] = member
+        for crate in unit:
+            root = manifests[crate]
+            declares = re.search(r"^hostsim\s*=", (root / "Cargo.toml").read_text(), flags=re.M) is not None
+            sources = (root / "src").rglob("*.rs")
+            cfgs = [str(f.relative_to(ROOT)) for f in sources if 'feature = "hostsim"' in f.read_text(errors="replace")]
+            if crate in hostsim:
+                self.assertTrue(declares, f"{crate} is in HOSTSIM_SUITE but declares no `hostsim` feature, which `--features hostsim -p {crate}` needs")
+            else:
+                self.assertFalse(declares, f"{crate} declares `hostsim`: add it to HOSTSIM_SUITE and the recipe")
+                self.assertEqual(cfgs, [], f"{crate} has a hostsim cfg: add it to HOSTSIM_SUITE and the recipe")
 
     def test_check_never_names_test_crate(self):
         text = (ROOT / "Makefile").read_text()

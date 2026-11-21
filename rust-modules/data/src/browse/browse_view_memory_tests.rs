@@ -76,8 +76,7 @@ fn library_on(pms: &Pms, machine: &str, title: &str, kind: SecKind) -> TestBrows
     // As a finished discovery leaves it: the roster sync must see this client as the one the
     // table was built against, or it re-runs discovery and that request eats a scripted answer.
     let client = plx_plex::plex::client_for(pms.sid).unwrap();
-    source.client_addr = client as *const _ as usize;
-    source.token_gen = client.token_gen();
+    source.client_key = Some(plx_plex::plex::ClientKey::of(client));
     let mut browse = TestBrowse::default();
     browse.seed_sources(vec![source]);
     browse.append_sections(0, vec![(1, title.into(), kind)]);
@@ -88,10 +87,13 @@ fn library_on(pms: &Pms, machine: &str, title: &str, kind: SecKind) -> TestBrows
 #[cfg(feature = "devtriggers")]
 fn pump_until_landed(browse: &mut TestBrowse) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    browse.state.want(0, PAGE);
+    browse.state.want(0, PAGE, None);
     while browse.state.cur_state().is_some_and(|state| state.total < 0)
         && std::time::Instant::now() < deadline {
         let _ = browse.pump();
+        // The runner's part, on this thread: the page the pump asked for is read against the
+        // scripted PMS and its answer waits for the next pump.
+        browse.run_listing_jobs();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
@@ -125,7 +127,8 @@ fn a_chosen_sort_survives_a_restart() {
         crate::stores::browse::LibraryWork::Commit {
             select: false, choice: false,
             query: Some(crate::stores::browse::QueryEdit::Sort { key: "viewCount".into(), desc: true }),
-        }));
+        }, &ClientKeys::default(), &mut Vec::new()));
+    browse.run_preference_jobs();
     pump_until_landed(&mut browse);
     let first_run: Vec<String> = (0..2).map(|_| pms.requests.recv().unwrap()).collect();
     assert!(first_run[1].contains("sort=viewCount%3Adesc"), "{}", first_run[1]);
@@ -135,8 +138,8 @@ fn a_chosen_sort_survives_a_restart() {
     // ---- the restart: a cold session cache read from disk, and a brand-new store -------------
     plx_plex::plex::reset_servers_for_test();
     plx_plex::plex::session::redirect_for_test(Some(session.path()));
-    let _ = plx_plex::plex::session::peek();
     plx_base::storage_worker::drain_for_test();
+    let _ = plx_plex::plex::session::refresh_blocking_for_test();
     session.watching("u-sorter");
     let pms = loopback_pms("sort-machine", vec![MENU_PAGE, PLAYS_PAGE]);
     let mut browse = movies_on(&pms, "sort-machine");
@@ -239,7 +242,8 @@ fn choosing_the_default_order_forgets_the_entry() {
             crate::stores::browse::LibraryWork::Commit {
                 select: false, choice: false,
                 query: Some(crate::stores::browse::QueryEdit::Sort { key: key.into(), desc }),
-            }));
+            }, &ClientKeys::default(), &mut Vec::new()));
+        browse.run_preference_jobs();
         plx_base::storage_worker::drain_for_test();
     };
     let held = |browse: &TestBrowse| {
@@ -254,7 +258,7 @@ fn choosing_the_default_order_forgets_the_entry() {
     land_page_with_sorts(&mut browse, vec![]);
     commit(&mut browse, "titleSort", false);
     assert_eq!(held(&browse), None, "the default order needs no record");
-    assert!(plx_plex::plex::session::peek().library_views.is_empty(),
+    assert!(plx_plex::plex::session::peek().prefs.library_views.is_empty(),
         "and a profile with nothing remembered leaves no empty record behind");
     // A Collections view's sort is that view's menu, not the library's: recorded as the
     // LISTING's sort, with the library's own sort left alone.
@@ -306,8 +310,8 @@ fn the_remembered_views_are_capped_most_recent_first() {
 fn restart(session: &TempPins, user: &str) {
     plx_plex::plex::reset_servers_for_test();
     plx_plex::plex::session::redirect_for_test(Some(session.path()));
-    let _ = plx_plex::plex::session::peek();
     plx_base::storage_worker::drain_for_test();
+    let _ = plx_plex::plex::session::refresh_blocking_for_test();
     session.watching(user);
 }
 
@@ -395,7 +399,8 @@ fn switch_unwatched_on(browse: &mut TestBrowse, pms: &Pms) {
         crate::stores::browse::LibraryWork::Commit {
             select: false, choice: false,
             query: Some(crate::stores::browse::QueryEdit::Unwatched(true)),
-        }));
+        }, &ClientKeys::default(), &mut Vec::new()));
+        browse.run_preference_jobs();
 }
 
 /// A saved sort whose restore FAILED transiently (the menu came back, the sorted re-ask did not)
@@ -565,7 +570,8 @@ fn unwatched_and_genre_survive_a_restart() {
         assert!(browse.state.addressed_with_adapter(&browse.adapter, target,
             crate::stores::browse::LibraryWork::Commit {
                 select: false, choice: false, query: Some(edit),
-            }));
+            }, &ClientKeys::default(), &mut Vec::new()));
+        browse.run_preference_jobs();
     }
     plx_base::storage_worker::drain_for_test();
     drop(browse);

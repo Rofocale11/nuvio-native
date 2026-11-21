@@ -34,8 +34,9 @@ use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, GroupId, Host,
 use plx_machine::present::PresentEvent;
 
 use super::{CardEvent, CardSource, Grid, GridSpec, SectionFrame, Shelf};
+use crate::a11y::{A11y, A11yPath, Role, Seg};
 use crate::card_row::{self, RowStyle};
-use crate::consts::{K_SCROLL, MARGIN_Y, SCR_H, SCR_W};
+use crate::consts::{K_SCROLL, MARGIN_Y, SCR_H, SCR_W, UNDER_LABEL_AIR};
 use crate::screen::{
     Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, Focusable, GroupKind, GroupSpec, Hover, Part,
     Placed, Seat, Step, Stop,
@@ -78,6 +79,9 @@ pub struct SectionSpec<K> {
     seat: Option<Seat>,
     edge: Option<[EdgeRule; 4]>,
     elem: Option<ElemKind>,
+    /// The section's name in the page's accessibility ids and the index after it, when it has one
+    /// ([`named`](Self::named), [`named_at`](Self::named_at)); `None` is `section.<position>`.
+    a11y: Option<(&'static str, Option<usize>)>,
 }
 
 impl<K> SectionSpec<K> {
@@ -89,7 +93,7 @@ impl<K> SectionSpec<K> {
 
     /// A section in document order, its group listed in document order too.
     pub fn new(key: K, kind: Kind, group: GroupId) -> Self {
-        Self { key, kind, group, rank: 0, seat: None, edge: None, elem: None }
+        Self { key, kind, group, rank: 0, seat: None, edge: None, elem: None, a11y: None }
     }
 
     /// Seat this section's group by `seat` instead of its kind's rule.
@@ -114,6 +118,34 @@ impl<K> SectionSpec<K> {
     pub fn ranked(mut self, rank: u32) -> Self {
         self.rank = rank;
         self
+    }
+
+    /// Name this section in the page's accessibility ids (`a11y`): its cards are `<name>.card.<i>`
+    /// and the elements of a `Custom` / `Overlay` one `<name>.<n>` (or `<name>.<leaf>`, see
+    /// [`StackPage::plain_name`]). `name` is `[a-z][a-z0-9_]*` and unique among the page's sections.
+    /// A section left unnamed is `section.<position>`, which moves when a section before it comes or
+    /// goes: a page whose tests address it by id names its sections.
+    pub fn named(mut self, name: &'static str) -> Self {
+        self.a11y = Some((name, None));
+        self
+    }
+
+    /// [`named`](Self::named) for one of several sections of a kind (`shelf.0`, `shelf.1`): `name`
+    /// then the index `i` the page gives it. Use an index that does not move when another section
+    /// comes or goes (the shelf's place in the page's own list, never its position among every section).
+    pub fn named_at(mut self, name: &'static str, i: usize) -> Self {
+        self.a11y = Some((name, Some(i)));
+        self
+    }
+
+    /// This section's path in the page's accessibility ids; `position` is where it stands in the
+    /// page's sections, the name of an unnamed one.
+    fn a11y_path(&self, position: usize) -> A11yPath {
+        match self.a11y {
+            Some((name, None)) => A11yPath::new().name(name),
+            Some((name, Some(i))) => A11yPath::new().name(name).index(i),
+            None => A11yPath::new().name("section").index(position),
+        }
     }
 }
 
@@ -146,6 +178,13 @@ pub trait StackPage<H: Host> {
     fn recover(&self, _cx: &Cx<'_, H>, _want: &H::Elem) -> Option<H::Elem> {
         None
     }
+    /// The element that now stands for `want` when the page re-keyed it without moving it: a card
+    /// whose slot was a placeholder until its content landed, keyed anew in the same cell. Asked
+    /// before anything else, even of an element the page still shows, so the engine's focus moves
+    /// to the new key in the frame of the landing and the cell under it does not change.
+    fn supersede(&self, _cx: &Cx<'_, H>, _want: &H::Elem) -> Option<H::Elem> {
+        None
+    }
     fn sections(&self, cx: &Cx<'_, H>, out: &mut Vec<SectionSpec<Self::Key>>);
     /// The page-level order focus falls back through when its section empties.
     fn fallback(&self, cx: &Cx<'_, H>, out: &mut Vec<Self::Key>);
@@ -172,6 +211,14 @@ pub trait StackPage<H: Host> {
     /// [`plain_step`](Self::plain_step) walks.
     fn plain_elem(&self, k: Self::Key, n: usize) -> Option<H::Elem> {
         if n == 0 { self.elem_of(k) } else { None }
+    }
+    /// The accessibility name of element `n` of a focusable `Custom` / `Overlay` section: the leaf of
+    /// its id under the section's own (`detail.hero.play` is the section `hero`, the leaf `play`).
+    /// `None`, the default, names it by its position, `<section>.<n>`. A name is `[a-z][a-z0-9_]*`
+    /// and unique among the section's elements; name an element by what it IS, so a list that
+    /// grows or reorders moves no id.
+    fn plain_name(&self, _k: Self::Key, _n: usize) -> Option<&'static str> {
+        None
     }
     /// Where a move `dir` from element `at` of a multi-element section ends inside it, as an index
     /// into [`plain_elem`](Self::plain_elem); `None` is the section's edge (its group's
@@ -202,7 +249,13 @@ pub trait StackPage<H: Host> {
     }
     /// Air the page keeps under a shelf's block, counted in the block's height (the scroll reveals
     /// it with the block): a page whose shelves are stacked with the label band's air under each.
-    fn shelf_foot(&self, _k: Self::Key) -> f32 {
+    /// Shelves are adjacent sections, never a `Custom` gap between two of them: the shelf above
+    /// reads the heading of the one below as the thing under its caption
+    /// ([`SectionFrame::below_rise`]), and a gap section hides it. A page that keeps the last
+    /// shelf bare says so from `cx`, the content its sections read: the default, 0, is for that
+    /// last shelf, because the caption rule counts [`UNDER_LABEL_AIR`] under every shelf that has another
+    /// below it (`card_row::room_for`), and a `Stack` refuses a page that keeps less there.
+    fn shelf_foot(&self, _cx: &Cx<'_, H>, _k: Self::Key) -> f32 {
         0.0
     }
     /// Whether a shelf's group extent spans the page's width (the default) or is the shelf's own
@@ -210,6 +263,9 @@ pub trait StackPage<H: Host> {
     fn wide_extent(&self, _k: Self::Key) -> bool {
         true
     }
+    /// Groups the page declares beyond its sections' own, appended after them (the group of a
+    /// listing still on its way: `PageRegions::declare_pending`).
+    fn extra_groups(&self, _cx: &Cx<'_, H>, _out: &mut Vec<GroupSpec>) {}
     /// The focus group of a focusable `Custom` / `Overlay` section.
     fn plain_group(&self, _cx: &Cx<'_, H>, _k: Self::Key, id: GroupId, extent: Rect) -> GroupSpec {
         GroupSpec {
@@ -233,6 +289,17 @@ pub trait StackPage<H: Host> {
     fn draw_heading(&self, _k: Self::Key, _f: &mut DrawFrame<'_, '_, H>, _r: Rect, _lift: f32) {}
     /// A `Custom` / `Overlay` section drawn in `r` (screen space); `scroll` is the page's.
     fn custom_draw(&self, _k: Self::Key, _f: &mut DrawFrame<'_, '_, H>, _r: Rect, _scroll: f32) {}
+    /// The Under posters policy shelf or grid section `k` opens its focused caption band by (0 / 80 /
+    /// 112 px, `caption_policy::band_h`). `None` keeps the legacy band (title and caption, 114 px): a
+    /// section whose tiles are not posters (a landscape still row, a headshot row) keeps it. The
+    /// stack hands it to the section every frame, so a setting changed elsewhere reaches a standing page.
+    fn caption_policy(&self, _cx: &Cx<'_, H>, _k: Self::Key) -> Option<crate::caption_policy::CaptionPolicy> {
+        None
+    }
+    /// The cards grid section `k`'s landing is fading out, painted BEFORE the grid's own cards so
+    /// the ones that slid over their cells cover them. A page that keeps the cards it removed
+    /// paints them with [`Grid::paint_ghosts`] (named by [`Grid::ghost_keys`]); the default keeps none.
+    fn paint_ghosts(&self, _k: Self::Key, _grid: &Grid, _f: &mut DrawFrame<'_, '_, H>, _p: crate::Painter) {}
 }
 
 enum Body {
@@ -259,6 +326,9 @@ pub struct Stack<K> {
     home: bool,
     /// The reveal target moves only on `FocusMoved`, not every tick ([`Stack::reveal_on_move`]).
     on_move: bool,
+    /// A wheel (or the pointer's edge glide) moved the page: it stays where the wheel put it until
+    /// focus moves, instead of the tick pulling it back to the focused section.
+    wheeled: bool,
     /// The clip every section's placement carries ([`Stack::clipped`]).
     clip: Rect,
     /// The section and position focus was last on, for the reconcile rule.
@@ -292,6 +362,7 @@ impl<K: Copy + Eq> Stack<K> {
             target: 0.0,
             home: false,
             on_move: false,
+            wheeled: false,
             clip: Rect::FULL,
             last: None,
             queue: Vec::new(),
@@ -330,11 +401,11 @@ impl<K: Copy + Eq> Stack<K> {
     }
 
     /// Teach the hold on this page: a standing "Hold OK for options" hint over the cards, on the
-    /// rarer cadence of a non-Home screen of `kind` (`HoldHint::once_per_run`). The stack steps it
+    /// run-wide cadence every card screen shares (`HoldHint::new`). The stack steps it
     /// on its `Tick`, answers its two screen-specific questions itself ([`hint_input`](Self::hint_input))
     /// and draws it last in [`StackView::paint`]. For a page whose card holds open the item menu.
-    pub fn hold_hint(mut self, kind: crate::hold_hint::Kind) -> Self {
-        self.hint = Some(crate::hold_hint::HoldHint::once_per_run(kind));
+    pub fn hold_hint(mut self) -> Self {
+        self.hint = Some(crate::hold_hint::HoldHint::new());
         self
     }
 
@@ -396,6 +467,49 @@ impl<K: Copy + Eq> Stack<K> {
         }
     }
 
+    /// Grid `k`'s state (`None` while the layout has no such grid): a page that keeps its removed
+    /// cards for the landing's ghosts reads [`Grid::landing_pending`] and [`Grid::ghost_keys`] here.
+    pub fn grid(&self, k: K) -> Option<&Grid> {
+        match self.bodies.get(self.index(k)?) {
+            Some(Body::Grid(g)) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// The page shelf `k`'s owner should ask for this tick ([`Shelf::page_ask`]); `None` for a key
+    /// that is not a shelf of the layout.
+    pub fn page_ask<H: Host<Elem = u32>, P: StackPage<H, Key = K>>(
+        &mut self,
+        p: &P,
+        cx: &Cx<'_, H>,
+        k: K,
+        wanted: bool,
+        offset: usize,
+    ) -> Option<super::PageEdge> {
+        let i = self.index(k)?;
+        let src = p.cards(cx, k)?;
+        match &mut self.bodies[i] {
+            Body::Shelf(s) => s.page_ask(cx, &src, wanted, offset, true),
+            _ => None,
+        }
+    }
+
+    /// The edge of shelf `k` whose page ask its owner must withdraw this tick ([`Shelf::page_cancel`]).
+    pub fn page_cancel<H: Host<Elem = u32>, P: StackPage<H, Key = K>>(
+        &mut self,
+        p: &P,
+        cx: &Cx<'_, H>,
+        k: K,
+        offset: usize,
+    ) -> Option<super::PageEdge> {
+        let i = self.index(k)?;
+        let src = p.cards(cx, k)?;
+        match &mut self.bodies[i] {
+            Body::Shelf(s) => s.page_cancel(cx, &src, offset, true),
+            _ => None,
+        }
+    }
+
     /// Where shelf `k`'s tiles sit now.
     pub fn shelf_frame<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, k: K) -> Option<SectionFrame> {
         Some(self.frame(p, cx, self.index(k)?))
@@ -412,6 +526,16 @@ impl<K: Copy + Eq> Stack<K> {
 
     fn index(&self, k: K) -> Option<usize> {
         self.specs.iter().position(|s| s.key == k)
+    }
+
+    /// The cards of grid section `k` the scroll can show, out of its `len`: what the grid draws and
+    /// registers stops for this frame, by the grid's own rule. A page that keeps keys for only some
+    /// of its cards projects these (`None` before the first pass has laid the section out, or
+    /// when `k` is not a grid).
+    pub fn grid_window<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, k: K) -> Option<std::ops::Range<usize>> {
+        let i = self.index(k)?;
+        let Body::Grid(g) = &self.bodies[i] else { return None };
+        Some(g.window(self.len_of(p, cx, i)))
     }
 
     pub fn memory(&self) -> StackMemory<K> {
@@ -471,7 +595,7 @@ impl<K: Copy + Eq> Stack<K> {
                 match (s.kind, kept) {
                     (Kind::Shelf { .. }, Some((_, b @ Body::Shelf(_)))) => b,
                     (Kind::Grid { .. }, Some((_, b @ Body::Grid(_)))) => b,
-                    (Kind::Shelf { style, .. }, _) => Body::Shelf(Shelf::new(self.entry, style)),
+                    (Kind::Shelf { style, .. }, _) => Body::Shelf(Shelf::new(self.entry, *style)),
                     (Kind::Grid { spec }, _) => Body::Grid(Grid::new(self.entry, spec.external())),
                     _ => Body::Plain,
                 }
@@ -494,7 +618,7 @@ impl<K: Copy + Eq> Stack<K> {
     fn height<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, i: usize) -> f32 {
         match (&self.specs[i].kind, &self.bodies[i]) {
             (Kind::Shelf { style, heading }, Body::Shelf(s)) => {
-                if self.len_of(p, cx, i) == 0 { 0.0 } else { heading + style.h + s.under_band() + p.shelf_foot(self.specs[i].key) }
+                if self.len_of(p, cx, i) == 0 { 0.0 } else { heading + style.h + s.under_band() + p.shelf_foot(cx, self.specs[i].key) }
             }
             (Kind::Grid { .. }, Body::Grid(g)) => g.height(self.len_of(p, cx, i)),
             (Kind::Custom { height, .. }, _) => *height,
@@ -524,6 +648,18 @@ impl<K: Copy + Eq> Stack<K> {
 
     /// Hand every grid the page: its top in document space and the scroll.
     fn sync_pages<H: Host, P: StackPage<H, Key = K>>(&mut self, p: &P, cx: &Cx<'_, H>) {
+        for i in 0..self.bodies.len() {
+            match &mut self.bodies[i] {
+                Body::Grid(g) => {
+                    let policy = p.caption_policy(cx, self.specs[i].key);
+                    if g.caption_policy() != policy {
+                        g.set_caption_policy(policy);
+                    }
+                }
+                Body::Shelf(s) => s.set_caption_policy(p.caption_policy(cx, self.specs[i].key)),
+                Body::Plain => {}
+            }
+        }
         self.retop(p, cx);
         for i in 0..self.bodies.len() {
             if let Body::Grid(g) = &mut self.bodies[i] {
@@ -572,7 +708,22 @@ impl<K: Copy + Eq> Stack<K> {
 
     fn frame<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, i: usize) -> SectionFrame {
         let heading = if let Kind::Shelf { heading, .. } = self.specs[i].kind { heading } else { 0.0 };
-        SectionFrame { y: self.top(p, cx, i) - self.scroll.pos + heading, clip: self.clip }
+        // what stands under a shelf's caption is the heading of the next section that takes room
+        // (an empty shelf takes none) when that is a shelf, drawn lifted by that shelf's own lift
+        // (`draw_heading`'s `lift`)
+        let below_rise = match (i + 1..self.specs.len()).find(|&j| self.height(p, cx, j) > 0.0).map(|j| &self.bodies[j]) {
+            Some(Body::Shelf(next)) => {
+                // `card_row::room_for` counts `UNDER_LABEL_AIR` under a shelf's band: a page that keeps less
+                // with a shelf below would have a caption line drawn over that heading
+                debug_assert!(
+                    p.shelf_foot(cx, self.specs[i].key) >= UNDER_LABEL_AIR,
+                    "a shelf with another shelf below it keeps at least UNDER_LABEL_AIR under it (`StackPage::shelf_foot`)"
+                );
+                next.heading_lift()
+            }
+            _ => 0.0,
+        };
+        SectionFrame { below_rise, ..SectionFrame::new(self.top(p, cx, i) - self.scroll.pos + heading, self.clip) }
     }
 
     // ---- events ----------------------------------------------------------------------------
@@ -618,13 +769,15 @@ impl<K: Copy + Eq> Stack<K> {
             ScreenEvent::Tick(t) => {
                 self.tick(t.dt(), p, cx, fx);
                 if let Some(h) = &self.hint {
-                    let input = if h.wants_input(cx.press.held_ms.is_some()) {
+                    let input = if h.wants_input(cx.press.held_ms.is_some(), cx.hold_hint) {
                         self.hint_input(p, cx)
                     } else {
                         crate::hold_hint::HintInput::default()
                     };
                     if let Some(h) = &mut self.hint {
-                        h.step(input, t.ms, t.dt(), &mut |ev| fx.note(ev));
+                        if let Some(event) = h.step(input, t.ms, t.dt(), &mut |ev| fx.note(ev), cx.hold_hint) {
+                            fx.push(plx_machine::machine::Fx::HoldHint(event));
+                        }
                     }
                 }
                 if reported.is_none() && !self.queue.is_empty() {
@@ -632,7 +785,50 @@ impl<K: Copy + Eq> Stack<K> {
                     reported = Some(StackEvent::Card(k, CardEvent::Want(r)));
                 }
             }
+            // A hover moves focus, never the page: the pointer scrolls by the screen's edges (and
+            // a click by what it clicked, below). Every other move brings the page to the focus.
+            ScreenEvent::FocusMoved { by: plx_machine::machine::By::Pointer, .. } => self.wheeled = true,
             ScreenEvent::FocusMoved { to, .. } if self.on_move => self.reveal_on(p, cx, *to),
+            ScreenEvent::FocusMoved { .. } => self.wheeled = false,
+            // The pointer's sideways glide moves the shelf under it (`Shelf::glide`).
+            ScreenEvent::Input(input) if matches!(input.kind, plx_machine::machine::InputKind::Pan { .. }) => {
+                if let plx_machine::machine::InputKind::Pan { dx, y, .. } = input.kind {
+                    let under = (0..self.bodies.len()).find(|&i| {
+                        matches!(self.bodies[i], Body::Shelf(_)) && {
+                            let r = self.rect(p, cx, i);
+                            y >= r.y && y < r.y + r.h
+                        }
+                    });
+                    if let Some(i) = under {
+                        let n = self.len_of(p, cx, i);
+                        if let Body::Shelf(shelf) = &mut self.bodies[i] {
+                            shelf.glide(dx, n);
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                        }
+                    }
+                }
+            }
+            ScreenEvent::Input(input) if matches!(input.kind, plx_machine::machine::InputKind::Click { hit: Some(_), .. }) => {
+                if let plx_machine::machine::InputKind::Click { hit: Some(elem), .. } = input.kind {
+                    self.wheeled = false;
+                    if self.on_move {
+                        self.reveal_on(p, cx, FocusKey { entry: self.entry, elem });
+                    }
+                }
+            }
+            // A wheel moves the page itself, focus staying where it is: `dy` rows of `ROW_PITCH`
+            // (fractional for the pointer's edge glide). A `reveal_on_move` page answers its own
+            // wheel (Search scrolls by its table rows), so it is left alone here.
+            ScreenEvent::Input(input) if !self.on_move => {
+                if let plx_machine::machine::InputKind::Wheel { dy } = input.kind {
+                    if dy.is_finite() {
+                        let max = self.max_scroll(p, cx).max(self.target);
+                        self.target = (self.target - dy * crate::consts::ROW_PITCH).clamp(0.0, max);
+                        self.wheeled = true;
+                        fx.invalidate(plx_machine::present::Provenance::Input);
+                    }
+                }
+            }
             ScreenEvent::Activate(e) => {
                 reported = reported.or_else(|| {
                     let i = self.owner(p, cx, e)?;
@@ -675,7 +871,7 @@ impl<K: Copy + Eq> Stack<K> {
             self.target += shift;
         }
         match focus {
-            _ if self.on_move => {}
+            _ if self.on_move || self.wheeled => {}
             Some((i, _)) if !matches!(self.specs[i].kind, Kind::Overlay { .. }) => self.target = self.wanted(p, cx, i),
             _ if self.home => self.target = 0.0,
             _ => {}
@@ -692,13 +888,19 @@ impl<K: Copy + Eq> Stack<K> {
     /// target computed against the live bands chases a moving goal for as long as they animate.
     fn settled_height<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, n: usize, focus: usize) -> f32 {
         match &self.specs[n].kind {
-            Kind::Shelf { style, heading } => {
-                if self.len_of(p, cx, n) == 0 {
-                    0.0
-                } else {
-                    heading + style.h + card_row::under_band((n == focus) as i32 as f32) + p.shelf_foot(self.specs[n].key)
+            Kind::Shelf { style, heading } => match &self.bodies[n] {
+                _ if self.len_of(p, cx, n) == 0 => 0.0,
+                // the band the shelf's OWN policy opens to, so a Nothing / one-line / two-line setting
+                // is the destination the scroll target is computed against
+                Body::Shelf(s) => {
+                    heading + style.h + card_row::under_band_for(s.band_h(), (n == focus) as i32 as f32) + p.shelf_foot(cx, self.specs[n].key)
                 }
-            }
+                _ => self.height(p, cx, n),
+            },
+            Kind::Grid { .. } => match &self.bodies[n] {
+                Body::Grid(g) => g.settled_height(self.len_of(p, cx, n), n == focus),
+                _ => self.height(p, cx, n),
+            },
             _ => self.height(p, cx, n),
         }
     }
@@ -708,7 +910,9 @@ impl<K: Copy + Eq> Stack<K> {
     /// names, [`StackPage::reveal_with`]) otherwise.
     fn wanted<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, i: usize) -> f32 {
         if let Body::Grid(g) = &self.bodies[i] {
-            return g.reveal_target().unwrap_or(self.target);
+            // a resting grid's row rests where the first row does, held by the document's end
+            let want = if g.rests() { g.rest_target(self.max_with_focus(p, cx, i)) } else { g.reveal_target() };
+            return want.unwrap_or(self.target);
         }
         if matches!(self.specs[i].kind, Kind::Overlay { .. }) {
             return self.target;
@@ -842,6 +1046,18 @@ impl<K: Copy + Eq, P> StackView<'_, K, P> {
     {
         let (s, page) = (self.stack, self.page);
         let Some(key) = focus.filter(|k| k.entry == s.entry) else { return };
+        // an opener that left the page: the lift carries its landing ghost above the dim
+        for (i, body) in s.bodies.iter().enumerate() {
+            if let Body::Grid(g) = body {
+                if g.departing::<H>(key) {
+                    let p = f.painter.alpha(f.page_alpha);
+                    let was = f.lifting.replace(key);
+                    page.paint_ghosts(s.specs[i].key, g, f, p);
+                    f.lifting = was;
+                    return;
+                }
+            }
+        }
         let Some(i) = s.owner(page, f.cx, &key.elem) else { return };
         let Some(src) = page.cards(f.cx, s.specs[i].key) else { return };
         let p = f.painter.alpha(f.page_alpha);
@@ -850,6 +1066,12 @@ impl<K: Copy + Eq, P> StackView<'_, K, P> {
             Body::Grid(g) => g.redraw_focused(f, p, &src, focus),
             Body::Plain => {}
         }
+    }
+
+    /// Whether `key`'s card left a grid section and is still fading as its ghost
+    /// ([`Screen::opener_departing`](crate::screen::Screen::opener_departing)).
+    pub fn opener_departing<H: Host>(&self, key: FocusKey<H::Elem>) -> bool {
+        key.entry == self.stack.entry && self.stack.bodies.iter().any(|b| matches!(b, Body::Grid(g) if g.departing::<H>(key)))
     }
 
     /// The live pop of card `elem` (no press), in whichever card section shows it.
@@ -886,6 +1108,9 @@ impl<K: Copy + Eq, P> StackView<'_, K, P> {
                     sh.draw(f, p, &src, s.frame(page, f.cx, i));
                 }
                 (Kind::Grid { .. }, Body::Grid(g)) => {
+                    if g.has_ghosts() {
+                        page.paint_ghosts(k, g, f, p);
+                    }
                     if let Some(src) = page.cards(f.cx, k) {
                         g.draw(f, p, &src);
                     }
@@ -975,6 +1200,7 @@ impl<K: Copy + Eq, H: Host<Elem = u32>, P: StackPage<H, Key = K>> Focusable<H> f
                 _ => {}
             }
         }
+        p.extra_groups(cx, out);
     }
 
     fn group_of(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<GroupId> {
@@ -1005,6 +1231,9 @@ impl<K: Copy + Eq, H: Host<Elem = u32>, P: StackPage<H, Key = K>> Focusable<H> f
     fn reconcile(&self, want: FocusKey<H::Elem>, cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         let (s, p) = (self.stack, self.page);
         let at = |elem| FocusKey { entry: s.entry, elem };
+        if let Some(elem) = p.supersede(cx, &want.elem) {
+            return at(elem);
+        }
         if s.owner(p, cx, &want.elem).is_some() {
             return at(want.elem);
         }
@@ -1046,5 +1275,104 @@ impl<K: Copy + Eq, H: Host<Elem = u32>, P: StackPage<H, Key = K>> Focusable<H> f
             .or_else(|| self.fallback_key(cx))
             .or_else(|| (0..s.specs.len()).find_map(|i| self.nth(cx, i, 0)).map(at))
             .unwrap_or(FocusKey { entry: s.entry, elem: s.last_elem })
+    }
+
+    /// **The accessibility projection** (`a11y`): a card is `<section>.card.<n>` ([`Role::Card`]),
+    /// `n` its place in its listing, given its label, subject and `loaded` by
+    /// [`card_a11y`](super::card_a11y); an element of a
+    /// focusable `Custom` / `Overlay` section is `<section>.<leaf>` or `<section>.<n>`
+    /// ([`StackPage::plain_name`], [`Role::Button`]). The section is [`SectionSpec::named`], else
+    /// `section.<position>`.
+    fn a11y(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        let (s, p) = (self.stack, self.page);
+        let i = s.owner(p, cx, key)?;
+        let k = s.specs[i].key;
+        let section = s.specs[i].a11y_path(i);
+        match s.specs[i].kind {
+            Kind::Shelf { .. } | Kind::Grid { .. } => {
+                let cards = p.cards(cx, k)?;
+                let j = cards.index_of(key)?;
+                Some(super::card_a11y::<H, _>(section, &cards, j))
+            }
+            Kind::Custom { .. } | Kind::Overlay { .. } => {
+                let n = s.plain_index(p, i, key)?;
+                let path = match p.plain_name(k, n) {
+                    Some(leaf) => section.name(leaf),
+                    None => section.index(n),
+                };
+                Some(A11y::new(path, Role::Button))
+            }
+        }
+    }
+
+    /// Every element of the section whose group is `g`, in index order: all the cards of a
+    /// `Shelf` / `Grid` (off screen and unloaded ones too), or the elements of a focusable
+    /// `Custom` / `Overlay`. A group the page declares itself ([`StackPage::extra_groups`]) is the
+    /// page's to answer.
+    fn a11y_elems(&self, g: GroupId, cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        let (s, p) = (self.stack, self.page);
+        let Some(i) = s.index_of_group(g) else { return };
+        let k = s.specs[i].key;
+        match s.specs[i].kind {
+            Kind::Shelf { .. } | Kind::Grid { .. } => {
+                if let Some(cards) = p.cards(cx, k) {
+                    out.extend((0..cards.len()).map(|j| cards.elem(j)));
+                }
+            }
+            Kind::Custom { focusable: true, .. } | Kind::Overlay { focusable: true, .. } => {
+                out.extend((0..p.plain_len(k)).filter_map(|n| p.plain_elem(k, n)));
+            }
+            Kind::Custom { .. } | Kind::Overlay { .. } => {}
+        }
+    }
+
+    /// The inverse of [`Self::a11y`]. A card is found by the index in its path, without a scan:
+    /// `<section>.card.<n>` is `cards.elem(j)` for the window index `j` holding listing position `n`
+    /// ([`card_window_index`](super::card_window_index)), and a position outside the window is no
+    /// element. An element of a `Custom` / `Overlay`
+    /// section is found by its [`StackPage::plain_name`] (a scan of that one section's few elements),
+    /// or by its position when it has no name. A path that carries a namespace is not relative to
+    /// this view and finds nothing.
+    fn a11y_find(&self, path: &A11yPath, cx: &Cx<'_, H>) -> Option<H::Elem> {
+        if path.ns().is_some() {
+            return None;
+        }
+        let (s, p) = (self.stack, self.page);
+        (0..s.specs.len()).find_map(|i| {
+            let section = s.specs[i].a11y_path(i);
+            let own = section.len();
+            // the section's own segments, then the leaf: `section.3` is not an element
+            if path.len() <= own || !path.segs().zip(section.segs()).all(|(a, b)| a == b) {
+                return None;
+            }
+            let mut rest = path.segs().skip(own);
+            let (a, b, c) = (rest.next(), rest.next(), rest.next());
+            let k = s.specs[i].key;
+            match (s.specs[i].kind, a, b, c) {
+                (Kind::Shelf { .. } | Kind::Grid { .. }, Some(Seg::Name("card")), Some(Seg::Index(n)), None) => {
+                    let cards = p.cards(cx, k)?;
+                    super::card_window_index::<H, _>(&cards, n).map(|j| cards.elem(j))
+                }
+                (
+                    Kind::Custom { focusable: true, .. } | Kind::Overlay { focusable: true, .. },
+                    Some(Seg::Index(n)),
+                    None,
+                    None,
+                ) => {
+                    // an element with a name has one spelling, the name
+                    if p.plain_name(k, n).is_some() || n >= p.plain_len(k) {
+                        return None;
+                    }
+                    p.plain_elem(k, n)
+                }
+                (
+                    Kind::Custom { focusable: true, .. } | Kind::Overlay { focusable: true, .. },
+                    Some(Seg::Name(leaf)),
+                    None,
+                    None,
+                ) => (0..p.plain_len(k)).find(|&n| p.plain_name(k, n) == Some(leaf)).and_then(|n| p.plain_elem(k, n)),
+                _ => None,
+            }
+        })
     }
 }

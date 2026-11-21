@@ -155,53 +155,54 @@ is what keeps stems and bars at their intended weight on a 1080p panel.
 
 ![Home, hero](screenshots/ux-home-hero.jpg)
 
-Home opens on a **hero** — one item, full-bleed backdrop, with its logo or title, a one-line fact
-row (kind · year · rating), a truncated summary and an action row. The hero rotates through a set of
-promoted items; the dots under the action row show the position.
+Home opens on a **hero** — one item, full-bleed backdrop, with its logo or title, an action row and a line for episode, movie or show metadata, or a short premise. The hero rotates through a set of
+promoted items. The dots beside Info show the position.
 
 **Controls on the hero row**, left to right:
 
 | control | what OK does |
 |---|---|
-| **Play** / **Continue** | starts playback — *Continue* when the item has a resume point, *Play* when it does not |
+| **Play** / **Resume** | starts playback. The resume pill shows progress and the time remaining when the runtime is known |
+| **🔖** (bookmark) | adds the title to the Watchlist (an episode's or season's show), or removes it when it is already on it; outline off the list, filled on it. Present only when the hero row names a title with a known catalog id |
 | **ⓘ** (info) | opens that item's detail page |
 
-Those are the only two. **The `›` beside them is an indicator, not a third button** — it is drawn,
-it never takes focus and it has no hit rect. The hero is paged by **RIGHT past the info disc** or
-**LEFT off the Play pill**, and it also advances itself every **8 s** while the row sits idle. The
-dots under the row show the position.
+Those are the only three, in that order (the bookmark disc is absent for a row with no catalog id), and none of the circles carries a name, focused or not. The hero is paged by **RIGHT past the info disc** or
+**LEFT off the Play pill**, and it also advances itself every **8 s** while the row sits idle.
 
 **Above it**, the top tab strip: **Home**, then **one pill per library section the server reports**
 (here *Movies* and *TV Shows*), then the **Search** pill — drawn as a magnifier mark, not a word.
 The strip is uncapped and scrolls once it outgrows the bar, so every discovered section is
 focusable. At the left margin, outside the group, sits the **profile chip** (§5.7).
 
-**UP from the hero reaches the bar**, landing on the profile chip; LEFT and RIGHT then walk the
-whole band — **chip → Home → Movies → TV Shows → … → Search**. DOWN leaves the bar: back to the
-hero action row from the chip, or into the shelves from a pill. The bar is worn by Home, the Library
-and Search and by nothing else — the detail, person, player and onboarding screens have none, which
-is why moving to or from them fades the whole screen rather than just the page.
+**UP from the hero reaches the bar**, landing on the Home pill (UP from any page that wears the bar
+lands on that page's own pill); LEFT and RIGHT then walk the whole band — **chip → Home → Movies →
+TV Shows → … → Search**. DOWN leaves the bar: back to the hero action row from the chip, or into the
+shelves from a pill. The bar is worn by Home, the Library family (the grid, its Collections page and
+its Recommended page), the Watchlist and Search, and by nothing else — the detail, person, player and
+onboarding screens have none, which is why moving to or from them fades the whole screen rather than
+just the page.
 
 **Below the hero**, the shelves.
 
 ![Home, shelves](screenshots/ux-home-shelves.jpg)
 
 DOWN from the hero enters the shelves; DOWN again steps between them; LEFT/RIGHT walks the cards.
-The focused card grows, and its title and a status line appear beneath it — here *"8 min
-left"*, which is the resume state. A watched item carries a check mark in its corner.
+The focused card grows, and what Settings → Libraries → Under posters asks for appears
+beneath it (a title line when its Title switch is On; a line the setting turns on is never left empty, so a season, which has no length, says *"Season 6"* under its show's name, and a film the server told us nothing about says *"Movie"*; the setting is the same under every poster in the app: Search results, a person's filmography, a title's Related and collection shelves and a collection's members, though not under a landscape still or a cast headshot) — a Continue Watching card on Home always shows its status, under every Details setting, Nothing included, as one line below the still, here *"S3 E4 · 8m left"* (*"8m left"* for a film) with a bar on the right, which is the resume state. A watched item carries a check mark in its corner. In a library whose grid is sorted by something that has a value (Settings → Libraries → Under posters → Sort value, on by default), every card of its movies, shows, seasons or episodes shows that value on one line instead, in place of the title and details line: a score beside its provider's mark, a length, a count of plays, a date as *"Today"*, *"Yesterday"*, *"27 Oct"* or *"Oct 2024"*; the Episodes view's wide cards say the same thing under each still (sorted by Audience score, *"TMDB 84%"*). A sort with no value to show, such as the Show order Seasons and Episodes default to, keeps the usual captions.
 
 **OK on a card in *Continue Watching* opens its page by default** (Settings → Playback →
-Continue Watching: *Open details*); set to *Play*, OK plays it directly and the amber ▶ on the card is
-what announces that — the ▶ is drawn only in that mode, and in the default the card's menu leads
-with Play instead. **Every other card opens a page, an episode included**: an episode tile on a
+Continue Watching: *Open details*); set to *Play*, OK plays it directly and the white play glyph that opens at the leading edge of the focused card's footer line
+announces that (in the default that glyph is an *info* mark, and the card's menu leads
+with Play instead); an *episode* card there opens its **show** on that episode's season (the card's menu
+offers *Go to Episode*). **Every other card opens a page, an episode included**: an episode tile on a
 discovery shelf ("Recently Released Episodes", "Recently Added…") opens that EPISODE's own page and
-carries no ▶, precisely so nothing on it promises playback. The one-press resume is *Play* mode: there the deck is a list of things already in progress and one
+carries no play glyph, precisely so nothing on it promises playback. The one-press resume is *Play* mode: there the deck is a list of things already in progress and one
 press is the whole point of it. In the default the deck behaves like every other shelf — a press is
 a question rather than a commitment — and the resume is the first row of the card's hold menu (§5.6),
 which opens on it. A card's resume bar is a fact about how far in you
 are and appears on both kinds, so it is never the thing that says a press will play; that is the
-triangle's job alone. (Until 2026-09-05 an episode played from wherever it sat, which put the
-triangle on cards that navigated.)
+footer cue's job alone. (Until 2026-09-05 an episode played from wherever it sat, which put an
+amber triangle on cards that navigated; the triangle is gone everywhere now.)
 
 One refinement inside the deck rule: a **show** or **season** card has no single stream to
 start, so where the deck plays it (OK in *Play* mode, or the menu's Play row in the default) it
@@ -277,26 +278,32 @@ pad back to the roster.
 
 Reached from any library pill in the top strip. A poster grid, four-way navigable, with:
 
-- **Sort** and **Filter** pills above the grid (left), each reading its current choice;
-- an **A–Z rail** down the right edge, which jumps the grid to a letter;
+- one **sort** control at the right of the header row, reading its current choice (the sort icon, the criterion and a down chevron; its Sort & Filter menu also holds the filters), beside the **Collections** and **Recommended** places;
+- an **A–Z rail** down the right edge, which jumps the grid to a letter, or on a value sort (Score, Duration, Unplayed, Plays, Date added, Date viewed, Release date, and Last episode added when sorted newest first) to a band: a date sort's bands are `Today`, the months of this year, then each earlier year, and Release date's are the year then the decades;
 - watched check marks on the cards.
+
+When you leave a library with Collections or Recommended open, its top-strip pill reopens that
+page next time. The app saves the open page per profile and library. Back from the top of the
+page or OK on its breadcrumb closes it and returns to the grid.
 
 **CH ▲ / CH ▼ page the grid**, which is the fast way through a large library.
 
-**BACK here is ONE step to the head of the library, and a second leaves for Home.** From a shelf, a
-grid row, the Sort/Filter row or the A–Z rail, BACK returns to the top of the page — a deep shelf is
-as far from the head as a deep grid row is — and only from the head does it hand the screen back.
-(This said "two steps: to the tab row, then Home" until 2026-09-05. The Library is one continuous
-scroll now, with no fixed toolbar to walk up from and a tab track that never hides, so UP is the
-one-press route to the strip and BACK is about the DOCUMENT.)
+**BACK here climbs one region a press, and from the bar it leaves for Home.** From the A–Z rail (or a
+value sort's band rail) BACK returns to the grid; from deep in the grid it returns to the top of the page — a deep shelf is as far
+from the head as a deep grid row is; from the top it steps to the header row, from the header
+to the tab bar, and from the bar it hands the screen back. UP is still the one-press route to the
+strip; the header and bar steps exist so that BACK can never loop between them. The Collections and
+Recommended pages pop to the page that opened them from the top of their content, from their header or
+from the bar. (This said "two steps: to the tab row, then Home" until 2026-09-05, and "ONE step to the
+head of the library, and a second leaves for Home" after it.)
 
-Sort and Filter open as **popovers over the live grid**, never as full-screen sheets:
+The Sort & Filter menu opens as a **popover over the live grid**, never as a full-screen sheet:
 
 ![Library sort menu](screenshots/ux-library-sort.jpg)
 
 The options are the ones the **server** reports for that section, not a hardcoded list; the current
-choice carries a check and a direction chevron, and OK on the current choice reverses the direction.
-BACK closes the popover and returns focus to the pill.
+choice carries a check and its direction as a word ("A–Z", "Newest first"), and OK on the current choice reverses the direction.
+BACK closes the popover and returns focus to the sort control.
 
 ### 5.5 Search
 
@@ -545,16 +552,16 @@ distinction §6.1 draws.
 
 | key | effect |
 |---|---|
-| **OK** | on the scrubber band, toggle play/pause; on a focused control, activate it |
-| **Play** / **Pause** / **Play-Pause** | the corresponding transition, from anywhere |
-| **LEFT / RIGHT** | seek, or move within the focused band — §6.6 |
+| **OK** | on the scrubber band, toggle play/pause — except with a seek target pending, where it takes the target: one seek there, and the film plays on from it (§6.6); on a focused control, activate it |
+| **Play** / **Pause** / **Play-Pause** | the corresponding transition, from anywhere — except that Play and Play-Pause with a seek target pending take the target and play on from it (§6.6); Pause leaves the target alone |
+| **LEFT / RIGHT** | move the seek target, or move within the focused band — §6.6 |
 | **Rewind / Fast-forward** | the same as LEFT / RIGHT (§1.2) |
 | **UP / DOWN** | move between the HUD's three bands; a press on a hidden HUD is spent raising it |
 | **Stop** | leave the player |
-| **BACK** | leave the player |
+| **BACK** | cancel a scrub in progress (§6.6); otherwise hide the HUD if it is up, and leave the player from a bare picture. While playback is still loading, buffering or seeking, the HUD cannot come down: the first BACK hides it with nothing visible, and the next BACK leaves. Any other key in between, or the load finishing, makes it a first BACK again |
 | **EXIT** | terminate the app (§2.3) |
 
-**Stop and BACK do the same thing here**: both run one teardown ritual — cancel any play still being
+**Stop, and a BACK that finds nothing to cancel or hide (or that is the second in a row while the player is busy), do the same thing here**: both run one teardown ritual — cancel any play still being
 resolved, close every panel, stop the buffer feed — and return to **the page playback started
 from**. For an episode that is the **show page, scrolled to the episode that played**, not the
 generic show root. The final position is reported to the server on the way out, so the item resumes
@@ -576,13 +583,17 @@ One slot, beside the elapsed clock, showing exactly one of:
 |---|---|
 | playing steadily | **nothing** |
 | paused | pause mark |
-| playhead travelling backwards (scrub, chapter hop, seek burst) | rewind mark, drawn to the **left** of the clock |
-| playhead travelling forwards | fast-forward mark |
+| a live scrub travelling backwards (the target is still moving) | rewind mark, drawn to the **left** of the clock |
+| a live scrub travelling forwards | fast-forward mark |
 | just resumed | play mark, for **two seconds**, then it clears |
-| waiting on the pipeline with no travel to show | inline spinner |
+| waiting on the pipeline: a seek the viewer has committed (until it lands) or a re-buffer | inline spinner (the loading sign) |
 
-Precedence is travel → pipeline → paused → the resume mark, so a paused scrub still reads as a
-scrub. Rewind sits on the clock's left and everything else on its right, so the mark points the way
+Precedence is live scrub → pipeline → paused → the resume mark, so a paused scrub still reads as a
+scrub. A direction mark belongs to a *live* scrub only: the moment a seek is committed (OK on the
+scrubber, a chapter or marker hop, a FF/REW jump) the mark is the spinner whichever way it goes, and
+the first frame after it lands is the ordinary state mark (the play mark for two seconds, the pause
+mark while paused, nothing while playing), never a leftover direction. A package reaches the spinner
+the same way as before: the playbar's mark mode `busy_only` draws exactly this state. Rewind sits on the clock's left and everything else on its right, so the mark points the way
 the playhead is going.
 
 Three properties of this design are the substance of the decision, and are the part worth putting in
@@ -592,16 +603,17 @@ front of QA:
   nothing. This slot answers *did that press land* and *which way am I going* — questions a static
   button row cannot answer at all.
 - **The direction is derived from the playhead, not from the keycode.** One rule therefore covers a
-  LEFT/RIGHT scrub, a chapter or marker hop and a rapid seek burst — none of which agree about which
-  key, if any, was pressed. It reports **net** travel, so dragging back from +100 s to +50 s while
+  LEFT/RIGHT scrub and a held FF/REW scrub, which do not agree about which key was pressed. It reports **net** travel, so dragging back from +100 s to +50 s while
   still ahead of the playhead keeps reading fast-forward: it answers *which way will I jump when I
-  let go*.
+  confirm*.
 - **The play mark clears after two seconds** deliberately. A play glyph held for a whole film would
   be saying "playing" to somebody who is watching a moving picture.
 
 ### 6.6 Seeking
 
-Seeking is a **preview-then-commit** gesture, not one immediate jump per press.
+Seeking is a **click-to-confirm** gesture, not one immediate jump per press — and the same one
+whether the film is playing or paused. The remote's keys only move a **target**; the film moves
+when the viewer says so.
 
 - **With the HUD hidden, a LEFT/RIGHT press is spent raising it and moves nothing.** The HUD sits on
   a 4.5 s timer over full-screen video, so *"where am I"* and *"take me back ten seconds"* are two
@@ -609,17 +621,40 @@ Seeking is a **preview-then-commit** gesture, not one immediate jump per press.
   viewer glancing at the clock loses their place. **A hold is not affected** — holding LEFT raises
   the HUD and then runs the ordinary continuous scrub as the auto-repeats arrive, by which point the
   band being dragged is on screen.
-- **With the HUD up and the scrubber focused, one press moves the preview by the Skip interval — 10 s unless Settings > Playback says otherwise.** The picture does
+- **With the HUD up and the scrubber focused, one press moves the target by the Skip interval — 10 s unless Settings > Playback says otherwise.** The picture does
   not move yet; the scrubber shows the target, and the state mark shows the direction.
-- **Holding engages a continuous scrub that accelerates** — from 10× up to 140× playback speed — and
-  the key release commits it. A lost key-up is caught by a 400 ms watchdog, so a dropped release
-  cannot leave the scrub running.
-- **Quick repeated taps accumulate into one seek.** The commit waits ~450 ms after the last tap, so
-  "back thirty seconds" is three presses at the default 10 s step and a single seek rather than three. That matters beyond
-  feel: back-to-back in-flight seeks are what stress the demux pipeline.
+- **Holding engages a continuous scrub that accelerates** — 60× playback speed, doubling every second up to 480× — and
+  releasing the key leaves the target where the hold got to. A lost key-up is caught by a 400 ms watchdog (700 ms right after a key bounce, while the remote's
+  repeat delay restarts), so a dropped release cannot leave the scrub running; it ends the hold and seeks nothing.
+- **Nothing seeks until the viewer confirms.** Not the key release, not a pause after the last tap, not
+  the watchdog. A later tap or hold goes on from the target, not from the playhead, so "forward
+  thirty seconds" is three presses at the default 10 s step and, once OK is pressed, a single seek
+  rather than three — which matters beyond feel: back-to-back in-flight seeks are what stress the
+  demux pipeline.
+- **The film keeps playing underneath** while a target is pending, and the HUD stays up for as long
+  as it is (the 4.5 s linger never takes it away, and never commits it).
+- **OK, Play or Play-Pause confirms the target** — one seek to it, and the film plays on from there (a
+  paused film resumes). Pause leaves the target alone. **BACK drops it** (below), as does leaving the
+  scrubber with UP/DOWN, and so does anything else that takes the page from the scrubber — a panel
+  opening, the Skip Intro / Skip Credits button appearing or being pressed, a teardown. The target is
+  cancelled in every one of them, never committed.
 - The seek target is clamped to the item, stopping 3 s short of the end.
 
-The pointer can drag the scrubber directly, under the same commit rule.
+The pointer can drag the scrubber directly, and **that is its own confirmation**: the button coming
+up commits the drag. A playing film plays on from the new spot; a paused film seeks and stays paused.
+
+**BACK around a scrub.** Two meanings, tried in this order:
+
+1. **While a scrub is live, BACK cancels it.** Live means a key held (or its release still waiting
+   out the bounce), a target pending, or a pointer drag in progress. Nothing is sought, the preview
+   goes, the knob eases back to the playhead over about 0.3 s, and the HUD stays up; BACK did not
+   hide it or leave.
+2. **Otherwise BACK is the ordinary one**: with the HUD up it hides it (the film keeps playing), and
+   from a bare picture it leaves the player (§6.4); while the player is still loading, buffering or
+   seeking, the HUD cannot come down, so the first BACK hides it unseen and the next one leaves.
+   **A committed scrub is final** — an OK / Play
+   confirmation or a pointer drag's release is not followed by a way back to where the scrub
+   started; BACK straight afterwards hides the HUD like any other BACK.
 
 ### 6.7 The control row — subtitles and audio, and what replaces them
 
@@ -633,17 +668,22 @@ full-screen sheet. All three are modal while open: they take every key, and BACK
 
 - **Subtitles** and **Audio** open the same two-panel track menu, on whichever panel was asked for.
   **LEFT/RIGHT swaps between the Audio and Subtitles panels**, UP/DOWN moves the row, OK selects and
-  closes. Subtitles offers the item's subtitle tracks plus *Off*; both text and image (PGS/VobSub)
-  subtitles render. Audio offers the item's audio tracks. Switching is a **server-side** selection,
+  closes. Subtitles offers the item's subtitle tracks plus *Off* and *Forced only* (the forced track
+  in the language of the audio that plays, or nothing; remembered per show like *Off*); both text and
+  image (PGS/VobSub) subtitles render. Audio offers the item's audio tracks. Switching is a **server-side** selection,
   so it persists as the item's preference rather than lasting only this session.
-- **More** opens a popover led by the **Quality** ladder — Auto plus the fixed rungs — with an
-  *Options* section beneath it: **Stats for nerds**, an On/Off toggle that overlays live playback
+- **More** opens a popover led by the **Quality** ladder — Auto plus the fixed rungs — then
+  **Playback speed** (0.5× to 2×, Plex Web's seven, back to Normal on a new item; a pick reloads the
+  stream at the same position; shown only where the playback can play a speed — not over segmented
+  HLS, and not above 60 fps fed), with an *Options* section beneath them: **Stats for nerds**, an On/Off toggle that overlays live playback
   statistics, plus **Send diagnostics** when that row is enabled. LEFT/RIGHT are deliberately
   swallowed here: it is one column.
 
-The app exposes **no subtitle appearance settings**, and its client-rendered subtitles do not read
-the television's own subtitle settings — stated here because that is what makes the second half of
-checklist #48 N/A rather than failing.
+The player's Subtitles menu has a **Style** page (size, position and color; `docs/player-submenus.md`):
+a color the active subtitle cannot take (a picture subtitle, or a styled script with no white text) is
+shown dimmed with its reason, never as a checked choice that does nothing. Those are the app's own
+settings: its client-rendered subtitles do not read the television's own subtitle settings — stated
+here because that is what makes the second half of checklist #48 N/A rather than failing.
 
 **2. Over a marked segment: a Skip pill.** When the server has marked an intro or credits region and
 the playhead is inside it, a single **Skip Intro** / **Skip Credits** pill takes the row — same
@@ -651,6 +691,14 @@ position, same height, never narrower than the disc pair, so the transport does 
 When the segment begins the HUD is raised and the focus ring is parked on the pill, so **one bare OK
 skips**. OK seeks past the segment and resumes; on a `final` credits marker it finishes the item
 instead. The pill leaves with the segment, and focus returns to the scrubber when it does.
+
+**With Settings → Skip intros / Skip credits on Automatic the pill becomes a pair, and both timed prompts
+follow ONE rule.** The **filled** button is the action that will happen by itself when the five-second
+countdown (the fill sweep) runs out; pressing it does that action **now**; the **unfilled** button one key to its
+left cancels the countdown. The intro prompt is **Watch Intro** + **Skip Intro** (filled); the credits prompt is
+**Watch Credits** + **Next Episode** (filled; and **Skip Credits** for a mid-item credits marker). The focus ring
+starts on the filled button, so one bare OK performs the action, and LEFT reaches the cancel button. Reaching for it
+stops the countdown, and the filled button stays available to press. BACK dismisses the segment's offer as above.
 
 **3. Over the credits with another episode queued: Up Next.** The row becomes the next episode's
 still, a caption (*"Up Next · S2, E4 · Laura"*), and **two buttons — Watch Credits** on the left and
@@ -770,7 +818,7 @@ data layer are identical to the television's.
 **What the simulator cannot show** is the television's video path. The Starfish/ACB media seam is
 29 symbols that exist only on the television. The player figure (§6.3) is the real HUD over a real
 decoded frame, but the frame is made by a simulator-only facility: a clock sink plays the file the
-mock serves and a system `ffmpeg` decodes it under the UI (`player/sim_video.rs`). It shows what the
+mock serves and a system `ffmpeg` decodes it under the UI (`src/app/adapters/hostsim/sim_video.rs`). It shows what the
 HUD looks like over a picture; it says nothing about LG's decoder or the hardware video plane.
 
 | figure | source | status |
@@ -793,7 +841,7 @@ The needed captures are all reachable on the bench with the boot triggers docume
 
 - Key codes: LG's evdev→scancode table in the television's own `libSDL2-2.0.so.0.4.1`, plus 336
   captured key lines. Settled 2026-08-22.
-- Transport state-mark rule: `rust-modules/src/ui/player_hud.rs::transport_mark`.
+- Transport state-mark rule: `rust-modules/appkit/src/player_hud/state.rs::transport_mark`.
 - Key dispatch: `rust-modules/src/ui/consts.rs::classify` and `rust-modules/src/app.rs`'s ladder.
 - Screen map: the `Route` enum in `rust-modules/src/app.rs` and `ui::trail`.
 - Audio: `Makefile` `LIBS_REAL`, and `SDL_Init(SDL_INIT_VIDEO)` in `rust-modules/src/app.rs`.

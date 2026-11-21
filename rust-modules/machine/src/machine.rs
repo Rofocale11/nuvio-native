@@ -2,16 +2,6 @@
 //! bundle a generic library is compiled against, the newtypes, `Machine` + `Cx` + `Effects`, the
 //! effect vocabulary `Fx`, input events, navigation ops, addressing, and the `LogicalState` /
 //! `Canon` pair every hashed state implements.
-//!
-//! **Phase 2-i — the contract spike.** This module and its siblings (`screen`, `present`,
-//! `landing`, `tex`, `frame`, `dispatch`) are a COMPILING host-only skeleton; nothing in the
-//! product calls them until phase 2 replaces `app/run.rs`'s loop with `dispatch`. They exist so
-//! the boundaries are proven to COMPOSE against the layer rule (§2.1: this module names no
-//! application type, no widget, no engine, no screen — `stores/` will reach `ui::` through this
-//! module alone) before any real code moves. Every type here is what the spec names; where the
-//! spike narrows one (such as a `Timer` with no owner registry) the doc
-//! on it says so.
-#![allow(dead_code)] // phase 2-i: the contract has no consumer until phase 2 (spec §13)
 
 use std::ffi::CStr;
 use std::hash::Hash;
@@ -24,7 +14,7 @@ pub trait Host: 'static {
     /// The app's screen argument enum (what an entry is mounted from).
     type Arg: ScreenArg;
     /// App effects: Store / Net / Disk / Sys / Player / Poster / Emit — executed by `app/effects.rs`.
-    type Fx: 'static;
+    type Fx: AppEffect;
     /// App payloads: async results, store notices, deliveries — parsed by the REQUESTER.
     type Msg: 'static;
     /// `ElemKey`: interned, never a String.
@@ -49,6 +39,45 @@ pub trait Host: 'static {
     /// Whether this effect needs the emitting page's frozen navigation bookmark. Hosts may
     /// exempt housekeeping which never navigates; unknown effects retain the safe default.
     fn app_fx_needs_return(_fx: &Self::Fx) -> bool { true }
+
+    /// Cut an entry's saved page memory down to what a cold restore needs, once the entry sits
+    /// more than the stack's `DEEP` levels below the top: the route (kept by the entry) and the
+    /// focused identity, `focus` being the entry's saved focus key. The default keeps everything,
+    /// which is right for a host whose memory is already small.
+    fn shed_memory(_memory: &mut Self::Memory, _focus: Option<Self::Elem>) {}
+
+    /// **The views a page reads once the container has told them which page sits beneath it.**
+    /// The dispatcher owns the page stack and no screen may see it, yet a page that BACK returns
+    /// to a different place depending on its opener (the Collection screen, pushed from Home, a
+    /// library page, Search or an item's Detail) must name where BACK goes. It is the container's
+    /// one answer: for the page it is building a context for, the dispatcher passes the
+    /// [`ScreenId`] of the entry beneath it (`None` when it is the root, i.e. BACK leaves the
+    /// app's page stack) and the host folds that into its `Views`, which every screen already
+    /// reads. A `Copy` id rather than a reference, because the entry beneath lives in the same
+    /// `Vec` as the one being stepped. The default drops it: a host with no page that names its
+    /// parent pays nothing.
+    fn views_over<'a>(views: Self::Views<'a>, _beneath: Option<ScreenId>) -> Self::Views<'a> { views }
+}
+
+/// An owned, exhaustive execution partition. Routing consumes the effect exactly once;
+/// the yielded envelope can never contain an inline-only operation.
+pub enum EffectDisposition<I, E> { Inline(I), External(E) }
+
+/// Application-neutral effect contract associated with `Host::Fx`.
+/// No application vocabulary or runner capability crosses into the library.
+pub trait AppEffect: 'static {
+    type Inline: 'static;
+    type ExternalFx: 'static;
+    fn route(self) -> EffectDisposition<Self::Inline, Self::ExternalFx>;
+}
+
+pub type InlineFx<H> = <<H as Host>::Fx as AppEffect>::Inline;
+pub type ExternalFx<H> = <<H as Host>::Fx as AppEffect>::ExternalFx;
+
+impl AppEffect for () {
+    type Inline = ();
+    type ExternalFx = std::convert::Infallible;
+    fn route(self) -> EffectDisposition<(), Self::ExternalFx> { EffectDisposition::Inline(self) }
 }
 
 macro_rules! newtype {
@@ -98,6 +127,31 @@ newtype!(
     /// A part of a `Composed` screen (§7.1).
     PartId
 );
+
+/// One external app-command obligation, monotonically minted by its dispatcher.
+/// Tokens are local to that dispatcher, not portable between independent runtimes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppCommandId(pub u64);
+
+/// Terminal execution/admission result, distinct from a later asynchronous job result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppCommandOutcome {
+    Completed,
+    Failed,
+    Refused,
+    Cancelled,
+    RetiredSender,
+}
+
+/// Owned handoff at the head of a dispatcher's FIFO. No screen/store borrow crosses IO.
+/// `from` includes the mounted lifetime; effect-specific request identities remain in `F`.
+/// A retired sender yields an error instead of an executable effect.
+pub struct AppCommand<F, R> {
+    pub id: AppCommandId,
+    pub from: MachineId,
+    pub return_state: R,
+    pub effect: Result<F, AppCommandOutcome>,
+}
 
 /// Why an entry is left (§3.4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -192,6 +246,14 @@ pub trait Measure {
         fit_line_by(self, s, budget, sz, bold)
     }
 
+    /// A fitted drawable and its advance. Native measurement caches both; replay keeps querying
+    /// its supplied metrics. Use when an inline mark must be centred together with the text.
+    fn fit_line_measured(&self, s: &str, budget: f32, sz: i32, bold: bool) -> (std::rc::Rc<CStr>, f32) {
+        let run = self.fit_line(s, budget, sz, bold);
+        let width = self.width(&run, sz, bold);
+        (run, width)
+    }
+
     /// `width` for a borrowed `&str` (spec §4.3, phase 12 D4): builds the transient `CString` so
     /// a draw-time call site measures a `String`/`&str` slice without hand-rolling one — the exact
     /// conversion every `plx_gfx::text::text_width(c.as_ptr(), …)` call site already did, moved
@@ -277,6 +339,10 @@ pub fn fit_line_by<M: Measure + ?Sized>(
 #[derive(Clone, Copy, Debug)]
 pub struct PressRead<K = ()> {
     pub scale: f32,
+    /// Identity of the input owner's arm, retained through spring-back (not a global counter).
+    pub identity: u32,
+    pub live: bool,
+    pub active: bool,
     pub is_long: bool,
     /// Milliseconds a HOLDABLE (card) press has been held down right now, still undecided: `None`
     /// for no press, a control face's press (no hold gesture), a released or cancelled one.
@@ -292,7 +358,7 @@ pub struct PressRead<K = ()> {
 
 impl<K> Default for PressRead<K> {
     fn default() -> Self {
-        Self { scale: 0.0, is_long: false, held_ms: None, owner: None }
+        Self { scale: 0.0, identity: 0, live: false, active: false, is_long: false, held_ms: None, owner: None }
     }
 }
 
@@ -343,6 +409,66 @@ pub struct FocusKey<K> {
     pub elem: K,
 }
 
+/// Lessons captured from one input/runtime owner. Install facts are seeded explicitly;
+/// opening a menu retires physical feedback only for this owner's current profile tenure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HoldHintRead {
+    pub learned: bool,
+    pub card: bool,
+    pub pill: bool,
+    /// Profile-tenure identity; equal lesson bits must not retain an old page's claim.
+    pub context: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldHintEvent { Learned, ReadCard, ReadPill }
+
+impl HoldHintRead {
+    pub fn apply(&mut self, event: HoldHintEvent) {
+        match event {
+            HoldHintEvent::Learned => { self.learned = true; self.card = true; self.pill = true; }
+            HoldHintEvent::ReadCard => self.card = true,
+            HoldHintEvent::ReadPill => self.pill = true,
+        }
+    }
+}
+
+/// Visible modal veil threshold shared by the container and its captured readout.
+pub const MODAL_CLOSING_GONE: f32 = 0.02;
+
+/// Immutable modal facts captured from the owning container before a step or render walk.
+/// This is a projection, not another phase machine or a process-wide publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModalRead {
+    pub input_covered: bool,
+    pub host_cached: bool,
+    pub closing_only: bool,
+    pub veil: f32,
+}
+impl ModalRead {
+    pub fn page_veiled(self) -> bool { self.veil >= MODAL_CLOSING_GONE }
+}
+
+/// Immutable projection of an owner's captured page image, sampled anew for each context.
+/// Empty is live. Both identities are checked against the current navigation tree before use;
+/// this value is never published by input, a GL cache, or a speculative render walk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageImageRead {
+    owner: Option<(EntryId, InstanceId)>,
+}
+impl PageImageRead {
+    pub const fn held(entry: EntryId, instance: InstanceId) -> Self {
+        Self { owner: Some((entry, instance)) }
+    }
+    pub fn is_held(self) -> bool { self.owner.is_some() }
+    pub fn for_entry(self, entry: EntryId) -> Self {
+        if self.owner.is_some_and(|owner| owner.0 == entry) { self } else { Self::default() }
+    }
+    pub fn for_owner(self, entry: EntryId, instance: InstanceId) -> Self {
+        if self.owner == Some((entry, instance)) { self } else { Self::default() }
+    }
+}
+
 /// The read-only context a step receives (§3.1).
 pub struct Cx<'a, H: Host> {
     pub views: H::Views<'a>,
@@ -351,6 +477,9 @@ pub struct Cx<'a, H: Host> {
     pub press: PressRead<H::Elem>,
     pub focus: FocusRead<H::Elem>,
     pub owner: InputOwner,
+    pub modal: ModalRead,
+    pub page_image: PageImageRead,
+    pub hold_hint: HoldHintRead,
 }
 
 /// The dispatcher's reborrow of `App.present` for one step (§3.1, §4.4): `note` is its one method.
@@ -375,6 +504,8 @@ pub struct Stamped<H: Host> {
     pub from: MachineId,
     pub fx: Fx<H>,
 }
+
+// Job-value and stamped-effect assertions share crate::assert_fx! from job.rs.
 
 /// A single machine emitting more than this in one `step` is a debug assertion (§3.3 step 6).
 pub const MAX_EMIT_PER_STEP: u32 = 32;
@@ -443,6 +574,13 @@ impl<'p, H: Host> Effects<'p, H> {
         self.push(Fx::Remember { group, elem });
     }
 
+    /// How many more effects this step may push before it reaches `MAX_EMIT_PER_STEP`. An emitter
+    /// whose output scales with the data (one effect per server) sizes its batch by this and
+    /// carries the rest to a later step.
+    pub fn remaining(&self) -> u32 {
+        MAX_EMIT_PER_STEP.saturating_sub(self.emitted)
+    }
+
     /// How many effects this step has pushed (the dispatcher's per-step count).
     pub fn emitted(&self) -> u32 {
         self.emitted
@@ -463,10 +601,41 @@ pub enum Fx<H: Host> {
     },
     CancelTimer(TimerId),
     Press(PressArm<H::Elem>),
+    /// An owned input lesson; never an ambient publisher or a storage operation.
+    HoldHint(HoldHintEvent),
     Remember { group: GroupId, elem: H::Elem },
     Log(LogLine),
     /// Handed to the application's adapters.
     App(H::Fx),
+}
+
+/// Runtime identity for admitting environmental paint observations. Numeric frame/entry/
+/// instance counters alone do not distinguish two dispatchers in the same process.
+#[derive(Default)]
+pub struct PresentationAuthority(std::sync::Arc<()>);
+impl PresentationAuthority {
+    pub fn receipt<M>(&self, frame: u64, entry: EntryId, instance: InstanceId, message: M) -> PresentationReceipt<M> {
+        PresentationReceipt { authority:self.0.clone(), frame, entry, instance, message }
+    }
+    pub fn owns<M>(&self, receipt: &PresentationReceipt<M>) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &receipt.authority)
+    }
+}
+
+/// Opaque owner seal plus exact captured facts. Creating another authority cannot forge
+/// this runtime's seal; only its dispatcher holds the authority used at admission.
+pub struct PresentationReceipt<M> {
+    authority: std::sync::Arc<()>,
+    frame: u64,
+    entry: EntryId,
+    instance: InstanceId,
+    message: M,
+}
+impl<M> PresentationReceipt<M> {
+    pub fn frame(&self) -> u64 { self.frame }
+    pub fn entry(&self) -> EntryId { self.entry }
+    pub fn instance(&self) -> InstanceId { self.instance }
+    pub fn message(&self) -> &M { &self.message }
 }
 
 /// Everything a mounted screen can be told (§6.1).
@@ -505,6 +674,7 @@ pub enum ScreenEvent<H: Host> {
         by: By,
     },
     App(H::Msg),
+    Presented(PresentationReceipt<H::Msg>),
 }
 
 impl<H: Host> ScreenEvent<H> {
@@ -531,6 +701,7 @@ impl<H: Host> ScreenEvent<H> {
             ScreenEvent::StoreChanged(..) => "store_changed",
             ScreenEvent::FocusMoved { .. } => "focus_moved",
             ScreenEvent::App(_) => "app",
+            ScreenEvent::Presented(_) => "presented",
         }
     }
 }
@@ -573,12 +744,17 @@ pub enum FocusTarget<K> {
     /// so the arrival is exactly as deliberate as a directional move into the same group would
     /// be; reporting `By::Restore` for it read as "the page is being restored to where it was",
     /// which is false the first time a tab is ever visited, and it silently disabled every
-    /// screen's own "deliberate move" arrival animation (`library::LibraryScreen`'s
+    /// screen's own "deliberate move" arrival animation (at the time `library::LibraryScreen`'s
     /// `pop_from_rest`, gated on `By::Dir | By::Pointer`) for that one path only — the reason a
-    /// fresh Home/Search → TV Shows mint SNAPPED to the first tile while a Movies → TV Shows
-    /// peer switch (which never leaves the strip's already-focused pill, and never re-enters
-    /// through here at all) animated normally. `stack.rs`'s `SelectTab` "cover-and-mint" arm is
-    /// the one constructor; nothing else may produce this variant.
+    /// fresh Home/Search → TV Shows mint SNAPPED to the first tile while a Movies → TV Shows peer
+    /// switch (which never leaves the strip's already-focused pill, and never re-enters through
+    /// here at all) animated normally. Today the shared card grid reads a `By::Dir | By::Pointer |
+    /// By::Script` move as deliberate (`ui/src/cards/mod.rs`'s `Seen::of`). `stack.rs`'s
+    /// `SelectTab` "cover-and-mint" arm is the one constructor of a MINT. The second sanctioned
+    /// producer is a page seating its OWN arrival through a self-delivered `Enter::Fresh`: the
+    /// Watchlist's `follow_seat` moves its first seat from the Sort & Filter pill to the first tile
+    /// as the grid lands, and that seat must read as a deliberate move for the opening animation to
+    /// play (`watchlist/opening_tests.rs`). Nothing else may produce this variant.
     FirstInGroupAnimated(GroupId),
 }
 
@@ -588,6 +764,11 @@ pub enum By {
     Pointer,
     Restore,
     Reconcile,
+    /// **A deliberate arrival named by an accessibility id** (`focus:<id>` / `press:<id>`): the
+    /// dispatcher's by-id delivery sets focus with it. It reads like `Dir` everywhere a screen
+    /// asks "was this a deliberate move" (reveal-scroll, arrival animations, edge paging) and is
+    /// never a pointer hover. Recorded in its own resolution row, never as a `Focus` row.
+    Script,
 }
 
 /// What a `Deliver` carries: a screen event, app message, or identity-bound input operation.
@@ -653,6 +834,12 @@ impl<K> InputEvent<K> {
             }
             InputKind::PointerHidden => { c.u32(6); }
             InputKind::SystemKeyboard(up) => { c.u32(7).bool(*up); }
+            InputKind::Pan { dx, x, y } => { c.u32(8).f32(*dx).f32(*x).f32(*y); }
+            InputKind::ById { id, press, expect } => {
+                c.u32(9).str(id);
+                c.option(press.as_ref(), |c, tap| { c.u32(tap.sym).u32(tap.wcode); });
+                c.option(expect.as_ref(), |c, subject| { c.str(subject); });
+            }
         }
     }
 }
@@ -716,9 +903,38 @@ pub enum InputKind<K> {
     Wheel {
         dy: f32,
     },
+    /// **A sideways glide of the row under the pointer** (the application's pointer edge glide):
+    /// `dx` px (+ shows more on the right), for whatever scrolls sideways at screen `(x, y)`. A
+    /// page with nothing there ignores it.
+    Pan {
+        dx: f32,
+        x: f32,
+        y: f32,
+    },
     Text(TextEdit),
     PointerHidden,
     SystemKeyboard(bool),
+    /// **An accessibility-id focus or press** (`focus:<id>`, `press:<id>[@<subject>]`), ingress
+    /// only. The dispatcher acts on it at its ORDERED delivery position (never in the ingest
+    /// pre-pass): it resolves `id` against the input owner's view, moves focus with
+    /// `By::Script` and, for a press (`press` is `Some`), delivers the OK key's Down and Up to
+    /// the owner exactly as a remote OK would. `expect` is the subject the element must carry
+    /// (`@<subject>`), compared in the same delivery step. A refusal moves nothing and emits no
+    /// key. The id is text from the FIFO, so it is canonical content (`write_with` hashes the
+    /// bytes, never the `Arc` address).
+    ById {
+        id: std::sync::Arc<str>,
+        press: Option<OkTap>,
+        expect: Option<std::sync::Arc<str>>,
+    },
+}
+
+/// The OK key's codes a by-id press delivers (`InputKind::ById::press`), filled by the
+/// application from its `ok` token table so the core never names a platform key code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OkTap {
+    pub sym: u32,
+    pub wcode: u32,
 }
 
 /// A whole keyboard commit preserves LG's prediction boundary (`docs/search.md`). Cloning an
@@ -752,8 +968,13 @@ pub enum NavOp<A> {
     Push(A),
     Pop,
     PopTo(EntryId),
+    /// Reveal the nearest committed ancestor with the same screen argument. Focus identities
+    /// need not be navigation-entry identities (nested route surfaces deliberately remap them).
+    PopToArg(A),
     Replace(A),
     SelectTab(A),
+    /// Select a tab and put its child on top in the same commit. Back reveals the tab's page.
+    SelectTabWithChild { tab: A, child: A },
     Present(A),
     Dismiss(EntryId),
     Cancel,
@@ -779,6 +1000,8 @@ pub enum MachineId {
     Store(StoreOrd),
     Instance(InstanceId),
     Cache,
+    /// The player-HUD package store (`plx_data::hudpacks`), owned by the Bridge: the address its commands are delivered to.
+    Huds,
 }
 
 impl MachineId {
@@ -794,6 +1017,7 @@ impl MachineId {
             Self::Store(id) => { c.u32(6).u32(id.0); }
             Self::Instance(id) => { c.u32(7).u32(id.0); }
             Self::Cache => { c.u32(8); }
+            Self::Huds => { c.u32(9); }
         }
     }
 }
@@ -829,10 +1053,28 @@ impl Canon {
         }
     }
 
+    // `inline(always)` and plain index loops, not `for b in bytes` / `to_le_bytes()` iterators: this
+    // runs over the whole logical state several times a frame in a debug build (the dispatcher's
+    // `state_hash` assertions), where every iterator `next` is a call that is never inlined, and
+    // they were most of a dispatcher test frame. The bytes fed, and so the hash, are unchanged
+    // (`canon_is_fnv_1a_over_tagged_little_endian_bytes`).
+    #[inline(always)]
     fn byte(&mut self, b: u8) {
         self.h ^= b as u64;
         self.h = self.h.wrapping_mul(Self::PRIME);
         self.len += 1;
+    }
+
+    #[inline(always)]
+    fn bytes(&mut self, bytes: &[u8]) {
+        let mut h = self.h;
+        let mut i = 0;
+        while i < bytes.len() {
+            h = (h ^ bytes[i] as u64).wrapping_mul(Self::PRIME);
+            i += 1;
+        }
+        self.h = h;
+        self.len += bytes.len() as u64;
     }
 
     pub fn u8(&mut self, v: u8) -> &mut Self {
@@ -843,17 +1085,13 @@ impl Canon {
 
     pub fn u32(&mut self, v: u32) -> &mut Self {
         self.tag(2);
-        for b in v.to_le_bytes() {
-            self.byte(b);
-        }
+        self.bytes(&v.to_le_bytes());
         self
     }
 
     pub fn u64(&mut self, v: u64) -> &mut Self {
         self.tag(3);
-        for b in v.to_le_bytes() {
-            self.byte(b);
-        }
+        self.bytes(&v.to_le_bytes());
         self
     }
 
@@ -866,18 +1104,14 @@ impl Canon {
     /// Floats are their BITS: NaN, +0/-0 and Inf are all distinct and all stable.
     pub fn f32(&mut self, v: f32) -> &mut Self {
         self.tag(5);
-        for b in v.to_bits().to_le_bytes() {
-            self.byte(b);
-        }
+        self.bytes(&v.to_bits().to_le_bytes());
         self
     }
 
     pub fn str(&mut self, v: &str) -> &mut Self {
         self.tag(6);
         self.u32(v.len() as u32);
-        for b in v.bytes() {
-            self.byte(b);
-        }
+        self.bytes(v.as_bytes());
         self
     }
 
@@ -907,6 +1141,7 @@ impl Canon {
         self
     }
 
+    #[inline(always)]
     fn tag(&mut self, t: u8) {
         self.byte(t);
     }
@@ -979,6 +1214,46 @@ mod canon_tests {
         assert_ne!(z.finish(), nz.finish(), "+0 and -0 are different bits");
     }
 
+    /// The encoder is FNV-1a over a tag byte and little-endian bytes, `finish` folding the byte count
+    /// in. Recorded replay anchors hash through it, so its byte stream is pinned two ways: against a
+    /// one-byte-at-a-time reference written from that sentence, and against the value the encoder
+    /// produced before its loops were rewritten to run cheaply in a debug build.
+    #[test]
+    fn canon_is_fnv_1a_over_tagged_little_endian_bytes() {
+        let mut c = Canon::new();
+        c.u8(0xAB)
+            .u32(0xDEAD_BEEF)
+            .u64(0x0123_4567_89AB_CDEF)
+            .bool(true)
+            .f32(-1.5)
+            .str("héllo — ☃")
+            .discriminant(7)
+            .seq(3)
+            .option(Some(5u32), |c, v| {
+                c.u32(v);
+            })
+            .option::<u32>(None, |c, v| {
+                c.u32(v);
+            });
+        let mut stream = vec![1, 0xAB, 2];
+        stream.extend(0xDEAD_BEEFu32.to_le_bytes());
+        stream.push(3);
+        stream.extend(0x0123_4567_89AB_CDEFu64.to_le_bytes());
+        stream.extend([4, 1, 5]);
+        stream.extend((-1.5f32).to_bits().to_le_bytes());
+        stream.extend([6, 2]);
+        stream.extend(("héllo — ☃".len() as u32).to_le_bytes());
+        stream.extend("héllo — ☃".bytes());
+        stream.extend([7, 2, 7, 0, 0, 0, 8, 2, 3, 0, 0, 0, 10, 2, 5, 0, 0, 0, 9]);
+        let (mut h, mut len) = (0xcbf2_9ce4_8422_2325u64, 0u64);
+        for b in stream {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+            len += 1;
+        }
+        assert_eq!(c.finish(), h ^ len.rotate_left(32), "the byte stream is not the specified one");
+        assert_eq!(c.finish(), 7_471_706_773_540_265_486, "the value the encoder produced before its loops were rewritten");
+    }
+
     struct NoHost;
     #[derive(Clone)]
     struct NoArg;
@@ -1013,6 +1288,35 @@ mod canon_tests {
         type Views<'a> = ();
         type Init = NoInit;
         type Memory = ();
+    }
+
+    #[test]
+    fn assert_fx_checks_stamp_order_absence_and_extras_without_effect_traits() {
+        let mut buf: Vec<Stamped<NoHost>> = Vec::new();
+        let mut present = Present::new();
+        {
+            let _step = plx_base::step::StepScope::enter();
+            let mut fx = Effects::new(&mut buf, MachineId::Nav, &mut present);
+            fx.push(Fx::Timer { id: TimerId(7), after_ms: 40 });
+            fx.push(Fx::App(()));
+        }
+        crate::assert_fx!(&buf, stamped [(MachineId::Nav, Fx::Timer { id, after_ms: 40 } if *id == TimerId(7)),
+            (MachineId::Nav, Fx::App(()))]);
+        let empty: Vec<Stamped<NoHost>> = Vec::new();
+        crate::assert_fx!(&empty, stamped []);
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        assert!(catch_unwind(AssertUnwindSafe(|| crate::assert_fx!(&empty, stamped
+            [(MachineId::Nav, Fx::App(()))]))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| crate::assert_fx!(&buf, stamped []))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| crate::assert_fx!(&buf, stamped
+            [(MachineId::Nav, Fx::App(())), (MachineId::Nav, Fx::Timer { .. })]))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| crate::assert_fx!(&buf, stamped
+            [(MachineId::Nav, Fx::Timer { .. })]))).is_err());
+        buf[0].from = MachineId::Instance(InstanceId(17));
+        assert!(catch_unwind(AssertUnwindSafe(|| crate::assert_fx!(&buf, stamped
+            [(MachineId::Nav, Fx::Timer { .. }), (MachineId::Nav, Fx::App(()))]))).is_err());
+        crate::assert_fx!(&buf, stamped [(MachineId::Instance(InstanceId(17)), Fx::Timer { .. }),
+            (MachineId::Nav, Fx::App(()))]);
     }
 
     #[test]
@@ -1077,6 +1381,21 @@ impl Measure for BareMeasure {
     }
 }
 
+/// **The HUD cost model**: whole-pixel advances of the two shipped faces and a line height of
+/// `LINE_HEIGHT` x size ([`plx_base::fontcov::advances`]). The type is `fontcov`'s (base) and the trait is this
+/// module's, so the impl lives here, beside [`ShippedMeasure`]'s.
+impl Measure for plx_base::fontcov::advances::WholePixelMeasure {
+    fn width(&self, s: &CStr, sz: i32, bold: bool) -> f32 {
+        self.face(bold).width(&s.to_string_lossy(), sz)
+    }
+    fn cap_h(&self, sz: i32) -> f32 {
+        sz as f32 * plx_base::fontcov::advances::CAP_HEIGHT
+    }
+    fn line_h(&self, sz: i32) -> f32 {
+        sz as f32 * plx_base::fontcov::advances::LINE_HEIGHT
+    }
+}
+
 /// The host-test text measure over the shipped faces' real advances. The type is `fontcov`'s (base)
 /// and the trait is this module's, so the impl lives here: the lowest layer that names both, and
 /// the one place the orphan rule lets it sit once the layers are crates.
@@ -1086,9 +1405,9 @@ impl Measure for plx_base::fontcov::advances::ShippedMeasure {
         plx_base::fontcov::advances::shipped(bold).width(&s.to_string_lossy(), sz)
     }
     fn cap_h(&self, sz: i32) -> f32 {
-        sz as f32 * 0.73
+        sz as f32 * plx_base::fontcov::advances::CAP_HEIGHT
     }
     fn line_h(&self, sz: i32) -> f32 {
-        sz as f32 * 1.21
+        sz as f32 * plx_base::fontcov::advances::LINE_HEIGHT
     }
 }

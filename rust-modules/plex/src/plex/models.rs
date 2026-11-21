@@ -11,6 +11,16 @@ pub struct Envelope {
     pub media_container: MediaContainer,
 }
 
+/// One hit of `/library/search`: a card (`Metadata`) or a person (`Directory`, a tag row with
+/// `tagKey` and `count`), beside a score the app does not read.
+#[derive(Deserialize, Default)]
+pub struct SearchResult {
+    #[serde(rename = "Metadata", default)]
+    pub metadata: Option<Metadata>,
+    #[serde(rename = "Directory", default)]
+    pub directory: Option<Tag>,
+}
+
 /// One flat container; every list field is optional so the same type deserializes a sections
 /// list (`Directory`), an items/detail list (`Metadata`), or a hub list (`Hub`).
 #[derive(Deserialize, Default)]
@@ -25,6 +35,9 @@ pub struct MediaContainer {
     pub metadata: Vec<Metadata>,
     #[serde(rename = "Hub", default)]
     pub hub: Vec<Hub>,
+    /// `/library/search`: one row per hit, wrapping a card or a person.
+    #[serde(rename = "SearchResult", default, deserialize_with = "de_vec")]
+    pub search_result: Vec<SearchResult>,
     /// Subtitle search only (`docs/pms-api.md` §8): the agent's candidate rows arrive at the
     /// CONTAINER level, not nested inside `Metadata[].Media[].Part[]` the way an item's own
     /// streams do. `de_vec` rather than a bare `default` because an absent array and a present
@@ -274,6 +287,15 @@ pub struct Preferences {
     pub setting: Vec<Setting>,
 }
 
+/// An entry in a library item's artwork list.
+#[derive(Deserialize)]
+pub struct MetadataImage {
+    #[serde(rename = "type", default, deserialize_with = "de_str")]
+    kind: String,
+    #[serde(default, deserialize_with = "de_str")]
+    url: String,
+}
+
 /// The movie/show/season/episode item. Missing fields default (Plex omits optionals).
 #[derive(Deserialize, Default)]
 pub struct Metadata {
@@ -315,6 +337,9 @@ pub struct Metadata {
     pub guid: String,
     #[serde(default)]
     pub title: String,
+    /// PMS's edition label, kept separate from the title (e.g. Director's Cut).
+    #[serde(rename = "editionTitle", default, deserialize_with = "de_str")]
+    pub edition_title: String,
     /// The LIBRARY this row lives in, on the server that answered ("Movies", "Film Club"). Sent on
     /// a cross-library query such as `/library/all?guid=…`, which is the one place the app asks a
     /// server something without already knowing which of its libraries will answer.
@@ -355,12 +380,22 @@ pub struct Metadata {
     /// Collection rows use this as their tag id (distinct from `ratingKey`).
     #[serde(default, deserialize_with = "de_i64")]
     pub index: i64, // season/episode number
+    /// A show's season count, or a collection's member count (`childCount`).
     #[serde(rename = "childCount", default, deserialize_with = "de_i64")]
     pub child_count: i64,
+    /// A SMART collection (`smart="1"`: a saved filter, not a hand-picked set). Collection rows
+    /// only; lenient because PMS sends it as `1`, `"1"` or `true` depending on the endpoint.
+    #[serde(default, deserialize_with = "de_bool")]
+    pub smart: bool,
+    /// `addedAt`, unix seconds (0 = the server sent none).
+    #[serde(rename = "addedAt", default, deserialize_with = "de_i64")]
+    pub added_at: i64,
     #[serde(rename = "updatedAt", default, deserialize_with = "de_i64")]
     pub updated_at: i64,
-    #[serde(rename = "parentIndex", default, deserialize_with = "de_i64")]
-    pub parent_index: i64,
+    /// `None` when the server sent none — kept apart from a real `0` (Specials), which a plain
+    /// default would fold it into.
+    #[serde(rename = "parentIndex", default, deserialize_with = "de_opt_i64")]
+    pub parent_index: Option<i64>,
     #[serde(rename = "parentRatingKey", default)]
     pub parent_rating_key: String, // season → its show
     #[serde(rename = "parentTitle", default)]
@@ -369,6 +404,16 @@ pub struct Metadata {
     pub grandparent_rating_key: String, // episode → its show
     #[serde(rename = "grandparentTitle", default)]
     pub grandparent_title: String, // episode → show title
+    /// An episode's SHOW guid (`plex://show/<hex>`): the watchlist identity of "Add Show to
+    /// Watchlist". Empty on a movie, and on an episode whose server did not send it (then the show's
+    /// own record is read: [`resolve_catalog_hex`]). A season row carries no `grandparentGuid`.
+    #[serde(rename = "grandparentGuid", default, deserialize_with = "de_str")]
+    pub grandparent_guid: String,
+    /// A season's SHOW guid (`plex://show/<hex>`); an episode's is its season's
+    /// (`plex://season/…`), which names no catalog title. [`Metadata::show_guid_hex`] reads this
+    /// for a season row and `grandparentGuid` for an episode.
+    #[serde(rename = "parentGuid", default, deserialize_with = "de_str")]
+    pub parent_guid: String,
     #[serde(rename = "leafCount", default, deserialize_with = "de_i64")]
     pub leaf_count: i64,
     #[serde(rename = "viewedLeafCount", default, deserialize_with = "de_i64")]
@@ -381,6 +426,8 @@ pub struct Metadata {
     pub parent_thumb: String,
     #[serde(default)]
     pub art: String,
+    #[serde(rename = "Image", default)]
+    pub images: Option<Vec<MetadataImage>>,
     #[serde(rename = "grandparentThumb", default)]
     pub grandparent_thumb: String,
     #[serde(rename = "Media", default)]
@@ -434,29 +481,164 @@ pub struct Metadata {
     pub audience_rating: f64,
     #[serde(rename = "audienceRatingImage", default)]
     pub audience_rating_image: String,
+    /// The seated viewer's own score, independent of both review-score fields.
+    #[serde(rename = "userRating", default, deserialize_with = "de_f64")]
+    pub user_rating: f64,
+}
+
+/// The 12 bytes of a catalog id, from a `plex://movie/<hex>` or `plex://show/<hex>` guid. `None` for
+/// any other scheme (`plex://episode/…`, `local://…`, `com.plexapp.agents…`), a malformed tail, or
+/// an empty string: such an item has no Watchlist identity, so it gets no row and no disc.
+/// Decoded ONCE, where a row is built; nothing downstream re-parses the string.
+pub fn catalog_hex_of_guid(guid: &str) -> Option<[u8; 12]> {
+    let tail = guid.strip_prefix("plex://movie/").or_else(|| guid.strip_prefix("plex://show/"))?;
+    if tail.len() != 24 || !tail.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 12];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&tail[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// WORKER. The catalog id to write to: the one the row already carries, else the one the item's own
+/// server record names. `fetch` is `|| client.metadata_background(rk).map(|m| m.guid)` (or `grandparent`'s
+/// `show_rk` read for an episode's show); it is not called when `known` is set, so a press from a
+/// row that was decoded with its guid costs no round trip. `None` is a server that did not answer
+/// or an item with no `plex://movie|show` identity.
+pub fn resolve_catalog_hex(known: Option<[u8; 12]>, fetch: impl FnOnce() -> Option<String>) -> Option<[u8; 12]> {
+    known.or_else(|| fetch().and_then(|g| catalog_hex_of_guid(&g)))
+}
+
+/// **What a listing row says of the title it is, for a caption**, lifted off the wire once
+/// ([`Metadata::listing_facts`]) with unknown left `None` / `false` rather than a zero a reader could
+/// mistake for a value. The catalog row (`data::pms::parse_item`) takes its caption facts from it,
+/// and so does the Watchlist's guid lookup ([`GuidMatch::facts`](super::GuidMatch)), so a matched
+/// copy is described by the same rule on a poster shelf and on the Watchlist.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ListingFacts {
+    /// The FIRST genre tag.
+    pub genre: Option<String>,
+    /// `Media[0]`'s resolution class (`"4k"`, `"1080"`).
+    pub video_resolution: Option<String>,
+    /// A video stream of `Media[0]` is HDR ([`Stream::is_hdr`]).
+    pub hdr: bool,
+    /// A video stream of `Media[0]` carries Dolby Vision (`DOVIPresent`); such a row is `hdr` too.
+    pub dolby_vision: bool,
+    pub content_rating: Option<String>,
+    /// 0..10.
+    pub audience_rating: Option<f32>,
+    pub duration_ms: Option<i64>,
+    /// A show's or season's episode count (`0` is "none sent", not an empty show).
+    pub leaf_count: Option<u32>,
+    /// With `leaf_count`: the episodes watched.
+    pub viewed_leaf_count: Option<u32>,
+    /// A show's season count (`childCount`, which a movie, episode or season does not send).
+    pub season_count: Option<u32>,
 }
 
 impl Metadata {
-    /// Media[0].Part[0] — the primary playable part (None for a show container, which carries
-    /// no Media). The part holds the direct-play `key` and the `Stream[]` list.
-    pub fn first_part(&self) -> Option<&MediaPart> {
-        self.media.first().and_then(|m| m.part.first())
+    /// The versioned clearLogo URL for this title, or its show for a season or episode.
+    /// An image list without a usable logo answers `Some("")`. A response without an image list
+    /// answers `None` so callers can still try the legacy clearLogo endpoint.
+    pub fn clear_logo(&self) -> Option<&str> {
+        let images = self.images.as_ref()?;
+        let title_rk = match self.kind.as_str() {
+            "episode" => &self.grandparent_rating_key,
+            "season" => &self.parent_rating_key,
+            _ => &self.rating_key,
+        };
+        Some(images.iter().find_map(|image| {
+            (image.kind == "clearLogo"
+                && super::artwork::stamped_logo_rk(&image.url) == Some(title_rk.as_str()))
+                .then_some(image.url.as_str())
+        }).unwrap_or_default())
     }
 
-    /// `Media[0]` — the FIRST version listed, **not** a chosen-best one, and the honest name for
-    /// what every caller here actually reads. An item can carry SEVERAL `Media[]` versions
-    /// (docs/pms-api.md §4; the dev library really does — one episode ships a 4k and a 1080
-    /// version, another two 4k versions at different bitrates), and picking among them by
-    /// codec/resolution needs a version picker this client does not have yet. So anything derived
-    /// from this describes **version 0**, and a UI that shows it should be read that way.
-    /// [`first_part`](Self::first_part) carries the same caveat.
-    pub fn primary_media(&self) -> Option<&Media> {
-        self.media.first()
+    /// The caption facts of this item ([`ListingFacts`]).
+    pub fn listing_facts(&self) -> ListingFacts {
+        let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_owned());
+        let count = |n: i64| (n > 0).then(|| n.min(i64::from(u32::MAX)) as u32);
+        let media = self.media_version(None).map(|(_, m)| m);
+        let leaf_count = count(self.leaf_count);
+        let video = || media.into_iter().flat_map(|x| &x.part).flat_map(|p| &p.stream).filter(|s| s.stream_type == 1);
+        ListingFacts {
+            genre: self.genre.first().and_then(|g| some(&g.tag)),
+            video_resolution: media.and_then(|x| some(&x.video_resolution)),
+            hdr: video().any(Stream::is_hdr),
+            dolby_vision: video().any(|s| s.dovi_present != 0),
+            content_rating: some(&self.content_rating),
+            audience_rating: (self.audience_rating > 0.0).then_some(self.audience_rating as f32),
+            duration_ms: (self.duration > 0).then_some(self.duration),
+            leaf_count,
+            viewed_leaf_count: leaf_count
+                .map(|_| self.viewed_leaf_count.clamp(0, i64::from(u32::MAX)) as u32),
+            season_count: if self.kind == "show" { count(self.child_count) } else { None },
+        }
     }
+
+    /// This item's own catalog id (movie or show), decoded once.
+    pub fn guid_hex(&self) -> Option<[u8; 12]> {
+        catalog_hex_of_guid(&self.guid)
+    }
+
+    /// The show's catalog id for a season (its `parentGuid`) or an episode (its
+    /// `grandparentGuid`), decoded once.
+    pub fn show_guid_hex(&self) -> Option<[u8; 12]> {
+        let guid = if self.kind == "season" { &self.parent_guid } else { &self.grandparent_guid };
+        catalog_hex_of_guid(guid)
+    }
+
+    /// **The version a play takes, and its position in `Media[]`**: the one accessor every reader
+    /// of a version goes through, so none can take `Media[0]` without saying so. An item can carry
+    /// several versions (docs/pms-api.md §4: the dev library has an episode with a 4k and a 1080
+    /// one). `None` asks for the default, the first listed (what PMS plays unasked); `Some(id)`
+    /// asks for the version the viewer picked and answers `None` when this answer no longer lists
+    /// it, so the caller decides what a vanished version means. The index is the transcoder's
+    /// `mediaIndex`; it is resolved from the id on every read because a refetch may reorder
+    /// `Media[]`.
+    pub fn media_version(&self, want: Option<MediaId>) -> Option<(usize, &Media)> {
+        match want {
+            None => self.media.first().map(|m| (0, m)),
+            Some(id) => self.media.iter().enumerate().find(|(_, m)| m.id == id),
+        }
+    }
+
+    /// The default version's first part ([`media_version`](Self::media_version) of `None`).
+    pub fn default_part(&self) -> Option<&MediaPart> {
+        self.media_version(None).and_then(|(_, m)| m.part.first())
+    }
+
+    /// The version a `/decision` body describes: the one PMS marks `selected`, else its first.
+    /// A decision answers for the `mediaIndex` it was asked about, so this is the chosen
+    /// version's output, never version 0's by position.
+    pub fn decided_media(&self) -> Option<&Media> {
+        self.media.iter().find(|m| m.selected).or_else(|| self.media.first())
+    }
+}
+
+/// A version's identity: PMS's `Media.id`. Stable across refetches, unlike a position in
+/// `Media[]`, so a choice is carried as this and resolved to an index only when it is played
+/// ([`Metadata::media_version`]). `0` is "the server sent none".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct MediaId(pub i64);
+
+fn de_media_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<MediaId, D::Error> {
+    de_i64(d).map(MediaId)
 }
 
 #[derive(Deserialize, Default)]
 pub struct Media {
+    #[serde(default, deserialize_with = "de_media_id")]
+    pub id: MediaId,
+    /// `/decision` only: the version the answer is about.
+    #[serde(default, deserialize_with = "de_bool")]
+    pub selected: bool,
+    /// The default audio track's channel count (`6` for 5.1). Descriptive only.
+    #[serde(rename = "audioChannels", default, deserialize_with = "de_i64")]
+    pub audio_channels: i64,
     #[serde(rename = "videoCodec", default)]
     pub video_codec: String,
     #[serde(rename = "audioCodec", default)]
@@ -499,6 +681,9 @@ pub struct Media {
 pub struct MediaPart {
     #[serde(default, deserialize_with = "de_i64")]
     pub id: i64,
+    /// This version's Part duration in milliseconds; an item may have a different cut.
+    #[serde(default, deserialize_with = "de_i64")]
+    pub duration: i64,
     #[serde(default)]
     pub key: String, // /library/parts/{id}/{changestamp}/file.mkv
     /// /decision only: the MDE verdict for this part — "directplay" | "transcode" | "copy"
@@ -521,6 +706,15 @@ pub struct MediaPart {
     pub container: String,
     #[serde(rename = "Stream", default)]
     pub stream: Vec<Stream>,
+}
+
+impl Stream {
+    /// A video stream whose transfer characteristic is PQ (HDR10) or HLG, or that carries Dolby
+    /// Vision (a Profile 5 file sends no `colorTrc`, so `DOVIPresent` is what marks it). The one
+    /// HDR rule: `metadata::convert_streams` applies the same test to the detail parse.
+    pub fn is_hdr(&self) -> bool {
+        matches!(self.color_trc.as_str(), "smpte2084" | "arib-std-b67") || self.dovi_present != 0
+    }
 }
 
 impl MediaPart {
@@ -611,7 +805,9 @@ pub struct Stream {
     pub dovi_bl_compat_id: i64,
     /// `DOVIELPresent` — an enhancement layer rides in the file (Profile 7's dual layer). We feed
     /// a single elementary stream and cannot interleave a second one, so this is disqualifying on
-    /// its own, and it is the ONLY field that identifies P7 (whose compat id is 6, not 0).
+    /// its own unless the feed path converts the stream to Profile 8.1 (a Profile 7 with a
+    /// cross-compatible base layer; see `Dovi::converts_to_p81`), and it is the ONLY field that
+    /// identifies P7 (whose compat id is 6, not 0).
     #[serde(rename = "DOVIELPresent", default, deserialize_with = "de_i64")]
     pub dovi_el_present: i64,
     // ---- the remaining four DOVI keys, DESCRIPTIVE ONLY. The three above decide whether the base
@@ -655,6 +851,9 @@ pub struct Stream {
     pub chroma_subsampling: String,
     #[serde(default, deserialize_with = "de_i64")]
     pub channels: i64,
+    /// Audio track only: Hz, e.g. 48000; 0 = not said. The PCM Load declares it (FLAC).
+    #[serde(rename = "samplingRate", default, deserialize_with = "de_i64")]
+    pub sampling_rate: i64,
     #[serde(rename = "audioChannelLayout", default)]
     pub audio_channel_layout: String,
     #[serde(rename = "displayTitle", default)]
@@ -1080,12 +1279,81 @@ fn de_ultrablur<'de, D: serde::Deserializer<'de>>(
 
 #[cfg(test)]
 mod tests {
-    use super::Envelope;
+    use super::{catalog_hex_of_guid, resolve_catalog_hex, Envelope, MediaId};
+
+    const HEX: &str = "5d7768264de0ee001fcc87e4";
+    const BYTES: [u8; 12] = [0x5d, 0x77, 0x68, 0x26, 0x4d, 0xe0, 0xee, 0x00, 0x1f, 0xcc, 0x87, 0xe4];
+
+    #[test]
+    fn guid_and_show_guid_decode_once_to_bytes_when_present() {
+        let json = format!(
+            r#"{{"MediaContainer":{{"Metadata":[{{"ratingKey":"1","type":"episode","guid":"plex://episode/5fbd929d55d986002d63c021","grandparentGuid":"plex://show/{HEX}"}},
+               {{"ratingKey":"2","type":"movie","guid":"plex://movie/{HEX}"}}]}}}}"#
+        );
+        let mc = serde_json::from_slice::<Envelope>(json.as_bytes()).expect("parse").media_container;
+        assert_eq!(mc.metadata[0].guid_hex(), None, "an episode guid is not a watchlist identity");
+        assert_eq!(mc.metadata[0].show_guid_hex(), Some(BYTES));
+        assert_eq!(mc.metadata[1].guid_hex(), Some(BYTES));
+        assert_eq!(mc.metadata[1].show_guid_hex(), None, "a movie has no show");
+    }
+
+    fn listing(json: &str) -> super::ListingFacts {
+        let json = format!(r#"{{"MediaContainer":{{"Metadata":[{json}]}}}}"#);
+        serde_json::from_slice::<Envelope>(json.as_bytes()).expect("parse").media_container.metadata[0].listing_facts()
+    }
+
+    /// **A listing row's caption facts** are lifted once: the first genre, `Media[0]`'s resolution,
+    /// HDR from a video stream, the content rating and the audience score, the length, and a show's
+    /// season and episode counts. Unknown stays `None` (never a zero a reader could mistake).
+    #[test]
+    fn a_listing_row_says_its_genre_video_ratings_length_and_counts() {
+        let movie = listing(r#"{"type":"movie","ratingKey":"1","contentRating":"PG-13","audienceRating":7.8,"duration":6000000,
+            "Genre":[{"tag":"Drama"},{"tag":"Crime"}],
+            "Media":[{"videoResolution":"4k","Part":[{"Stream":[{"streamType":1,"colorTrc":"smpte2084"}]}]}]}"#);
+        assert_eq!(movie, super::ListingFacts {
+            genre: Some("Drama".into()),
+            video_resolution: Some("4k".into()),
+            hdr: true,
+            content_rating: Some("PG-13".into()),
+            audience_rating: Some(7.8),
+            duration_ms: Some(6_000_000),
+            ..Default::default()
+        });
+        let show = listing(r#"{"type":"show","ratingKey":"2","childCount":3,"leafCount":30,"viewedLeafCount":12}"#);
+        assert_eq!((show.season_count, show.leaf_count, show.viewed_leaf_count), (Some(3), Some(30), Some(12)));
+        let bare = listing(r#"{"type":"movie","ratingKey":"3","childCount":4}"#);
+        assert_eq!(bare, super::ListingFacts::default(), "nothing sent: nothing known (a movie has no seasons)");
+    }
+
+    #[test]
+    fn absent_or_malformed_guids_decode_to_none() {
+        for g in [
+            "", "local://1", "plex://episode/5d7768264de0ee001fcc87e4", "plex://movie/", "plex://movie/5d77",
+            "plex://movie/5d7768264de0ee001fcc87zz", "plex://movie/5d7768264de0ee001fcc87e4aa",
+            "plex://movie/5d7768264de0ee001fcc87é", "com.plexapp.agents.imdb://tt0000001?lang=en",
+        ] {
+            assert_eq!(catalog_hex_of_guid(g), None, "{g:?}");
+        }
+        assert_eq!(catalog_hex_of_guid(&format!("plex://show/{HEX}")), Some(BYTES));
+        assert_eq!(catalog_hex_of_guid(&format!("plex://movie/{}", HEX.to_uppercase())), Some(BYTES));
+        let mc = serde_json::from_slice::<Envelope>(br#"{"MediaContainer":{"Metadata":[{"ratingKey":"3"}]}}"#)
+            .expect("parse")
+            .media_container;
+        assert_eq!((mc.metadata[0].guid_hex(), mc.metadata[0].show_guid_hex()), (None, None));
+    }
+
+    #[test]
+    fn a_known_hex_is_never_fetched_and_an_absent_one_resolves_through_the_fetch() {
+        assert_eq!(resolve_catalog_hex(Some(BYTES), || panic!("no round trip")), Some(BYTES));
+        assert_eq!(resolve_catalog_hex(None, || Some(format!("plex://movie/{HEX}"))), Some(BYTES));
+        assert_eq!(resolve_catalog_hex(None, || Some("local://9".into())), None);
+        assert_eq!(resolve_catalog_hex(None, || None), None);
+    }
 
     /// The `Media[]` technical fields feed the resolution badge and (later) the quality ladder, and
     /// PMS is free to string-encode any of them. A strict field there does not lose one number —
     /// it fails the WHOLE `MediaContainer`, i.e. the entire detail page. Both encodings must land,
-    /// and the several-versions case must stay several (`primary_media` is version 0, not the only
+    /// and the several-versions case must stay several (`media_version(None)` is version 0, not the only
     /// one) — see docs/pms-api.md §4.
     #[test]
     fn media_technical_fields_survive_both_encodings_and_keep_every_version() {
@@ -1101,10 +1369,10 @@ mod tests {
         assert_eq!(
             it.media.len(),
             2,
-            "both versions are kept for a future picker"
+            "both versions are kept, so the Play Version picker can offer each"
         );
 
-        let v0 = it.primary_media().expect("Media[0]");
+        let v0 = it.media_version(None).map(|(_, m)| m).expect("Media[0]");
         assert_eq!((v0.bitrate, v0.width, v0.height), (14663, 3840, 2160));
         assert_eq!(v0.video_resolution, "4k");
         // version 1 sends the same fields string-encoded, and videoResolution as a bare NUMBER
@@ -1113,6 +1381,36 @@ mod tests {
         assert_eq!(v1.video_resolution, "1080");
         // the two versions therefore badge differently ("4K" vs "1080p" — see ui::fmt::resolution's
         // own tests), which is the whole reason the accessor has to name WHICH one it returned.
+    }
+
+    /// A version is found by its `Media.id` wherever the answer lists it, so a refetch that
+    /// reorders `Media[]` still names the right index; an id the answer lost is `None`, never a
+    /// silent `Media[0]`.
+    #[test]
+    fn a_version_is_resolved_by_id_and_a_lost_one_is_not_replaced() {
+        let json = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"1859","Media":[
+              {"id":"3086","videoResolution":"1080","audioChannels":"6","Part":[{"key":"/p/3134"}]},
+              {"id":3082,"videoResolution":"4k","Part":[{"key":"/p/3130"}]}]}]}}"#;
+        let env: Envelope = serde_json::from_slice(json).expect("parse");
+        let it = &env.media_container.metadata[0];
+        let (i, m) = it.media_version(Some(MediaId(3082))).expect("listed");
+        assert_eq!((i, m.part[0].key.as_str()), (1, "/p/3130"));
+        let (i, m) = it.media_version(None).expect("default");
+        assert_eq!((i, m.id, m.audio_channels), (0, MediaId(3086), 6));
+        assert!(it.media_version(Some(MediaId(9))).is_none());
+        assert_eq!(it.default_part().map(|p| p.key.as_str()), Some("/p/3134"));
+    }
+
+    /// A `/decision` body is read off the version it marks `selected`.
+    #[test]
+    fn a_decision_reads_the_selected_version() {
+        let json = br#"{"MediaContainer":{"Metadata":[{"Media":[
+              {"id":1,"videoCodec":"hevc"},{"id":2,"selected":true,"videoCodec":"h264"}]}]}}"#;
+        let env: Envelope = serde_json::from_slice(json).expect("parse");
+        assert_eq!(env.media_container.metadata[0].decided_media().map(|m| m.id), Some(MediaId(2)));
+        let one = br#"{"MediaContainer":{"Metadata":[{"Media":[{"id":7}]}]}}"#;
+        let env: Envelope = serde_json::from_slice(one).expect("parse");
+        assert_eq!(env.media_container.metadata[0].decided_media().map(|m| m.id), Some(MediaId(7)));
     }
 
     /// The `/decision` verdict block, in BOTH encodings PMS uses for it. This body is the one the
@@ -1201,10 +1499,10 @@ mod tests {
     /// A show container carries no `Media` at all — the accessor must say so rather than panic,
     /// because the detail page asks every item for its primary version.
     #[test]
-    fn a_show_container_has_no_primary_media() {
+    fn a_show_container_has_no_default_version() {
         let json = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"9","type":"show","title":"A Show"}]}}"#;
         let env: Envelope = serde_json::from_slice(json).expect("parse");
-        assert!(env.media_container.metadata[0].primary_media().is_none());
+        assert!(env.media_container.metadata[0].media_version(None).map(|(_, m)| m).is_none());
     }
 
     // ---- /hubs/search ----

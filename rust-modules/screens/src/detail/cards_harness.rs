@@ -25,6 +25,7 @@ pub(crate) struct Harness {
 fn cx_of<'a>(ms: u32, press: f32, focus: Option<FocusKey<u32>>) -> Cx<'a, TestHost> {
     static MEASURE: FixtureMeasure = FixtureMeasure;
     Cx { views: (), tick: Tick { ms, dt_us: 16_667 }, measure: &MEASURE,
+        modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
         press: PressRead { scale: press, owner: focus, ..Default::default() },
         focus: FocusRead { current: focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) }
 }
@@ -127,9 +128,10 @@ impl Harness {
     fn step(&mut self, ev: ScreenEvent<TestHost>) -> bool {
         let mut present = plx_machine::present::Present::new();
         let mut out = Vec::new();
-        let (_, moving) = plx_machine::idle::scoped_motion(|| {
+        let (_, moving) = plx_machine::motion::report::scoped_motion(|| {
             static MEASURE: FixtureMeasure = FixtureMeasure;
             let cx = Cx::<TestHost> { views: (), tick: Tick { ms: self.ms, dt_us: 16_667 }, measure: &MEASURE,
+                modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
                 press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
                 focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };
             let mut fx = Effects::new(&mut out, plx_machine::machine::MachineId::Instance(plx_machine::machine::InstanceId(1)), &mut present);
@@ -336,4 +338,36 @@ mod real_draw {
     fn extras_stops_from_the_real_draw_are_the_placed_rects() { run(Which::Extras); }
     #[test]
     fn cast_stops_from_the_real_draw_are_the_placed_rects() { run(Which::Cast); }
+}
+
+#[cfg(test)]
+mod reach {
+    use super::*;
+
+    /// The hero names three of a thirty-member cast; the Cast row holds all thirty, the thirtieth
+    /// a card of its own that focus can land on.
+    #[test]
+    fn a_thirty_member_cast_reaches_its_thirtieth_on_the_cast_row() {
+        let _serial = plx_base::testlock::serial();
+        let mut h = mount_cast(30);
+        let cards = h.cards();
+        assert_eq!(cards.len(), 30);
+        assert_eq!(h.identity(cards[29]), "r29");
+        h.focus(cards[29], By::Dir);
+        assert_eq!(h.focused(), Some(cards[29]));
+        plx_data::metadata::set_current_for_test(test_store().state_mut(), None);
+    }
+
+    /// Extras are one whole response, and the row shows every one: the hundredth is a card.
+    #[test]
+    fn a_hundred_extras_reach_the_hundredth_on_the_extras_row() {
+        let _serial = plx_base::testlock::serial();
+        let mut h = mount_extras(100);
+        let cards = h.cards();
+        assert_eq!(cards.len(), 100);
+        assert_eq!(h.identity(cards[99]), "r99");
+        h.focus(cards[99], By::Dir);
+        assert_eq!(h.focused(), Some(cards[99]));
+        plx_data::metadata::set_current_for_test(test_store().state_mut(), None);
+    }
 }

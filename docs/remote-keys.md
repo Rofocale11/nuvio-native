@@ -20,7 +20,7 @@ done offline is read out of the television's own harvested `libSDL2`, which is s
 ## 1. How a press reaches the app
 
 An `SDL_KEYDOWN` / `SDL_KEYUP` from LG's SDL fork is read by raw byte offset, because the fork's
-`SDL_KeyboardEvent` is **shifted four bytes** against the headers (`app/events.rs::decode_key`, and the
+`SDL_KeyboardEvent` is **shifted four bytes** against the headers (`plx_shell_sdl::event::decode_key` in `rust-modules/shell-sdl/src/event.rs`, and the
 gotcha in `docs/agent-reference.md`):
 
 | offset | field | the app calls it |
@@ -98,7 +98,7 @@ before `SDL_Init` (§5).
 
 | Code | Field | `Key` | What it does | Provenance |
 | --- | --- | --- | --- | --- |
-| `450` | `wcode` only | `Play` | resume, or start playback off a card | evdev 207 `KEY_PLAYCD` |
+| `450` | `wcode` only | `Play` | resume, or start playback off a card; on the Player HUD settings page, on the row of a HUD installed from a development address (`tools/hud-dev`), fetch that address again | evdev 207 `KEY_PLAYCD` |
 | `72` | `wcode` only | `Pause` | pause | evdev 119 `KEY_PAUSE` |
 | `261` | either | `PlayPause` | toggles — its own variant, since `key_play`/`key_pause` are each one direction | evdev 164 `KEY_PLAYPAUSE` |
 | `451` | either | `Right { alt: true }` | fast-forward: scrubs in the player, does nothing elsewhere | evdev 208 `KEY_FASTFORWARD` |
@@ -121,13 +121,13 @@ before `SDL_Init` (§5).
 | `301` | `wcode` | `page_dir`, Library route only | CH▼ pages down (evdev 403 `KEY_CHANNELDOWN`) |
 | `8` | `sym` | `screens::search::SearchScreen::step`, while editing | backspace |
 | `156 \| 1<<30` | `sym` | `screens::search::SearchScreen::step`, while editing | the panel's **Clear all**. **Not producible from the evdev table** — it reaches us through the fork's own text/IME path, which is why it is measured but has no evdev provenance. |
-| `48..=57` | `sym` | `screens::profiles`, PIN keypad | type that digit into the PIN. `screens::profiles::digit_of` also reads the range out of `wcode`, where it is **not** a digit — §9. |
+| `48..=57` | `sym` | `screens::profiles`, PIN keypad | type that digit into the PIN. `consts::pin_digit` (moved from `screens::profiles::digit_of`) also reads the range out of `wcode`, where it is **not** a digit — §9. |
 
 ### Swallowed
 
 | Code | Field | `Key` | What it does |
 | --- | --- | --- | --- |
-| `484` (`0x1e4`) | `wcode` | `PointerHidden` | the Magic Remote reporting its pointer auto-hid. The ladder's arm has an empty body — the press is consumed there rather than reaching the arms below. evdev 614, an LG-private code and not a key. |
+| `484` (`0x1e4`) | `wcode` | `PointerHidden` | LG's pointer-hidden notification. It stops edge scrolling and is consumed before fresh-press bookkeeping. Evdev 614 is an LG-private code. |
 
 ### Reachable but deliberately unbound
 
@@ -150,8 +150,8 @@ from two different namespaces (§1, §4), so "make them consistent" is not the t
 **`Left`/`Right` carry an `alt` flag, and the two horizontal tests accept different sets.** `alt`
 is `false` for a press that arrived as the plain `SDLK_LEFT`/`SDLK_RIGHT` sym and `true` for one
 that arrived only as `WCODE_REWIND`/`WCODE_FASTFORWARD`. The non-player four-way nav dispatch
-matches `alt: false` alone, so a transport key does nothing on Home; the player's scrub arm and the
-Chapters strip match both. A press carrying BOTH stays plain — `classify` asks `sym` first — which
+matches `alt: false` alone, so a transport key does nothing on Home; the player's scrub arm matches
+both (an open MODAL section page swallows them: the bar they drive is not on screen). A press carrying BOTH stays plain — `classify` asks `sym` first — which
 is what keeps Home's navigation answering an ordinary arrow that happens to ride beside a transport
 code.
 
@@ -201,10 +201,10 @@ change rather than a tidy-up, and the sibling codes (`402`, `415`, `413`) come f
 `linux/input.h` does not name — so unlike `33`/`34` there is no positive evidence about them in
 either direction. **Settle all four together, with the §7 capture plus a USB keyboard, in one pass.**
 
-### 4.3 and 4.4 — `SDLK_SELECT`, and `digit_of`'s `wcode` arm
+### 4.3 and 4.4 — `SDLK_SELECT`, and `pin_digit`'s `wcode` arm
 
 The other two are written up in §9, whose first and third bullets they are: `SDLK_SELECT` is
-`SDL_SCANCODE_END`, and `screens::profiles::digit_of` reads ASCII digits out of the scancode field. Both are
+`SDL_SCANCODE_END`, and `consts::pin_digit` (the old `screens::profiles::digit_of`) reads ASCII digits out of the scancode field. Both are
 misreadings of the same field, both are recorded rather than changed, and the reasons are there.
 `is_bound` (§6) declines to inherit the second of them.
 
@@ -276,14 +276,18 @@ predicate: `classify` names a `Key`, **or** `page_dir` answers, **or** the sym i
 build's configured upload trigger (`crate::labcfg::is_trigger_key`, `false` at compile time in every
 build anyone can install; `docs/lab-diagnostics.md`). The guarded half lives in
 `app/input.rs::note_global_press`, split
-out so `make check` can grade it — `begin_fresh_press` itself calls `hide_cursor`, a webOS-only SDL
-symbol, and a host test that reaches it fails at `ld` rather than at an assertion.
+out so `make check` can grade it — `begin_fresh_press` itself hides the pointer through the platform's
+`Shell` (`hide_pointer`), which on a television acts on whatever pointer calls the process's SDL
+exports, so a test that reached the television's shell would be grading the host's SDL rather than the
+press. The bare player samples the HUD for bound keys in ordered screen
+delivery. A second Back in the same SDL batch sees the first one's dismissal, and an intervening
+bound press spends any exit arming. The LG pointer-hidden notification only stops edge scrolling.
 
-**The digit term reads `sym` and not `wcode`, diverging from `screens::profiles::digit_of`, on purpose.**
+**The digit term reads `sym` and not `wcode`, diverging from `consts::pin_digit` (the old `screens::profiles::digit_of`), on purpose.**
 48–57 in the scancode field are `]` `\` `#` `;` `'` `` ` `` `,` `.` `/` and CapsLock (the digits'
 scancodes are 30–39, which is how 33/34 turned out to be `4` and `5` in the first place). Mirroring
-`digit_of` would have put the retired mis-reading straight back inside the gate that exists to stop
-it. The consequence is that `is_bound` is not a strict superset of `digit_of` for a wcode-only
+`pin_digit` would have put the retired mis-reading straight back inside the gate that exists to stop
+it. The same term is `action_of`'s `Action::Digit`, which `is_bound` is now defined by. The consequence is that `is_bound` is not a strict superset of `pin_digit` for a wcode-only
 punctuation press — which is harmless, because the PIN pad has neither a HUD nor an armed click.
 
 Three things stay unconditional, each for its own reason. `held.down_sym` is bookkeeping about the
@@ -292,16 +296,41 @@ The D-pad cursor gate is already narrower than `is_bound` — it takes the four 
 and nothing else. And the caller's `last_input` stamp is a local, read only by arms that run in the
 same loop iteration, so an unbound press cannot carry it anywhere.
 
+**OK under a transparent pointer is a click, and is turned back into OK.** Where LG's
+`SDL_webOSCursorVisibility` is missing (webOS 3.9.3's SDL 2.0.4), the D-pad gate hides the pointer by
+swapping in a transparent cursor. The system still thinks its pointer is up, so the Magic Remote's
+OK arrives as a pointer click at the invisible pointer's position, not as an OK key: arrow to a
+control, press OK, and the click lands on whatever is under the hidden pointer (in the player, the
+picture, which toggles pause). `app/input.rs::click_is_ok` names the case: D-pad mode on a
+transparent-cursor set, and either less than `DPAD_MOTION_GATE` of pointer travel since the last
+arrow press or a click that lands on no control. The loop then pushes an OK key-down for the button-down and an OK key-up for its
+button-up. It is not keyed on the pointer being hidden: pressing OK jiggles the remote, any motion
+shows the pointer again, and a version keyed on "hidden" never fired on the set. Nor on travel
+alone: travel is summed since the last arrow press, so a hand holding the remote drifts past any
+gate (159–600 px measured between arrowing to a disc and pressing OK), and over full-screen video
+the player never leaves D-pad mode. A click that lands on a control after real travel is still
+that control's, so pointing at a button and clicking it keeps working.
+
+When Back dismisses the player transport, the last delivered pointer position becomes the anchor.
+If there is no position yet, the next motion sets the anchor. The HUD stays down until the sum of
+the horizontal and vertical distances from the anchor reaches four logical pixels. The motion that
+reaches the threshold raises the HUD and restores a transparent cursor installed by Back. While
+that cursor is held, its OK click takes the same paired key path. On firmware with the LG visibility
+API, webOS handles the pointer's return.
+
 **The one place it deliberately over-approximates.** The digits count as bound *everywhere*, because
 the who's-watching PIN keypad types from them, so a number press on Home or during playback still
 un-dismisses the HUD. Narrowing that means making the predicate route-aware, i.e. a second copy of
 the ladder's own order — the duplication `page_dir` exists to have ended. A number key is also,
 unlike a colour button, a key this app really does bind, so calling it bound is honest.
 
-Graded twice, because neither half implies the other: `app/input.rs`'s `unsupported_key_tests` covers the
-two global effects (invisible to any focus fingerprint), and `tools/keytable.py` covers "moves
+Graded in three places, because no one of them implies the others: `app/input.rs`'s
+`unsupported_key_tests` covers the HUD wake (invisible to any focus fingerprint); the press half is
+observed on the dispatcher's real press in `run.rs`'s `lifecycle_regression_tests` (an unbound key
+leaves a click armed and live, a direction key abandons it); and `tools/keytable.py` covers "moves
 nothing on any screen" — its `k:0,269` (HOME) and `k:53,34` (the digit 5) rows are inert on Home,
-Library and Search in `tests/keytable.json`.
+Library and Search in `tests/keytable.json`. The trap to avoid is an `armed` assertion beside
+`note_global_press`: that function holds no press, so such an assertion cannot fail.
 
 **What neither covers**: the player route. The simulator has no video path, so no fingerprint in
 that table was taken with a HUD on screen. The HUD half of this invariant has been graded as a unit
@@ -407,10 +436,10 @@ reproduce rather than a rule to obey by quitting.
   `SDL_SCANCODE_RETURN`, captured and bound.
 * **§4.2** — `19` is `SDL_SCANCODE_P` and is bound to PLAY. Untested on a device; needs a USB
   keyboard as well as §7.
-* **`screens::profiles`' `digit_of` reads the digit range in `wcode` too**, where 48–57 are not digits at
+* **`consts::pin_digit` (moved from `screens::profiles::digit_of`) reads the digit range in `wcode` too**, where 48–57 are not digits at
   all but `]` `\` `#` `;` `'` `` ` `` `,` `.` `/` and CapsLock — and its own test asserts
-  `digit_of(0, 55) == Some(b'7')`, where scancode 55 is a full stop. No remote has those keys, so it
-  is harmless in practice and `screens/profiles.rs` is left alone here; a USB keyboard on the PIN screen
+  `pin_digit(0, 55) == Some(b'7')`, where scancode 55 is a full stop. No remote has those keys, so it
+  is harmless in practice and the reader moved down to `consts` unchanged; a USB keyboard on the PIN screen
   would type digits from punctuation. `is_bound` deliberately does **not** mirror it (§6). The same
   capture settles both.
 * **`461` and `156` are not producible from the evdev table.** 156 is explained — the panel's *Clear

@@ -15,8 +15,8 @@ use super::test_support::apply_plan;
 #[cfg(feature = "devtriggers")]
 fn the_codec_gates_verdict_is_what_the_quality_menu_reads() {
     let mut ps = crate::route::PlaybackSession::IDLE;
-    let caps = plx_platform::devcaps::Caps::assumed();
-    let dv = plx_data::metadata::Dovi::default().presentation_now(true);
+    let caps = plx_os::devcaps::Caps::assumed();
+    let dv = plx_data::metadata::Dovi::default().presentation(true, plx_os::devcaps::dv::DvCapability::Unknown, true);
     // The two ends of the gate, at a UHD raster this device's table admits.
     assert!(
         video_direct_plays("hevc", 3840, 2160, dv, &caps),
@@ -206,7 +206,7 @@ fn dv_decision_survives_reload_recovery_and_rollback() {
         23.976,
         p8(),
         true,
-        plx_platform::devcaps::dv::DvCapability::Supported,
+        plx_os::devcaps::dv::DvCapability::Supported,
     ));
     let frozen = stream_dv_decision(&ps);
     assert!(frozen.presentation.declared().is_some());
@@ -258,14 +258,9 @@ fn dv_decision_survives_reload_recovery_and_rollback() {
         23.976,
         p8(),
         false,
-        plx_platform::devcaps::dv::DvCapability::Supported,
+        plx_os::devcaps::dv::DvCapability::Supported,
     ));
-    clear_output_dv(&mut ps);
-    assert_eq!(
-        stream_dv_decision(&ps),
-        plx_data::metadata::DvDecision::NONE,
-        "the shared remux/transcode output reset clears the declaration",
-    );
+    // The copy rule itself (`copied_video_dv`) is covered in `plan_dolby_vision_tests.rs`.
 
     restore_quality(Quality::Original);
     install_active_encoder("");
@@ -744,7 +739,7 @@ fn failed_original_then_auto_keeps_the_live_adaptive_route() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -810,7 +805,7 @@ fn failed_original_then_auto_keeps_the_live_adaptive_route() {
     reset_session(&mut ps);
     restore_quality(Quality::Original);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -840,7 +835,7 @@ fn hls_recovery_restores_the_exact_direct_source_and_rearms_its_watchdog() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: Some(2),
             }),
@@ -871,7 +866,7 @@ fn hls_recovery_restores_the_exact_direct_source_and_rearms_its_watchdog() {
     restore_quality(Quality::Original);
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -917,7 +912,7 @@ fn a_recovery_that_never_opens_can_still_go_back_to_the_encoder_it_replaced() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: Some(2),
             }),
@@ -980,7 +975,7 @@ fn a_recovery_that_never_opens_can_still_go_back_to_the_encoder_it_replaced() {
     restore_quality(Quality::Original);
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -1094,7 +1089,7 @@ fn a_remux_recovery_keeps_hls_until_frames_and_rolls_back_the_replacement() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1146,7 +1141,7 @@ fn a_remux_recovery_keeps_hls_until_frames_and_rolls_back_the_replacement() {
     reset_session(&mut ps);
     install_active_encoder("");
     plx_plex::plex::reset_servers_for_test();
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -1201,7 +1196,7 @@ fn a_missing_whole_file_bitrate_must_not_silently_delete_original_recovery() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1257,7 +1252,7 @@ fn a_recovery_that_opens_spends_the_way_back_rather_than_leaving_it_armed() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1301,7 +1296,7 @@ fn a_recovery_that_opens_spends_the_way_back_rather_than_leaving_it_armed() {
     restore_quality(Quality::Original);
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -1371,7 +1366,7 @@ fn manual_original_adopts_one_running_trial_and_revokes_its_auto_ticket_on_frame
     reset_session(&mut ps);
     install_active_encoder("");
     reset_player_control_for_test(&ps);
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -1404,7 +1399,7 @@ fn a_quality_change_waits_for_an_original_handoff_to_commit() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1487,7 +1482,7 @@ fn a_quality_change_survives_an_original_handoff_rollback() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1522,6 +1517,32 @@ fn a_quality_change_survives_an_original_handoff_rollback() {
     reset_session(&mut ps);
     install_active_encoder("");
     crate::player::reset_route_requests_for_test(&ps);
+}
+
+/// **Issue #665: a fixed-quality re-encode keeps `ProgressiveMkv` delivery, and its Load must
+/// declare the quality's ceiling, not the 4K source.** `sink_max_raster` used to return the
+/// source raster for the whole progressive arm, so a 4K H.264 source forced to 480p declared
+/// 4K@60 for a 480p stream and the pipeline refused it (`type=18 num=601`).
+#[test]
+fn a_fixed_quality_progressive_reencode_declares_the_ceiling_not_the_source() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    { let s = &mut ps; {
+        s.cur_src.1 = 3840;
+        s.cur_src.2 = 2160;
+        s.cur_contract.delivery = plx_plex::plex::TranscodeDelivery::ProgressiveMkv;
+        s.cur_contract.ceiling = Quality::P480.ceiling();
+    } };
+    assert_eq!(sink_max_raster(&ps), (854, 480), "the smaller of source and ceiling");
+    // Direct play / remux (Original has no ceiling) still declares the source.
+    { let s = &mut ps; s.cur_contract.ceiling = Quality::Original.ceiling() };
+    assert_eq!(sink_max_raster(&ps), (3840, 2160));
+    // PMS never upscales: a source smaller than the ceiling wins.
+    { let s = &mut ps; {
+        s.cur_src.1 = 640;
+        s.cur_src.2 = 360;
+        s.cur_contract.ceiling = Quality::P480.ceiling();
+    } };
+    assert_eq!(sink_max_raster(&ps), (640, 360));
 }
 
 #[test]
@@ -1620,7 +1641,7 @@ fn audio_selected_during_original_trial_uses_the_route_that_actually_lands() {
                 fps: 23.976,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1633,7 +1654,7 @@ fn audio_selected_during_original_trial_uses_the_route_that_actually_lands() {
         Some(AutoOriginalReload::Direct)
     );
 
-    commit_audio_selection(&mut ps, CarriedAudio { sid: 99, ordinal: 2, codec: "aac".into(), channels: 2, can_normalize_loudness: false, immersive: false });
+    commit_audio_selection(&mut ps, CarriedAudio { sid: 99, ordinal: 2, codec: "aac".into(), channels: 2, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 });
     assert!(
         !pending_user_route_intent(UserRouteIntent::NativeAudioReload),
         "the temporary Direct actuator must not escape the Original trial",
@@ -1831,7 +1852,7 @@ fn automatic_recovery_issues_no_part_admission_before_the_trial() {
                 fps: 24.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -1857,7 +1878,7 @@ fn automatic_recovery_issues_no_part_admission_before_the_trial() {
     reset_session(&mut ps);
     install_active_encoder("");
     plx_plex::plex::reset_servers_for_test();
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -1951,7 +1972,7 @@ fn a_confirmed_direct_recovery_remains_seekable_after_hls_is_retired() {
                 fps: 24.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2027,7 +2048,7 @@ fn a_confirmed_direct_recovery_remains_seekable_after_hls_is_retired() {
     reset_session(&mut ps);
     install_active_encoder("");
     plx_plex::plex::reset_servers_for_test();
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -2132,7 +2153,7 @@ fn stopping_a_pending_direct_recovery_closes_its_resource_once() {
                 fps: 24.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2165,7 +2186,7 @@ fn stopping_a_pending_direct_recovery_closes_its_resource_once() {
     reset_session(&mut ps);
     install_active_encoder("");
     plx_plex::plex::reset_servers_for_test();
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -2196,7 +2217,7 @@ fn direct_recovery_without_its_server_keeps_hls_instead_of_using_a_logical_alias
                 fps: 24.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 0, ordinal: -1, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2241,14 +2262,14 @@ fn manually_picking_original_restores_native_dolby_vision_instead_of_retranscodi
                 fps: 23.976,
                 dovi: p8(),
                 dv_decision: plx_data::metadata::DvDecision {
-                    capability: plx_platform::devcaps::dv::DvCapability::Supported,
+                    capability: plx_os::devcaps::dv::DvCapability::Supported,
                     presentation: p8().presentation(
                         true,
-                        plx_platform::devcaps::dv::DvCapability::Supported,
+                        plx_os::devcaps::dv::DvCapability::Supported,
                         true,
                     ),
                 },
-                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 1, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2257,7 +2278,7 @@ fn manually_picking_original_restores_native_dolby_vision_instead_of_retranscodi
         "rk-auto",
     );
 
-    crate::player::note_original_failure(crate::player::ABR_FAILURE_ORIGINAL_HTTP, 503);
+    crate::player::note_original_failure(&mut ps, crate::player::ABR_FAILURE_ORIGINAL_HTTP, 503);
 
     set_quality(&mut ps, Quality::Original);
     assert_eq!(quality(), Quality::Original);
@@ -2281,10 +2302,8 @@ fn manually_picking_original_restores_native_dolby_vision_instead_of_retranscodi
         "the native Load must regain its Dolby Vision declaration"
     );
     assert_eq!(
-        crate::player::SHARED
-            .abr_failure_kind
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
+        ps.readout().original_failure(),
+        None,
         "the new Original attempt supersedes the old probe's failure",
     );
     assert!(!is_transcoding(&ps));
@@ -2295,7 +2314,7 @@ fn manually_picking_original_restores_native_dolby_vision_instead_of_retranscodi
 
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -2337,7 +2356,7 @@ fn local_auto_preserves_the_candidate_needed_to_leave_a_fixed_rung() {
                 fps: 25.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 14_778, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 14_778, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2416,6 +2435,82 @@ fn local_auto_keeps_hls_when_original_is_infeasible() {
     plx_plex::plex::reset_servers_for_test();
 }
 
+/// **A manual fixed-rung switch notes the delivery it asks for.** `set_quality` to a rung the
+/// playing route cannot satisfy re-transcodes through `request_transcode_refresh`, which noted no
+/// `DeliveryRequested`: the open that follows was not marked as a new attempt, so a failure of it
+/// read the route the playback HAD as `attempted_delivery` and `attempt_started = true` from the
+/// picture that route had shown (S5a's leftover). The pick now notes the route it requests, which
+/// starts a new attempt, and says the viewer asked for it.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_manual_fixed_rung_switch_notes_its_requested_delivery_and_its_origin() {
+    use plx_telemetry::telemetry::consent::{self, Consent};
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let previous = consent::current();
+    let mut enabled = Consent::default();
+    enabled.errors = true;
+    enabled.asked_version = consent::POLICY_VERSION;
+    consent::install(enabled);
+    restore_quality(Quality::P720);
+    let sid = plx_plex::plex::register_for_test(
+        "machine-fixed-rung-switch",
+        "<peer-host-1>.example.invalid",
+        32400,
+        "token",
+        "test-client-id",
+    );
+    apply_plan(&mut ps,
+        Plan {
+            sid,
+            tsession: "encoder-fixed".into(),
+            contract: plx_plex::plex::EncodeContract {
+                delivery: plx_plex::plex::TranscodeDelivery::ProgressiveMkv,
+                ceiling: Some(Quality::P720.ceiling().expect("fixed rung")),
+                ..Default::default()
+            },
+            src_measure: (16_357, 3_840, 1_608),
+            auto_original: None,
+            ..Default::default()
+        },
+        "rk-fixed-rung-switch",
+    );
+    install_active_encoder("encoder-fixed");
+    let generation = crate::player::report::requested(
+        &ps,
+        sid,
+        crate::player::report::AttemptOrigin::Fresh,
+    );
+    ACTIVE_TRACE_GENERATION.store(generation, Ordering::SeqCst);
+    // The playback is up: a picture is on screen.
+    crate::player::report::note_presented_for_test(&ps);
+    let before = crate::player::report::error_context_for_test(&ps);
+    assert!(before.attempt_started, "the playing route showed a picture");
+    assert_eq!(before.attempted_delivery, before.delivery, "nothing was switched yet");
+
+    set_quality(&mut ps, Quality::P480);
+
+    assert!(crate::player::pending_transcode_refresh(), "the switch re-transcodes");
+    let after = crate::player::report::error_context_for_test(&ps);
+    assert_eq!(
+        after.attempted_delivery.code(),
+        "progressive_transcode",
+        "the route the pick asks for is the attempt, not the installed one",
+    );
+    assert!(!after.attempt_started, "the new route's open has shown nothing yet");
+    assert_eq!(after.attempt_origin.code(), "quality_change");
+    assert_eq!(after.attempt_ordinal.code(), "2");
+
+    crate::player::report::reset_latches_for_test();
+    ACTIVE_TRACE_GENERATION.store(0, Ordering::SeqCst);
+    consent::install(previous.unwrap_or_default());
+    reset_session(&mut ps);
+    restore_quality(Quality::Original);
+    install_active_encoder("");
+    crate::player::reset_route_requests_for_test(&ps);
+    plx_plex::plex::reset_servers_for_test();
+}
+
 /// The exact remote-control sequence from a 4K Original session: Manual 1080p replaces it
 /// with a capped encoder, and Manual Original must use the preserved source candidate to
 /// return to direct play. The bad old route kept the progressive-transcode flavor and asked
@@ -2445,7 +2540,7 @@ fn manual_original_after_a_fixed_rung_returns_to_the_native_source() {
                 fps: 25.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 14_778, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 14_778, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2510,7 +2605,7 @@ fn manual_original_after_a_fixed_rung_returns_to_the_native_source() {
 
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -2553,7 +2648,7 @@ fn original_to_auto_restarts_the_worker_to_arm_the_watchdog() {
                 fps: 24.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 0, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 0, codec: "eac3".into(), channels: 0, can_normalize_loudness: false, immersive: true, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2632,7 +2727,7 @@ fn auto_to_an_admitting_fixed_rung_restarts_the_worker_to_remove_the_watchdog() 
                 fps: 24.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 42, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 42, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: None,
             }),
@@ -2691,7 +2786,7 @@ fn manual_original_after_a_fixed_rung_with_a_subtitle_returns_to_direct_play() {
                 fps: 25.0,
                 dovi: plx_data::metadata::Dovi::NONE,
                 dv_decision: plx_data::metadata::DvDecision::NONE,
-                audio: Some(CarriedAudio { sid: 14_778, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false }),
+                audio: Some(CarriedAudio { sid: 14_778, ordinal: 0, codec: "aac".into(), channels: 0, can_normalize_loudness: false, immersive: false, sample_rate: 0, bit_depth: 0 }),
                 audio_converted: false,
                 subtitle_ordinal: Some(3),
             }),
@@ -2732,6 +2827,152 @@ fn manual_original_after_a_fixed_rung_with_a_subtitle_returns_to_direct_play() {
 
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
+}
+
+/// What `start_bufferfeed_inner` asks of the session at the start door, and then does on a start:
+/// the recipe the route plans must be allowed, and the common owner admits exactly that recipe.
+/// Returns the recipe it admitted, or `None` where the door answers "no qualified feed offer for
+/// this resolved route".
+#[cfg(test)]
+fn feed_start_door(ps: &mut PlaybackSession) -> Option<crate::route::backend_policy::OfferId> {
+    if !ps.backend_planned_feed_allowed() {
+        return None;
+    }
+    let offer = ps.planned_feed_offer().expect("an allowed Feed start has a recipe");
+    assert!(
+        ps.backend_offer_admitted(plx_playback_contract::BackendKind::Feed, offer),
+        "the prechecked feed offer must remain admissible on the main thread",
+    );
+    Some(offer)
+}
+
+/// **An Auto request that STARTED on its Original can return to it after an HLS drop.**
+///
+/// The device case `pipe_auto_original_slow_recover` (Original start, a slow link drops ABR to an
+/// HLS transcode, the link recovers, an Original probe measures enough, the ABR machine reloads
+/// the Original file): the third `Load` never came, because the reload's Start was refused at the
+/// start door with "no qualified feed offer for this resolved route". The first start had spent
+/// `FEED_ORIGINAL` in the request's finite catalog, and the recovery landing asked for it again as
+/// a brand-new candidate. The existing rig tests all begin on an HLS route (`FEED_PMS_HLS`
+/// admitted, `FEED_ORIGINAL` untouched), which is why none of them could see it.
+///
+/// Every step goes through the door the way `start_bufferfeed_inner` does.
+#[test]
+fn an_auto_request_that_started_on_its_original_can_reload_it_after_an_hls_drop() {
+    use crate::route::backend_policy::OfferId;
+    let mut ps = PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    restore_quality(Quality::Auto);
+    reset_player_control_for_test(&ps);
+    assert_eq!(
+        arm_auto_fixture(&mut ps, "http://host/clip.mp4", 8_000, "http://host/__abr", false, (1_920, 1_080)),
+        None,
+        "the fixture starts on its Original",
+    );
+    // The first start: `resolve_source` qualifies the explicit source's one recipe.
+    assert!(ps.qualify_explicit_feed_source());
+    assert_eq!(feed_start_door(&mut ps), Some(OfferId::FEED_ORIGINAL), "the Original start");
+
+    for cycle in 1..=2 {
+        let hls = fallback_auto_to_hls_for(&mut ps, &worker_ticket(), 4_000, 11)
+            .expect("the watched fixture Original falls back to fixture HLS");
+        assert!(hls.contains("/__abr/"), "cycle {cycle}: {hls}");
+        // The fallback qualifies the recipe it installed (it used to ride the Original's label),
+        // the first time as a new candidate and every later time as a revisit.
+        assert_eq!(
+            feed_start_door(&mut ps),
+            Some(OfferId::FEED_PMS_HLS),
+            "cycle {cycle}: the HLS reload is admitted at the door",
+        );
+
+        assert_eq!(
+            recover_auto_to_original_for(&mut ps, &worker_ticket(), 24, RecoveryCause::Automatic),
+            Some(AutoOriginalReload::Direct),
+            "cycle {cycle}: the ABR machine reloads the Original file",
+        );
+        assert_eq!(
+            feed_start_door(&mut ps),
+            Some(OfferId::FEED_ORIGINAL),
+            "cycle {cycle}: the Original reload gets a qualified Feed offer, as the first start did",
+        );
+        // The trial's first decoded frame makes the recovery permanent.
+        settle_pending_native_start(&mut ps, RouteStartResult::Started);
+        confirm_original_recovery(&mut ps);
+    }
+}
+
+/// **A failed Original trial of a request that STARTED on its Original rolls back to the HLS route
+/// it left.** The Auto fallback installs an HLS route nobody re-qualified, so the way back named
+/// the Original's recipe, not the HLS the viewer was watching: the rollback's Start was refused at
+/// the door with "no qualified feed offer for this resolved route" and the restored HLS never
+/// reloaded. The trial fails either after its Start was admitted (the Load or its first frame
+/// fails) or before it (the Start is refused), and both rollbacks must pass the door.
+///
+/// The rollback mirrors the flight's landing: the route is restored, then the installed recipe is
+/// qualified as `RollbackExisting` and the door asks for it.
+#[test]
+fn a_failed_original_trial_of_an_original_start_rolls_back_through_the_door() {
+    use crate::route::backend_policy::OfferId;
+    for trial_admitted in [true, false] {
+        let mut ps = PlaybackSession::IDLE;
+        let _g = fresh_registry(&mut ps);
+        restore_quality(Quality::Auto);
+        reset_player_control_for_test(&ps);
+        assert_eq!(
+            arm_auto_fixture(&mut ps, "http://host/clip.mp4", 8_000, "http://host/__abr", false, (1_920, 1_080)),
+            None,
+            "the fixture starts on its Original",
+        );
+        assert!(ps.qualify_explicit_feed_source());
+        assert_eq!(feed_start_door(&mut ps), Some(OfferId::FEED_ORIGINAL), "the Original start");
+
+        let hls = fallback_auto_to_hls_for(&mut ps, &worker_ticket(), 4_000, 11)
+            .expect("the watched fixture Original falls back to fixture HLS");
+        assert!(hls.contains("/__abr/"), "{hls}");
+        assert_eq!(
+            feed_start_door(&mut ps),
+            Some(OfferId::FEED_PMS_HLS),
+            "the HLS reload carries the recipe it actually installed",
+        );
+        assert_eq!(
+            recover_auto_to_original_for(&mut ps, &worker_ticket(), 24, RecoveryCause::Automatic),
+            Some(AutoOriginalReload::Direct),
+        );
+        if trial_admitted {
+            assert_eq!(feed_start_door(&mut ps), Some(OfferId::FEED_ORIGINAL), "the trial's Start");
+        }
+        // The trial fails to open: the way back restores the HLS route.
+        assert_eq!(rollback_seconds(&mut ps), Some(24), "trial_admitted={trial_admitted}");
+        assert!(ps.qualify_installed_feed_offer(CandidatePurpose::RollbackExisting));
+        assert_eq!(
+            feed_start_door(&mut ps),
+            Some(OfferId::FEED_PMS_HLS),
+            "trial_admitted={trial_admitted}: the rollback reopens the HLS route through the door",
+        );
+    }
+}
+
+/// A panic inside a cleanup observation must not leave its record claimed: `checking` stays set
+/// otherwise, `take_unchecked` skips the record for the rest of the process and every ABR trial
+/// on that server is deferred behind a check that will never finish.
+#[test]
+fn a_panicking_encoder_cleanup_check_releases_its_claim() {
+    let sid = ServerId::from_raw(60_417);
+    ENCODER_CLEANUP.lock().unwrap_or_else(|e| e.into_inner()).remember(sid, "panic-claim");
+    let mut claimed = ENCODER_CLEANUP.lock().unwrap_or_else(|e| e.into_inner()).take_unchecked(sid);
+    assert_eq!(claimed.len(), 1);
+    let check = claimed.remove(0);
+
+    let outcome = std::panic::catch_unwind(|| {
+        run_encoder_cleanup_check_with(check, |_| panic!("observation blew up"));
+    });
+    assert!(outcome.is_err(), "the observation's panic propagates");
+
+    let retry = ENCODER_CLEANUP.lock().unwrap_or_else(|e| e.into_inner()).take_unchecked(sid);
+    // Remove the record before asserting so a red run leaves no process-global debris.
+    ENCODER_CLEANUP.lock().unwrap_or_else(|e| e.into_inner()).pending.retain(|e| e.sid != sid);
+    assert_eq!(retry.len(), 1, "the record is claimable again after the panic, so a later check runs");
+    assert!(retry[0].stop_needed, "no verdict was published, so the stop is still owed");
 }

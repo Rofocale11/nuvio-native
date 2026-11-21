@@ -8,50 +8,58 @@
     "args": {},
     "description": "Shared display formatter: converts_on_server"
   },
-  "core.duration_short_hours": {
+  "core.duration_hours": {
     "value": "{hours}h {minutes}m",
     "args": {
       "hours": "i64",
       "minutes": "i64"
     },
-    "description": "Shared display formatter: duration_short_hours"
+    "description": "The one duration (length of a film or episode) in hours and minutes, on every screen that tells one: captions, hero, About, Info card, HUD, source list."
   },
-  "core.duration_short_minutes": {
+  "core.duration_minutes": {
     "value": "{minutes}m",
     "args": {
       "minutes": "i64"
     },
-    "description": "Shared display formatter: duration_short_minutes"
-  },
-  "core.duration_long_hours": {
-    "value": "{hours} hr {minutes} min",
-    "args": {
-      "hours": "i64",
-      "minutes": "i64"
-    },
-    "description": "Shared display formatter: duration_long_hours"
-  },
-  "core.duration_long_minutes": {
-    "value": "{minutes} min",
-    "args": {
-      "minutes": "i64"
-    },
-    "description": "Shared display formatter: duration_long_minutes"
+    "description": "The one duration under an hour, in minutes. See core.duration_hours."
   },
   "core.time_left_hours": {
-    "value": "{hours} hr {minutes} min left",
+    "value": "{hours}h {minutes}m left",
     "args": {
       "hours": "i64",
       "minutes": "i64"
     },
-    "description": "Shared display formatter: time_left_hours"
+    "description": "Time remaining on a started title, in the one duration form (core.duration_hours) plus 'left': 1h 2m left. Continue Watching captions."
   },
   "core.time_left_minutes": {
-    "value": "{minutes} min left",
+    "value": "{minutes}m left",
     "args": {
       "minutes": "i64"
     },
-    "description": "Shared display formatter: time_left_minutes"
+    "description": "Time remaining under an hour, in the one duration form (core.duration_minutes) plus 'left': 8m left. Continue Watching captions."
+  },
+  "core.footer_tag": {
+    "value": "S{season} E{episode} ·",
+    "args": {
+      "season": "i64",
+      "episode": "i64"
+    },
+    "description": "The episode tag that leads a still's footer line, with its trailing middle dot: 'S2 E4 ·'. The time-left text follows it after one space (so 'S2 E4 · 38m left'). Where a language's footer is too long the tag is dropped, never the time unit. DRAFT per language until a native reviewer has read it."
+  },
+  "core.footer_left_minutes": {
+    "value": "{minutes}m left",
+    "args": {
+      "minutes": "i64"
+    },
+    "description": "Time remaining under an hour in a still's one-line footer, in the shortest form the language has: '38m left'. Not capitalised in languages that follow a lower-case tag, since it usually follows 'S2 E4 ·'. DRAFT per language until a native reviewer has read it."
+  },
+  "core.footer_left_hours": {
+    "value": "{hours}h {minutes}m left",
+    "args": {
+      "hours": "i64",
+      "minutes": "i64"
+    },
+    "description": "Time remaining of an hour or more in a still's one-line footer, shortest form: '1h 12m left'. See core.footer_left_minutes. DRAFT per language until a native reviewer has read it."
   },
   "core.seconds": {
     "value": "{seconds} s",
@@ -117,13 +125,21 @@
     "value": "delivery",
     "description": "Field name in the consent preview's list of possible playback-error values: how the video was delivered."
   },
+  "core.preview_domain_backend": {
+    "value": "playback backend",
+    "description": "Field name in the consent preview: the physical executor of the terminal playback attempt, or unknown when no current attempt was proven."
+  },
+  "core.preview_domain_terminal_stage": {
+    "value": "terminal failure stage",
+    "description": "Field name in the consent preview: the stage of the current terminal failure, or unknown when no stage was proven."
+  },
   "core.preview_domain_refusal_codes": {
     "value": "server decision codes, general and transcode (refused-plan reports only)",
     "description": "Field name in the consent preview's list of possible playback-error values: the numeric verdict codes the media server gave when it refused to play or convert an item. Only reports about a refusal carry it."
   },
   "core.preview_domain_attempted_delivery": {
-    "value": "attempted delivery (refused-plan reports only)",
-    "description": "Field name in the consent preview's list of possible playback-error values: which way of delivering the video the app asked the server for before the server refused. Only reports about a refusal carry it."
+    "value": "attempted delivery",
+    "description": "Field name in the consent preview's list of possible playback-error values: which way of delivering the video the app was opening when the failure happened, which after a mid-playback quality switch can differ from the delivery before the switch. For a refused plan it is the way the app asked the server for before the server refused."
   },
   "core.preview_domain_source_video": {
     "value": "source video codec (refused-plan reports only)",
@@ -132,6 +148,10 @@
   "core.preview_domain_source_audio": {
     "value": "source audio codec (refused-plan reports only)",
     "description": "Field name in the consent preview's list of possible playback-error values: the audio format class of the file the server refused. Only reports about a refusal carry it."
+  },
+  "core.preview_domain_preview_refusal": {
+    "value": "reason an automatic trailer was refused (refused-trailer reports only)",
+    "description": "Field name in the consent preview's list of possible playback-error values: which condition refused the trailer that plays behind a detail page before it opened (the title has no media file, a direct play was not on offer, or Auto quality did not keep the original). Only reports about a refused trailer carry it."
   },
   "core.preview_domain_quality": {
     "value": "quality",
@@ -149,6 +169,26 @@
     "value": "pipeline",
     "description": "Field name in the consent preview's list of possible playback-error values: the playback pipeline stage."
   },
+  "core.preview_domain_pipeline_error": {
+    "value": "TV firmware error number (0 = none recorded)",
+    "description": "Field name in the consent preview's list of possible playback-error values: the whole number the television's own video pipeline reported with its first error, or 0 when it reported none. Its possible values are a range of integers rather than a list of codes."
+  },
+  "core.preview_domain_attempt_started": {
+    "value": "picture shown in this attempt",
+    "description": "Field name in the consent preview's list of possible playback-error values: whether the attempt that failed (the latest opening of the video, such as after a quality switch) had put a picture on screen before it failed, as against the playback as a whole. Its possible values are yes and no."
+  },
+  "core.preview_domain_attempt_origin": {
+    "value": "why this attempt was made",
+    "description": "Field name in the consent preview's list of possible playback-error values: what led to the attempt that failed, such as the first press of Play, a Retry, a quality change the viewer made, a switch the app made on its own, a recovery after a failed attempt, reopening after the app returned to the foreground, or the trailer that plays behind a detail page."
+  },
+  "core.preview_domain_attempt_ordinal": {
+    "value": "which attempt of this playback (1 to 9, then 9+)",
+    "description": "Field name in the consent preview's list of possible playback-error values: how many times the video had been opened during this playback, counting the failed attempt, every Retry and every switch. Its possible values are the numbers 1 to 9 and then 9+."
+  },
+  "core.preview_domain_http_status": {
+    "value": "HTTP status number (0 = none)",
+    "description": "Field name in the consent preview's list of possible playback-error values: the exact HTTP status number the media server answered with, from 100 to 599, or 0 when none was recorded. Its possible values are a range of integers rather than a list of codes."
+  },
   "core.preview_domain_http": {
     "value": "HTTP",
     "description": "Field name in the consent preview's list of possible playback-error values: the HTTP status class."
@@ -164,6 +204,30 @@
   "core.preview_domain_transfer_age": {
     "value": "transfer time before the failure",
     "description": "Field name in the consent preview's list of possible playback-error values: how long the media transfer had been running when it failed, as a time class."
+  },
+  "core.preview_domain_demux_exit": {
+    "value": "media stream step that failed",
+    "description": "Field name in the consent preview's list of possible playback-error values: which step of reading the media stream raised the failure, as a fixed code."
+  },
+  "core.preview_domain_recovered_rung": {
+    "value": "recovery step that played",
+    "description": "Field name in the consent preview's list of possible refusal_recovered values: which step of the app's recovery ladder put the picture up (the refused stream converted by the server, the video encoded by the server, the adaptive-streaming fallback, or the restored earlier route)."
+  },
+  "core.preview_domain_recovered_stream": {
+    "value": "refused stream",
+    "description": "Field name in the consent preview's list of possible refusal_recovered values: whether the refused stream was a video, an audio track, or none could be named."
+  },
+  "core.preview_domain_recovered_codec": {
+    "value": "refused stream's codec",
+    "description": "Field name in the consent preview's list of possible refusal_recovered values: the codec class of the refused stream, as a fixed code."
+  },
+  "core.preview_domain_recovered_channels": {
+    "value": "refused audio channels",
+    "description": "Field name in the consent preview's list of possible refusal_recovered values: the channel-count bucket of the refused audio, as a fixed code."
+  },
+  "core.preview_domain_recovered_error": {
+    "value": "TV firmware error number, or timeout / stall",
+    "description": "Field name in the consent preview's list of possible refusal_recovered values: the whole number the television's own video pipeline gave when it refused the video (an integer range), or the word timeout (no answer in time) or stall (the pipeline swallowed the audio)."
   },
   "core.preview_domain_elapsed": {
     "value": "elapsed",
@@ -211,7 +275,7 @@
     "args": {
       "value": "str"
     },
-    "description": "A percentage. es and be put a no-break space before the percent sign."
+    "description": "A percentage. de, es and be put a no-break space before the percent sign."
   },
   "core.unit_b": {
     "value": "{value} B",

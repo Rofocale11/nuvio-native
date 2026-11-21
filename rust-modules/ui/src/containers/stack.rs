@@ -14,13 +14,19 @@
 //! the entry stays, and a Pop that reaches it remounts from its `ReturnState` — which is what
 //! `an_evicted_entry_keeps_its_focus_identity_on_remount` grades.
 
-use plx_machine::machine::{EntryId, GroupId, Host, InstanceId, Leave, NavOp, RequestId, Stamped};
+use plx_machine::machine::{EntryId, GroupId, Host, InstanceId, Leave, NavOp, RequestId, ScreenId, Stamped};
 use super::super::screen::{Enter, FocusTarget, ReturnState, Screen, ScreenArg, ScreenEvent};
 use super::transition::{CommitPoint, Transition};
 use super::{Life, Minter};
 
 /// Entries a stack keeps BODIES for (§6.1).
 pub const CAP: usize = 16;
+
+/// How far below the top an entry sits before it keeps only its route and its focused identity.
+/// Depth follows what the user navigated, with no cap on it; what an entry far below holds does
+/// not follow it: its page memory is cut to one identity, and on return the page reloads and seats
+/// by that identity, the path a cold restore already takes.
+pub const DEEP: usize = 32;
 
 /// A mounted body (§5.1).
 pub struct Instance<H: Host> {
@@ -86,6 +92,23 @@ impl<H: Host> NavStack<H> {
         self.entries.first()
     }
 
+    /// **The kind of page BACK returns to from `entry`** — the screen id of the entry beneath it
+    /// on this stack, which is the ONE answer to "where does BACK go" for a page whose opener
+    /// varies ([`Host::views_over`] hands it to the screens). `None` when `entry` is the root (BACK
+    /// leaves the page stack). A staged push sees the outgoing top. A staged tab child sees the
+    /// tab it will open over.
+    pub fn beneath_id(&self, entry: EntryId) -> Option<ScreenId> {
+        match self.entries.iter().position(|e| e.id == entry) {
+            Some(index) => index.checked_sub(1).map(|below| self.entries[below].arg.id()),
+            None => {
+                if let Some(Pending { op: NavOp::SelectTabWithChild { tab, .. }, staged: Some(staged), .. }) = &self.pending {
+                    if staged.id == entry { return Some(tab.id()); }
+                }
+                self.top().map(|top| top.arg.id())
+            }
+        }
+    }
+
     pub fn depth(&self) -> usize {
         self.entries.len()
     }
@@ -143,8 +166,22 @@ impl<H: Host> NavStack<H> {
     /// closes: the transition never reached `Idle`, so its own floor kept re-covering and
     /// re-orphaning whatever was presented over it — TV 2026-09-17). See [`Self::is_inert`].
     pub fn request(&mut self, op: NavOp<H::Arg>, ret: ReturnState<H::Elem, H::Memory>) {
+        self.request_taken(op, ret);
+    }
+
+    /// Queue a request and report whether it changed the pending navigation. Argument-based
+    /// ancestor requests capture the actual stack identity here, before any transition begins.
+    /// A missing ancestor and an inert request leave both navigation and its return state alone.
+    pub fn request_taken(&mut self, op: NavOp<H::Arg>, ret: ReturnState<H::Elem, H::Memory>) -> bool {
+        let op = match op {
+            NavOp::PopToArg(arg) => match self.entries.iter().rev().find(|entry| entry.arg.same_instance(&arg)) {
+                Some(entry) => NavOp::PopTo(entry.id),
+                None => return false,
+            },
+            other => other,
+        };
         if self.is_inert(&op) {
-            return;
+            return false;
         }
         let from = self.top().map(|e| e.id);
         let continuous = self.continuous_for(&op);
@@ -156,6 +193,7 @@ impl<H: Host> NavStack<H> {
         if self.transition.commit_point() == CommitPoint::Immediate {
             self.due = true;
         }
+        true
     }
 
     /// **Is `op` a no-op right now?** Two independent reasons, either enough on its own:
@@ -184,6 +222,8 @@ impl<H: Host> NavStack<H> {
             return match (&p.op, op) {
                 (NavOp::Root(a), NavOp::Root(b)) => a.same_instance(b),
                 (NavOp::SelectTab(a), NavOp::SelectTab(b)) => a.same_instance(b),
+                // A tab and its child can have the same screen identities for different
+                // libraries. A new branch request must supersede the pending one.
                 (NavOp::Push(a), NavOp::Push(b)) => a.same_instance(b),
                 (NavOp::Replace(a), NavOp::Replace(b)) => a.same_instance(b),
                 (NavOp::PopTo(a), NavOp::PopTo(b)) => a == b,
@@ -211,9 +251,10 @@ impl<H: Host> NavStack<H> {
         use plx_machine::machine::Chrome;
         let top = self.top().map(|e| e.arg.chrome());
         let dest = match op {
-            NavOp::Push(a) | NavOp::Root(a) | NavOp::SelectTab(a) | NavOp::Replace(a) | NavOp::Present(a) => {
+            NavOp::Push(a) | NavOp::Root(a) | NavOp::SelectTab(a) | NavOp::Replace(a) | NavOp::Present(a) | NavOp::PopToArg(a) => {
                 Some(a.chrome())
             }
+            NavOp::SelectTabWithChild { child, .. } => Some(child.chrome()),
             NavOp::Pop => self
                 .entries
                 .iter()
@@ -261,7 +302,8 @@ impl<H: Host> NavStack<H> {
             NavOp::Pop => self.under_top().map(|e| e.id),
             NavOp::PopTo(id) | NavOp::Dismiss(id) => Some(*id),
             NavOp::SelectTab(arg) => self.root().filter(|e| e.arg.same_instance(arg)).map(|e| e.id),
-            NavOp::Push(_) | NavOp::Root(_) | NavOp::Replace(_) => None,
+            NavOp::PopToArg(arg) => self.entries.iter().rev().find(|e| e.arg.same_instance(arg)).map(|e| e.id),
+            NavOp::Push(_) | NavOp::Root(_) | NavOp::Replace(_) | NavOp::SelectTabWithChild { .. } => None,
             NavOp::Present(_) | NavOp::Cancel => return None,
         };
         if let Some(id) = existing {
@@ -269,6 +311,7 @@ impl<H: Host> NavStack<H> {
         }
         let arg = match self.pending.as_ref().map(|p| &p.op)? {
             NavOp::Push(arg) | NavOp::Root(arg) | NavOp::Replace(arg) | NavOp::SelectTab(arg) => arg.clone(),
+            NavOp::SelectTabWithChild { child, .. } => child.clone(),
             _ => return None,
         };
         let id = ids.entry();
@@ -327,6 +370,16 @@ impl<H: Host> NavStack<H> {
         if let Some(i) = self.entries.iter().position(|e| e.id == id) {
             let e = self.entries.remove(i);
             self.retired.push(e);
+        }
+    }
+
+    /// Entries more than [`DEEP`] below the top give up everything but their route and focus
+    /// identity: their group cursors go and the host sheds their page memory. Idempotent.
+    fn shed_deep(&mut self) {
+        let n = self.entries.len();
+        for e in self.entries.iter_mut().take(n.saturating_sub(DEEP + 1)) {
+            e.ret.remembered = Vec::new();
+            H::shed_memory(&mut e.ret.memory, e.ret.focus.map(|key| key.elem));
         }
     }
 
@@ -396,6 +449,7 @@ impl<H: Host> NavStack<H> {
                 let old = self.top().map(|e| e.id);
                 let new = self.adopt_or_mint(ids, arg, &mut staged);
                 self.evict(&mut out);
+                self.shed_deep();
                 if let Some(o) = old {
                     out.push(Life::Ev(o, ScreenEvent::WillLeave(Leave::Deeper)));
                 }
@@ -482,49 +536,8 @@ impl<H: Host> NavStack<H> {
                     out.push(Life::Ev(new, ScreenEvent::Enter(Self::fresh(GroupId(0)))));
                 }
             }
-            NavOp::SelectTab(arg) => {
-                // The strip's pill semantics: unwind to whatever the root already is (every entry
-                // ABOVE it leaves for good, top-down), then either restore that root (it is
-                // already `arg`) or cover-and-mint a fresh entry over it. The root itself is never
-                // retired — BACK off a pressed pill still returns to it.
-                let root = self.root().map(|e| e.id);
-                let above: Vec<EntryId> = self
-                    .entries
-                    .iter()
-                    .rev()
-                    .filter(|e| Some(e.id) != root)
-                    .map(|e| e.id)
-                    .collect();
-                for id in above {
-                    out.push(Life::Ev(id, ScreenEvent::WillLeave(Leave::ForGood)));
-                    out.push(Life::Unmount(id));
-                    self.retire(id);
-                }
-                match root {
-                    None => {
-                        // the first root: the stack was empty
-                        let new = self.adopt_or_mint(ids, arg, &mut staged);
-                        out.push(Life::Mount(new));
-                        out.push(Life::Ev(new, ScreenEvent::Enter(Self::fresh(GroupId(0)))));
-                    }
-                    Some(r) if self.entry(r).map_or(false, |e| e.arg.same_instance(&arg)) => {
-                        // the root's own pill: a PopTo(root)
-                        let bodyless = self.entry(r).map_or(false, |e| e.inst.is_none());
-                        if bodyless {
-                            out.push(Life::Mount(r));
-                        }
-                        out.push(Life::Ev(r, ScreenEvent::Uncover));
-                        out.push(Life::Ev(r, ScreenEvent::Enter(Enter::Restored)));
-                    }
-                    Some(r) => {
-                        out.push(Life::Ev(r, ScreenEvent::WillLeave(Leave::Deeper)));
-                        let new = self.adopt_or_mint(ids, arg, &mut staged);
-                        out.push(Life::Mount(new));
-                        out.push(Life::Ev(new, ScreenEvent::Enter(Self::fresh_tab(GroupId(0)))));
-                        out.push(Life::Ev(r, ScreenEvent::Cover));
-                    }
-                }
-            }
+            NavOp::SelectTab(arg) => self.apply_tab(ids, arg, None, staged, &mut out),
+            NavOp::SelectTabWithChild { tab, child } => self.apply_tab(ids, tab, Some(child), staged, &mut out),
             NavOp::Replace(arg) => {
                 let old = self.top().map(|e| e.id);
                 if let Some(o) = old {
@@ -541,8 +554,49 @@ impl<H: Host> NavStack<H> {
                 // with no chrome argument — never reached, `Navigation` routes it
             }
             NavOp::Cancel => {}
+            NavOp::PopToArg(_) => unreachable!("request_taken resolves arguments before parking an op"),
         }
         out
+    }
+
+    /// Unwind to the root and mount the tab's branch at the same transition floor. A restored
+    /// child is the only arrival to seat. The covered tab mounts so Back can uncover it normally.
+    fn apply_tab(&mut self, ids: &mut Minter, arg: H::Arg, child: Option<H::Arg>,
+        mut staged: Option<Entry<H>>, out: &mut Vec<Life<H>>) {
+        let root = self.root().map(|e| e.id);
+        while let Some(id) = self.top().map(|e| e.id).filter(|id| Some(*id) != root) {
+            out.push(Life::Ev(id, ScreenEvent::WillLeave(Leave::ForGood)));
+            out.push(Life::Unmount(id));
+            self.retire(id);
+        }
+
+        let tab = if let Some(entry) = self.root().filter(|e| e.arg.same_instance(&arg)) {
+            let id = entry.id;
+            if entry.inst.is_none() { out.push(Life::Mount(id)); }
+            if child.is_none() {
+                out.push(Life::Ev(id, ScreenEvent::Uncover));
+                out.push(Life::Ev(id, ScreenEvent::Enter(Enter::Restored)));
+            }
+            id
+        } else {
+            if let Some(root) = root { out.push(Life::Ev(root, ScreenEvent::WillLeave(Leave::Deeper))); }
+            let id = if child.is_some() { self.mint(ids, arg) } else { self.adopt_or_mint(ids, arg, &mut staged) };
+            out.push(Life::Mount(id));
+            if child.is_none() {
+                let enter = if root.is_some() { Self::fresh_tab(GroupId(0)) } else { Self::fresh(GroupId(0)) };
+                out.push(Life::Ev(id, ScreenEvent::Enter(enter)));
+            }
+            if let Some(root) = root { out.push(Life::Ev(root, ScreenEvent::Cover)); }
+            id
+        };
+
+        if let Some(arg) = child {
+            let id = self.adopt_or_mint(ids, arg, &mut staged);
+            out.push(Life::Ev(tab, ScreenEvent::WillLeave(Leave::Deeper)));
+            out.push(Life::Mount(id));
+            out.push(Life::Ev(id, ScreenEvent::Enter(Self::fresh_tab(GroupId(0)))));
+            out.push(Life::Ev(tab, ScreenEvent::Cover));
+        }
     }
 
     /// Drop retired entries whose `Unmount` was delivered, and the bodies of evicted ones.
@@ -572,7 +626,8 @@ impl<H: Host> NavStack<H> {
     /// that argument is remains the application's answer.
     pub fn pending_dest(&self) -> Option<&H::Arg> {
         match self.pending.as_ref().map(|p| &p.op)? {
-            NavOp::Push(a) | NavOp::Root(a) | NavOp::SelectTab(a) | NavOp::Replace(a) => Some(a),
+            NavOp::Push(a) | NavOp::Root(a) | NavOp::SelectTab(a) | NavOp::Replace(a) | NavOp::PopToArg(a) => Some(a),
+            NavOp::SelectTabWithChild { child, .. } => Some(child),
             NavOp::PopTo(id) | NavOp::Dismiss(id) => self.entry(*id).map(|e| &e.arg),
             NavOp::Pop => self.under_top().map(|e| &e.arg),
             NavOp::Present(_) | NavOp::Cancel => None,

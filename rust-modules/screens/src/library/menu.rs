@@ -1,19 +1,23 @@
 //! A registered Library menu surface. Navigation owns its lifetime, phase, and input scope.
 use plx_data::browse::{LibraryType, GenreEntry, SecKind, SortEntry, SrcGroup, SrcRow};
 use crate::registry::{AppFx, AppMsg, LibraryLike, LibraryMenuArg, LibraryMenuKind};
-use plx_data::stores::browse::{BrowseCmd, LibraryWork, QueryEdit, SectionAddress};
+use plx_data::stores::browse::{BrowseCmd, DirectoryView, LibraryWork, QueryEdit, SectionAddress};
 use plx_data::stores::{StoreCmd, StoreId};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{
     Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputKind, Key,
     LogicalState, Machine, MachineId, NavOp,
 };
+use plx_ui::a11y::{A11y, A11yPath};
 use plx_ui::screen::{
     Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, Focusable, GroupKind, GroupSpec,
     Hover, Placed, RenderStrategy, Screen, ScreenEvent, Seat, Step, Stop,
 };
 use plx_ui::form::{Binding, Form, FormSection, FormTable, RowKey, RowKind};
-use plx_appkit::source_list::{self, Level, SrcTarget, Tail};
+use plx_appkit::source_list::{self, SrcTarget, Tail};
+use plx_ui::page_stack::{self, PageStack};
+use plx_ui::panel_motion::PanelMotion;
+use plx_ui::popover::Popover;
 use plx_ui::table::{Row, TableView};
 use std::convert::Infallible;
 #[cfg(test)]
@@ -25,7 +29,7 @@ use std::borrow::Cow;
 const PANEL_RADIUS: f32 = 20.0;
 
 pub const SHAPE: [&str; 2] = [
-    "LibraryMenu{arg:LibraryMenuArg,kind:u32,desired_unwatched:Option<bool>,identities:[str],dependencies:[u8],rows:[{key:u32,table_index:i32}],table:TableViewMotion}",
+    "LibraryMenu{arg:LibraryMenuArg,kind:u32,desired_unwatched:Option<bool>,selected_library:Option<SectionAddress>,pages:[{kind:u32,return_key:u32,scroll:f32}],identities:[str],dependencies:[u8],rows:[{key:u32,table_index:i32}],table:TableViewMotion}",
     TableView::MOTION_SHAPE,
 ];
 
@@ -35,6 +39,7 @@ enum Action {
     Genre,
     Select(SectionAddress),
     Recheck,
+    Favourites,
 }
 
 /// A menu's rows: identity string per focusable row (the stable name focus follows across a
@@ -124,33 +129,84 @@ fn stamp_tier(stamp: &mut Stamp, tier: Option<plx_plex::plex::probe::Location>) 
     });
 }
 
+/// What pressing a library's row selects, and the identity focus follows across rebuilds: one
+/// spelling for the Library options picker.
+/// `None` for a library the directory has no address for.
+fn section_target(epoch: u32, section: &plx_data::browse::view::SectionView) -> Option<(String, SectionAddress)> {
+    let sid = section.sid?;
+    Some((
+        format!("section:{}:{}", sid.raw(), section.key),
+        SectionAddress { epoch, sid, section: section.key },
+    ))
+}
+
+/// A library row's target in the change-detection stamp (the epoch is part of what a press means).
+fn stamp_target(stamp: &mut Stamp, target: &SectionAddress) {
+    stamp.u32(u32::from(target.sid.raw()));
+    stamp.i64(target.section);
+    stamp.u32(target.epoch);
+}
+
 fn source_draft(
     epoch: u32,
     current: usize,
     groups: &[SrcGroup],
     sections: &[plx_data::browse::view::SectionView],
+    folded: &[u32],
+    refreshing: bool,
 ) -> MenuDraft {
     let kind = sections.get(current).map(|section| section.kind);
+    // Hidden favorites and available non-favorites. A hidden current library stays ticked.
     let source_rows: Vec<SrcRow> = sections
         .iter()
-        .filter(|section| Some(section.kind) == kind && section.row.pinned)
+        .filter(|section| Some(section.kind) == kind &&
+            ((section.row.pinned && u32::try_from(section.row.section).is_ok_and(|index| folded.contains(&index)))
+                || (!section.row.pinned && (section.row.current || groups.get(section.row.src).is_some_and(source_list::usable)))))
         .map(|section| section.row.clone())
         .collect();
-    let source_form =
-        source_list::form(Level::Browse, groups, &source_rows, Tail::Recheck);
     let mut stamp = Stamp::default();
     stamp.tag(1);
     stamp.u32(epoch);
     stamp.u32(current as u32);
     stamp_kind(&mut stamp, kind);
+    let (form, selected) =
+        library_form(epoch, groups, sections, &source_rows, Tail::None, &mut stamp);
+    stamp.bool(refreshing);
+    // placeholder-exempt: inline refresh status beside an action; the library list stays available.
+    let loading = plx_os::i18n::msg::browse_library_loading();
+    let actions = choice(MenuSection::new(""), "recheck".into(), Action::Recheck,
+        Row::new(plx_os::i18n::msg::widgets_source_new_shares())
+            .value(if refreshing { loading } else { "" }).value_slot(loading))
+        .disabled(refreshing);
+    let actions = choice(actions, "favourites".into(), Action::Favourites,
+        Row::new(plx_os::i18n::msg::settings_libraries_title()).chevron(true));
+    let form = form.section(actions);
+    MenuDraft {
+        stamp: stamp.finish(),
+        form,
+        selected,
+    }
+}
+
+/// Library options rows share the source list's identity, status and disabled-state rules.
+/// The stamp includes every displayed value and the complete addressed action.
+fn library_form(
+    epoch: u32,
+    groups: &[SrcGroup],
+    sections: &[plx_data::browse::view::SectionView],
+    rows: &[SrcRow],
+    tail: Tail,
+    stamp: &mut Stamp,
+) -> (MenuForm, Option<String>) {
+    let source_form = source_list::compact_picker(groups, rows, tail);
     for group in groups {
         stamp.tag(2);
         stamp.str(&group.name);
         stamp.str(&group.handle);
-        stamp_state(&mut stamp, group.state);
-        stamp_tier(&mut stamp, group.tier);
+        stamp_state(stamp, group.state);
+        stamp_tier(stamp, group.tier);
     }
-    for row in &source_rows {
+    for row in rows {
         stamp.tag(3);
         stamp.u32(row.src as u32);
         stamp.u32(row.section as u32);
@@ -167,6 +223,7 @@ fn source_draft(
         .collect();
     let mut selected = None;
     let mut addresses = std::collections::HashMap::new();
+    let mut targets = std::collections::HashSet::new();
     for slot in &slots {
         match slot {
             Some(SrcTarget::Library(index)) => {
@@ -174,17 +231,10 @@ fn source_draft(
                 let Some(candidate) = sections.get(*index) else {
                     continue;
                 };
-                let Some(sid) = candidate.sid else { continue };
-                let target = SectionAddress {
-                    epoch,
-                    sid,
-                    section: candidate.key,
-                };
+                let Some((identity, target)) = section_target(epoch, candidate) else { continue };
+                if !targets.insert(identity.clone()) { continue; }
                 stamp.tag(4);
-                stamp.u32(u32::from(sid.raw()));
-                stamp.i64(candidate.key);
-                stamp.u32(target.epoch);
-                let identity = format!("section:{}:{}", sid.raw(), candidate.key);
+                stamp_target(stamp, &target);
                 if candidate.row.current {
                     selected = Some(identity.clone());
                 }
@@ -210,43 +260,44 @@ fn source_draft(
             disabled: b.disabled,
         }),
     });
-    MenuDraft {
-        stamp: stamp.finish(),
-        form,
-        selected,
-    }
+    (form, selected)
 }
 
 fn sort_draft(sorts: &[SortEntry], sort_index: usize, sort_desc: bool) -> MenuDraft {
-    let mut section = MenuSection::new(plx_platform::i18n::msg::browse_library_sort_by());
     let mut stamp = Stamp::default();
+    let mut selected = None;
+    let section = sort_section(plx_os::i18n::msg::browse_library_sort_by(), sorts, sort_index, sort_desc, &mut stamp, &mut selected);
+    MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
+}
+
+/// The sort rows, under `title`, stamped into `stamp`; `selected` takes the active sort's identity.
+fn sort_section(title: &str, sorts: &[SortEntry], sort_index: usize, sort_desc: bool,
+    stamp: &mut Stamp, selected: &mut Option<String>) -> MenuSection
+{
+    let mut section = MenuSection::new(title);
     stamp.tag(7);
     stamp.u32(sort_index as u32);
     stamp.bool(sort_desc);
-    let mut selected = None;
     for (i, sort) in sorts.iter().enumerate() {
         let active = i == sort_index;
         if active {
-            selected = Some(format!("sort:{}", sort.key));
+            *selected = Some(format!("sort:{}", sort.key));
         }
         let desc = if active {
             !sort_desc
         } else {
             sort.default_desc
         };
-        let mut row = Row::new(&sort.title).checked(active);
-        // The server advertises every sort's title; the client-side Plays entry is the app's own.
-        if sort.key != plx_data::browse::PLAYS_SORT_KEY { row = row.server_label(); }
+        // The name is the shared table's for a fact it knows (`plx_data::sortfacts`), the server's
+        // otherwise; the checked row says which end comes first in a WORD, never a chevron.
+        let mut row = Row::new(sort.label()).checked(active);
+        if !sort.label_is_ours() { row = row.server_label(); }
         if active {
-            row = row.ticon(if sort_desc {
-                plx_ui::icons::Icon::ChevronDown
-            } else {
-                plx_ui::icons::Icon::ChevronUp
-            });
+            if let Some(word) = sort.direction_word(sort_desc) { row = row.value(word); }
         }
         stamp.tag(8);
         stamp.str(&sort.key);
-        stamp.str(&sort.title);
+        stamp.str(sort.label());
         stamp.bool(sort.default_desc);
         stamp.bool(desc);
         section = choice(
@@ -259,11 +310,7 @@ fn sort_draft(sorts: &[SortEntry], sort_index: usize, sort_desc: bool) -> MenuDr
             row,
         );
     }
-    MenuDraft {
-        stamp: stamp.finish(),
-        form: MenuForm::new().section(section),
-        selected,
-    }
+    section
 }
 
 /// The kind of the library `listing` lists — the section the directory names at the listing's own
@@ -279,11 +326,21 @@ fn listing_kind(
 
 /// The TYPE menu: every [`LibraryType`] the section's kind offers, the current one checked.
 fn type_draft(section_kind: SecKind, current: LibraryType) -> MenuDraft {
-    let mut section = MenuSection::new(plx_platform::i18n::msg::browse_library_filter_by());
+    let mut stamp = Stamp::default();
     let mut selected = None;
-    for &kind in LibraryType::offered(section_kind) {
+    let section = type_section(plx_os::i18n::msg::browse_library_filter_by(), section_kind, current,
+        LibraryType::offered(section_kind), &mut stamp, &mut selected);
+    MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
+}
+
+/// One row per type in `offered`, the current one checked.
+fn type_section(title: &str, section_kind: SecKind, current: LibraryType, offered: &[LibraryType],
+    stamp: &mut Stamp, selected: &mut Option<String>) -> MenuSection
+{
+    let mut section = MenuSection::new(title);
+    for &kind in offered {
         let identity = format!("type:{}", kind.code());
-        if kind == current { selected = Some(identity.clone()); }
+        if kind == current { *selected = Some(identity.clone()); }
         section = choice(
             section,
             identity,
@@ -291,30 +348,35 @@ fn type_draft(section_kind: SecKind, current: LibraryType) -> MenuDraft {
             Row::new(kind.title(section_kind)).checked(kind == current),
         );
     }
-    let mut stamp = Stamp::default();
     stamp.tag(13);
     stamp.tag(u8::from(section_kind == SecKind::Show));
     stamp.u32(current.code());
-    MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
+    section
 }
 
 fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: bool) -> MenuDraft {
-    let mut section = MenuSection::new(plx_platform::i18n::msg::browse_library_filter()).item_keyed(
+    let mut stamp = Stamp::default();
+    let section = filter_section(unwatched, genre, genres_supported, &mut stamp);
+    MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected: None }
+}
+
+/// The Unwatched toggle and the Genre row, stamped into `stamp`.
+fn filter_section(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: bool, stamp: &mut Stamp) -> MenuSection {
+    let mut section = MenuSection::new(plx_os::i18n::msg::browse_library_filter()).item_keyed(
         "unwatched".into(),
         RowKey(0),
         RowKind::Toggle,
         Action::Edit(QueryEdit::Unwatched(!unwatched)),
-        Row::new(plx_platform::i18n::msg::browse_library_unwatched_only()).toggle(unwatched),
+        Row::new(plx_os::i18n::msg::browse_library_unwatched_only()).toggle(unwatched),
     );
     if genres_supported {
-        let mut row = Row::new(plx_platform::i18n::msg::browse_library_genre())
-            .value(genre.map(|g| g.title.as_str()).unwrap_or(plx_platform::i18n::msg::browse_library_all()))
+        let mut row = Row::new(plx_os::i18n::msg::browse_library_genre())
+            .value(genre.map(|g| g.title.as_str()).unwrap_or(plx_os::i18n::msg::browse_library_all()))
             .chevron(true);
         // A chosen genre is the server's tag title; "All" is the app's.
         if genre.is_some() { row = row.server_value(); }
         section = choice(section, "genre".into(), Action::Genre, row);
     }
-    let mut stamp = Stamp::default();
     stamp.tag(9);
     stamp.bool(genres_supported);
     stamp.bool(unwatched);
@@ -323,19 +385,44 @@ fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: b
         stamp.str(&genre.id);
         stamp.str(&genre.title);
     }
-    MenuDraft {
-        stamp: stamp.finish(),
-        form: MenuForm::new().section(section),
-        selected: None,
-    }
+    section
 }
+
+/// Controls for the current listing: its offered types, declared sorts and filters.
+/// Library navigation and management belong to the separate Library options picker.
+fn sort_filter_draft(
+    section_kind: SecKind,
+    current: LibraryType,
+    sorts: &[SortEntry],
+    sort_index: usize,
+    sort_desc: bool,
+    genre: Option<&GenreEntry>,
+    unwatched: bool,
+    _directory: DirectoryView<'_>,
+) -> MenuDraft {
+    let mut stamp = Stamp::default();
+    stamp.tag(14);
+    let mut selected = None;
+    let mut form = MenuForm::new();
+    let shown: Vec<LibraryType> = LibraryType::offered(section_kind).iter().copied()
+        .filter(|kind| *kind != LibraryType::Collections).collect();
+    if shown.len() > 1 {
+        form = form.section(type_section(plx_os::i18n::msg::library_header_show(), section_kind,
+            current, &shown, &mut stamp, &mut selected));
+    }
+    form = form.section(sort_section(plx_os::i18n::msg::browse_library_sort(), sorts, sort_index,
+        sort_desc, &mut stamp, &mut selected));
+    form = form.section(filter_section(unwatched, genre, current == LibraryType::Primary, &mut stamp));
+    MenuDraft { stamp: stamp.finish(), form, selected }
+}
+
 
 fn genre_draft(genres: &[GenreEntry], current: Option<&GenreEntry>) -> MenuDraft {
     let mut section = choice(
-        MenuSection::new(plx_platform::i18n::msg::browse_library_genre()),
+        MenuSection::new(plx_os::i18n::msg::browse_library_genre()),
         "genre:all".into(),
         Action::Edit(QueryEdit::Genre(None)),
-        Row::new(plx_platform::i18n::msg::browse_library_all_genres()).checked(current.is_none()),
+        Row::new(plx_os::i18n::msg::browse_library_all_genres()).checked(current.is_none()),
     );
     let mut stamp = Stamp::default();
     stamp.tag(10);
@@ -377,6 +464,14 @@ pub struct LibraryMenu {
     identities: Vec<String>,
     stamp: Vec<u8>,
     desired_unwatched: Option<bool>,
+    selected_library: Option<SectionAddress>,
+    pages: PageStack<LibraryMenuKind, RowKey>,
+    motion: PanelMotion,
+    /// The open/close motion: the panel MORPHS out of the control it opened from and back into it
+    /// (`Popover::morphing` + `open_from`, the path the Watchlist's Sort & Filter takes: one opener
+    /// rule for every header menu, design review S11). It owns the glass's arrival; the control
+    /// itself is the host's opener lift (S12), so this draws no pill of its own.
+    popover: Popover,
     #[cfg(test)] draft_rebuilds: usize,
 }
 
@@ -390,21 +485,55 @@ impl LibraryMenu {
             identities: Vec::new(),
             stamp: Vec::new(),
             desired_unwatched: None,
+            selected_library: None,
+            pages: PageStack::new(),
+            motion: PanelMotion::new().spring_all_edges(),
+            // a header pill opens it: the close's blob whitens toward the pill's own focused fill
+            popover: Popover::new().morphing().opener_fill(plx_ui::page_header::OPENER_FILL),
             #[cfg(test)] draft_rebuilds: 0,
         }
     }
-    /// Hugs its rows: width is the shared menu rule ([`TableView::menu_panel_width`]), hung off the
-    /// anchor's left edge and pulled back so the right edge stays inside the keep-out.
+    /// The control's focused pill: where the panel grows from and shrinks back into, and what its
+    /// width is measured against.
+    fn pill(&self) -> Rect {
+        let [x, y, w, h] = self.arg.anchor.map(f32::from_bits);
+        plx_ui::widgets::focus_pill(Rect::new(x, y, w, h))
+    }
+    /// Hugs its rows: width is the shared menu rule ([`TableView::menu_panel_width_from`]: the
+    /// rows, never narrower than the control's focused pill), laid OVER the opener by the shared
+    /// rule ([`plx_ui::popover::cover_opener`]: top edges flush, the near edge hung off the
+    /// opener's outer edge) and held inside the safe frame. ONE placement for every kind: the
+    /// "+N" list opens over its "+N" pill exactly as Sort & Filter does; it differs only in its
+    /// ceiling, because its rows are library NAMES a user chose: as wide as the widest, up to the
+    /// safe width, never cut with room to spare.
     fn frame(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
-        let [x, y, _, h] = self.arg.anchor.map(f32::from_bits);
+        self.motion.natural(self.form.table.layout_rev(), || self.measure_frame(measure))
+    }
+    fn measure_frame(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
         let height = self.form.table.measured_height().clamp(120.0, 740.0);
-        let width = self.form.table.menu_panel_width(measure);
-        Rect::new(
-            x.clamp(96.0, (1920.0 - 96.0 - width).max(96.0)),
-            (y + h + 16.0).clamp(96.0, 984.0 - height),
-            width,
-            height,
-        )
+        let pill = self.pill();
+        let width = if self.kind == LibraryMenuKind::Sources {
+            self.form.table.menu_panel_width_to(measure, pill, plx_ui::page_header::TEXT_X1 - 96.0)
+        } else {
+            self.form.table.menu_panel_width_from(measure, pill)
+        };
+        // The shared rule: the panel covers its opener, top edges flush, near edges flush (NV1).
+        plx_ui::popover::cover_opener(pill, (width, height), plx_ui::consts::SAFE)
+    }
+    /// The panel as it reads: each section's heading and its rows' `(label, value)`, for a route
+    /// test that compares the Library's words with the Watchlist's.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn probe_panel(&self) -> Vec<(String, Vec<(String, Option<String>)>)> {
+        self.form.table.sections.iter()
+            .map(|section| (section.header.clone(), section.rows.iter().map(|row| (row.label.clone(), row.value.clone())).collect()))
+            .collect()
+    }
+    /// The identity of the row focus is on (`"unwatched"`, `"sort:titleSort"`, a library's row), as
+    /// a route test names what a key landed on; `None` off the menu.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn probe_row(&self, focus: Option<FocusKey<u32>>) -> Option<&str> {
+        focus.filter(|key| key.entry == self.entry)
+            .and_then(|key| self.identities.get(key.elem as usize)).map(String::as_str)
     }
     fn refresh<H: LibraryLike>(&mut self, cx: &Cx<'_, H>) {
         let listing = H::listing(cx);
@@ -416,6 +545,10 @@ impl LibraryMenu {
     }
 
     fn apply_draft(&mut self, draft: MenuDraft) {
+        self.install_draft(draft, None);
+    }
+
+    fn install_draft(&mut self, draft: MenuDraft, restore: Option<(RowKey, f32)>) {
         if self.stamp == draft.stamp {
             return;
         }
@@ -430,11 +563,16 @@ impl LibraryMenu {
             .form
             .selected_id()
             .filter(|id| form.contains(id))
-            .cloned()
-            .or(draft.selected);
+            .cloned();
         self.stamp = draft.stamp;
         self.form.table.compact = true;
-        self.form.set(form, keep.as_ref());
+        if let Some((key, scroll)) = restore {
+            self.form.restore(form, self.identities.get(key.0 as usize), scroll);
+        } else if let Some(keep) = keep {
+            self.form.set_sliding(form, Some(&keep));
+        } else {
+            self.form.open(form, draft.selected.as_ref());
+        }
     }
 
     fn draft(
@@ -443,11 +581,12 @@ impl LibraryMenu {
         directory: plx_data::stores::browse::DirectoryView<'_>,
     ) -> MenuDraft {
         let title = match self.kind {
-            LibraryMenuKind::Type => plx_platform::i18n::msg::browse_library_filter_by(),
-            LibraryMenuKind::Sort => plx_platform::i18n::msg::browse_library_sort_by(),
-            LibraryMenuKind::Filter => plx_platform::i18n::msg::browse_library_filter(),
-            LibraryMenuKind::Genre => plx_platform::i18n::msg::browse_library_genre(),
-            LibraryMenuKind::Sources => plx_platform::i18n::msg::browse_library_libraries(),
+            LibraryMenuKind::Type => plx_os::i18n::msg::browse_library_filter_by(),
+            LibraryMenuKind::Sort => plx_os::i18n::msg::browse_library_sort_by(),
+            LibraryMenuKind::Filter => plx_os::i18n::msg::browse_library_filter(),
+            LibraryMenuKind::Genre => plx_os::i18n::msg::browse_library_genre(),
+            LibraryMenuKind::Sources => plx_os::i18n::msg::browse_library_libraries(),
+            LibraryMenuKind::SortFilter => plx_os::i18n::msg::library_header_sort_filter(),
         };
         let mut section = MenuSection::new(title);
         match self.kind {
@@ -457,6 +596,11 @@ impl LibraryMenu {
             }
             LibraryMenuKind::Filter => {
                 return filter_draft(self.desired_unwatched.unwrap_or(listing.unwatched()), listing.genre(), listing.library_type() == LibraryType::Primary);
+            }
+            LibraryMenuKind::SortFilter => {
+                return sort_filter_draft(listing_kind(listing, directory), listing.library_type(), listing.sorts(),
+                    listing.sort_index(), listing.sort_desc(), listing.genre(),
+                    self.desired_unwatched.unwrap_or(listing.unwatched()), directory);
             }
             LibraryMenuKind::Genre => {
                 return genre_draft(listing.genres(), listing.genre());
@@ -473,13 +617,14 @@ impl LibraryMenu {
                         current,
                         &groups,
                         directory.sections(),
-                    );
+                        &self.arg.folded,
+                    directory.refreshing());
                 }
                 section = choice(
                     section,
                     "recheck".into(),
                     Action::Recheck,
-                    Row::new(plx_platform::i18n::msg::browse_library_check_shares()),
+                    Row::new(plx_os::i18n::msg::browse_library_check_shares()),
                 );
             }
         }
@@ -499,12 +644,17 @@ impl LibraryMenu {
             .form
             .index_of_key(RowKey(elem))
             .and_then(|i| self.form.binding_at(i))
+            .filter(|binding| !binding.disabled)
             .map(|b| b.action.clone())
         else {
             return;
         };
         match action {
             Action::Genre => {
+                let _ = self.frame(cx.measure);
+                self.pages.push(self.kind, RowKey(elem), self.form.table.scroll_pos());
+                let leaving = page_stack::leave_page(&mut self.form);
+                self.motion.begin_slide(leaving, 1.0);
                 self.kind = LibraryMenuKind::Genre;
                 self.stamp.clear();
                 self.refresh(cx);
@@ -527,16 +677,21 @@ impl LibraryMenu {
                 }
             }
             Action::Select(target) => {
-                fx.push(Fx::Deliver(
-                    MachineId::Instance(self.arg.host),
-                    Delivery::Screen(ScreenEvent::App(AppMsg::LibrarySelect(target))),
-                ));
+                // Let the menu finish closing against the old row. The page can then install
+                // the new header and seat its destination together, with input ownership back.
+                self.selected_library = Some(target);
                 fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
             }
             Action::Recheck => fx.push(Fx::App(AppFx::Store(
                 StoreId::Browse,
                 StoreCmd::Browse(BrowseCmd::RecheckShares),
             ))),
+            Action::Favourites => {
+                fx.push(Fx::App(AppFx::Loop(
+                    crate::registry::LoopReq::OpenSettings(crate::registry::SettingsPage::LibraryFavourites),
+                )));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
+            }
         }
     }
 }
@@ -559,10 +714,29 @@ impl<H: LibraryLike> Machine<H> for LibraryMenu {
                 }
                 return Handled::Yes;
             }
-            ScreenEvent::Mount | ScreenEvent::StoreChanged(..) | ScreenEvent::Enter(_) => {
+            ScreenEvent::Mount => {
+                self.popover.open_from(Some(self.pill()));
+                self.refresh(cx)
+            }
+            // However the surface was dismissed (BACK, a pick, the host's own press), the panel
+            // runs the morph back into its control.
+            ScreenEvent::Closing => self.popover.dismiss(),
+            ScreenEvent::Unmount => {
+                if let Some(target) = self.selected_library.take() {
+                    fx.push(Fx::Deliver(
+                        MachineId::Instance(self.arg.host),
+                        Delivery::Screen(ScreenEvent::App(AppMsg::LibraryMenuSelect {
+                            origin: self.arg.target,
+                            target,
+                        })),
+                    ));
+                }
+            }
+            ScreenEvent::StoreChanged(..) | ScreenEvent::Enter(_) => {
                 self.refresh(cx)
             }
             ScreenEvent::Tick(tick) => {
+                self.popover.update(tick.dt());
                 self.refresh(cx);
                 if self.kind == LibraryMenuKind::Genre {
                     fx.push(Fx::App(AppFx::Store(
@@ -573,18 +747,14 @@ impl<H: LibraryLike> Machine<H> for LibraryMenu {
                         }),
                     )));
                 }
-                self.form.table.sel = cx
-                    .focus
-                    .current
-                    .and_then(|focus| self.form.index_of_key(RowKey(focus.elem)))
-                    .map_or(-1, |i| i as i32);
-                self.form.table.update(tick.dt(), self.frame(cx.measure).h);
+                let frame = self.frame(cx.measure);
+                self.motion.step(tick.dt(), frame);
+                self.form.table.update(tick.dt(), frame.h);
             }
             ScreenEvent::FocusMoved { to, .. } => {
-                self.form.table.sel = self
-                    .form
-                    .index_of_key(RowKey(to.elem))
-                    .map_or(-1, |i| i as i32);
+                if let Some(index) = self.form.index_of_key(RowKey(to.elem)) {
+                    self.form.table.sel = index as i32;
+                }
             }
             ScreenEvent::Activate(elem) => self.activate(*elem, cx, fx),
             ScreenEvent::PressCommit(_) => {
@@ -599,10 +769,14 @@ impl<H: LibraryLike> Machine<H> for LibraryMenu {
                     ..
                 } = input.kind
                 {
-                    if self.kind == LibraryMenuKind::Genre {
-                        self.kind = LibraryMenuKind::Filter;
+                    if let Some(saved) = self.pages.pop() {
+                        let _ = self.frame(cx.measure);
+                        let leaving = page_stack::leave_page(&mut self.form);
+                        self.motion.begin_slide(leaving, -1.0);
+                        self.kind = saved.page;
                         self.stamp.clear();
-                        self.refresh(cx);
+                        let draft = self.draft(H::listing(cx), H::directory(cx));
+                        self.install_draft(draft, Some((saved.return_id, saved.scroll)));
                     } else {
                         fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
                     }
@@ -645,15 +819,15 @@ impl<H: LibraryLike> Focusable<H> for LibraryMenu {
                 })
             })
     }
-    fn place(&self, elem: &u32, cx: &Cx<'_, H>, _: At) -> Option<Placed> {
+    fn place(&self, elem: &u32, cx: &Cx<'_, H>, at: At) -> Option<Placed> {
         let index = self.form.index_of_key(RowKey(*elem))?;
-        let rect = self.form.table.row_frame(self.frame(cx.measure), index as i32)?;
-        Some(Placed {
-            rect,
-            rest_rect: rect,
-            clip: self.frame(cx.measure),
-            index: Some(index as u32),
-        })
+        let frame = self.frame(cx.measure);
+        let row = self.form.table.row_frame(frame, index as i32)?;
+        let (clip, dx) = match at {
+            At::Drawn => (self.motion.shown(frame), self.motion.live_dx()),
+            At::SpringTarget => (frame, 0.0),
+        };
+        Some(page_stack::panel_stop(row, clip, dx, Some(index as u32)))
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, H>) -> FocusKey<u32> {
         if self.group_of(&want.elem, cx).is_some() {
@@ -661,7 +835,7 @@ impl<H: LibraryLike> Focusable<H> for LibraryMenu {
         } else {
             FocusKey {
                 entry: self.entry,
-                elem: self.form.opening_key().map_or(0, |key| key.0),
+                elem: self.form.selected_key().map_or(0, |key| key.0),
             }
         }
     }
@@ -671,14 +845,84 @@ impl<H: LibraryLike> Focusable<H> for LibraryMenu {
             elem: self.form.selected_key().map_or(0, |key| key.0),
         }
     }
+    /// **The ids** (relative to the menu, `library_menu.<path>`), through the shared popover
+    /// projection ([`page_stack::popover_a11y`]): a row is [`row_path`] of its identity, and the
+    /// role its [`RowKind`] says. The menu has the one `Column` group, so the default walk is the
+    /// inverse.
+    fn a11y(&self, key: &u32, _: &Cx<'_, H>) -> Option<A11y<'_>> {
+        page_stack::popover_a11y(&self.form, key, |id| row_path(&self.form, id))
+    }
+    fn a11y_elems(&self, g: GroupId, _: &Cx<'_, H>, out: &mut Vec<u32>) {
+        page_stack::popover_a11y_elems(&self.form, g, GroupId(0), out);
+    }
+}
+
+/// **A row's name in the menu's accessibility ids**, from the identity focus follows (never from the
+/// row's words): the rows that are one of a kind are their word (`recheck`, `favourites`,
+/// `unwatched`, and the Filter page's `genre` drill-in); a row of a list is `<list>.<n>`, `n` its
+/// place among the rows of that list on the page now: `library.<n>` for the Sources list, `sort.<n>`,
+/// `type.<n>`, and `genre.<n>` on the Genre page, whose *All genres* row is `genre.all`. The
+/// identities of those lists carry a server's text (a sort key, a genre id, a library's address), which
+/// an id never holds, so their place is their name. An identity this does not know is `row.<n>`.
+fn row_path(form: &MenuTable, id: &String) -> A11yPath {
+    let here = form.index_of(id).unwrap_or(0);
+    let unknown = || A11yPath::new().name("row").index(here);
+    let word = |word: &'static str| A11yPath::new().name(word);
+    let Some((list, rest)) = id.split_once(':') else {
+        return match id.as_str() {
+            "recheck" => word("recheck"),
+            "favourites" => word("favourites"),
+            "unwatched" => word("unwatched"),
+            "genre" => word("genre"),
+            _ => unknown(),
+        };
+    };
+    if (list, rest) == ("genre", "all") {
+        return word("genre").name("all");
+    }
+    let (name, ours) = match list {
+        "section" => ("library", "section:"),
+        "sort" => ("sort", "sort:"),
+        "type" => ("type", "type:"),
+        "genre" => ("genre", "genre:"),
+        _ => return unknown(),
+    };
+    // the rows of this list above this one (the Genre page's *All genres* row is named, not counted)
+    let before = (0..here)
+        .filter_map(|i| form.id_at(i))
+        .filter(|other| other.starts_with(ours) && other.as_str() != "genre:all")
+        .count();
+    word(name).index(before)
 }
 impl<H: LibraryLike> Screen<H> for LibraryMenu {
+    fn pointer_held(&self) -> bool {
+        self.motion.transitioning()
+    }
+
+    /// The header control the panel grew out of, for every kind of menu ("+N" included): the page
+    /// leaves it out of its pass (`DrawFrame::lifted`) and the opener lift draws it focused above
+    /// the scrim and the panel (`LibraryScreen::draw_header_opener`) at the morph's `opener_alpha`:
+    /// gone while the menu stands, back as the droplet drains into it.
+    fn opener(&self) -> Option<(EntryId, Option<FocusKey<u32>>)> {
+        self.arg.opener.map(|(entry, control)| (entry, Some(FocusKey { entry, elem: control })))
+    }
+    /// The opener is CONSUMED by the morph (`popover_morph`): the lift paints it at the morph's
+    /// `opener_alpha`, out as the glass detaches from it and back in as it merges into it.
+    fn opener_alpha(&self) -> f32 {
+        self.popover.opener_alpha()
+    }
+    /// The droplet has drained into the header control: the surface, and the lift that holds the
+    /// control above it, end on this frame (`Screen::handed_back`).
+    fn handed_back(&self) -> bool {
+        self.popover.handed_back()
+    }
     fn name(&self) -> &'static str {
         "library_menu"
     }
     fn state(&self) -> &dyn LogicalState {
         self
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> { Some(self) }
     fn crumb(&self, _: &Cx<'_, H>) -> Option<Cow<'_, str>> {
         None
     }
@@ -687,7 +931,7 @@ impl<H: LibraryLike> Screen<H> for LibraryMenu {
     /// chip-shaped control on a live page opening a list beside it. The page recedes (inheriting
     /// its own light through the container's field) and stays readable.
     fn scrim(&self) -> plx_ui::screen::Scrim {
-        plx_ui::screen::Scrim::dim(plx_ui::theme::underlay::DIM_COMPACT)
+        self.popover.dim(plx_ui::theme::underlay::DIM_COMPACT)
     }
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>) {
         let p = f.painter.alpha(f.page_alpha);
@@ -695,11 +939,17 @@ impl<H: LibraryLike> Screen<H> for LibraryMenu {
         // The panel's own share, named for `/tmp/plxnative-cpuprof` beside the page's `lb.*`
         // phases: the frosted ground plus its rows, so a slow frame while the Sort/Filter menu is
         // up can be read as the PANEL or as the host under it rather than as one `main.ui` total.
+        // The glass and the rows ride the MORPH (`Popover::panel` / `morph_rows`), not the
+        // container's appear: the panel begins and ends as the control it grows from.
         let field = f.underlay;
         let frame = self.frame(measure);
+        let m = self.popover.content_painter_on(f.painter.alpha(f.nav_page_alpha), 0.0);
         plx_ui::profile::phase("lb.menu", || {
-            plx_ui::widgets::panel_ground(p, frame, PANEL_RADIUS, field);
-            self.form.table.draw(p, frame, measure);
+            let shown = self.motion.shown(frame);
+            self.popover.panel(m, shown, PANEL_RADIUS, field, plx_ui::widgets::Ground::Menu);
+            self.popover.morph_rows(m, shown, PANEL_RADIUS, |m| {
+                self.motion.draw_rows(m, frame, &self.form.table, measure)
+            });
         });
         for index in 0..self.form.table.n_rows() as usize {
             let Some(key) = self.form.key_at(index) else { continue };
@@ -730,6 +980,13 @@ impl LogicalState for LibraryMenu {
         self.arg.write(c);
         c.u32(self.kind as u32);
         c.option(self.desired_unwatched.as_ref(), |c, desired| { c.bool(*desired); });
+        c.option(self.selected_library.as_ref(), |c, target| {
+            c.u32(target.epoch).u32(u32::from(target.sid.raw())).u64(target.section as u64);
+        });
+        c.seq(self.pages.len());
+        for saved in self.pages.iter() {
+            c.u32(saved.page as u32).u32(saved.return_id.0).f32(saved.scroll);
+        }
         c.seq(self.identities.len());
         for identity in &self.identities {
             c.str(identity);
@@ -757,7 +1014,7 @@ impl LogicalState for LibraryMenu {
 mod review_actions_tests;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use plx_data::browse::{SecKind, SourceState};
     use plx_plex::plex::ServerId;
@@ -825,7 +1082,14 @@ mod tests {
         type Init = Arg;
         type Memory = crate::registry::PageMemory;
     }
-    impl LibraryLike for HostFixture {
+    impl crate::registry::ScreenInputsLike for HostFixture {
+    fn screen_inputs<'a>(_cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        crate::registry::empty_fixture()
+    }
+}
+
+impl LibraryLike for HostFixture {
+    fn clock_facts<'a>(_cx: &Cx<'a, Self>) -> Option<&'a plx_plex::plex::ClockFacts> { None }
         fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> {
             cx.views.listing
         }
@@ -856,12 +1120,102 @@ mod tests {
             measure: &measure,
             focus: FocusRead { current: None , ..Default::default() },
             press: PressRead::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             owner: InputOwner::Entry(EntryId(7)),
         })
     }
 
+    /// The ids of every listed element of a menu, in listing order, with each one's role.
+    fn listed(menu: &LibraryMenu, cx: &Cx<'_, HostFixture>) -> Vec<(String, plx_ui::a11y::Role)> {
+        let mut elems = Vec::new();
+        <LibraryMenu as Focusable<HostFixture>>::a11y_elems(menu, GroupId(0), cx, &mut elems);
+        elems.iter()
+            .map(|elem| {
+                let a = <LibraryMenu as Focusable<HostFixture>>::a11y(menu, elem, cx).expect("a listed row projects");
+                (a.path.to_string(), a.role)
+            })
+            .collect()
+    }
+
+    /// The Library menu's three pages (Sources, Sort & filter, Genre) mounted and run through the id
+    /// conformance, with the ids each names (`AppArg::LibraryMenu`; the coverage table calls this):
+    /// a row of a list is `<list>.<n>` by its place, and a row that is one of a kind is its word.
+    pub(crate) fn library_menu_conforms() -> plx_ui::a11y::Namespaces {
+        use plx_ui::a11y::conform;
+        use plx_ui::a11y::Role;
+        let _guard = plx_base::testlock::serial();
+        let _locale = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let mut namespaces = Vec::new();
+        let mut page = |kind, draft: MenuDraft, want: &[(&str, Role)]| {
+            let mut menu = LibraryMenu::new(EntryId(7), menu_arg(kind, [0; 4]));
+            menu.apply_draft(draft);
+            with_cx(|cx| {
+                namespaces.push(conform::<HostFixture, _>(&menu, cx));
+                let want: Vec<_> = want.iter().map(|(id, role)| (id.to_string(), *role)).collect();
+                assert_eq!(listed(&menu, cx), want, "{kind:?}");
+                // the table counts the rows a key can land on, and every one of them is listed
+                let mut groups = Vec::new();
+                <LibraryMenu as Focusable<HostFixture>>::groups(&menu, cx, &mut groups);
+                assert_eq!(groups[0].len, want.len(), "{kind:?}: the group's length is the listing's");
+            });
+        };
+
+        let (groups, sections) = source_sections();
+        page(
+            LibraryMenuKind::Sources,
+            source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false),
+            &[("library.0", Role::Row), ("library.1", Role::Row), ("recheck", Role::Row), ("favourites", Role::Row)],
+        );
+        let sorts: Vec<_> = (0..3)
+            .map(|i| SortEntry { key: format!("sort{i}"), desc_key: String::new(), title: format!("Sort {i}"), default_desc: false })
+            .collect();
+        page(
+            LibraryMenuKind::SortFilter,
+            sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, false, DirectoryView::empty_for_test()),
+            &[
+                ("type.0", Role::Row),
+                ("type.1", Role::Row),
+                ("type.2", Role::Row),
+                ("sort.0", Role::Row),
+                ("sort.1", Role::Row),
+                ("sort.2", Role::Row),
+                ("unwatched", Role::Toggle),
+                ("genre", Role::Row),
+            ],
+        );
+        let genres: Vec<_> = ["28", "35"].map(|id| GenreEntry { id: id.into(), title: format!("Genre {id}") }).into();
+        page(
+            LibraryMenuKind::SortFilter,
+            genre_draft(&genres, None),
+            &[("genre.all", Role::Row), ("genre.0", Role::Row), ("genre.1", Role::Row)],
+        );
+        namespaces
+    }
+
+    /// **The ids come from a row's identity, never from the server's text**: a sort key, a genre id
+    /// and a library address are all positions, so two menus offering different server data name
+    /// their rows alike, and the menu's id for a row that is one of a kind is its word.
     #[test]
-    fn sort_refresh_updates_icon_and_the_next_action_direction() {
+    fn the_library_menu_names_its_rows_by_place_and_word_and_never_by_server_text() {
+        assert!(!library_menu_conforms().is_empty());
+        let _guard = plx_base::testlock::serial();
+        let ids = |sorts: &[&str]| {
+            let sorts: Vec<_> = sorts
+                .iter()
+                .map(|key| SortEntry { key: (*key).into(), desc_key: String::new(), title: (*key).into(), default_desc: false })
+                .collect();
+            let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::SortFilter, [0; 4]));
+            menu.apply_draft(sort_filter_draft(SecKind::Movie, LibraryType::Primary, &sorts, 0, false, None, false,
+                DirectoryView::empty_for_test()));
+            with_cx(|cx| listed(&menu, cx).into_iter().map(|(id, _)| id).collect::<Vec<_>>())
+        };
+        assert_eq!(ids(&["titleSort", "year"]), ids(&["addedAt", "rating"]), "the server's keys are not in the ids");
+        assert!(ids(&["titleSort"]).iter().all(|id| !id.contains("titleSort")));
+    }
+
+    #[test]
+    fn sort_refresh_updates_the_direction_word_and_the_next_action_direction() {
+        let _g = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
         let sorts = vec![SortEntry {
             desc_key: String::new(),
             key: "titleSort".into(),
@@ -869,20 +1223,15 @@ mod tests {
             default_desc: false,
         }];
         let up = lay(sort_draft(&sorts, 0, false));
-        assert_eq!(
-            up.sections[0].rows[0].ticon,
-            Some(plx_ui::icons::Icon::ChevronUp)
-        );
+        assert_eq!(up.sections[0].rows[0].value.as_deref(), Some("A\u{2013}Z"));
+        assert_eq!(up.sections[0].rows[0].ticon, None, "a word says the direction, not a chevron");
         assert!(matches!(
             up.rows[0].1,
             Action::Edit(QueryEdit::Sort { desc: true, .. })
         ));
 
         let down = lay(sort_draft(&sorts, 0, true));
-        assert_eq!(
-            down.sections[0].rows[0].ticon,
-            Some(plx_ui::icons::Icon::ChevronDown)
-        );
+        assert_eq!(down.sections[0].rows[0].value.as_deref(), Some("Z\u{2013}A"));
         assert!(matches!(
             down.rows[0].1,
             Action::Edit(QueryEdit::Sort { desc: false, .. })
@@ -901,7 +1250,7 @@ mod tests {
         let mut menu = LibraryMenu::new(EntryId(7), LibraryMenuArg {
             host: plx_machine::machine::InstanceId(8),
             target: SectionAddress { epoch: 11, sid: ServerId::from_raw(1), section: 7 },
-            kind: LibraryMenuKind::Sort, anchor: [0; 4],
+            kind: LibraryMenuKind::Sort, anchor: [0; 4], folded: Vec::new(), opener: None,
         });
         let mut sorts = vec![
             SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false },
@@ -1053,13 +1402,15 @@ mod tests {
         // with_cx retains the same explicit directory shape a Bridge captures from its owner.
         let _guard = plx_base::testlock::serial();
         let (groups, sections) = source_sections();
-        let draft = lay(source_draft(11, 0, &groups, &sections));
+        let draft = lay(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         assert_eq!(draft.sections.len(), 2);
-        assert_eq!(draft.sections[1].header, "Friend NAS");
-        assert_eq!(draft.sections[1].accessory, "friend");
-        assert!(draft.sections[1].rows[1].sep);
+        assert!(draft.sections.iter().all(|section| section.header.is_empty()));
+        assert_eq!(draft.sections[0].rows[0].detail, "Own NAS");
+        assert_eq!(draft.sections[0].rows[1].detail, "Friend NAS · friend");
+        assert!(draft.sections[0].rows[0].checked);
+        assert!(!draft.sections[0].rows[1].checked);
         assert_eq!(
-            draft.rows[2].2, 3,
+            draft.rows[2].2, 2,
             "recheck follows the separator in TableView coordinates"
         );
         match &draft.rows[0].1 {
@@ -1083,14 +1434,16 @@ mod tests {
                 },
                 kind: LibraryMenuKind::Sources,
                 anchor: [0; 4],
+                folded: (0..8).collect(),
+                opener: None,
             },
         );
-        menu.apply_draft(source_draft(11, 0, &groups, &sections));
-        let recheck = menu.form.key_at(3).expect("recheck is bound").0;
+        menu.apply_draft(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
+        let recheck = menu.form.key_at(2).expect("recheck is bound").0;
         let placed = with_cx(|cx|
             <LibraryMenu as Focusable<HostFixture>>::place(&menu, &recheck, cx, At::Drawn)
                 .expect("recheck remains placed after the separator"));
-        assert_eq!(placed.index, Some(3));
+        assert_eq!(placed.index, Some(2));
         let mut output = Vec::new();
         let mut present = plx_machine::present::Present::new();
         let mut fx = Effects::new(
@@ -1111,22 +1464,22 @@ mod tests {
     #[test]
     fn sources_rebuild_on_metadata_without_changing_stable_row_identities() {
         let (groups, sections) = source_sections();
-        let before = lay(source_draft(11, 0, &groups, &sections));
+        let before = lay(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         let mut changed_groups = groups.clone();
         changed_groups[1].state = SourceState::Unreachable;
         let mut changed_sections = sections.clone();
         changed_sections[1].row.count_line = "5 films".into();
         changed_sections[1].row.current = true;
-        let after = lay(source_draft(11, 1, &changed_groups, &changed_sections));
+        let after = lay(source_draft(11, 1, &changed_groups, &changed_sections, &(0..9).collect::<Vec<u32>>(), false));
 
         assert_ne!(before.stamp, after.stamp);
-        assert!(after.sections[1].dim);
+        assert!(after.sections[0].rows[1].disabled);
         assert_eq!(
             before.rows.iter().map(|r| &r.0).collect::<Vec<_>>(),
             after.rows.iter().map(|r| &r.0).collect::<Vec<_>>()
         );
         assert_eq!(after.selected, 1);
-        assert_eq!(after.sections[1].rows[0].detail, "5 films");
+        assert!(after.sections[0].rows[1].detail.contains("Not reachable"));
     }
 
     #[test]
@@ -1134,18 +1487,109 @@ mod tests {
         let (mut groups, sections) = source_sections();
         groups[0].name = "A:B".into();
         groups[0].handle = "C".into();
-        let first = lay(source_draft(11, 0, &groups, &sections));
+        let first = lay(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         groups[0].name = "A".into();
         groups[0].handle = "B:C".into();
-        let second = lay(source_draft(11, 0, &groups, &sections));
+        let second = lay(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         assert_ne!(first.stamp, second.stamp);
 
         groups[0].name = "A|B".into();
-        let third = lay(source_draft(11, 0, &groups, &sections));
+        let third = lay(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         groups[0].name = "A".into();
         groups[0].handle = "B:C|A|B".into();
-        let fourth = lay(source_draft(11, 0, &groups, &sections));
+        let fourth = lay(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         assert_ne!(third.stamp, fourth.stamp);
+    }
+
+    #[test]
+    fn checking_for_shared_libraries_keeps_the_panel_width() {
+        let (groups, sections) = source_sections();
+        let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, [0; 4]));
+        menu.apply_draft(source_draft(11, 0, &groups, &sections, &[], false));
+        let width = menu.frame(&FixtureMeasure).w;
+        menu.apply_draft(source_draft(11, 0, &groups, &sections, &[], true));
+        assert_eq!(menu.frame(&FixtureMeasure).w, width);
+    }
+
+    #[test]
+    fn toggling_unwatched_preserves_the_scrolled_filter_row() {
+        let _guard = plx_base::testlock::serial();
+        let sorts: Vec<_> = (0..20).map(|i| SortEntry { key: format!("sort{i}"), desc_key: String::new(), title: format!("Sort {i}"), default_desc: false }).collect();
+        let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::SortFilter, [0; 4]));
+        let draft = |unwatched| sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false,
+            None, unwatched, DirectoryView::empty_for_test());
+        menu.apply_draft(draft(false));
+        let index = menu.form.index_of(&"unwatched".to_owned()).unwrap();
+        menu.form.table.sel = index as i32;
+        for _ in 0..90 {
+            menu.form.table.update(0.016, 740.0);
+        }
+        let scroll = menu.form.table.scroll_pos();
+        assert!(scroll > 0.0);
+        let highlight = menu.form.table.highlight_motion();
+        menu.apply_draft(draft(true));
+        assert_eq!(menu.form.table.scroll_pos(), scroll);
+        assert_eq!(menu.form.table.highlight_motion(), highlight);
+        assert_eq!(menu.form.table.sel, index as i32);
+    }
+
+    #[test]
+    fn genre_push_and_pop_slide_and_restore_the_parent_view() {
+        let _guard = plx_base::testlock::serial();
+        with_cx(|cx| {
+            let labels: Vec<_> = (0..20).map(|i| format!("sort{i}")).collect();
+            let sorts: Vec<_> = labels.iter().map(|s| (s.as_str(), s.as_str())).collect();
+            let listing = plx_data::browse::view::ListingSnapshot::fixture(
+                ServerId::from_raw(1), Vec::new(), Vec::new(),
+            ).with_sorts(&sorts, 0);
+            let cx = Cx {
+                views: Views { listing: listing.view(), ..cx.views },
+                focus: cx.focus.clone(),
+                ..*cx
+            };
+            let mut present = plx_machine::present::Present::new();
+            let mut out = Vec::new();
+            let mut fx = Effects::new(&mut out, MachineId::Instance(plx_machine::machine::InstanceId(10)), &mut present);
+            let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::SortFilter, [0; 4]));
+            menu.refresh(&cx);
+            let index = menu.form.index_of(&"genre".to_owned()).unwrap();
+            let key = menu.form.key_at(index).unwrap();
+            menu.form.table.sel = index as i32;
+            for _ in 0..90 { menu.form.table.update(0.016, 740.0); }
+            let scroll = menu.form.table.scroll_pos();
+            assert!(scroll > 0.0);
+            let parent_frame = menu.frame(cx.measure);
+            menu.motion.step(0.016, parent_frame);
+
+            menu.activate(key.0, &cx, &mut fx);
+            assert_eq!(menu.kind, LibraryMenuKind::Genre);
+            assert!(menu.motion.sliding());
+            let frame = menu.frame(cx.measure);
+            menu.motion.step(0.016, frame);
+            let shown = menu.motion.shown(frame);
+            assert!(frame.h < shown.h && shown.h < parent_frame.h, "the glass resizes with the pages");
+            for _ in 0..90 { menu.motion.step(0.016, frame); }
+            assert!(!menu.motion.sliding());
+
+            let back = ScreenEvent::Input(plx_machine::machine::InputEvent {
+                at: Tick::default(), source: plx_machine::machine::Source::Script,
+                kind: InputKind::Key { key: Key::Back, sym: 0, wcode: 0, edge: Edge::Down, at_edge: false },
+            });
+            assert_eq!(menu.step(&back, &cx, &mut fx), Handled::Yes);
+            assert!(menu.motion.sliding());
+            assert_eq!(menu.kind, LibraryMenuKind::SortFilter);
+            assert_eq!(menu.form.selected_key(), Some(key));
+            assert_eq!(menu.form.table.scroll_pos(), scroll);
+            let frame = menu.frame(cx.measure);
+            menu.motion.step(0.016, frame);
+            let live = menu.place(&key.0, &cx, At::Drawn).unwrap();
+            let settled = menu.place(&key.0, &cx, At::SpringTarget).unwrap();
+            assert_ne!(live.rect.x, settled.rect.x);
+            assert_eq!(live.rest_rect, settled.rect);
+            assert_eq!(live.clip, menu.motion.shown(frame));
+            for _ in 0..90 { menu.motion.step(0.016, frame); }
+            assert!(!menu.motion.sliding());
+        });
     }
 
     #[test]
@@ -1162,12 +1606,14 @@ mod tests {
                 },
                 kind: LibraryMenuKind::Sources,
                 anchor: [0; 4],
+                folded: (0..8).collect(),
+                opener: None,
             },
         );
-        menu.apply_draft(source_draft(11, 0, &groups, &sections));
+        menu.apply_draft(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
         let focused_key = menu.form.key_at(1).expect("second source row").0;
         menu.form.table.sel = 1;
-        let quiet = source_draft(11, 0, &groups, &sections);
+        let quiet = source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false);
         menu.apply_draft(quiet);
         assert_eq!(
             menu.form.table.sel, 1,
@@ -1193,7 +1639,7 @@ mod tests {
             },
         );
         shifted[2].row.section = 2;
-        menu.apply_draft(source_draft(11, 0, &groups, &shifted));
+        menu.apply_draft(source_draft(11, 0, &groups, &shifted, &(0..9).collect::<Vec<u32>>(), false));
         assert_eq!(
             menu.form.index_of_key(RowKey(focused_key)),
             Some(2)
@@ -1204,6 +1650,141 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_plus_n_list_shows_only_folded_libraries_one_line_each_then_the_recheck_row() {
+        let _guard = plx_base::testlock::serial();
+        let (groups, sections) = source_sections();
+        let draft = lay(source_draft(11, 0, &groups, &sections, &[1], false));
+        assert_eq!(draft.sections.len(), 2);
+        assert!(draft.sections[0].header.is_empty());
+        assert_eq!(draft.sections[0].rows[0].label, "Shared Movies");
+        assert_eq!(draft.sections[0].rows[0].detail, "Friend NAS · friend");
+        assert!(!draft.sections[0].rows[0].checked);
+        assert!(matches!(draft.rows[1].1, Action::Recheck));
+        assert!(matches!(draft.rows[2].1, Action::Favourites));
+        assert_eq!(draft.rows.len(), 3);
+
+    }
+
+    #[test]
+    fn the_sort_filter_panel_is_flush_with_its_opener_and_lifts_its_control() {
+        let _guard = plx_base::testlock::serial();
+        let arg = |kind, opener| LibraryMenuArg {
+            host: plx_machine::machine::InstanceId(8),
+            target: SectionAddress { epoch: 11, sid: ServerId::from_raw(1), section: 7 },
+            kind,
+            anchor: [1640.0f32.to_bits(), 148.0f32.to_bits(), 150.0f32.to_bits(), 56.0f32.to_bits()],
+            folded: Vec::new(),
+            opener,
+        };
+        let mut menu = LibraryMenu::new(EntryId(7), arg(LibraryMenuKind::SortFilter, Some((EntryId(3), 5))));
+        menu.apply_draft(filter_draft(false, None, true));
+        let frame = menu.frame(&FixtureMeasure);
+        // NV1: the near edge IS the opener's outer edge (the focused pill, 1792), not the header's
+        // text edge 1771 that sits 21 px inside the control's plate.
+        let pill_edge = 1640.0 + 150.0 + plx_ui::widgets::PILL_FOCUS_OUTSET;
+        assert!((frame.x + frame.w - pill_edge).abs() < 0.01, "right edge {} is the opener's edge {pill_edge}", frame.x + frame.w);
+        assert_eq!(
+            <LibraryMenu as Screen<HostFixture>>::opener(&menu),
+            Some((EntryId(3), Some(FocusKey { entry: EntryId(3), elem: 5 }))),
+            "the page's control is lifted into the menu");
+        let more = LibraryMenu::new(EntryId(7), arg(LibraryMenuKind::Sources, Some((EntryId(3), 6))));
+        assert_eq!(
+            <LibraryMenu as Screen<HostFixture>>::opener(&more),
+            Some((EntryId(3), Some(FocusKey { entry: EntryId(3), elem: 6 }))),
+            "the +N list lifts its +N too: it reads as the focused opener, not as the page's dimmed capsule");
+    }
+
+    /// **A header menu GROWS out of the control it opened from** (design review S11), as the
+    /// Watchlist's Sort & Filter does: one opener rule, one morph path (`Popover::morphing` +
+    /// `open_from`), whichever kind opens ("+N" included). Red while the panel was laid at its
+    /// final rect on its first frame and only faded in: three frames in, the glass is still the
+    /// control's size or a little over, and the settled panel is exactly `frame()`.
+    #[test]
+    fn the_panel_grows_out_of_its_control_and_settles_on_its_frame() {
+        use plx_machine::machine::MachineId;
+        let _guard = plx_base::testlock::serial();
+        for kind in [LibraryMenuKind::SortFilter, LibraryMenuKind::Sources] {
+            let anchor = Rect::new(1640.0, 148.0, 150.0, 56.0);
+            let arg = LibraryMenuArg {
+                host: plx_machine::machine::InstanceId(8),
+                target: SectionAddress { epoch: 11, sid: ServerId::from_raw(1), section: 7 },
+                kind,
+                anchor: [anchor.x, anchor.y, anchor.w, anchor.h].map(f32::to_bits),
+                folded: Vec::new(),
+                opener: Some((EntryId(3), 5)),
+            };
+            let mut menu = LibraryMenu::new(EntryId(7), arg);
+            let step = |menu: &mut LibraryMenu, ev: ScreenEvent<HostFixture>| {
+                with_cx(|cx| {
+                    let mut present = plx_machine::present::Present::new();
+                    let mut out = Vec::new();
+                    let mut fx = Effects::new(&mut out, MachineId::Instance(plx_machine::machine::InstanceId(10)), &mut present);
+                    Machine::<HostFixture>::step(menu, &ev, cx, &mut fx);
+                })
+            };
+            // The glass this frame: the panel ground (a `rect_rimmed`, tag 8, on a host with no
+            // frozen field) the surface drew.
+            let glass = |menu: &mut LibraryMenu| -> Rect {
+                with_cx(|cx| {
+                    plx_ui::draw_census::capture(|| {
+                        let mut f = DrawFrame::new(cx, plx_ui::Painter::recording());
+                        Screen::<HostFixture>::draw(menu, &mut f);
+                    })
+                })
+                .into_iter()
+                .find_map(|(tag, r)| (tag == 8).then_some(r))
+                .unwrap_or_default()
+            };
+            step(&mut menu, ScreenEvent::Mount);
+            let settled = menu.frame(&FixtureMeasure);
+            let mut ms = 0;
+            for _ in 0..3 {
+                ms += 16;
+                step(&mut menu, ScreenEvent::Tick(Tick { ms, dt_us: 16_667 }));
+            }
+            let early = glass(&mut menu);
+            assert!(
+                early.w < settled.w - 20.0 && early.h < settled.h - 20.0,
+                "{kind:?}: three frames into the open the panel is still growing out of the control \
+                 ({early:?}), not laid at its final {settled:?}"
+            );
+            for _ in 0..90 {
+                ms += 16;
+                step(&mut menu, ScreenEvent::Tick(Tick { ms, dt_us: 16_667 }));
+            }
+            let end = glass(&mut menu);
+            assert!(
+                (end.x - settled.x).abs() < 0.5 && (end.y - settled.y).abs() < 0.5
+                    && (end.w - settled.w).abs() < 0.5 && (end.h - settled.h).abs() < 0.5,
+                "{kind:?}: the settled panel is the frame {settled:?}, drew {end:?}"
+            );
+        }
+    }
+
+    /// **The panel is never narrower than the control's pill** (the Watchlist's menu hangs by the
+    /// same rule, `TableView::menu_panel_width_from`): a wide control, here 400 px, gets a panel as
+    /// wide as its focused pill, and the right edge still ends on that pill's outer edge.
+    #[test]
+    fn the_sort_filter_panel_is_never_narrower_than_its_controls_pill() {
+        let _guard = plx_base::testlock::serial();
+        let arg = LibraryMenuArg {
+            host: plx_machine::machine::InstanceId(8),
+            target: SectionAddress { epoch: 11, sid: ServerId::from_raw(1), section: 7 },
+            kind: LibraryMenuKind::SortFilter,
+            anchor: [1371.0f32.to_bits(), 148.0f32.to_bits(), 400.0f32.to_bits(), 56.0f32.to_bits()],
+            folded: Vec::new(),
+            opener: Some((EntryId(3), 5)),
+        };
+        let mut menu = LibraryMenu::new(EntryId(7), arg);
+        menu.apply_draft(filter_draft(false, None, true));
+        let frame = menu.frame(&FixtureMeasure);
+        let pill = 400.0 + 2.0 * plx_ui::widgets::PILL_FOCUS_OUTSET;
+        assert!(frame.w >= pill, "the panel {} is narrower than its control's pill {pill}", frame.w);
+        let pill_edge = 1371.0 + 400.0 + plx_ui::widgets::PILL_FOCUS_OUTSET;
+        assert!((frame.x + frame.w - pill_edge).abs() < 0.01, "right edge {} is the opener's edge {pill_edge}", frame.x + frame.w);
+    }
+
     include!("menu_contract_tests.rs");
 
     /// **Every TYPE row fits the popover, in every shipped language** — movie and TV sections
@@ -1212,7 +1793,7 @@ mod tests {
     /// popover actually gets.
     #[test]
     fn every_type_row_fits_the_popover_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let measure = plx_base::fontcov::advances::ShippedMeasure;
         let mut out = Vec::new();
         for language in SHIPPED {
@@ -1229,16 +1810,244 @@ mod tests {
         plx_ui::table::assert_no_fit_failures(&out);
     }
 
+    /// **The one Sort & Filter popover's sections** (redesign spec, "Header"): Show appears only when
+    /// the library offers more than one type besides Collections (TV: Shows / Seasons / Episodes),
+    /// and never lists Collections itself; Sort and Filter always follow, then the Favorite
+    /// libraries row in a block of its own (no heading).
+    #[test]
+    fn sort_and_filter_menu_sections_follow_the_library_kind() {
+        let sorts = vec![SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false }];
+        let titles = |draft: MenuDraft| -> Vec<String> { lay(draft).sections.iter().map(|s| s.header.clone()).collect() };
+        let dir = DirectoryView::empty_for_test();
+        let show = titles(sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, false, dir));
+        let movie = titles(sort_filter_draft(SecKind::Movie, LibraryType::Primary, &sorts, 0, false, None, false, dir));
+        assert_eq!(show.len(), 3, "TV libraries open only Show, Sort and Filter");
+        assert_eq!(show[0], plx_os::i18n::msg::library_header_show());
+        assert_eq!(movie.len(), 2, "a Movies library has one type to show, so no Show section");
+        assert_eq!(movie[0], plx_os::i18n::msg::browse_library_sort());
+        let laid = lay(sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, false, dir));
+        assert!(!laid.rows.iter().any(|(id, ..)| id == &format!("type:{}", LibraryType::Collections.code())), "Collections has its own control");
+        assert_ne!(sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, false, dir).stamp,
+            sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 0, false, None, true, dir).stamp);
+    }
+
+    /// The two-server fixture of the Sources tests plus a third library, the friend's "Anime
+    /// Movies", which is not a favourite; the friend's server is in `friend`'s state.
+    fn switcher_directory(friend: SourceState) -> plx_data::stores::browse::DirectorySnapshot {
+        let (mut groups, mut sections) = source_sections();
+        groups[1].state = friend;
+        let mut anime = sections[1].clone();
+        anime.key = 8;
+        anime.row.section = 2;
+        anime.row.title = "Anime Movies".into();
+        anime.row.pinned = false;
+        sections.push(anime);
+        plx_data::stores::browse::DirectorySnapshot::fixture_with_sources(
+            11,
+            0,
+            [1, 2].map(ServerId::from_raw).into_iter().zip(groups).collect(),
+            sections,
+        )
+    }
+
+    /// The Movies Sort & Filter menu over `directory`, laid out.
+    fn switcher_menu(directory: &plx_data::stores::browse::DirectorySnapshot) -> Laid {
+        let dir = directory.view();
+        let groups: Vec<_> = dir.sources().iter().map(|(_, group)| group.clone()).collect();
+        let folded: Vec<_> = dir.sections().iter().map(|section| section.row.section as u32).collect();
+        lay(source_draft(dir.epoch().unwrap_or(0), dir.current().unwrap_or(0), &groups, dir.sections(), &folded, false))
+    }
+
+    #[test]
+    fn sort_filter_never_contains_library_navigation_or_management() {
+        let _guard = plx_base::testlock::serial();
+        let directory = switcher_directory(SourceState::Reachable);
+        let sorts = vec![SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false }];
+        let laid = lay(sort_filter_draft(SecKind::Movie, LibraryType::Primary, &sorts, 0, false, None, false, directory.view()));
+        assert!(!laid.rows.iter().any(|(_, action, _)|
+            matches!(action, Action::Select(_) | Action::Recheck | Action::Favourites)));
+    }
+
+    #[test]
+    fn library_options_offers_non_favorites_and_management_even_without_overflow() {
+        let _guard = plx_base::testlock::serial();
+        let directory = switcher_directory(SourceState::Reachable);
+        let dir = directory.view();
+        let groups: Vec<_> = dir.sources().iter().map(|(_, group)| group.clone()).collect();
+        let laid = lay(source_draft(dir.epoch().unwrap(), dir.current().unwrap(), &groups, dir.sections(), &[], false));
+        let ids: Vec<_> = laid.rows.iter().map(|(id, ..)| id.as_str()).collect();
+        assert_eq!(ids, ["section:2:8", "recheck", "favourites"]);
+        assert!(laid.sections.iter().all(|section| section.header.is_empty()));
+    }
+
+    /// Options uses a headerless library list and opens the editor at its contextual root.
+    #[test]
+    fn library_options_opens_the_contextual_favorite_editor() {
+        let _guard = plx_base::testlock::serial();
+        let _lang = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let directory = switcher_directory(SourceState::Reachable);
+        let laid = switcher_menu(&directory);
+        assert!(laid.sections.iter().all(|section| section.header.is_empty()));
+        assert_eq!(laid.sections[0].rows[1].detail, "Friend NAS · friend");
+        let action = |id: &str| laid.rows.iter().find(|(row, ..)| row == id).map(|(_, action, _)| action.clone());
+        assert!(
+            matches!(action("section:2:8"),
+                Some(Action::Select(addr)) if addr.sid == ServerId::from_raw(2) && addr.section == 8),
+            "a reachable non-favorite is listed in Library options"
+        );
+        assert!(matches!(action("recheck"), Some(Action::Recheck)));
+        assert!(
+            matches!(action("favourites"), Some(Action::Favourites)),
+            "Favorite libraries entry is offered at the bottom of Library options"
+        );
+        assert_eq!(laid.rows.last().map(|(id, ..)| id.as_str()), Some("favourites"), "the Favorite libraries row is last");
+
+        let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, [0; 4]));
+        let dir = directory.view();
+        let groups: Vec<_> = dir.sources().iter().map(|(_, group)| group.clone()).collect();
+        menu.apply_draft(source_draft(11, 0, &groups, dir.sections(), &[0, 1], false));
+        let fav_idx = menu.form.index_of(&"favourites".to_string()).expect("favourites row");
+        let fav_key = menu.form.key_at(fav_idx).expect("favourites key").0;
+        let mut output = Vec::new();
+        let mut present = plx_machine::present::Present::new();
+        let mut fx = Effects::new(
+            &mut output,
+            plx_machine::machine::MachineId::Instance(plx_machine::machine::InstanceId(8)),
+            &mut present,
+        );
+        with_cx(|cx| menu.activate(fav_key, cx, &mut fx));
+        assert!(output.iter().any(|effect| matches!(
+            &effect.fx,
+            Fx::App(AppFx::Loop(crate::registry::LoopReq::OpenSettings(crate::registry::SettingsPage::LibraryFavourites)))
+        )));
+    }
+
+    /// **Which libraries the switcher offers is the Sources list's own answer to "can it be
+    /// opened"** (`source_list::usable`): a favourite is always offered, drawn dimmed with its
+    /// group's fault said when the server cannot be opened; a library that is not a favourite is
+    /// offered only on a server that can, which includes one nobody has dialled yet.
+    #[test]
+    fn the_switcher_offers_a_non_favourite_only_on_a_server_that_can_be_opened() {
+        let _guard = plx_base::testlock::serial();
+        let _lang = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let offered = |state| {
+            let laid = switcher_menu(&switcher_directory(state));
+            let ids: Vec<String> = laid.rows.iter().map(|(id, ..)| id.clone())
+                .filter(|id| id.starts_with("section:")).collect();
+            let shared = laid.sections.iter().flat_map(|s| &s.rows).find(|row| row.label == "Shared Movies")
+                .map(|row| (row.disabled, row.detail.clone()));
+            (ids, shared)
+        };
+        let (ids, shared) = offered(SourceState::NotProbed);
+        assert_eq!(ids, ["section:1:7", "section:2:7", "section:2:8"], "a server nobody has dialled is offered");
+        assert_eq!(shared, Some((false, "Friend NAS · friend".into())));
+        for (state, word) in [
+            (SourceState::Unauthorized, "Not authorized"),
+            (SourceState::Unreachable, "Not reachable"),
+            (SourceState::InsecureOnly, "Not secure"),
+        ] {
+            let (ids, shared) = offered(state);
+            assert_eq!(ids, ["section:1:7", "section:2:7"], "{state:?}: the favourite stays, the non-favourite goes");
+            assert_eq!(shared, Some((true, format!("Friend NAS · {word} · friend"))), "{state:?}: the group dims and says why");
+        }
+    }
+
+    /// **One library of the kind is not a choice**: no list and no roster-refresh row, only the
+    /// Favorite libraries row. The directory has two libraries, but only one is a Movies library.
+    #[test]
+    fn the_switcher_is_absent_with_one_library_of_the_kind() {
+        let _guard = plx_base::testlock::serial();
+        let _lang = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let (groups, mut sections) = source_sections();
+        sections[1].kind = SecKind::Show;
+        let directory = plx_data::stores::browse::DirectorySnapshot::fixture_with_sources(
+            11,
+            0,
+            [1, 2].map(ServerId::from_raw).into_iter().zip(groups).collect(),
+            sections,
+        );
+        let dir = directory.view();
+        let groups: Vec<_> = dir.sources().iter().map(|(_, g)| g.clone()).collect();
+        let laid = lay(source_draft(11, 0, &groups, dir.sections(), &[], false));
+        assert!(!laid.rows.iter().any(|(id, ..)| id.starts_with("section:")));
+        assert!(laid.rows.iter().any(|(id, ..)| id == "recheck"));
+        assert!(laid.rows.iter().any(|(id, ..)| id == "favourites"));
+    }
+
+    /// **The library on view stays in the switcher** when its server turns faulty: the header still
+    /// names it, so the list does too, dimmed under its group's fault like a dead favourite.
+    #[test]
+    fn the_library_on_view_stays_listed_when_its_server_cannot_be_opened() {
+        let _guard = plx_base::testlock::serial();
+        let _lang = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let (mut groups, mut sections) = source_sections();
+        groups[1].state = SourceState::Unreachable;
+        sections[1].row.pinned = false;
+        sections[1].row.current = true;
+        sections[0].row.current = false;
+        let directory = plx_data::stores::browse::DirectorySnapshot::fixture_with_sources(
+            11,
+            1,
+            [1, 2].map(ServerId::from_raw).into_iter().zip(groups).collect(),
+            sections,
+        );
+        let laid = switcher_menu(&directory);
+        let ticked: Vec<&str> = laid.sections.iter()
+            .flat_map(|section| &section.rows)
+            .filter(|row| row.checked).map(|row| row.label.as_str()).collect();
+        assert_eq!(ticked, ["Shared Movies"], "a visit to a library on a server that went dark is still ticked");
+        assert!(laid.sections.iter().flat_map(|s| &s.rows).any(|row| row.label == "Shared Movies" && row.disabled));
+    }
+
+    /// **A library shared while the menu is open appears in it** (and a server's fault is said as
+    /// soon as the directory knows it): the menu rebuilds from each directory the page beneath
+    /// publishes, whose pump (`StoreWork::Browse`) is what lands discovery. The Library page keeps
+    /// ticking under a compact menu, so the menu pumps nothing of its own.
+    #[test]
+    fn a_share_arriving_while_the_menu_is_open_rebuilds_the_switcher() {
+        let _guard = plx_base::testlock::serial();
+        let _lang = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+        let (groups, mut sections) = source_sections();
+        let mut shared = sections.pop().expect("the friend's library");
+        shared.row.pinned = false;
+        let before = plx_data::stores::browse::DirectorySnapshot::fixture_with_sources(
+            11,
+            0,
+            [1].map(ServerId::from_raw).into_iter().zip(groups.clone().into_iter().take(1)).collect(),
+            sections.clone(),
+        );
+        sections.push(shared);
+        let after = plx_data::stores::browse::DirectorySnapshot::fixture_with_sources(
+            11,
+            0,
+            [1, 2].map(ServerId::from_raw).into_iter().zip(groups).collect(),
+            sections,
+        );
+        let draft = |directory: &plx_data::stores::browse::DirectorySnapshot| {
+            let dir = directory.view();
+            let groups: Vec<_> = dir.sources().iter().map(|(_, group)| group.clone()).collect();
+            source_draft(11, 0, &groups, dir.sections(), &[], false)
+        };
+        let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::SortFilter, [0; 4]));
+        menu.apply_draft(draft(&before));
+        assert!(menu.form.index_of(&"section:2:7".to_string()).is_none(), "one library: nothing to switch to yet");
+        let rebuilds = menu.draft_rebuilds;
+        menu.apply_draft(draft(&after));
+        assert!(menu.form.index_of(&"section:2:7".to_string()).is_some(), "the shared library appears");
+        assert!(menu.form.index_of(&"recheck".to_string()).is_some());
+        assert_eq!(menu.draft_rebuilds, rebuilds + 1);
+    }
+
     /// **The Sort, Filter and Genre popovers' app text fits the popover, in every shipped language**
     /// — through the real drafts, with server sort/genre titles marked and exempt. Sort covers the
     /// client-side Plays entry (app text); Filter covers both the "All" value and a chosen genre.
     #[test]
     fn every_sort_filter_and_genre_row_fits_the_popover_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let sorts = vec![
             SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false },
             SortEntry { key: plx_data::browse::PLAYS_SORT_KEY.into(), desc_key: String::new(),
-                title: plx_platform::i18n::msg::browse_library_plays().into(), default_desc: true },
+                title: plx_os::i18n::msg::browse_library_plays().into(), default_desc: true },
         ];
         let genres = vec![GenreEntry { id: "1".into(), title: "Drama".into() }];
         let measure = plx_base::fontcov::advances::ShippedMeasure;
@@ -1254,13 +2063,24 @@ mod tests {
                 ("filter no genres", lay(filter_draft(false, None, false))),
                 ("genre all", lay(genre_draft(&genres, None))),
                 ("genre one", lay(genre_draft(&genres, Some(&genres[0])))),
+                ("sort & filter show", lay(sort_filter_draft(SecKind::Show, LibraryType::Primary, &sorts, 1, false, Some(&genres[0]), true, DirectoryView::empty_for_test()))),
+                ("sort & filter movie", lay(sort_filter_draft(SecKind::Movie, LibraryType::Primary, &sorts, 0, true, None, false, DirectoryView::empty_for_test()))),
+                ("library options", switcher_menu(&switcher_directory(SourceState::Reachable))),
+                ("library options unauthorized", switcher_menu(&switcher_directory(SourceState::Unauthorized))),
+                ("library options unreachable", switcher_menu(&switcher_directory(SourceState::Unreachable))),
+                ("library options insecure", switcher_menu(&switcher_directory(SourceState::InsecureOnly))),
             ];
             for (name, draft) in drafts {
                 let mut table = TableView::new();
                 table.set_sections(draft.sections, draft.selected, false);
-                out.extend(table.menu_cap_failure(&measure, &format!("{tag} {name}")));
-                out.extend(table.app_fit_failures(MENU_MAX_W, &format!("{tag} {name}")));
-                out.extend(table.app_fit_failures_hugged(&format!("{tag} {name}")));
+                if name.starts_with("library options") {
+                    let width = table.menu_panel_width_to(&measure, Rect::new(96.0, 148.0, 56.0, 56.0), plx_ui::page_header::TEXT_X1 - 96.0);
+                    out.extend(table.app_fit_failures(width, &format!("{tag} {name}")));
+                } else {
+                    out.extend(table.menu_cap_failure(&measure, &format!("{tag} {name}")));
+                    out.extend(table.app_fit_failures(MENU_MAX_W, &format!("{tag} {name}")));
+                    out.extend(table.app_fit_failures_hugged(&format!("{tag} {name}")));
+                }
             }
         }
         plx_ui::table::assert_no_fit_failures(&out);

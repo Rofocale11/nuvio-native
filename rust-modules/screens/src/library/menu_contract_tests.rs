@@ -8,6 +8,8 @@ fn menu_arg(kind: LibraryMenuKind, anchor: [u32; 4]) -> LibraryMenuArg {
         },
         kind,
         anchor,
+        folded: if kind == LibraryMenuKind::Sources { (0..9).collect() } else { Vec::new() },
+        opener: None,
     }
 }
 
@@ -32,6 +34,7 @@ fn source_cx<'a>(
         measure,
         focus: FocusRead { current: None, ..Default::default() },
         press: PressRead::default(),
+        modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
         owner: InputOwner::Entry(EntryId(7)),
     }
 }
@@ -43,10 +46,10 @@ fn menu_anchor_is_frozen_and_a_new_open_uses_the_new_anchor() {
     session.watching("u-menu-anchor-contract");
     let stores = plx_data::stores::Stores::default();
     stores.browse.borrow_mut().seed_two_source_table_for_test();
-    stores.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
+    stores.browse_run_for_test(plx_data::stores::browse::BrowseCmd::SetCur(0));
     let measure = FixtureMeasure;
     let mut first = plx_data::stores::browse::DirectorySnapshot::default();
-    let publication = stores.capture_browse(&mut first);
+    let publication = stores.capture_seeded_browse_for_test(&mut first, plx_plex::plex::current_server());
     let listing = publication.listing;
     let hubs = publication.section_hubs;
     let old_anchor = [100.0f32.to_bits(), 400.0f32.to_bits(), 220.0f32.to_bits(), 60.0f32.to_bits()];
@@ -71,7 +74,7 @@ fn menu_anchor_is_frozen_and_a_new_open_uses_the_new_anchor() {
         browse.set_pinned_for_test(4, true);
     }
     let mut changed = plx_data::stores::browse::DirectorySnapshot::default();
-    stores.capture_browse(&mut changed);
+    stores.capture_seeded_browse_for_test(&mut changed, plx_plex::plex::current_server());
     let cx_changed = source_cx(&listing, &changed, &hubs, &measure, Tick { ms: 2, dt_us: 16_000 });
     old.step(
         &ScreenEvent::Tick(Tick { ms: 2, dt_us: 16_000 }),
@@ -91,7 +94,8 @@ fn menu_anchor_is_frozen_and_a_new_open_uses_the_new_anchor() {
     let mut fresh_groups = Vec::new();
     fresh.groups(&cx_changed, &mut fresh_groups);
     assert_ne!(anchor_bits(fresh_groups[0].extent), anchor_bits(old_extent), "a new open releases the old anchor");
-    assert_eq!(fresh_groups[0].extent.x, 760.0);
+    assert_eq!(fresh_groups[0].extent.x, 760.0 - plx_ui::widgets::PILL_FOCUS_OUTSET,
+        "the +N list hangs from its +N pill's near edge (the focused pill's outer edge), as Sort & Filter does");
 }
 
 #[test]
@@ -109,7 +113,7 @@ fn menu_side_actions_keep_source_sort_and_filter_row_identity() {
     let filter_key = filter.form.key_at(0).unwrap().0;
     let (groups, sections) = source_sections();
     let mut sources = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, [0; 4]));
-    sources.apply_draft(source_draft(11, 0, &groups, &sections));
+    sources.apply_draft(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
     let source_key = sources.form.key_at(1).unwrap().0;
 
     with_cx(|cx| {
@@ -160,15 +164,21 @@ fn menu_side_actions_keep_source_sort_and_filter_row_identity() {
             cx,
             &mut Effects::new(&mut output, MachineId::Instance(plx_machine::machine::InstanceId(7)), &mut present),
         );
+        assert_eq!(output.len(), 1, "the host retains the old library while the menu closes");
+        assert!(matches!(&output[0].fx, Fx::Nav(NavOp::Dismiss(EntryId(7)))));
+        output.clear();
+        sources.step(
+            &ScreenEvent::Unmount,
+            cx,
+            &mut Effects::new(&mut output, MachineId::Instance(plx_machine::machine::InstanceId(7)), &mut present),
+        );
+        assert_eq!(output.len(), 1);
         assert!(output.iter().any(|effect| matches!(
             &effect.fx,
-            Fx::Deliver(_, Delivery::Screen(ScreenEvent::App(AppMsg::LibrarySelect(
-                SectionAddress { sid, section: 7, .. }
-            )))) if sid == &ServerId::from_raw(2)
-        )));
-        assert!(output.iter().any(|effect| matches!(
-            &effect.fx,
-            Fx::Nav(NavOp::Dismiss(EntryId(7)))
+            Fx::Deliver(_, Delivery::Screen(ScreenEvent::App(AppMsg::LibraryMenuSelect {
+                origin,
+                target: SectionAddress { sid, section: 7, .. },
+            }))) if *origin == sources.arg.target && sid == &ServerId::from_raw(2)
         )));
     });
 }
@@ -180,7 +190,7 @@ fn sources_menu_left_is_an_engine_edge_not_an_editor_transition() {
     let _guard = plx_base::testlock::serial();
     let (groups, sections) = source_sections();
     let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, [0; 4]));
-    menu.apply_draft(source_draft(11, 0, &groups, &sections));
+    menu.apply_draft(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
     let owner = InputOwner::Entry(EntryId(7));
     with_cx(|cx| {
         let mut engine = FocusEngine::new();
@@ -221,10 +231,10 @@ fn open_sources_refreshes_metadata_once_then_settles() {
     session.watching("u-menu-refresh-contract");
     let stores = plx_data::stores::Stores::default();
     stores.browse.borrow_mut().seed_two_source_table_for_test();
-    stores.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
+    stores.browse_run_for_test(plx_data::stores::browse::BrowseCmd::SetCur(0));
     let measure = FixtureMeasure;
     let mut first = plx_data::stores::browse::DirectorySnapshot::default();
-    let publication = stores.capture_browse(&mut first);
+    let publication = stores.capture_seeded_browse_for_test(&mut first, plx_plex::plex::current_server());
     let listing = publication.listing;
     let hubs = publication.section_hubs;
     let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, [0; 4]));
@@ -256,7 +266,7 @@ fn open_sources_refreshes_metadata_once_then_settles() {
         browse.set_pinned_for_test(4, true);
     }
     let mut changed = plx_data::stores::browse::DirectorySnapshot::default();
-    stores.capture_browse(&mut changed);
+    stores.capture_seeded_browse_for_test(&mut changed, plx_plex::plex::current_server());
     let cx_changed = source_cx(&listing, &changed, &hubs, &measure, Tick { ms: 2, dt_us: 16_000 });
     effects(&mut menu, &cx_changed);
     assert_ne!(menu.stamp, first_stamp, "source metadata refresh rebuilds the open menu");
@@ -268,4 +278,54 @@ fn open_sources_refreshes_metadata_once_then_settles() {
     assert_eq!(menu.form.key_at(0).unwrap().0, first_key);
     assert_eq!(menu.form.table.sel, first_selection);
     assert_eq!(menu.draft_rebuilds, 2);
+}
+
+/// S11 + S24: the +N list opens OVER its own pill (the same `frame` rule as Sort & Filter: the
+/// pill's near edge, its top edge), and is as wide as its widest row up to the safe width, so a long
+/// library name is read whole rather than cut in a 650 px panel with room to spare.
+#[test]
+fn the_plus_n_list_covers_its_pill_and_fits_its_widest_row() {
+    let _guard = plx_base::testlock::serial();
+    let (groups, mut sections) = source_sections();
+    sections[0].row.title = "A long library name that outgrows the shared".into();
+    let anchor = [648.0f32.to_bits(), 148.0f32.to_bits(), 59.0f32.to_bits(), 56.0f32.to_bits()];
+    let mut menu = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, anchor));
+    menu.apply_draft(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
+    with_cx(|cx| {
+        let frame = menu.frame(cx.measure);
+        let widest = menu.form.table.measured_width(cx.measure);
+        assert_eq!(frame.x, 648.0 - plx_ui::widgets::PILL_FOCUS_OUTSET, "the near edge is the +N pill's outer edge");
+        assert_eq!(frame.y, menu.pill().y, "the panel's top edge is the +N pill's top edge, as Sort & Filter");
+        assert!(widest > plx_ui::table::MENU_MAX_W, "the fixture name must outgrow the shared cap ({widest})");
+        assert!(frame.w >= widest, "the panel fits its widest row ({} < {widest})", frame.w);
+        let safe = plx_ui::consts::SAFE;
+        assert!(frame.x + frame.w <= safe.x + safe.w + 0.5, "inside the safe frame");
+    });
+}
+
+/// **Owner, 2026-11-17: the morphing menus open OVER their opener, as on iOS.** For both Library
+/// menus, the settled panel contains the opener's whole rect and its top edge IS the opener's top
+/// edge (the consumed opener leaves no empty slot under it), whatever the control's width: a panel
+/// never narrower than the pill, a wide pill (a long sort name) included.
+#[test]
+fn both_library_menus_open_over_their_opener_top_edges_flush() {
+    let _guard = plx_base::testlock::serial();
+    for (kind, anchor) in [
+        (LibraryMenuKind::SortFilter, [1589.0f32, 148.0, 190.0, 56.0]),
+        (LibraryMenuKind::SortFilter, [1380.0f32, 148.0, 400.0, 56.0]),
+        (LibraryMenuKind::Sources, [648.0f32, 148.0, 59.0, 56.0]),
+    ] {
+        let anchor = anchor.map(f32::to_bits);
+        let mut menu = LibraryMenu::new(EntryId(7), menu_arg(kind, anchor));
+        let (groups, sections) = source_sections();
+        menu.apply_draft(source_draft(11, 0, &groups, &sections, &(0..9).collect::<Vec<u32>>(), false));
+        with_cx(|cx| {
+            let (frame, pill) = (menu.frame(cx.measure), menu.pill());
+            assert_eq!(frame.y, pill.y, "{kind:?}: the panel's top is the opener's top");
+            assert!(frame.x <= pill.x + 0.01 && frame.x + frame.w >= pill.x + pill.w - 0.01, "{kind:?}: {frame:?} covers {pill:?} across");
+            assert!(frame.y + frame.h >= pill.y + pill.h, "{kind:?}: {frame:?} covers {pill:?} down");
+            let safe = plx_ui::consts::SAFE;
+            assert!(frame.y >= safe.y && frame.y + frame.h <= safe.y + safe.h + 0.01, "{kind:?}: inside the safe frame");
+        });
+    }
 }

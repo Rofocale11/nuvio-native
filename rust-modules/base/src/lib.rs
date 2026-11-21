@@ -13,9 +13,13 @@
 
 pub mod eventlog; // THE event log: `eventlog::log` is the one sink every module writes through
 pub mod paths; // where the app's own files live — /proc/self/exe, not a hardcoded install prefix
+pub mod process; // `exit_now`: the one way the app's own exits end the process (`_exit`, never libc `exit`, #1115)
+pub mod step; // test-time Sans-IO scope, shared by every layer
+pub mod clock; // `vclock_ms`/`vclock_us`: the one monotonic clock for stamps that are only differenced
 pub mod task; // the one spawn: a refused thread is a return value, not a panic that kills the app
 pub mod cbuf; // fixed NUL-terminated C-string buffer read/write
 pub mod sha256; // SHA-256 / HMAC / PBKDF2, hand-written: the offline PIN verifier's hash
+pub mod sha1;
 pub mod b64; // standard base64 encode/decode
 pub mod spki; // a PEM certificate -> its CURLOPT_PINNEDPUBLICKEY string
 pub mod dynlib; // dlopen-by-SONAME-candidate: the libraries whose major moves between webOS releases
@@ -25,11 +29,18 @@ pub mod fontcov; // which codepoints a font file can draw, read from its cmap
 pub mod surface; // what we are actually drawing into: drawable vs the 1920x1080 logical canvas
 pub mod local_server; // NuvioNative: the loopback PMS shim that stands in for Plex, set once at boot
 pub mod tile; // `Tile`: the shelf-tile trait the data layer implements and `ui` draws through
+pub mod detail_parts; // `DetailPart`, `DetailParts`: the facts a details line under a poster carries, which the profile's setting keeps and the caption policy words
+pub mod window; // `Window`: a stamp that is open for a span (the reachability memos, an expiring miss), so a layer holds a value and reads no clock
+pub mod hold; // `HOLD_ROWS`, `clamp_hold`: the rows a paged store keeps, which the store and `ui::cards::HoldBand` both apply
 pub mod devtrig; // the /tmp trigger PRIMITIVES (`flag`, `read`, `latched_flag!`, `no_wan`...)
 pub mod diag; // the frame instruments (`heartbeat`, `spans`) and the zlib helper
 #[cfg(any(test, feature = "test-support"))]
+pub mod testheap; // the C heap's live bytes and a fresh process to measure in: the tests that pin how many copies of a buffer a path keeps
+#[cfg(any(test, feature = "test-support"))]
 pub mod testlock; // one lock for every test that touches a process-global
 #[cfg(any(test, feature = "test-support"))]
-pub mod testnet; // the one accept for a loopback test server whose listener is nonblocking
+pub mod testnet; // the accepts for a loopback test server: the one that fixes the socket's mode, and the bounded ones
 #[cfg(any(test, feature = "test-support"))]
 pub mod testscratch; // per-process scratch directories a test binary removes when it exits
+#[cfg(any(test, feature = "test-support"))]
+pub mod testrace; // N threads released by one barrier, joined with a deadline: the shared-state race test

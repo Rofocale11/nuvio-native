@@ -65,8 +65,9 @@ pub(super) fn hub_source(state: &PmsState, i: usize) -> &str {
     hubs(state).get(i).map(|h| h.source.as_str()).unwrap_or("")
 }
 
-/// whether hub `i` is the merged Continue Watching shelf (its tiles play on OK and wear the ▶ only
-/// under `DeckPress::Play`). Matched on the locale-independent hubIdentifier, through the one identity function the publication itself uses.
+/// whether hub `i` is the merged Continue Watching shelf (its tiles play on OK under `DeckPress::Play`,
+/// which the focused still's footer cue shows as a play glyph; the default opens the page and shows an
+/// info glyph). Matched on the locale-independent hubIdentifier, through the one identity function the publication itself uses.
 pub(super) fn hub_is_continue(state: &PmsState, i: usize) -> bool {
     hubs(state)
         .get(i)
@@ -80,20 +81,24 @@ pub(super) fn sid(slot: u16) -> ServerId {
 
 /// One source of the table, seeded directly. `handle` empty = a server of our own.
 pub(super) fn src(slot: u16, handle: &str, state: HubState, last: Option<SourceBuild>) -> Src {
-    let mut s = Src::new(sid(slot), handle.into());
+    let mut s = Src::new(sid(slot), handle.into(), &registry_keys_for_test());
     s.state = state;
     s.last = last;
+    // a Ready fixture is a source that answered
+    if state == HubState::Ready { s.deck_read = DeckRead::Answered; }
     s
 }
 
 /// Install a source table and the merge of it — the state a run of landings would have reached.
 /// Bypasses the roster, because a host test has no server registry to derive one from.
-pub(super) fn seed(state: &mut PmsState, srcs: Vec<Src>) {
+pub(super) fn seed(state: &mut PmsState, mut srcs: Vec<Src>) {
+    for s in &mut srcs { s.ledger = state.ledger.clone(); s.feed_copies(); }
     let build = merge(&srcs);
     state.srcs = srcs;
     // leave `sync_roster` idle — both halves, see `seed_for_test`
-    remember_roster(state, &BrowseScope::standalone());
-    state.seen_facts = facts_key();
+    let scope = BrowseScope::standalone();
+    remember_roster(state, &scope);
+    state.seen_facts = facts_key(&scope);
     commit(state, build);
 }
 
@@ -134,13 +139,13 @@ fn plain_row(slot: u16, rk: &str) -> PmsMovie {
 }
 
 pub(super) fn shelf(slot: u16, title: &str, hub_id: &str, rks: &[&str]) -> Shelf {
-    Shelf {
+    Shelf { epoch: 0,
         title: title.into(),
         hub_id: hub_id.into(),
         key: String::new(),
         items: rks.iter().map(|r| row(slot, r)).collect(),
         positions: (0..rks.len()).collect(),
-        total: 0, offset: 0, end: 0, more: false,
+        total: 0, offset: 0, end: 0, more: false, shown: 0, row: Default::default(),
     }
 }
 
@@ -157,11 +162,13 @@ pub(super) fn shelf_in(slot: u16, sec: i64, title: &str, hub_id: &str, rks: &[&s
 /// A source's projection: `(lastViewedAt, rk)` deck entries plus whole shelves.
 pub(super) fn built(slot: u16, cw: &[(i64, &str)], shelves: Vec<Shelf>) -> SourceBuild {
     SourceBuild {
+        lane: Default::default(),
         cw: cw
             .iter()
             .map(|&(t, r)| CwItem {
                 last_viewed_at: t,
                 m: row(slot, r),
+                position: 0,
             })
             .collect(),
         shelves,

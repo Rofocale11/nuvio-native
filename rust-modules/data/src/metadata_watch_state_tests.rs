@@ -35,14 +35,16 @@ fn a_mounted_detail_page_follows_a_corrected_credit() {
         rk: "42".into(),
         ..Default::default()
     }));
+    pump_detail(test_state(), test_adapter(), &crate::pms::registry_keys_for_test(), false);
     assert_eq!(current(test_state()).unwrap().source(), "admin");
 
     // the roster refresh re-grades it, with nothing touching the mounted page
     plx_plex::plex::describe_server(house, "Mac mini", "", plx_plex::plex::GrantEvidence::outside());
+    pump_detail(test_state(), test_adapter(), &crate::pms::registry_keys_for_test(), false);
     assert_eq!(
         current(test_state()).unwrap().source(),
         "",
-        "the page re-asks the registry rather than carrying a copy taken at fetch time"
+        "the page follows captured facts rather than carrying a stale worker credit"
     );
 
     // and a share is still credited, so this is not a blanket clear
@@ -53,6 +55,7 @@ fn a_mounted_detail_page_follows_a_corrected_credit() {
         rk: "318".into(),
         ..Default::default()
     }));
+    pump_detail(test_state(), test_adapter(), &crate::pms::registry_keys_for_test(), false);
     assert_eq!(current(test_state()).unwrap().source(), "friend");
 
     set_current_for_test(test_state(), None);
@@ -70,7 +73,7 @@ fn an_optimistic_watch_flip_reaches_the_item_its_episodes_and_the_season_tabs_co
         resume_ms: 900_000,
         ..Default::default()
     }));
-    assert!(set_watched_local(test_state(), SRV_A, "42", true));
+    assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "42"), true));
     assert!(current(test_state()).unwrap().watched);
     assert_eq!(
         current(test_state()).unwrap().resume_ms,
@@ -80,7 +83,7 @@ fn an_optimistic_watch_flip_reaches_the_item_its_episodes_and_the_season_tabs_co
 
     // …and the SHARE's 42 is a different film, so neither its press nor ours reaches the other
     assert!(
-        !set_watched_local(test_state(), SRV_B, "42", false),
+        !set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_B, "42"), false),
         "another server's key names nothing here"
     );
     assert!(
@@ -121,18 +124,20 @@ fn an_optimistic_watch_flip_reaches_the_item_its_episodes_and_the_season_tabs_co
                 resume_ms: 60_000,
                 ..Default::default()
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     }));
 
     assert!(
-        set_watched_local(test_state(), SRV_A, "e2", true),
+        set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "e2"), true),
         "an episode of the loaded season"
     );
     let d = current(test_state()).unwrap();
-    assert!(d.episodes[1].watched);
+    let e2 = d.episodes.get(1).expect("the season has two episodes");
+    assert!(e2.watched);
     assert_eq!(
-        d.episodes[1].resume_ms, 0,
+        e2.resume_ms, 0,
         "…and its still stops drawing a resume bar"
     );
     assert!(!d.watched, "marking one episode does not finish the show");
@@ -147,7 +152,7 @@ fn an_optimistic_watch_flip_reaches_the_item_its_episodes_and_the_season_tabs_co
 
     // idempotent: pressing watched on an already-watched episode must not double-count the
     // season, which would make a part-watched season read as finished
-    assert!(set_watched_local(test_state(), SRV_A, "e2", true));
+    assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "e2"), true));
     assert_eq!(
         current(test_state()).unwrap().seasons[1].viewed_leaf_count,
         2,
@@ -156,8 +161,8 @@ fn an_optimistic_watch_flip_reaches_the_item_its_episodes_and_the_season_tabs_co
 
     // …and the reverse, clamped at zero rather than going negative
     for _ in 0..5 {
-        assert!(set_watched_local(test_state(), SRV_A, "e2", false));
-        assert!(set_watched_local(test_state(), SRV_A, "e1", false));
+        assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "e2"), false));
+        assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "e1"), false));
     }
     assert_eq!(
         current(test_state()).unwrap().seasons[1].viewed_leaf_count,
@@ -166,7 +171,7 @@ fn an_optimistic_watch_flip_reaches_the_item_its_episodes_and_the_season_tabs_co
     );
 
     assert!(
-        !set_watched_local(test_state(), SRV_A, "not-here", true),
+        !set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "not-here"), true),
         "an rk on neither the item nor its row"
     );
     clear(test_state(), test_adapter());
@@ -210,7 +215,8 @@ fn an_optimistic_watch_flip_reaches_the_related_shelf_the_menu_was_opened_on() {
         episodes: vec![Episode {
             rk: "e1".into(),
             ..Default::default()
-        }],
+        }]
+        .into(),
         related: vec![rel(SRV_A, "r0"), rel(SRV_A, "r1")],
         ..Default::default()
     }));
@@ -218,7 +224,7 @@ fn an_optimistic_watch_flip_reaches_the_related_shelf_the_menu_was_opened_on() {
     // …and the tile is reached even though the page's own rk did not match and the rk is on no
     // episode — the two arms that both return early
     assert!(
-        set_watched_local(test_state(), SRV_A, "r1", true),
+        set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "r1"), true),
         "the Related tile is a hit, not a miss"
     );
     let d = current(test_state()).unwrap();
@@ -232,17 +238,17 @@ fn an_optimistic_watch_flip_reaches_the_related_shelf_the_menu_was_opened_on() {
     );
     assert!(d.related[0].resume_frac().is_some(), "no other tile moved");
     assert!(!d.watched, "the page's own item is not what was pressed");
-    assert!(!d.episodes[0].watched, "…nor is any episode of it");
+    assert!(!d.episodes.get(0).expect("the show has one episode").watched, "…nor is any episode of it");
 
     // the way back, from the second row a part-watched tile offers
-    assert!(set_watched_local(test_state(), SRV_A, "r1", false));
+    assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "r1"), false));
     let d = current(test_state()).unwrap();
     assert!(d.related[1].unwatched && !d.related[1].watched);
 
     // A SHARE's `r0` is a different film that happens to carry the same number. The row's own
     // `sid` is what keeps the press off it — a bare-key walk would flip the tile here.
     assert!(
-        !set_watched_local(test_state(), SRV_B, "r0", true),
+        !set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_B, "r0"), true),
         "another server's key names nothing on this shelf"
     );
     assert!(
@@ -262,7 +268,7 @@ fn an_optimistic_watch_flip_reaches_the_collection_shelf() {
     set_current_for_test(test_state(), Some(Detail {
         sid: SRV_A,
         rk: "m1".into(),
-        collection: Some(crate::metadata::CollectionShelf {
+        collection: Some(CollectionShelf {
             title: "A Pair".into(),
             section: 1,
             tag: 5,
@@ -271,12 +277,12 @@ fn an_optimistic_watch_flip_reaches_the_collection_shelf() {
         }),
         ..Default::default()
     }));
-    assert!(set_watched_local(test_state(), SRV_A, "m2", true));
+    assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "m2"), true));
     let d = current(test_state()).unwrap();
     let members = &d.collection.as_ref().unwrap().members;
     assert!(members[1].watched && !members[1].unwatched, "the pressed member ticks");
     assert!(members[0].unwatched && !d.watched, "nothing else moved");
-    assert!(set_watched_local(test_state(), SRV_A, "m1", true));
+    assert!(set_watched_local(test_state(), &crate::viewstate::ViewAt::leaf(SRV_A, "m1"), true));
     let d = current(test_state()).unwrap();
     assert!(d.watched && d.collection.as_ref().unwrap().members[0].watched,
         "the page's own film and its own tile agree");
@@ -335,6 +341,134 @@ fn the_playing_item_cache_hits_only_for_the_same_item_on_the_same_server() {
     clear(test_state(), test_adapter());
 }
 
+/// `PlayingItem.kind` is the played item's own Plex type, read from the same wire `type` the
+/// detail page reads. The three kinds the player meets (episode, movie, track) must each survive
+/// the conversion from the server's item, and an absent item has no type.
+#[test]
+fn the_playing_item_carries_its_plex_type() {
+    for wire in ["episode", "movie", "track"] {
+        let it: plx_plex::plex::Metadata =
+            serde_json::from_value(serde_json::json!({ "type": wire })).unwrap();
+        let item = playing_item_from(SRV_A, "42", Some(&it));
+        assert_eq!(item.kind, wire, "the played item's own type");
+    }
+    assert_eq!(
+        playing_item_from(SRV_A, "42", None).kind,
+        "",
+        "an item the server did not return has no type"
+    );
+}
+
+fn two_versions() -> plx_plex::plex::Metadata {
+    serde_json::from_value(serde_json::json!({ "type": "episode", "Media": [
+        { "id": 3086, "bitrate": 2372, "width": 1920, "height": 1080, "videoResolution": "1080",
+          "videoCodec": "h264", "audioCodec": "aac", "audioChannels": 2, "container": "mp4",
+          "Part": [{ "key": "/p/3134", "size": 1000, "Stream": [{ "id": 1, "streamType": 2, "codec": "aac" }] }] },
+        { "id": 3082, "bitrate": 14663, "width": 3840, "height": 2160, "videoResolution": "4k",
+          "videoCodec": "hevc", "audioCodec": "eac3", "audioChannels": 6,
+          "Part": [{ "key": "/p/3130", "container": "mkv", "size": 6000, "Stream": [
+            { "id": 2, "streamType": 1, "colorTrc": "smpte2084" },
+            { "id": 3, "streamType": 2, "codec": "eac3" }] }] }
+    ] })).unwrap()
+}
+
+/// A picked version's track store, frame size and part all come from THAT `Media[]` entry, so the
+/// route can never pair version 0's part with version 1's streams; a version the item lost falls
+/// back to the default and says so by naming no played version.
+#[test]
+fn a_picked_version_is_the_whole_playing_item() {
+    let it = two_versions();
+    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(3082)));
+    let played = played.expect("the version is listed");
+    assert_eq!((played.index, played.part.as_str(), played.vcodec.as_str()), (1, "/p/3130", "hevc"));
+    assert_eq!((item.width, item.audio[0].id, item.hdr), (3840, 3, true));
+    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(9)));
+    assert!(played.is_none());
+    assert_eq!((item.width, item.audio[0].id), (1920, 1));
+    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), None);
+    assert!(played.is_none(), "the default needs no override");
+    assert_eq!(item.width, 1920);
+}
+
+/// The picker's facts come off the listing row, one per version in the server's order; a
+/// single-version item offers none.
+#[test]
+fn versions_are_listed_only_when_there_is_a_choice() {
+    let v = crate::pms::versions_of(&two_versions());
+    assert_eq!(v.iter().map(|v| v.id.0).collect::<Vec<_>>(), [3086, 3082]);
+    assert_eq!((v[1].kbps, v[1].resolution.as_str(), v[1].channels, v[1].size, v[1].hdr), (14663, "4k", 6, 6000, true));
+    assert_eq!((v[0].container.as_str(), v[1].container.as_str()), ("mp4", "mkv"), "the part's container wins");
+    let one: plx_plex::plex::Metadata =
+        serde_json::from_value(serde_json::json!({ "Media": [{ "id": 1, "Part": [{ "key": "/p/1" }] }] })).unwrap();
+    assert!(crate::pms::versions_of(&one).is_empty());
+}
+
+#[test]
+fn each_version_carries_the_dolby_vision_of_its_own_video_stream() {
+    let it: plx_plex::plex::Metadata = serde_json::from_value(serde_json::json!({ "Media": [
+        { "id": 1, "Part": [{ "key": "/p/1", "Stream": [
+            { "id": 1, "streamType": 1, "DOVIPresent": true, "DOVIProfile": 5, "DOVIBLCompatID": 0 },
+            { "id": 2, "streamType": 1 }] }] },
+        { "id": 2, "Part": [{ "key": "/p/2", "Stream": [{ "id": 3, "streamType": 1, "colorTrc": "smpte2084" }] }] }
+    ] })).unwrap();
+    let v = crate::pms::versions_of(&it);
+    assert_eq!(
+        (v[0].dovi.present, v[0].dovi.profile, v[0].dovi.bl_compat),
+        (true, 5, 0),
+        "a later video stream without DOVI fields keeps the record",
+    );
+    assert_eq!(v[1].dovi, crate::metadata::Dovi::NONE);
+    assert!(serde_json::to_value(&v[1]).unwrap().get("dovi").is_none(), "a version without Dolby Vision records nothing new");
+}
+
+#[test]
+fn each_version_and_the_playing_item_carry_their_own_video_bitrate() {
+    let it: plx_plex::plex::Metadata = serde_json::from_value(serde_json::json!({ "Media": [
+        { "id": 1, "bitrate": 20000, "Part": [{ "key": "/p/1", "Stream": [
+            { "id": 1, "streamType": 1, "bitrate": 19000 }, { "id": 2, "streamType": 2, "bitrate": 640 }] }] },
+        { "id": 2, "bitrate": 8540, "Part": [{ "key": "/p/2", "Stream": [
+            { "id": 3, "streamType": 2, "bitrate": 640 }, { "id": 4, "streamType": 1, "bitrate": 7900 }] }] }
+    ] })).unwrap();
+    let v = crate::pms::versions_of(&it);
+    assert_eq!(v.iter().map(|v| (v.kbps, v.video_kbps)).collect::<Vec<_>>(), [(20000, 19000), (8540, 7900)]);
+    let (item, _) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(2)));
+    assert_eq!((item.bitrate, item.video_kbps), (8540, 7900));
+    let unmeasured = crate::pms::MediaVersion { video_kbps: 0, ..v[1].clone() };
+    assert!(serde_json::to_value(&unmeasured).unwrap().get("video_kbps").is_none(), "an unmeasured video records nothing new");
+}
+
+/// `PlayingItem.hdr` is the played leaf's video HDR flag (PQ or HLG transfer), the fact the
+/// player's HDR overlay dim reads; an SDR leaf and an absent item are not HDR.
+#[test]
+fn the_playing_item_carries_the_video_hdr_flag() {
+    let leaf = |trc: &str| -> plx_plex::plex::Metadata {
+        serde_json::from_value(serde_json::json!({ "Media": [{ "Part": [{ "Stream": [
+            { "streamType": 1, "colorTrc": trc }
+        ] }] }] })).unwrap()
+    };
+    assert!(playing_item_from(SRV_A, "42", Some(&leaf("smpte2084"))).hdr, "HDR10");
+    assert!(playing_item_from(SRV_A, "42", Some(&leaf("arib-std-b67"))).hdr, "HLG");
+    assert!(!playing_item_from(SRV_A, "42", Some(&leaf("bt709"))).hdr, "SDR");
+    assert!(!playing_item_from(SRV_A, "42", None).hdr, "no item, no HDR");
+}
+
+/// The cache hit must hand back the same `kind` the page loaded, so a play from a detail page
+/// that skips the PMS fetch still knows what it is playing.
+#[test]
+fn the_playing_item_cache_round_trips_the_kind() {
+    let _serial = plx_base::testlock::serial();
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "42".into(),
+        kind: "episode".into(),
+        audio: vec![Stream { id: 7, ..Default::default() }],
+        ..Default::default()
+    }));
+    let hit = cached_playing(test_state(), SRV_A, "42").expect("the loaded page IS this item");
+    assert_eq!(hit.kind, "episode", "the cache carries the page's own type");
+    clear(test_state(), test_adapter());
+}
+
 /// **Regression (2026-10-06):** the loaded page's copy of an item describes the server as the page
 /// read it. Once the item has PLAYED, the server's streams may have moved under it (a subtitle
 /// downloaded mid-playback is installed and selected; a track picked in the HUD changes the part's
@@ -368,7 +502,7 @@ fn the_playing_item_cache_is_not_trusted_once_the_item_has_played() {
     // a fresh landing of the played item is a fresh read
     set_current_for_test(test_state(), Some(page(vec![embedded.clone()])));
     install_playing(test_state(), cached_playing(test_state(), SRV_A, "42"));
-    assert!(install_landed_detail(test_state(), test_adapter(), Some(page(vec![embedded]))));
+    assert!(install_landed_detail(test_state(), test_adapter(), Some(page(vec![embedded])), &plx_plex::plex::ClientKeys::default(), false));
     assert!(cached_playing(test_state(), SRV_A, "42").is_some(), "read after the playback: trusted again");
     clear(test_state(), test_adapter());
 }
@@ -396,4 +530,235 @@ fn a_season_is_watched_only_when_the_server_counted_episodes_and_all_of_them_are
     // viewedLeafCount can lead leafCount right after a scrobble of a season being re-indexed;
     // more-watched-than-exists is still watched, never a negative remainder.
     assert!(season(10, 11).watched(), "an over-count is still watched");
+}
+
+#[test]
+fn a_show_or_season_scoped_change_marks_the_loaded_shows_episodes_and_season_counts() {
+    use crate::viewstate::{Scope, ViewAt};
+    let _serial = plx_base::testlock::serial();
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "show".into(),
+        is_show: true,
+        kind: "show".into(),
+        seasons: vec![
+            Season { rk: "sk1".into(), index: 1, title: "S1".into(), leaf_count: 2, viewed_leaf_count: 0 },
+            Season { rk: "sk2".into(), index: 2, title: "S2".into(), leaf_count: 2, viewed_leaf_count: 0 },
+        ],
+        episodes: vec![
+            Episode { rk: "e1".into(), season: 1, resume_ms: 5, ..Default::default() },
+            Episode { rk: "e2".into(), season: 1, ..Default::default() },
+        ].into(),
+        ..Default::default()
+    }));
+    let season = ViewAt {
+        sid: SRV_A,
+        rk: "sk1".into(),
+        scope: Scope::Season { show_rk: "show".into(), index: 1 },
+    };
+    assert!(set_watched_local(test_state(), &season, true));
+    let d = current(test_state()).unwrap();
+    assert!(d.episodes.get(0).unwrap().watched && d.episodes.get(1).unwrap().watched);
+    assert_eq!(d.episodes.get(0).unwrap().resume_ms, 0);
+    assert_eq!((d.seasons[0].viewed_leaf_count, d.seasons[1].viewed_leaf_count), (2, 0),
+        "only the named season's count moves");
+    assert!(!d.watched, "a season does not finish the show");
+
+    let show = ViewAt { sid: SRV_A, rk: "show".into(), scope: Scope::Show };
+    assert!(set_watched_local(test_state(), &show, false));
+    let d = current(test_state()).unwrap();
+    assert!(d.episodes.get(0).is_some_and(|e| !e.watched) && d.episodes.get(1).is_some_and(|e| !e.watched));
+    assert_eq!((d.seasons[0].viewed_leaf_count, d.seasons[1].viewed_leaf_count), (0, 0));
+    clear(test_state(), test_adapter());
+}
+
+#[test]
+fn unmarking_one_season_of_a_watched_show_clears_the_shows_own_watched_flag() {
+    use crate::viewstate::{Scope, ViewAt};
+    let _serial = plx_base::testlock::serial();
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "show".into(),
+        is_show: true,
+        kind: "show".into(),
+        watched: true,
+        seasons: vec![
+            Season { rk: "sk1".into(), index: 1, title: "S1".into(), leaf_count: 2, viewed_leaf_count: 2 },
+            Season { rk: "sk2".into(), index: 2, title: "S2".into(), leaf_count: 2, viewed_leaf_count: 2 },
+        ],
+        episodes: vec![
+            Episode { rk: "e1".into(), season: 1, watched: true, ..Default::default() },
+        ].into(),
+        ..Default::default()
+    }));
+    let season = ViewAt {
+        sid: SRV_A,
+        rk: "sk1".into(),
+        scope: Scope::Season { show_rk: "show".into(), index: 1 },
+    };
+    assert!(set_watched_local(test_state(), &season, false));
+    let d = current(test_state()).unwrap();
+    assert!(!d.watched, "a show with an unwatched season is not watched");
+    assert_eq!((d.seasons[0].viewed_leaf_count, d.seasons[1].viewed_leaf_count), (0, 2));
+    clear(test_state(), test_adapter());
+}
+
+/// The detail read was requested, the user pressed Mark Watched on a related tile while it was out,
+/// and the read installs the page as the server described it before the press. The ledger makes
+/// the press again, through the same edit the press used. The stamp is taken by the REAL request
+/// (`MetadataCmd::RequestDetail`), not assigned.
+#[test]
+fn a_detail_read_in_flight_across_a_watched_edit_installs_with_it_made_again() {
+    use crate::stores::metadata::MetadataCmd;
+    let _serial = plx_base::testlock::serial();
+    let mut state = MetadataState::default();
+    let adapter = test_adapter();
+    let sid = plx_plex::plex::ServerId::UNSET;
+    let tile = || related_tile(sid, "rel");
+    let fresh = || Detail { sid, rk: "42".into(), related: vec![tile()], ..Default::default() };
+    let tile_state = |state: &MetadataState| state.current.as_ref().map(|d| (d.related[0].watched, d.related[0].resume_ms));
+    let at = crate::viewstate::ViewAt::leaf(sid, "rel");
+
+    // an older press, before the request: the server has it, so the read must not undo the server
+    let older = state.ledger.record(&crate::viewstate::ViewAt::leaf(sid, "older"), crate::viewstate::ViewEdit::Watched(true));
+    state.ledger.landed(older);
+    assert!(run(&mut state, adapter, MetadataCmd::RequestDetail { sid, rk: "42".into() })); // the read goes out…
+    let pressed = state.ledger.record(&at, crate::viewstate::ViewEdit::Watched(true)); // …then the press
+    assert!(install_landed_detail(&mut state, adapter, Some(fresh()), &plx_plex::plex::ClientKeys::default(), false));
+    assert_eq!(tile_state(&state), Some((true, 0)));
+
+    // a read requested after the press's write LANDED: the server has it, its answer stands
+    state.ledger.landed(pressed);
+    assert!(run(&mut state, adapter, MetadataCmd::RequestDetail { sid, rk: "42".into() }));
+    assert!(install_landed_detail(&mut state, adapter, Some(fresh()), &plx_plex::plex::ClientKeys::default(), false));
+    assert_eq!(tile_state(&state), Some((false, 4)), "the server's answer stands");
+}
+
+/// One episode's flip steps the browsed season's count by one, only on a real flip and clamped to
+/// the season's leaf count (the optimistic layer: the tab and the hero read it before any answer).
+/// The Detail re-read the read-back asks for then OVERWRITES it with the server's number, which may
+/// differ from a +-1 step (a leaf watched elsewhere).
+#[test]
+fn a_single_episode_flip_steps_the_season_count_and_the_re_read_overwrites_it_with_the_servers() {
+    use crate::viewstate::ViewAt;
+    let _serial = plx_base::testlock::serial();
+    let show = |viewed| Detail {
+        sid: SRV_A,
+        rk: "show".into(),
+        is_show: true,
+        kind: "show".into(),
+        seasons: vec![Season { rk: "sk1".into(), index: 1, title: "S1".into(), leaf_count: 3, viewed_leaf_count: viewed }],
+        episodes: vec![Episode { rk: "e1".into(), season: 1, ..Default::default() }].into(),
+        ..Default::default()
+    };
+    set_current_for_test(test_state(), Some(show(0)));
+    let count = || current(test_state()).unwrap().seasons[0].viewed_leaf_count;
+    let ep = ViewAt::leaf(SRV_A, "e1");
+    set_watched_local(test_state(), &ep, true);
+    assert_eq!(count(), 1, "the flip steps the browsed season");
+    set_watched_local(test_state(), &ep, true);
+    assert_eq!(count(), 1, "a press that flips nothing steps nothing");
+    set_watched_local(test_state(), &ep, false);
+    assert_eq!(count(), 0);
+    set_watched_local(test_state(), &ep, false);
+    assert_eq!(count(), 0, "clamped at zero");
+
+    // the server says two of three are watched (one of them elsewhere), after the optimistic step
+    set_watched_local(test_state(), &ep, true);
+    assert_eq!(count(), 1);
+    assert!(install_landed_detail(test_state(), test_adapter(), Some(show(2)), &plx_plex::plex::ClientKeys::default(), false));
+    assert_eq!(count(), 2, "the re-read overwrites the optimistic count with the server's number");
+    clear(test_state(), test_adapter());
+}
+
+fn related_tile(sid: plx_plex::plex::ServerId, rk: &str) -> crate::pms::PmsMovie {
+    crate::pms::PmsMovie { sid, rk: rk.into(), unwatched: true, resume_ms: 4, ..Default::default() }
+}
+
+/// The server's word (`Facts`, `Offset`) reaches the other items' tiles on a Detail page, the
+/// Related shelf and the collection shelf's members, in place and only where it differs. The loaded
+/// item, its episodes and its seasons are not patched here (they re-read themselves until the Detail
+/// fold takes Facts).
+#[test]
+fn the_servers_facts_and_offset_patch_related_and_collection_tiles_only_where_they_differ() {
+    use crate::stores::metadata::MetadataCmd;
+    use crate::viewstate::{ViewAt, ViewEdit};
+    let _serial = plx_base::testlock::serial();
+    let tile = |rk: &str| Related { sid: SRV_A, rk: rk.into(), resume_ms: 3_510_000, unwatched: true, ..Default::default() };
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "show".into(),
+        resume_ms: 11,
+        related: vec![tile("r0"), tile("r1")],
+        collection: Some(CollectionShelf { members: vec![tile("m0")], ..Default::default() }),
+        ..Default::default()
+    }));
+    let adapter = std::sync::Arc::new(MetadataAdapter::default());
+    let run = |rk: &str, sid, edit| super::run(test_state(), &adapter, MetadataCmd::ApplyView { at: ViewAt::leaf(sid, rk), edit });
+    let facts = ViewEdit::Facts { watched: true, unwatched: false, resume_ms: 0, sort: None };
+    assert!(run("r1", SRV_A, facts));
+    assert!(!run("r1", SRV_A, facts), "facts that agree with the tile change nothing");
+    assert!(!run("r0", SRV_B, facts), "another server's r0 names nothing here");
+    assert!(run("m0", SRV_A, ViewEdit::Offset { ms: 42 }));
+    assert!(!run("m0", SRV_A, ViewEdit::Offset { ms: 42 }));
+    let d = current(test_state()).unwrap();
+    assert_eq!((d.related[1].watched, d.related[1].unwatched, d.related[1].resume_ms), (true, false, 0));
+    assert_eq!(d.related[0].resume_ms, 3_510_000, "no other tile moved");
+    let m = &d.collection.as_ref().unwrap().members[0];
+    assert_eq!((m.watched, m.unwatched, m.resume_ms), (false, true, 42), "an offset leaves the watched state alone");
+    assert_eq!(d.resume_ms, 11, "the loaded item is the fold's, not this patch's");
+}
+
+/// A stop's `Offset` reaches the LOADED item and the loaded show's episode it names, matched on the
+/// exact (server, key): a resume point must not wait for a read the server may never answer
+/// differently (a refused stop). A repeat of the same position changes nothing, so it raises no
+/// notice, and another server's same key names nothing here.
+#[test]
+fn an_offset_moves_the_loaded_item_and_the_episode_it_names_and_only_when_it_differs() {
+    use crate::stores::metadata::MetadataCmd;
+    use crate::viewstate::{ViewAt, ViewEdit};
+    let _serial = plx_base::testlock::serial();
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "show".into(),
+        kind: "show".into(),
+        is_show: true,
+        resume_ms: 11,
+        episodes: vec![
+            Episode { rk: "e1".into(), season: 1, resume_ms: 5, ..Default::default() },
+            Episode { rk: "e2".into(), season: 1, resume_ms: 6, ..Default::default() },
+        ].into(),
+        ..Default::default()
+    }));
+    let apply = |sid, rk: &str, ms| super::run(test_state(), test_adapter(),
+        MetadataCmd::ApplyView { at: ViewAt::leaf(sid, rk), edit: ViewEdit::Offset { ms } });
+    assert!(apply(SRV_A, "e1", 42_000), "an episode of the loaded show");
+    assert!(!apply(SRV_A, "e1", 42_000), "the same position again changes nothing");
+    assert!(apply(SRV_A, "show", 7_000), "the loaded item itself");
+    assert!(!apply(SRV_A, "show", 7_000));
+    assert!(!apply(SRV_B, "e2", 1), "another server's e2 names nothing here");
+    let d = current(test_state()).unwrap();
+    assert_eq!(d.resume_ms, 7_000);
+    assert_eq!((d.episodes.get(0).unwrap().resume_ms, d.episodes.get(1).unwrap().resume_ms), (42_000, 6), "no other episode moved");
+    clear(test_state(), test_adapter());
+}
+
+#[test]
+fn pdf_proposal_on_deck_watch_flip_is_immediate_outside_the_loaded_season() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = MetadataState::default();
+    state.current = Some(Detail {
+        sid: SRV_A, rk: "show".into(), kind: "show".into(), is_show: true,
+        on_deck: Some(Episode { rk: "next".into(), season: 2, resume_ms: 60_000, dur_ms: 120_000, ..Default::default() }),
+        ..Default::default()
+    });
+    assert!(!set_watched_local(&mut state, &crate::viewstate::ViewAt::leaf(SRV_B, "next"), true));
+    let at = crate::viewstate::ViewAt::leaf(SRV_A, "next");
+    assert!(set_watched_local(&mut state, &at, true), "the on-deck copy is a mounted view of this leaf");
+    let ep = state.current.as_ref().unwrap().on_deck.as_ref().unwrap();
+    assert!(ep.watched);
+    assert_eq!(ep.resume_ms, 0);
+    assert!(!state.current.as_ref().unwrap().watched, "one episode never marks the whole show");
+    assert!(set_watched_local(&mut state, &at, false));
+    assert!(!state.current.as_ref().unwrap().on_deck.as_ref().unwrap().watched);
 }

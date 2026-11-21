@@ -26,9 +26,10 @@
 //!    the HUD reads `Resolving` through [`engineless_flight_outstanding`], and the same drain reaps a
 //!    landing a stale flight left ([`discard_stale_flight_landing`]) because no pump will. So is
 //!    the FOREGROUND restore's resume (the foreground machine, `player::lifecycle`, waits on it the
-//!    way it waits on a pending Load and drains it with the same `land_resume`) and the rollback of
-//!    an Original trial whose Load failed before an Engine existed
-//!    ([`dispatch_engineless_rollback_rebase`], drained by `player::land_engineless_rollback`).
+//!    way it waits on a pending Load, and its driver `player::foreground::poll_foreground_flight`
+//!    drains it with the same `land_resume`) and the rollback of an Original trial whose Load failed
+//!    before an Engine existed ([`dispatch_engineless_rollback_rebase`], drained by
+//!    `player::land_engineless_rollback`).
 //!    The foreground restore's resume may also find an Original TRIAL's transaction (the OS suspended
 //!    mid-trial); see the invariant below on what the flight leaves of the trial.
 //!
@@ -91,7 +92,8 @@ pub(super) enum FlightOwner {
     /// A seek on a transcode: the start transaction its plan reserved, `Preparing(serial)`.
     Start(RouteStartTransaction),
     /// A RECOVERY: the replacement route a failed start is owed (the rollback's rebase after a
-    /// failed Original trial, the HLS fallback of a source that never opened) — and the cold
+    /// failed Original trial, the HLS fallback of a source that never opened, the rebuild that has
+    /// the server convert audio the pipeline refused) — and the cold
     /// resume's rebuild at the saved position, which is the same debt before the first Load: the
     /// start transaction a landed plan left `Prepared`. A failed Engine is still the pump's and
     /// waits for the landing; a cold resume has none. The transaction is `Preparing(serial)` like a
@@ -207,6 +209,9 @@ impl RetranscodeClaimResult {
 pub(super) enum ClaimWork {
     /// One `/decision` attempt for this contract ([`try_retranscode`]).
     Encode(plx_plex::plex::EncodeContract),
+    /// A refusal conversion carries the requested facet identity through the worker. Its
+    /// output codecs or changing URL cannot mint another finite recovery offer.
+    EncodeRecovery(plx_plex::plex::EncodeContract, super::backend_policy::OfferId),
     /// A recovery back to the Original ([`run_original_recovery`]).
     RecoverOriginal(Box<OriginalRecoveryPlan>),
     /// A transcode rebuilt at an offset ([`run_rebase`]): an adaptive refresh, or a seek.
@@ -283,7 +288,7 @@ fn run_retranscode_claim_worker(
     fallback: RetranscodeFallback,
 ) -> RetranscodeClaimResult {
     // A rebuild carries everything it needs in its plan; the other kinds are built only by
-    // `execute_retranscode_claim`, which always captured inputs for them.
+    // `plan_claim_flight`, which captures the retranscode inputs whenever an encode may run.
     if let ClaimWork::Rebase(plan) = work {
         let outcome = run_rebase(off, &plan);
         return match (outcome, fallback) {
@@ -298,12 +303,22 @@ fn run_retranscode_claim_worker(
             outcome => RetranscodeClaimResult::AutoHls(Box::new(AutoHlsLanding { plan: *plan, outcome })),
         };
     }
-    let inputs = inputs.expect("an encode or recovery flight is dispatched with its claim inputs");
+    // An Original recovery's plan carries its own PMS inputs too ([`OriginalRecoveryPlan`]); the
+    // claim's retranscode inputs are captured only when an encode is the primary or the owed
+    // fallback ([`plan_claim_flight`]), so a recovery with neither (the no-Plex fixture has no
+    // client to capture them from) flies without them.
+    let claim_inputs = || inputs.expect("an encode, or a recovery owing a rebuild, is dispatched with its claim inputs");
+    let recovery_recipe = match &work {
+        ClaimWork::EncodeRecovery(_, id) => Some(*id),
+        _ => None,
+    };
     match work {
         ClaimWork::Rebase(_) | ClaimWork::AutoHls(_) => unreachable!("handled above"),
-        ClaimWork::Encode(primary_contract) => {
+        ClaimWork::Encode(primary_contract) | ClaimWork::EncodeRecovery(primary_contract, _) => {
+            let inputs = claim_inputs();
             select_streams_for_encode(off, inputs);
-            if let RetranscodeWorkerOutcome::Applied(applied) = try_retranscode(off, inputs, primary_contract) {
+            if let RetranscodeWorkerOutcome::Applied(mut applied) = try_retranscode(off, inputs, primary_contract) {
+                applied.recovery_offer = recovery_recipe;
                 return RetranscodeClaimResult::Retranscode(applied);
             }
         }
@@ -314,7 +329,7 @@ fn run_retranscode_claim_worker(
             // The recovery's own selection PUT named the candidate's track; a rebuild owed to a
             // displaced pick names the session's, so it sends its own, once, like any other claim.
             if matches!(fallback, RetranscodeFallback::Retranscode(_)) {
-                select_streams_for_encode(off, inputs);
+                select_streams_for_encode(off, claim_inputs());
             }
         }
     }
@@ -323,7 +338,7 @@ fn run_retranscode_claim_worker(
         RetranscodeFallback::Native { ordinal, codec } => {
             RetranscodeClaimResult::NativeAudio { ordinal, codec }
         }
-        RetranscodeFallback::Retranscode(contract) => match try_retranscode(off, inputs, contract) {
+        RetranscodeFallback::Retranscode(contract) => match try_retranscode(off, claim_inputs(), contract) {
             RetranscodeWorkerOutcome::Applied(applied) => RetranscodeClaimResult::Retranscode(applied),
             RetranscodeWorkerOutcome::Refused => RetranscodeClaimResult::Rejected(LEGACY_REJECTED),
         },
@@ -406,7 +421,7 @@ fn spawn_flight_worker(
     if take_fault(Fault::SpawnRefusal) {
         return false;
     }
-    plx_base::task::spawn_off_frame("retranscode-claim", move |off| {
+    plx_base::task::spawn_off_frame("retransc-claim", move |off| {
         // catch_unwind OUTSIDE the mailbox write, like the resolve worker: a panicking attempt must
         // still land (as a `Rejected`) or `ControlPhase::Applying` waits forever for a mailbox
         // entry that will now never arrive.
@@ -464,7 +479,7 @@ pub(super) fn stop_encoder_session(client: &'static plx_plex::plex::Client, sess
         return;
     }
     plx_base::task::spawn_small_or_inline(
-        "retranscode-stop",
+        "retransc-stop",
         const { &plx_base::task::BlockingLabel::new("encoder stop (worker thread refused)") },
         move || {
             let _ = client.transcode_stop(&session);
@@ -536,7 +551,7 @@ pub enum SeekVerdict {
 /// Drained once a frame by the pump, before it tries to claim a fresh action (a claim stays
 /// `Applying` — see `claim_route_action` — and a seek stays `Preparing`, for as long as this
 /// mailbox is empty, so nothing else can race either). `newer_seek_waiting` is the pump's one read
-/// of `TX.seek_to_ns`: a tap that arrived during a seek's flight sits there untouched, and the
+/// of the readout's pending seek: a tap that arrived during a seek's flight sits there untouched, and the
 /// landing it outdates is discarded rather than installed (the viewer asked for somewhere else
 /// since).
 ///
@@ -585,6 +600,10 @@ pub struct RecoveryLanding {
     /// The recovery position the flight was dispatched for, in nanoseconds.
     pub offset_ns: i64,
     pub verdict: RecoveryVerdict,
+    /// The lane verdicts of the `/decision` that built the replacement route, for a landing that
+    /// came from a retranscode (the facet rung's proof); `None` for any other (a refusal, a rollback,
+    /// the HLS contingency's rebuild, a resume), which can therefore never prove.
+    pub lanes: Option<crate::player::recovery::Lanes>,
 }
 
 /// Whether a recovery flight is outstanding — landed or not — so the pump's failure branches wait
@@ -635,7 +654,11 @@ pub fn take_ready_recovery_flight(ps: &mut PlaybackSession) -> Option<RecoveryLa
     let FlightOwner::Recovery(ticket) = owner else {
         unreachable!("take_claim_landing_for(true) only takes a recovery's landing");
     };
-    Some(RecoveryLanding { offset_ns: user_target, verdict: install_recovery_landing(ps, ticket, resume, result) })
+    let lanes = match &result {
+        RetranscodeClaimResult::Retranscode(applied) => Some(applied.lanes),
+        _ => None,
+    };
+    Some(RecoveryLanding { offset_ns: user_target, verdict: install_recovery_landing(ps, ticket, resume, result), lanes })
 }
 
 /// A recovery's landing, applied. Every way out leaves the reducer out of `Preparing(serial)`:
@@ -658,13 +681,20 @@ fn install_recovery_landing(
             let rollback = plan.owner == RebaseFor::Rollback;
             // `install_rebase` settles the start transaction itself on every refusal.
             match install_rebase(ps, plan, outcome) {
-                Some(_) => {
+                Some(installed) => {
+                    let _ = ps.qualify_installed_feed_offer(if rollback {
+                        CandidatePurpose::RollbackExisting
+                    } else {
+                        CandidatePurpose::ReopenCurrent
+                    });
                     if rollback {
+                        note_original_rolled_back_onto(&installed);
                         crate::player::report::note_delivery_requested_for(
                             playback_trace_generation(),
                             crate::player::report::DeliveryClass::Hls,
                             crate::player::report::QualityClass::Unknown,
                             crate::player::report::DeliveryReason::OriginalOpenRollback,
+                            crate::player::report::AttemptOrigin::Recovery,
                         );
                     }
                     RecoveryVerdict::Install
@@ -683,13 +713,50 @@ fn install_recovery_landing(
                 release_rebase_start(owner, ticket);
                 return RecoveryVerdict::Refused;
             };
+            let _ = ps.qualify_installed_feed_offer(CandidatePurpose::NewCandidate);
             // Nothing is playing, so the Original it replaced has nothing left to feed: stop it
             // now, not after a reload that keeps it on screen.
             installed.retire_replaced();
+            // The HLS attempt lacks the video raster the refusal named: the Original candidate the
+            // climb would return to is graded against it again.
+            regrade_original(ps);
             if !prepare_route_start(ticket) {
                 crate::player::log("recovery: prepared PMS route lost its start transaction");
                 return RecoveryVerdict::Refused;
             }
+            RecoveryVerdict::Install
+        }
+        RetranscodeClaimResult::Retranscode(applied) => {
+            // The refused stream's conversion ([`dispatch_refusal_conversion`]). The same
+            // re-check an accepted claim makes: a route change between the worker's commit and
+            // this drain leaves nothing this install may point at.
+            if !is_worker_ticket_current(&applied.ticket) {
+                stop_discarded_landing(applied);
+                release_rebase_start(owner, ticket);
+                return RecoveryVerdict::Refused;
+            }
+            install_retranscode_outcome(ps, &applied);
+            let _ = if let Some(id) = applied.recovery_offer {
+                ps.qualify_resolved_feed_offer(id, CandidatePurpose::NewCandidate)
+            } else {
+                ps.qualify_installed_feed_offer(CandidatePurpose::NewCandidate)
+            };
+            // The attempt now lacks the facet the pipeline refused: the Original candidate the ABR
+            // climb would return to is graded against it again, so the climb does not propose the
+            // refused audio's direct play or the refused video raster.
+            regrade_original(ps);
+            // Nothing is playing, so the encoder it replaced has nothing left to feed: stop it
+            // now, not after a reload that keeps it on screen.
+            stop_encoder_session(applied.client, applied.superseded);
+            if !prepare_route_start(ticket) {
+                crate::player::log("recovery: prepared PMS route lost its start transaction");
+                return RecoveryVerdict::Refused;
+            }
+            // The reload that follows is the app's own reopen after a failed open, like the other
+            // recovery flights': the ledger must say so, or a failure of the converted route
+            // reads as the first fresh open.
+            // The delivery note carries the origin and notes the attempt itself.
+            crate::player::report::note_refusal_recovery_delivery(ps);
             RecoveryVerdict::Install
         }
         // A refused rebuild (the worker answered `Rejected`), a panicked worker, or a kind a
@@ -805,11 +872,15 @@ fn install_claim_landing(
             }
         }
         RetranscodeClaimResult::NativeAudio { ordinal, codec } => {
-            // `stage_native_audio` moves `ps.stream_acodec`; it touches no other projection field
-            // (the desired audio index and cues live outside it).
-            advance_claim_snapshot(&mut action, |p| p.stream_acodec = codec.clone());
-            crate::player::stage_native_audio(ps, ordinal, &codec);
-            ClaimTail::NativeAudio
+            if !ps.backends().feed {
+                ClaimTail::Rejected("native audio requires Feed")
+            } else {
+                // `stage_native_audio` moves `ps.stream_acodec`; it touches no other projection field
+                // (the desired audio index and cues live outside it).
+                advance_claim_snapshot(&mut action, |p| p.stream_acodec = codec.clone());
+                crate::player::route_fx::stage_native_audio(ps, ordinal, &codec);
+                ClaimTail::NativeAudio
+            }
         }
         RetranscodeClaimResult::Rejected(reason) => ClaimTail::Rejected(reason),
     };

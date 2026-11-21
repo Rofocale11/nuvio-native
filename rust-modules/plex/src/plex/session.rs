@@ -31,44 +31,133 @@
 //! - Only this module writes the session domain of the persisted record; every
 //!   `persistence::commit_*`/`write_session`/`commit_cleared` caller here ends by calling exactly
 //!   a read install, proven-write install, cache drop, or local revocation.
-//! - `peek` never takes `IO`. A miss schedules one refresh on the bounded persistence FIFO and
-//!   returns the last snapshot immediately. The worker reads and installs under `IO`; `CACHE`
-//!   is never held across `IO`. Queued and in-flight reads cannot overwrite a later revocation.
-//!   Cached views poll `VisibleSessionWatch` on Tick; `peek_settled` distinguishes recovery in
-//!   progress from an authoritative empty session, so pending preferences need not flash defaults.
+//! - `peek` is a pure read of memory: it takes no `IO`, submits nothing and reads no clock. A miss
+//!   returns the last snapshot (or the empty session). The refill is the session owner's job:
+//!   `refresh_need` says what the cache lacks, the app's frame step hands it to the owner, and the
+//!   owner's `RefreshCache` effect runs `refresh_cache_job` on the bounded persistence FIFO. The
+//!   job reads and installs under `IO`; `CACHE` is never held across `IO`. Queued and in-flight
+//!   reads cannot overwrite a later revocation (`CACHE_GENERATION` and `replace_cache`'s Revoked
+//!   guard). Cached views poll `VisibleSessionWatch` on Tick; `peek_settled` distinguishes recovery
+//!   in progress from an authoritative empty session, so pending preferences need not flash defaults.
 //! - Writers never read from the cache; they read the authority under `IO` (fence correctness),
 //!   then install their own outcome over it.
-//! - A `Locked`/`Blocked` read or fallback `Ready` during helper unavailability is transient:
-//!   served for `LOCKED_RETRY` (about a second) after it finishes, then re-read on the next call
-//!   rather than latched forever.
+//! - A `Locked`/`Blocked` read or fallback `Ready` during helper unavailability is transient: it
+//!   is served as the last known state, and the owner re-reads it no sooner than `LOCKED_RETRY_MS`
+//!   of frame time later (per generation), rather than latching it forever.
 //! - [`clear`] (sign-out) drops the cached `Arc` immediately — it holds the very account/server
 //!   tokens sign-out means to get rid of.
+//! - **Except on a platform with no credential store** (`StoreMode::MemoryOnly` in
+//!   `plx_os::tv::secure`, see `session/memory_only.rs`): there the cache is the only authority,
+//!   writers read it and install into it, a write is `Ephemeral` rather than `Durable`, no
+//!   credential store is read or committed, and the install's own file (client id, language,
+//!   Interface resolution) is all that survives the process.
 //! - Other domains of the same record (consent) are not in this cache and their writes never
 //!   touch it. `async_persistence`'s own `CACHE`/`LOCKED_STATE` are a separate, currently-unwired
 //!   engine (see its doc) — when it is wired, its coordinator must install into and drop THIS
 //!   cache rather than keep a second copy of the session live.
 use super::origin::Origin;
 use super::probe::Location;
+mod playback_options;
+pub use playback_options::{MarkerSkipMode, DolbyVisionMode, InstantDpadSeeking, UriEngine};
+
+pub use prefs::{IntroSkipPref, CreditsSkipPref, DolbyVisionModePref, InstantDpadSeekingPref, UriEnginePref, HoldHintTaughtPref, effective, effective_hud, own_prefs, persist_profile_hud, persist_profile_pref, put_own, stored_effective, stored_effective_hud, tenure, HudSelectionPref, AudioEnhancementsPref,
+    DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsPref,
+    ProfilePrefsRecord, ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipIntervalPref,
+    SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, HudEndTimePref, UiResolutionPref, UnderPostersPref};
+use prefs::ProfileMemory;
+use plx_os::tv::authority::{authority as storage_authority, Authority};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Mutex;
 use std::collections::BTreeMap;
 use serde_json::Value;
+pub use plx_base::detail_parts::{DetailPart, DetailParts};
 
 /// The signed-in profile, in-memory for the UI (the Home profile chip reads this). Set by the boot
 /// gate (from the stored session) and on every profile switch, so it survives an offline boot.
 static CURRENT: Mutex<Option<std::sync::Arc<CurrentProfile>>> = Mutex::new(None);
+static CURRENT_PUBLICATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Immutable worker publication. Identity and its explicit owner-assigned generation are one
 /// record, so a reader that needs both can retain one snapshot across subsequent publications.
 pub struct CurrentProfile {
     pub user: Option<UserRef>,
     pub generation: u32,
+    /// `grant::account_key` of the account token the owner published this profile under: the half of
+    /// the [`Seat`] that says WHICH sign-in the profile belongs to. Empty before a sign-in and in a
+    /// publication recorded before the field existed.
+    pub stamp: String,
+}
+
+impl CurrentProfile {
+    /// Who this publication seats. A publication with no profile seats nobody, and so does one with
+    /// no stamp (a dev token, an older recording): without a stamp a stored per-profile value cannot
+    /// be told from another sign-in's, so nothing may be read from or written to a record.
+    pub fn seat(&self) -> Seat {
+        Seat::of(self.user.as_ref(), &self.stamp)
+    }
+}
+
+/// **Whose per-profile settings the TV is showing**, as a value that can be compared, captured on the
+/// main thread and carried to a worker. `current_profile_key()` cannot say this: it is `""` for the
+/// account owner AND for "no profile published yet", and it carries no sign-in.
+///
+/// * [`Seat::Unseated`] is the process before a profile is chosen, the boot picker until a choice, a
+///   change-profile, a sign-out, a dev token and a controlled replay. Nothing is restored for it and
+///   nothing may be written for it.
+/// * [`Seat::Seated`] names the Plex Home user's `uuid` (`""` for the account owner) and the
+///   account stamp. Two seats are the same seat only when both match, so a re-login as the same
+///   person with a different token is a new seat.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Seat {
+    #[default]
+    Unseated,
+    Seated { user: String, stamp: String },
+}
+
+impl Seat {
+    /// The seat a publication of `user` under the account `stamp` occupies. Nobody published seats
+    /// nobody, and so does a profile with no stamp (a dev token, an older recording): without a stamp
+    /// a stored per-profile value cannot be told from another sign-in's, so nothing may be read from
+    /// or written to a record. The unstamped case is logged once, so a field report would show it.
+    pub fn of(user: Option<&UserRef>, stamp: &str) -> Seat {
+        match user {
+            Some(user) if !stamp.is_empty() => Seat::Seated { user: user.uuid.clone(), stamp: stamp.to_string() },
+            Some(_) => {
+                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    plx_base::eventlog::log("session: a profile was published without an account stamp; unseated");
+                }
+                Seat::Unseated
+            }
+            None => Seat::Unseated,
+        }
+    }
+
+    /// The seated profile's key (`""` for the owner), or `None` while unseated.
+    pub fn user(&self) -> Option<&str> {
+        match self {
+            Seat::Seated { user, .. } => Some(user),
+            Seat::Unseated => None,
+        }
+    }
 }
 
 pub fn current_snapshot() -> std::sync::Arc<CurrentProfile> {
     CURRENT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned()
-        .unwrap_or_else(|| std::sync::Arc::new(CurrentProfile { user: None, generation: 0 }))
+        .unwrap_or_else(|| std::sync::Arc::new(CurrentProfile { user: None, generation: 0, stamp: String::new() }))
+}
+
+/// The seat the published profile occupies — [`CurrentProfile::seat`] of [`current_snapshot`].
+pub fn current_seat() -> Seat {
+    current_snapshot().seat()
+}
+
+/// Whether the profile `user` (`""` for the account owner) is the one seated now: the allocation-free
+/// question the memory door asks on every recall.
+pub fn is_seated_as(user: &str) -> bool {
+    let profile = current_snapshot();
+    !profile.stamp.is_empty() && profile.user.as_ref().is_some_and(|u| u.uuid == user)
 }
 
 /// Resource-side capability; constructing it borrows, but does not duplicate or retain, the
@@ -83,24 +172,31 @@ impl ProfilePublisher {
         Self { scoped: None, _main_thread: std::marker::PhantomData }
     }
     pub fn scoped(_mt: &plx_base::task::MainThread) -> Self {
-        Self { scoped: Some(std::sync::Arc::new(CurrentProfile { user: None, generation: 0 })),
+        Self { scoped: Some(std::sync::Arc::new(CurrentProfile { user: None, generation: 0, stamp: String::new() })),
             _main_thread: std::marker::PhantomData }
     }
     pub fn snapshot(&self) -> std::sync::Arc<CurrentProfile> {
         self.scoped.clone().unwrap_or_else(current_snapshot)
     }
+    /// Whether this publisher keeps its publications to itself (a controlled replay): they never
+    /// reach the process global, so they seat nobody in the process.
+    pub fn is_scoped(&self) -> bool {
+        self.scoped.is_some()
+    }
     /// A user-confirmed exit from recording resumes ordinary live publication, preserving
     /// the last owner-supplied scope. Replay never receives this transition capability.
     pub fn resume_live(&mut self) {
         if let Some(scoped) = self.scoped.take() {
-            self.publish(scoped.user.clone(), scoped.generation);
+            self.publish(scoped.user.clone(), scoped.generation, scoped.stamp.clone());
         }
     }
-    pub fn publish(&mut self, user: Option<UserRef>, generation: u32) {
+    /// Publish `user` as the active profile under the owner's `generation` and the account `stamp`
+    /// (`grant::account_key` of the account token) the owner published it under.
+    pub fn publish(&mut self, user: Option<UserRef>, generation: u32, stamp: String) {
         #[cfg(any(test, feature = "test-support"))]
-        self.publish_with(user, generation, |_, _| {});
+        self.publish_with(user, generation, stamp, |_, _| {});
         #[cfg(not(any(test, feature = "test-support")))]
-        self.publish_with(user, generation, |user, generation| {
+        self.publish_with(user, generation, stamp, |user, generation| {
             super::account::publish_audio_preferences_profile(user.as_ref(), generation);
             let Some(user) = user else { return; };
             let client_id = peek().client_id.clone();
@@ -108,22 +204,23 @@ impl ProfilePublisher {
             super::account::warm_audio_preferences(client_id, credential, user, generation);
         });
     }
-    fn publish_with<W>(&mut self, user: Option<UserRef>, generation: u32, warm: W)
+    fn publish_with<W>(&mut self, user: Option<UserRef>, generation: u32, stamp: String, warm: W)
     where W: FnOnce(Option<UserRef>, u32) {
         if let Some(scoped) = &mut self.scoped {
-            *scoped = std::sync::Arc::new(CurrentProfile { user, generation });
+            *scoped = std::sync::Arc::new(CurrentProfile { user, generation, stamp });
             return;
         }
         {
-            *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(
-                CurrentProfile { user: user.clone(), generation }));
+            let mut current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+            *current = Some(std::sync::Arc::new(CurrentProfile { user: user.clone(), generation, stamp }));
+            CURRENT_PUBLICATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         warm(user, generation);
     }
     #[cfg(any(test, feature = "test-support"))]
     fn publish_with_warmer_for_test<W>(&mut self, user: Option<UserRef>, generation: u32, warm: W)
     where W: FnOnce(Option<UserRef>, u32) {
-        self.publish_with(user, generation, warm);
+        self.publish_with(user, generation, String::new(), warm);
     }
 }
 
@@ -131,9 +228,17 @@ impl ProfilePublisher {
 /// This is not a controller or a process-global scope allocator. Caller owns teardown/serial guard.
 #[cfg(any(test, feature = "test-support"))]
 pub fn publish_profile_for_test(user: Option<UserRef>, generation: u32) {
+    publish_seat_for_test(user, generation, String::new());
+}
+
+/// [`publish_profile_for_test`] with the account `stamp`, so the published profile occupies a
+/// [`Seat`]. The plain fixture publishes none (an unstamped publication seats nobody), which keeps
+/// every test that does not care about a seat unseated.
+#[cfg(any(test, feature = "test-support"))]
+pub fn publish_seat_for_test(user: Option<UserRef>, generation: u32, stamp: String) {
     plx_base::testlock::assert_held("profile publication fixture");
     let mt = unsafe { plx_base::task::MainThread::assume() };
-    ProfilePublisher::new(&mt).publish(user, generation);
+    ProfilePublisher::new(&mt).publish(user, generation, stamp);
 }
 /// The active profile (name + avatar), if any. Empty title = the owner with no Plex Home selection.
 pub fn current() -> Option<UserRef> {
@@ -203,7 +308,7 @@ static TEST_FILE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 /// surviving every run. Three consequences — the first MEASURED, the second and third read off
 /// the code that produced it:
 ///
-/// * **A test's answer was decided by that file.** `browse::append_sections` calls `resolve_pins`,
+/// * **A test's answer was decided by that file.** `browse::append_sections` calls `resolve_pins_from`,
 ///   which reads this module for the current profile's `home_pins` — so EVERY use of
 ///   `browse::seed_two_source_table_for_test` resolved its favourite libraries against whatever
 ///   record happened to be on that developer's disk. A record for the empty profile key naming
@@ -295,7 +400,6 @@ fn redirect_candidates_for_test(v: Option<Vec<std::path::PathBuf>>) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn redirect_for_test(p: Option<std::path::PathBuf>) {
     plx_base::storage_worker::drain_for_test();
-    REFRESH.lock().unwrap_or_else(|e| e.into_inner()).retry_at = None;
     let _io = io();
     *TEST_FILE.lock().unwrap_or_else(|e| e.into_inner()) = p;
     // A test swapping the scratch file changes what `peek` answers just as surely as a write
@@ -377,6 +481,23 @@ impl TempSession {
             ..Default::default()
         }), current_gen().wrapping_add(1));
     }
+
+    /// **Sign the fixture in and seat `uuid`**: store `account_token` in the scratch record, then
+    /// publish the profile with the stamp of that token, so [`current_seat`] is
+    /// [`Seat::Seated`] and a per-profile write has somewhere to land. [`TempSession::watching`]
+    /// publishes no stamp (an unstamped publication seats nobody), which is what every test that
+    /// does not care about a seat wants. Returns the stamp.
+    pub fn seated(&self, uuid: &str, account_token: &str) -> String {
+        assert!(update(|cur| {
+            let mut next = cur.clone();
+            next.account_token = account_token.into();
+            Some(next)
+        }), "the fixture session takes the account token");
+        let stamp = super::grant::account_key(account_token);
+        publish_seat_for_test(Some(UserRef { uuid: uuid.into(), ..Default::default() }),
+            current_gen().wrapping_add(1), stamp.clone());
+        stamp
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -392,7 +513,7 @@ impl Drop for TempSession {
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct OpaqueExtensions(pub BTreeMap<String, Value>);
+pub struct OpaqueExtensions(pub BTreeMap<String, ::serde_json::Value>);
 
 impl OpaqueExtensions {
     fn is_empty(&self) -> bool {
@@ -413,8 +534,8 @@ pub struct Session {
     /// Install-wide UI language, applied on the next process launch. Absent means System, and
     /// System is not written, so a session that never chose a language serializes exactly as it
     /// did before localization — committed replay initials and the owner digest included.
-    #[serde(default, skip_serializing_if = "plx_platform::i18n::Preference::is_system")]
-    pub language: plx_platform::i18n::Preference,
+    #[serde(default, skip_serializing_if = "plx_os::i18n::Preference::is_system")]
+    pub language: plx_os::i18n::Preference,
     /// Stable `X-Plex-Client-Identifier` — generated once, reused forever (plex.tv binds the pin
     /// and the authorized-device entry to it).
     #[serde(default)]
@@ -485,70 +606,6 @@ pub struct Session {
     /// search term would sign the device out on every boot.
     #[serde(default, deserialize_with = "de_soft_vec")]
     pub recent_searches: Vec<RecentSearches>,
-    /// **The library each top tab was last browsed in**, per profile — so a household with two TV
-    /// libraries opens the one it actually watches instead of whichever the server happens to list
-    /// first.
-    ///
-    /// Without it the tab resolves through `browse::section_of_kind` every launch: owned first,
-    /// then table order, which is the server's order and is not a preference anybody expressed.
-    /// Issue #68 is what that costs when the two are not the same library — the reporter's own
-    /// libraries opened in the order their server listed them, every time.
-    ///
-    /// **Per TYPE, not one entry per profile.** The Movies tab and the TV Shows tab are two
-    /// choices; one slot would make picking a film library forget which shows you browse.
-    ///
-    /// Keyed by profile like [`RecentSearches`] and [`HomePins`], and by (machine id, section key)
-    /// like [`PinnedLib`] — never a section INDEX, which the table renumbers on every
-    /// `browse::reset` and on a re-discovery that appends.
-    ///
-    /// Soft-parsed for the reason every list in this struct is: one hand-edited entry costs that
-    /// entry, never the credentials.
-    #[serde(default, deserialize_with = "de_soft_vec")]
-    pub last_library: Vec<LastLibrary>,
-    /// **How each library was last browsed**, per profile — the sort and its direction, the
-    /// Unwatched switch, the genre and the listing type (Movies / Collections, Shows / Seasons /
-    /// Episodes / Collections) — so a library the viewer sorted by Plays, narrowed to Unwatched
-    /// Action films and left there opens that way again after a restart instead of falling back
-    /// to the server's title order with every filter off (GitHub #278 for the sort, #441 for the
-    /// rest).
-    ///
-    /// **Stored on disk as `library_sorts`**, the name it had when it held only the sort: the key
-    /// is what an older build reads back on a rollback, so it stays ([`Session::home_pins`] set
-    /// the precedent) and each entry grows fields beside the old ones instead of replacing them.
-    ///
-    /// Keyed like [`Session::last_library`] and for its reasons: by profile, because a view is a
-    /// person's habit rather than the television's, and by (machine id, section key), never a
-    /// section INDEX. The sort is recorded by its KEY, never by its menu position: the menu is
-    /// the server's (`Meta.Type[].Sort`) and a PMS update may reorder it. `browse` applies a
-    /// recorded sort or genre only once the server has offered it again, so one a server stopped
-    /// advertising falls silently back to the default rather than being sent blind.
-    ///
-    /// Bounded per profile ([`LibraryViews::CAP`], most recent kept), and choosing a library's
-    /// DEFAULT view back removes its entry rather than recording it, so the list holds only the
-    /// libraries somebody actually changed.
-    ///
-    /// Soft-parsed for the reason every list in this struct is; omitted while empty so a session
-    /// that never changed a view serializes exactly as it did before the field existed.
-    #[serde(rename = "library_sorts", default, deserialize_with = "de_soft_vec",
-        skip_serializing_if = "Vec::is_empty")]
-    pub library_views: Vec<LibraryViews>,
-    /// **The sync-timing correction a profile last tuned for an item**, per profile, keyed by
-    /// (machine id, ratingKey) — never a track id: within one playback a track CHANGE still zeros
-    /// the live offset (`route::commit_subtitle_selection`'s own doc), so by the time this is
-    /// restored at the next resume only the item's own correction is left to remember. This is
-    /// deliberately narrower than a raw in-memory offset would suggest: `crate::player::subtitle_offset_ms`
-    /// is about a single live playback (never persisted whole, on purpose — see
-    /// `session_compat_tests::the_session_file_carries_no_subtitle_offset`), while this is a
-    /// per-item memory a profile builds up across resumes of the SAME file, the same way
-    /// [`Session::library_views`] remembers a per-library habit.
-    ///
-    /// Bounded per profile ([`SubtitleOffsets::CAP`], most recent kept), and setting the offset
-    /// back to Original (0) forgets the entry rather than recording a no-op correction.
-    ///
-    /// Soft-parsed for the reason every list in this struct is; omitted while empty so a session
-    /// that never tuned a subtitle's timing serializes exactly as it did before the field existed.
-    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
-    pub subtitle_offsets: Vec<SubtitleOffsets>,
     /// **Every profile this television has switched to, with the credentials that switch
     /// resolved** — so the who's-watching picker can seat a household member with plex.tv
     /// unreachable. Written by the profile switch on every ONLINE success (replace-by-uuid), read
@@ -568,133 +625,23 @@ pub struct Session {
     /// Soft-parsed like every list in this struct: an entry costs itself, never the credentials.
     #[serde(default, deserialize_with = "de_profile_cache")]
     pub profiles: Vec<ProfileCreds>,
-    /// The install's playback-quality preference. `None` is deliberately distinct from an
-    /// explicit value: every session written before this field existed lands there and must keep
-    /// the old **Original** behaviour rather than being migrated onto automatic playback.
-    ///
-    /// A newly-created session writes an explicit default through [`PlaybackQuality::fresh_default`].
-    /// That default may become Auto only when the playback owner exposes a positive readiness
-    /// gate. The integrated HLS prime/swap path opens it for fresh installs; old files remain
-    /// Original because their absent field is not reinterpreted. Unknown or malformed future
-    /// values soften to `None`, and therefore Original,
-    /// instead of making the credentials file fail to parse.
-    #[serde(default, deserialize_with = "de_soft_playback_quality")]
-    pub playback_quality: Option<PlaybackQuality>,
-    /// Install-wide original-stream override; malformed/future values remain automatic.
-    #[serde(default, deserialize_with = "de_soft_direct_play_mode")]
-    pub direct_play_mode: DirectPlayMode,
-    /// **Automatically Sign In** — skip the boot who's-watching picker and enter as
-    /// [`Session::user`]. Install-wide, not per profile: the boot gate reads it before anyone is
-    /// seated this run. Absence is **off**, which is today's picker. Enabling it from Settings
-    /// while a profile is already active is an explicit opt-in to skip that profile's PIN on the
-    /// next launch; BACK out of the picker still refuses a protected resume when this is off.
-    ///
-    /// Soft-parsed so a hand-edited or future-shaped value costs the preference, never the
-    /// credentials.
-    #[serde(default, deserialize_with = "de_soft_bool")]
-    pub auto_sign_in: bool,
-    /// **Hero trailer autoplay.** Detail default is on. Absence is on, so a session written
-    /// before this field existed does not silently lose the preview. Explicit `false` stays off.
-    /// Soft-parsed to on rather than failing the credentials file. The bound Starfish surface
-    /// has no mute, so this is also the only sound control.
-    #[serde(default = "default_true", deserialize_with = "de_soft_bool_on")]
-    pub trailer_autoplay: bool,
-    /// **How bright the client-rendered subtitles are drawn** — white, or a rung of the grey
-    /// ladder under it. Install-wide like [`Session::playback_quality`], because it answers a fact
-    /// about the PANEL (an HDR picture maps graphics white to a searing level) rather than about
-    /// whoever is watching. Absence is white, which is what every build before the field drew.
-    /// Soft-parsed: an unknown spelling costs the preference, never the credentials.
-    #[serde(default, deserialize_with = "de_soft_subtitle_tone")]
-    pub subtitle_tone: SubtitleTone,
-    /// **The client-rendered subtitle caption's text size.** Install-wide like
-    /// [`Session::subtitle_tone`]. Absence is Medium — see [`SubtitleSize`]'s own doc. Skipped at
-    /// the default so a session predating this field — committed replay fixtures included —
-    /// serializes exactly as it did before.
-    #[serde(default, deserialize_with = "de_soft_subtitle_size", skip_serializing_if = "is_default_subtitle_size")]
-    pub subtitle_size: SubtitleSize,
-    /// **The client-rendered subtitle caption's vertical placement.** Install-wide like
-    /// [`Session::subtitle_tone`]. Absence is Low — see [`SubtitlePosition`]'s own doc. Skipped at
-    /// the default for the same reason as [`Session::subtitle_size`].
-    #[serde(default, deserialize_with = "de_soft_subtitle_position", skip_serializing_if = "is_default_subtitle_position")]
-    pub subtitle_position: SubtitlePosition,
-    /// **What the player does when an episode with a successor reaches its credits** — see
-    /// [`NextEpisodeMode`]. Install-wide like [`Session::playback_quality`]. Absence is
-    /// Countdown, which is what every build before the field did. Skipped at the default so a
-    /// session predating this field — committed replay fixtures included — serializes exactly as
-    /// it did before.
-    #[serde(default, deserialize_with = "de_soft_next_episode_mode", skip_serializing_if = "is_default_next_episode_mode")]
-    pub next_episode_mode: NextEpisodeMode,
-    /// **How far one Left/Right press jumps in the player** — see [`SkipInterval`]. Install-wide
-    /// like [`Session::playback_quality`], one value for both directions. Absence is 10 s, the
-    /// hop every build before the field made. Skipped at the default so a session predating this
-    /// field — committed replay fixtures included — serializes exactly as it did before.
-    #[serde(default, deserialize_with = "de_soft_skip_interval", skip_serializing_if = "is_default_skip_interval")]
-    pub skip_interval: SkipInterval,
-    /// **What OK does on a Continue Watching card** — see [`DeckPress`]. Install-wide like
-    /// [`Session::playback_quality`]. Absence is Details, so a session written before the field
-    /// existed opens the page on OK. Skipped at the default so a session predating this field —
-    /// committed replay fixtures included — serializes exactly as it did before.
-    #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
-    pub deck_press: DeckPress,
+    // Fork Rofocale11: Nuvio Native keeps the rating-source preference (IMDb vs Rotten Tomatoes)
+    // in the canonical session record. Upstream's `Preferences` refactor has no such key and no
+    // plex.tv rating source it could carry, so keep this fork-only field on `Session` itself while
+    // every other preference takes upstream's flattened `prefs`. Dropping it would lose the setting
+    // and break the existing `Session::rating_source`/`with_rating_source` accessors and the DB8
+    // canonical round-trip below.
     #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
     pub rating_source: RatingSource,
-    /// **Device-wide ambient memory**: the last hero `UltraBlurColors` envelope Home actually
-    /// rendered on this television, so a route in the Settings/first-run family that opens
-    /// BEFORE Home has fetched anything this boot — first-run consent moved ahead of the
-    /// profile picker is the case that motivated this — can still seed its frozen ground from
-    /// real light instead of falling all the way to the design system's authored atmosphere
-    /// (`theme::ROUTE_GROUND_FALLBACK`). See `plx_ui::route_screen::RouteGround::draw_home`,
-    /// the only reader, and [`record_last_hero`], its one writer.
-    ///
-    /// Not keyed by profile: it says nothing about content history, only about what colour light
-    /// this SET last showed, which is why it lives beside `client_id` rather than in a per-profile
-    /// section like [`Session::home_pins`].
-    #[serde(default, deserialize_with = "de_soft_hero_blur")]
-    pub last_hero_blur: Option<[[f32; 3]; 4]>,
-    /// **The person's answer to "Connect without encryption?"**, one entry per server
-    /// (`machineIdentifier`) they were asked about. The account half of the key is this file: it
-    /// is the signed-in account's, and it is cleared with the credentials on sign-out, so an
-    /// answer never outlives the account that gave it.
-    ///
-    /// This is a CHOICE, never a transport grant: nothing here says which address was used or
-    /// lets a plaintext origin be reactivated from disk. A credential goes to a plaintext origin
-    /// only under a live `plex::grant::PlaintextGrant`, minted in-process from a FRESH eligible
-    /// probe and this answer together (`docs/shared-servers.md`). An absent entry is "never
-    /// asked".
-    ///
-    /// Soft-parsed for the reason every list in this struct is: a hand-edited entry costs that
-    /// entry — and an entry that cannot be read is "never asked", the closed direction.
-    #[serde(default, deserialize_with = "de_soft_vec")]
-    pub plaintext_consent: Vec<PlaintextConsent>,
-    /// **Each server's remembered public key** (issue #380, for the offline fallback of #378), one
-    /// entry per `machineIdentifier`: the pin of the leaf certificate the server presented the last
-    /// time a connection to it passed STRICT verification and its `/identity` named that machine.
-    /// A television cold-booted with no internet has a wrong clock, so the server's own valid
-    /// certificate fails its date check; the key it had is what lets the next layer tell "the
-    /// server I know" from a stranger. [`Session::server_key_pin`] is the accessor and
-    /// [`project_server_keys`] its reader: `net::keypin` uses the key to recognise the server when
-    /// only the certificate's dates fail (issue #378).
-    ///
-    /// Session-level, not part of [`ServerRef`], [`SourceRef`] or [`ProfileCreds`]: those are
-    /// cloned per profile, while a key is a fact about one machine seen from this television and
-    /// this account. It sits in the PUBLIC preferences, so a pin write is a public-only edit with no
-    /// credential reseal; the price is that sign-out does not take it with the credentials by
-    /// itself. The native `Mutation::ClearTenure` retains public preferences whole EXCEPT the keys
-    /// in `storage::state::ACCOUNT_BOUND_PREFERENCES`, and this field's key is one: sign-out, and
-    /// so "Delete all local data" which follows it, leave the stored record with no learned key. The
-    /// legacy file store drops it with the file. Skipped on write while empty, so a session that never learned one round-trips
-    /// byte-identical to what it wrote before. Soft-parsed: an unreadable entry costs that entry.
-    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
-    pub server_key_pins: Vec<ServerKeyPin>,
-    /// Plex Pass per-track transcoder DSP preference (issue #266): dialog boost / loudness
-    /// normalization. `NONE` by default and skipped on write while `NONE`, so every session
-    /// persisted before the field existed — and every viewer who never opted in — round-trips
-    /// byte-identical to what it wrote before. Restored into `player::audio_enhancements` at boot
-    /// and at the credentials handoff; written by `player::set_audio_enhancements`. Soft-parsed
-    /// like every preference in this struct: an unknown shape costs the preference, never the
-    /// credentials.
-    #[serde(default, deserialize_with = "de_soft_audio_enhancements", skip_serializing_if = "crate::plex::AudioEnhancements::is_none")]
-    pub audio_enhancements: crate::plex::AudioEnhancements,
+    /// Every preference key but `language` (`ui_resolution`, `hold_hint_taught`, `profile_prefs`, the per-profile home of playback
+    /// and display settings, and those settings' frozen top-level keys every profile
+    /// falls back to (`trailer_autoplay` among them), `auto_sign_in`,
+    /// `last_hero_blur`, `plaintext_consent`, `server_key_pins`, `last_library`,
+    /// `library_sorts`, `track_memory`, `subtitle_offsets`), flattened so the keys sit at the top level of the file under
+    /// the same keys they always had. Declared before [`Session::extensions`]:
+    /// a flattened struct takes its keys first, so the unknown-key map sees only keys nobody models.
+    #[serde(flatten)]
+    pub prefs: Preferences,
     #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
     pub extensions: OpaqueExtensions,
 
@@ -720,44 +667,17 @@ struct CanonicalSessionAuth {
 #[derive(Serialize, Deserialize)]
 struct CanonicalSessionPreferences {
     #[serde(default)]
-    language: plx_platform::i18n::Preference,
-    #[serde(default, deserialize_with = "de_soft_playback_quality")]
-    playback_quality: Option<PlaybackQuality>,
-    #[serde(default, deserialize_with = "de_soft_direct_play_mode")]
-    direct_play_mode: DirectPlayMode,
-    #[serde(default, deserialize_with = "de_soft_bool")]
-    auto_sign_in: bool,
-    #[serde(default, deserialize_with = "de_soft_vec")]
-    last_library: Vec<LastLibrary>,
-    #[serde(rename = "library_sorts", default, deserialize_with = "de_soft_vec",
-        skip_serializing_if = "Vec::is_empty")]
-    library_views: Vec<LibraryViews>,
-    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
-    subtitle_offsets: Vec<SubtitleOffsets>,
-    #[serde(default, deserialize_with = "de_soft_hero_blur")]
-    last_hero_blur: Option<[[f32; 3]; 4]>,
-    #[serde(default = "default_true", deserialize_with = "de_soft_bool_on")]
-    trailer_autoplay: bool,
-    #[serde(default, deserialize_with = "de_soft_subtitle_tone")]
-    subtitle_tone: SubtitleTone,
-    #[serde(default, deserialize_with = "de_soft_subtitle_size", skip_serializing_if = "is_default_subtitle_size")]
-    subtitle_size: SubtitleSize,
-    #[serde(default, deserialize_with = "de_soft_subtitle_position", skip_serializing_if = "is_default_subtitle_position")]
-    subtitle_position: SubtitlePosition,
-    #[serde(default, deserialize_with = "de_soft_next_episode_mode", skip_serializing_if = "is_default_next_episode_mode")]
-    next_episode_mode: NextEpisodeMode,
-    #[serde(default, deserialize_with = "de_soft_skip_interval", skip_serializing_if = "is_default_skip_interval")]
-    skip_interval: SkipInterval,
-    #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
-    deck_press: DeckPress,
+    language: plx_os::i18n::Preference,
+    // Fork Rofocale11: the rating-source preference must survive the canonical DB8 round-trip.
+    // Upstream's flattened `Preferences` has no rating-source key (there is no plex.tv rating
+    // source), so keep this fork-only top-level key here; otherwise a pick would be lost on reload.
     #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
     rating_source: RatingSource,
-    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
-    plaintext_consent: Vec<PlaintextConsent>,
-    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
-    server_key_pins: Vec<ServerKeyPin>,
-    #[serde(default, deserialize_with = "de_soft_audio_enhancements", skip_serializing_if = "crate::plex::AudioEnhancements::is_none")]
-    audio_enhancements: crate::plex::AudioEnhancements,
+    /// Every flattened preference key (playback and display settings, the A5 rows and the two memory-door
+    /// lists), flattened ahead of `extensions` so a flattened struct takes its keys first and
+    /// `extensions` still sees only unknown ones.
+    #[serde(flatten)]
+    prefs: Preferences,
     /// Parsed only so a future preference does not make the known fields disappear. The shipping
     /// adapter merges these opaque keys from the current DB8 public payload before every rewrite;
     /// they are not promoted into the Session domain object.
@@ -775,25 +695,12 @@ struct CanonicalSessionPreferences {
 impl Default for CanonicalSessionPreferences {
     fn default() -> Self {
         Self {
-            language: plx_platform::i18n::Preference::System,
-            playback_quality: None,
-            direct_play_mode: DirectPlayMode::Auto,
-            auto_sign_in: false,
-            last_library: Vec::new(),
-            library_views: Vec::new(),
-            subtitle_offsets: Vec::new(),
-            last_hero_blur: None,
-            trailer_autoplay: true,
-            subtitle_tone: SubtitleTone::White,
-            subtitle_size: SubtitleSize::Medium,
-            subtitle_position: SubtitlePosition::Low,
-            next_episode_mode: NextEpisodeMode::Countdown,
-            skip_interval: SkipInterval::Seconds10,
-            deck_press: DeckPress::Details,
+            language: plx_os::i18n::Preference::System,
+            // Fork Rofocale11: keep the fork's IMDb default for its rating-source preference —
+            // upstream's `Preferences` has no such field, so this default must be supplied here
+            // for the canonical record whose `rating_source` key the fork owns.
             rating_source: RatingSource::Imdb,
-            plaintext_consent: Vec::new(),
-            server_key_pins: Vec::new(),
-            audio_enhancements: crate::plex::AudioEnhancements::NONE,
+            prefs: Preferences { trailer_autoplay: true, ..Preferences::default() },
             extensions: BTreeMap::new(),
         }
     }
@@ -807,7 +714,7 @@ impl Default for CanonicalSessionPreferences {
 #[allow(dead_code)] // Connected by the Stage B Session adapter.
 pub fn split_canonical(
     session: &Session,
-) -> Result<(plx_platform::storage::state::PublicPayload, String), ()> {
+) -> Result<(plx_os::storage::state::PublicPayload, String), ()> {
     // `profiles` in a v1 extension is opaque, never an active credential cache. Refuse an
     // ambiguous v2 write; only the typed field is permitted to carry active credentials.
     if session.extensions.0.contains_key("profiles") { return Err(()); }
@@ -826,33 +733,29 @@ pub fn split_canonical(
     Ok((split_public(session)?, auth))
 }
 
-fn split_public(session: &Session) -> Result<plx_platform::storage::state::PublicPayload, ()> {
-    let preferences = serde_json::to_value(CanonicalSessionPreferences {
+fn split_public(session: &Session) -> Result<plx_os::storage::state::PublicPayload, ()> {
+    let mut preferences = serde_json::to_value(CanonicalSessionPreferences {
         language: session.language,
-        playback_quality: session.playback_quality,
-        direct_play_mode: session.direct_play_mode,
-        auto_sign_in: session.auto_sign_in,
-        last_library: session.last_library.clone(),
-        library_views: session.library_views.clone(),
-        subtitle_offsets: session.subtitle_offsets.clone(),
-        last_hero_blur: session.last_hero_blur,
-        trailer_autoplay: session.trailer_autoplay,
-        subtitle_tone: session.subtitle_tone,
-        subtitle_size: session.subtitle_size,
-        subtitle_position: session.subtitle_position,
-        next_episode_mode: session.next_episode_mode,
-        skip_interval: session.skip_interval,
-        deck_press: session.deck_press,
+        // Fork Rofocale11: carry the fork's rating-source preference into the canonical public
+        // record — upstream's `prefs` clone does not include it, so without this explicit line a
+        // Nuvio rating-source pick would never be persisted to DB8.
         rating_source: session.rating_source,
-        plaintext_consent: session.plaintext_consent.clone(),
-        server_key_pins: session.server_key_pins.clone(),
-        audio_enhancements: session.audio_enhancements,
+        prefs: session.prefs.clone(),
         extensions: BTreeMap::new(),
     })
     .map_err(|_| ())?;
+    // `plaintext_consent` is written as `[]` in the legacy file (its row has no skip attribute) but
+    // the canonical record has always omitted it while empty: one flattened field carries one
+    // attribute set, so the canonical form drops the empty key here (pinned by
+    // `prefs_characterisation_tests`, the default session's canonical record).
+    if session.prefs.plaintext_consent.is_empty() {
+        if let Some(object) = preferences.as_object_mut() {
+            object.remove("plaintext_consent");
+        }
+    }
     let pins = serde_json::to_value(&session.home_pins).map_err(|_| ())?;
     let recents = serde_json::to_value(&session.recent_searches).map_err(|_| ())?;
-    Ok(plx_platform::storage::state::PublicPayload {
+    Ok(plx_os::storage::state::PublicPayload {
             preferences,
             client_id: (!session.client_id.is_empty()).then(|| session.client_id.clone()),
             // Profile/server bootstrap metadata is personal and only useful together with its
@@ -874,7 +777,7 @@ fn split_public(session: &Session) -> Result<plx_platform::storage::state::Publi
 /// session would turn corruption into an authenticated state.
 #[allow(dead_code)] // Connected by the Stage B Session adapter.
 pub fn join_canonical(
-    public: &plx_platform::storage::state::PublicPayload,
+    public: &plx_os::storage::state::PublicPayload,
     protected: &str,
 ) -> Result<Session, ()> {
     let auth: CanonicalSessionAuth = serde_json::from_str(protected).map_err(|_| ())?;
@@ -904,31 +807,18 @@ pub fn join_canonical(
         home_pins,
         recent_searches,
         language: preferences.language,
-        playback_quality: preferences.playback_quality,
-        direct_play_mode: preferences.direct_play_mode,
-        auto_sign_in: preferences.auto_sign_in,
-        last_library: preferences.last_library,
-        library_views: preferences.library_views,
-        subtitle_offsets: preferences.subtitle_offsets,
-        last_hero_blur: preferences.last_hero_blur,
-        trailer_autoplay: preferences.trailer_autoplay,
-        subtitle_tone: preferences.subtitle_tone,
-        subtitle_size: preferences.subtitle_size,
-        subtitle_position: preferences.subtitle_position,
-        next_episode_mode: preferences.next_episode_mode,
-        skip_interval: preferences.skip_interval,
-        deck_press: preferences.deck_press,
+        // Fork Rofocale11: restore the fork's rating-source preference from the canonical record —
+        // upstream's `prefs` field does not carry it, so without this line the Nuvio rating-source
+        // pick would reset to IMDb every time the session is reloaded from DB8.
         rating_source: preferences.rating_source,
-        plaintext_consent: preferences.plaintext_consent,
-        server_key_pins: preferences.server_key_pins,
-        audio_enhancements: preferences.audio_enhancements,
+        prefs: preferences.prefs,
         profiles,
         extensions: auth.extensions,
     })
 }
 
 /// Public snapshot for a locked protected bundle. It deliberately contains no offline credentials.
-fn public_session(public: &plx_platform::storage::state::PublicPayload) -> Session {
+fn public_session(public: &plx_os::storage::state::PublicPayload) -> Session {
     let preferences = serde_json::from_value::<CanonicalSessionPreferences>(
         public.preferences.clone(),
     )
@@ -938,24 +828,11 @@ fn public_session(public: &plx_platform::storage::state::PublicPayload) -> Sessi
     Session {
         client_id: public.client_id.clone().unwrap_or_default(),
         language: preferences.language,
-        playback_quality: preferences.playback_quality,
-        direct_play_mode: preferences.direct_play_mode,
-        auto_sign_in: preferences.auto_sign_in,
-        last_library: preferences.last_library,
-        library_views: preferences.library_views,
-        subtitle_offsets: preferences.subtitle_offsets,
-        last_hero_blur: preferences.last_hero_blur,
-        trailer_autoplay: preferences.trailer_autoplay,
-        subtitle_tone: preferences.subtitle_tone,
-        subtitle_size: preferences.subtitle_size,
-        subtitle_position: preferences.subtitle_position,
-        next_episode_mode: preferences.next_episode_mode,
-        skip_interval: preferences.skip_interval,
-        deck_press: preferences.deck_press,
+        // Fork Rofocale11: restore the fork's rating-source preference from the canonical record —
+        // upstream's `prefs` field does not carry it, so without this line the Nuvio rating-source
+        // pick would reset to IMDb every time the session is reloaded from DB8.
         rating_source: preferences.rating_source,
-        plaintext_consent: preferences.plaintext_consent,
-        server_key_pins: preferences.server_key_pins,
-        audio_enhancements: preferences.audio_enhancements,
+        prefs: preferences.prefs,
         home_pins, recent_searches,
         ..Default::default()
     }
@@ -993,7 +870,7 @@ fn protected_fields_equal(left: &Session, right: &Session) -> bool {
     matches!((protected_fields(left), protected_fields(right)), (Ok(left), Ok(right)) if left == right)
 }
 fn protected_matches(session: &Session, protected: &str) -> bool {
-    join_canonical(&plx_platform::storage::state::PublicPayload::default(), protected)
+    join_canonical(&plx_os::storage::state::PublicPayload::default(), protected)
         .is_ok_and(|previous| protected_fields_equal(&previous, session))
 }
 
@@ -1009,75 +886,15 @@ fn valid_profiles(profiles: Vec<ProfileCreds>) -> Vec<ProfileCreds> {
     }).collect()
 }
 
-/// Remember the hero envelope Home is showing right now, best-effort, for [`Session::last_hero_blur`].
-///
-/// Cheap to call on every route-ground latch: [`update`] is a single read-modify-write, and this
-/// skips the write entirely when the stored envelope already matches, so parking on the same hero
-/// for minutes costs nothing beyond the initial read. A session with no `client_id` yet (nothing
-/// signed in) is a deliberate no-op — see [`update`]'s doc — which is fine here: there is no
-/// pre-Home route to seed before an account exists.
-///
-/// Returns whether the file was actually rewritten — `false` both when nothing is signed in yet
-/// ([`update`]'s own no-op rule) and when the stored envelope already matches, which is how a test
-/// can grade the skip without inspecting file bytes.
-pub fn record_last_hero(blur: [[f32; 3]; 4]) -> bool {
-    update(|cur| {
-        if cur.last_hero_blur == Some(blur) {
-            return None;
-        }
-        let mut next = cur.clone();
-        next.last_hero_blur = Some(blur);
-        Some(next)
-    })
-}
-
-/// The last hero envelope recorded by [`record_last_hero`], or `None` on a fresh device that has
-/// never rendered one.
-pub fn last_hero() -> Option<[[f32; 3]; 4]> {
-    peek().last_hero_blur
-}
-
 /// Persist Automatically Sign In through [`update`], so a concurrent roster/recents write cannot
 /// lose the switch. Returns whether the file was rewritten.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_auto_sign_in(on: bool) -> bool {
     update(|cur| {
-        if cur.auto_sign_in == on {
+        if cur.prefs.auto_sign_in == on {
             return None;
         }
         Some(cur.with_auto_sign_in(on))
-    })
-}
-
-/// Persist hero trailer autoplay. Same write door as [`set_auto_sign_in`].
-#[cfg(any(test, feature = "test-support"))]
-pub fn set_trailer_autoplay(on: bool) -> bool {
-    update(|cur| {
-        if cur.trailer_autoplay == on {
-            return None;
-        }
-        Some(cur.with_trailer_autoplay(on))
-    })
-}
-
-/// Persist the subtitle tone through [`update`], merging with the current disk record.
-pub fn set_subtitle_tone(tone: SubtitleTone) -> bool {
-    update(|cur| {
-        if cur.subtitle_tone == tone {
-            return None;
-        }
-        Some(cur.with_subtitle_tone(tone))
-    })
-}
-
-/// Persist the Plex Pass audio-DSP preference (issue #266) through [`update`], merging with the
-/// current disk record — the same door as [`set_subtitle_tone`].
-pub fn set_audio_enhancements(enhancements: crate::plex::AudioEnhancements) -> bool {
-    update(|cur| {
-        if cur.audio_enhancements == enhancements {
-            return None;
-        }
-        Some(cur.with_audio_enhancements(enhancements))
     })
 }
 
@@ -1144,7 +961,7 @@ impl PlaybackQuality {
     /// Display text in the UI language with its regional digits; a log line names the rung by
     /// `{:?}` instead, so the log does not depend on the viewer's language.
     pub fn label(self) -> String {
-        use plx_platform::i18n::{current, msg};
+        use plx_os::i18n::{current, msg};
         let (lines, kbps): (i64, i64) = match self {
             PlaybackQuality::Auto => return msg::settings_playback_auto().to_owned(),
             PlaybackQuality::Original => return msg::widgets_quality_original().to_owned(),
@@ -1163,6 +980,18 @@ impl PlaybackQuality {
         format!("{lines}p \u{b7} {rate}")
     }
 
+    /// The rung's SHORT name for a row that has another part to read beside it ("720p"): the
+    /// picture height alone, which is the format's own conventional name in every shipped language.
+    /// Auto and Original name themselves ([`Self::label`]).
+    pub fn short_label(self) -> String {
+        match self {
+            PlaybackQuality::Auto | PlaybackQuality::Original => self.label(),
+            PlaybackQuality::P1080High | PlaybackQuality::P1080 => "1080p".to_owned(),
+            PlaybackQuality::P720 | PlaybackQuality::P720Low => "720p".to_owned(),
+            PlaybackQuality::P480 => "480p".to_owned(),
+        }
+    }
+
     /// A missing field in an OLD file is handled by [`Session::playback_quality`] and is always
     /// Original. This is only for a genuinely NEW file, where Auto is allowed to become the
     /// default after (and only after) its whole playback path declares itself ready.
@@ -1178,15 +1007,27 @@ impl PlaybackQuality {
 /// The persisted subtitle tones, lightest first. Like [`PlaybackQuality`] the spelling on disk is
 /// explicit: these strings are a file-format contract and must survive a variant rename.
 ///
-/// A ladder of GREYS rather than a colour wheel, because the job is brightness: over an HDR
+/// Mostly a ladder of GREYS rather than a colour wheel, because the job is brightness: over an HDR
 /// picture the panel maps graphics white far above where it sits in SDR, and the only thing that
-/// makes a caption comfortable there is less light. What each rung looks like is `ui::theme`'s
-/// (`subtitle_ink`); this type only names them.
+/// makes a caption comfortable there is less light. The one exception is a legibility colour,
+/// [`SubtitleTone::Yellow`] (a viewer asks for it for readability, discussion #1193). The greys
+/// are inks `ui::theme` tints a drawn caption with (`SUBTITLE_INKS`); a COLOUR rung has a text
+/// colour, [`SubtitleTone::text_rgb8`]: a synthesized text-subtitle header takes it as its primary
+/// colour (media cannot name `ui::theme`), and an authored ASS/SSA script takes it in the PrimaryColour of
+/// every pure-white style (`plx_media::player::ass_ink`), so a cue's own inline colours and a script's
+/// other-coloured styles are left alone, while the client's own drawn text takes the same colour from the matching
+/// `ui::theme::SUBTITLE_INKS` entry, which a test ties to it. Adding a colour is one variant, one
+/// `LADDER` rung, one arm of `text_rgb8` and that theme entry.
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubtitleTone {
     #[default]
     #[serde(rename = "white")]
     White,
+    /// Added after the greys were persisted, so a build from before it reads `"yellow"` as a value
+    /// it cannot parse: the per-profile field falls back to the install's older value and the
+    /// install key to white (both are parsed softly), never a failed load.
+    #[serde(rename = "yellow")]
+    Yellow,
     #[serde(rename = "grey_85")]
     Silver,
     #[serde(rename = "grey_70")]
@@ -1201,8 +1042,9 @@ pub enum SubtitleTone {
 
 impl SubtitleTone {
     /// Every rung, lightest first — the order the picker draws them in.
-    pub const LADDER: [SubtitleTone; 6] = [
+    pub const LADDER: [SubtitleTone; 7] = [
         SubtitleTone::White,
+        SubtitleTone::Yellow,
         SubtitleTone::Silver,
         SubtitleTone::LightGrey,
         SubtitleTone::Grey,
@@ -1215,6 +1057,7 @@ impl SubtitleTone {
     pub fn label(self) -> &'static str {
         match self {
             SubtitleTone::White => "White",
+            SubtitleTone::Yellow => "Yellow",
             SubtitleTone::Silver => "Silver",
             SubtitleTone::LightGrey => "Light gray",
             SubtitleTone::Grey => "Gray",
@@ -1232,11 +1075,27 @@ impl SubtitleTone {
     pub fn index(self) -> u8 {
         Self::LADDER.iter().position(|&t| t == self).unwrap_or(0) as u8
     }
+
+    /// The colour this rung paints text in, as 8-bit sRGB, or `None` for white and the greys (which
+    /// only dim: `ui::theme::SUBTITLE_INKS` tints with them). The colour code media's header reads;
+    /// see the type's own doc for the theme entry it is tied to.
+    pub const fn text_rgb8(self) -> Option<[u8; 3]> {
+        match self {
+            SubtitleTone::Yellow => Some([0xff, 0xe6, 0x1a]),
+            SubtitleTone::White
+            | SubtitleTone::Silver
+            | SubtitleTone::LightGrey
+            | SubtitleTone::Grey
+            | SubtitleTone::DarkGrey
+            | SubtitleTone::Charcoal => None,
+        }
+    }
 }
 
-/// The persisted subtitle text sizes, smallest first — install-wide like [`SubtitleTone`]: a
-/// legible caption size answers a fact about the PANEL and the couch distance from it, not about
-/// whoever is watching. Absence is `Medium`, which is the caption face every build before this
+/// The persisted subtitle text sizes, smallest first — one per PROFILE, like [`SubtitleTone`]: a
+/// legible caption size is as much about the viewer's eyes as the panel and the couch distance, and
+/// two people on one couch differ. A profile that has not picked reads the install's older key.
+/// Absence is `Medium`, which is the caption face every build before this
 /// preference drew (`appkit::player_hud`'s hardcoded `sz = 36`). Spelling on disk is explicit, like
 /// every other persisted ladder here.
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1250,15 +1109,22 @@ pub enum SubtitleSize {
     Large,
     #[serde(rename = "extra_large")]
     ExtraLarge,
+    /// Added on top of the ladder rather than by moving the other rungs up, so no saved pick
+    /// changes size. A build from before it reads `"huge"` as a value it cannot parse: the
+    /// per-profile field falls back to the install's older value and the install key to `Medium`
+    /// (both are parsed softly), never a failed load.
+    #[serde(rename = "huge")]
+    Huge,
 }
 
 impl SubtitleSize {
     /// Every rung, smallest first — the order the picker lists them in.
-    pub const LADDER: [SubtitleSize; 4] = [
+    pub const LADDER: [SubtitleSize; 5] = [
         SubtitleSize::Small,
         SubtitleSize::Medium,
         SubtitleSize::Large,
         SubtitleSize::ExtraLarge,
+        SubtitleSize::Huge,
     ];
 
     /// An in-memory index back to a rung — out of range is `Medium`, never a neighbouring rung,
@@ -1272,9 +1138,9 @@ impl SubtitleSize {
     }
 }
 
-/// The persisted subtitle vertical placements, lowest first — install-wide like [`SubtitleTone`].
+/// The persisted subtitle vertical placements, lowest first — one per profile, like [`SubtitleTone`].
 /// Absence is `Low`, which is where every build before this preference drew the caption
-/// (`appkit::player_hud`'s fixed `SUB_BASE_Y`/`SUB_CEIL_Y` baseline). Only the plain-text caption draw
+/// (`media::player::text_style`'s fixed `SUB_BASE_Y` baseline, lifted to the HUD's `HudBand` ceiling). Only the plain-text caption draw
 /// moves with this; image (PGS/VobSub) captions and native ASS/SSA keep their own placement
 /// (`docs/ass-subtitles.md`).
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1307,7 +1173,7 @@ impl SubtitlePosition {
     }
 }
 
-/// What the player does when an episode that has a successor reaches its credits — install-wide,
+/// What the player does when an episode that has a successor reaches its credits — one per profile,
 /// like [`SubtitleTone`]. Absence is `Countdown`, the Up Next tile and its 10 s countdown every
 /// build before this preference showed. `AfterCredits` shows nothing during the credits and
 /// starts the next episode only when the stream ends; `Off` shows nothing and, at the end of the
@@ -1342,7 +1208,7 @@ impl NextEpisodeMode {
     }
 }
 
-/// How far one Left/Right press jumps in the player (and the trailer transport) — install-wide
+/// How far one Left/Right press jumps in the player (and the trailer transport) — one per profile
 /// like [`SubtitleTone`], the same for both directions. Absence is `Seconds10`, the fixed hop
 /// every build before this preference made. A closed set rather than a free number so the
 /// telemetry code for a pick is a fixed string and a hand-edited file cannot ask for a
@@ -1398,9 +1264,10 @@ impl SkipInterval {
     }
 }
 
-/// What OK does on a Continue Watching card — install-wide, like [`SubtitleTone`]. Absence is
-/// `Details`: OK opens the movie or episode page, exactly as on any other shelf, and the card's
-/// menu leads with Play (and the card draws no amber ▶, which promises a press that plays).
+/// What OK does on a Continue Watching card — one per profile, like [`SubtitleTone`]. Absence is
+/// `Details`: OK opens the movie page, exactly as on any other shelf, or for an episode the SHOW's
+/// page on the card's season; the card's menu leads with Play (and the card draws no amber ▶, which
+/// promises a press that plays).
 /// `Play` is what every build before this preference did: OK plays or resumes at once.
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeckPress {
@@ -1432,6 +1299,10 @@ impl DeckPress {
     }
 }
 
+// Fork Rofocale11: Nuvio Native's rating-source preference (IMDb vs Rotten Tomatoes) is a
+// fork-only setting stored in the canonical session record; upstream has no plex.tv rating source
+// and defines no `RatingSource` type. Keep the fork's enum and its soft-parsers, and also keep all
+// of upstream's new setting enums below them.
 /// The score provider shown by Nuvio Native. Missing scores stay absent.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1446,6 +1317,382 @@ fn de_soft_rating_source<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Ratin
 }
 fn is_default_rating_source(source: &RatingSource) -> bool { *source == RatingSource::Imdb }
 
+/// **The retired single-choice ladder** the Details setting was before it became a set of parts
+/// (Under posters v3): kept only to READ an older profile's record and to WRITE the nearest rung
+/// beside the parts, so a build that predates the parts reads something sensible instead of losing
+/// the choice. plex's own enum, because plex does not name `ui`. Absence, and any spelling this
+/// build does not know, is `YearLength`.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnderPostersLadder {
+    /// "2019 · 2h 14m" (the default).
+    #[default]
+    #[serde(rename = "year_length")]
+    YearLength,
+    #[serde(rename = "genre")]
+    Genre,
+    /// "4K · HDR".
+    #[serde(rename = "video")]
+    Video,
+    /// "PG-13 · 7.8".
+    #[serde(rename = "age_rating_score")]
+    AgeRatingScore,
+    /// No details line.
+    #[serde(rename = "none")]
+    None,
+}
+
+impl UnderPostersLadder {
+    /// Every rung the old picker listed.
+    pub const LADDER: [UnderPostersLadder; 5] = [
+        UnderPostersLadder::YearLength,
+        UnderPostersLadder::Genre,
+        UnderPostersLadder::Video,
+        UnderPostersLadder::AgeRatingScore,
+        UnderPostersLadder::None,
+    ];
+
+    /// **The movie parts an old rung stands for** (the migration): Year · Length, Genre, Video
+    /// quality, Age rating · Score, Nothing.
+    pub fn movie_parts(self) -> DetailParts {
+        match self {
+            UnderPostersLadder::YearLength => DetailParts::MOVIE_DEFAULT,
+            UnderPostersLadder::Genre => DetailParts::of(&[DetailPart::Genre]),
+            UnderPostersLadder::Video => DetailParts::of(&[DetailPart::VideoQuality]),
+            UnderPostersLadder::AgeRatingScore => DetailParts::of(&[DetailPart::AgeRating, DetailPart::Score]),
+            UnderPostersLadder::None => DetailParts::NONE,
+        }
+    }
+
+    /// **The TV show parts an old rung stands for**: the same, except that a show has no video
+    /// quality, so the rung that was never a show's own (a stored `video`, which the old picker
+    /// could not write for a show and a pre-split profile could hold for both) reads as the show's
+    /// default, Year · Seasons, exactly as the old `for_shows` did.
+    pub fn show_parts(self) -> DetailParts {
+        match self {
+            UnderPostersLadder::YearLength | UnderPostersLadder::Video => DetailParts::SHOW_DEFAULT,
+            other => other.movie_parts().for_shows(),
+        }
+    }
+
+    /// **The nearest rung to a set of parts**, written beside the parts for a build that predates
+    /// them: no parts is Nothing, otherwise the first rung (in the old ladder's order) that any
+    /// ticked part belongs to.
+    pub fn nearest(parts: DetailParts) -> UnderPostersLadder {
+        let has = |ps: &[DetailPart]| ps.iter().any(|p| parts.contains(*p));
+        if parts.is_empty() {
+            UnderPostersLadder::None
+        } else if has(&[DetailPart::Year, DetailPart::Length, DetailPart::Seasons]) {
+            UnderPostersLadder::YearLength
+        } else if has(&[DetailPart::Genre]) {
+            UnderPostersLadder::Genre
+        } else if has(&[DetailPart::VideoQuality]) {
+            UnderPostersLadder::Video
+        } else {
+            UnderPostersLadder::AgeRatingScore
+        }
+    }
+}
+
+/// **What sits under the focused poster** — one setting for every poster grid and row (Library,
+/// Collections, Home, Search, Watchlist): whether the title shows, which facts the details line
+/// carries (a SET of parts per kind of title, [`DetailParts`]), and whether a library grid sorted by
+/// something other than Title or Random shows the value it is sorted by on one line under every
+/// poster (`sort_value`). Per profile, like [`DeckPress`]. The default is no title, the year and
+/// length of a movie and the year and seasons of a show, and the sort value On.
+///
+/// **Stored** as `title`, the two part lists (`detail_parts` for movies, `show_detail_parts` for
+/// shows: arrays of [`DetailPart::name`]) and `sort_value_off`, plus the nearest old rung under the
+/// old keys `details` / `show_details` ([`UnderPostersLadder::nearest`]) so an older build still
+/// reads a choice. **Read**: a part list that is present wins (unknown names and parts a kind does
+/// not offer are dropped, more than [`DetailParts::MAX`] keep the first four); one that is absent is
+/// migrated from the old key ([`UnderPostersLadder::movie_parts`] / [`UnderPostersLadder::show_parts`]),
+/// and a show list absent beside the movie's old key is that key read for shows.
+///
+/// Each field is soft-parsed on its own, so a spelling a later build wrote for one costs that one
+/// alone and never the title. `sort_value` is stored as its OFF state only (the key is absent while
+/// it is On), so a profile that never chose it, and one that persisted the retired `show_sort_info`
+/// key of the earlier sort-information switch (ignored, never written), reads On.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(from = "UnderPostersWire", into = "UnderPostersWire")]
+pub struct UnderPosters {
+    pub title: bool,
+    /// The parts of the details line under a MOVIE (and under a season or an episode, which have
+    /// always followed it), held to what a movie offers ([`DetailPart::MOVIE`]).
+    pub details: DetailParts,
+    /// The parts of the details line under a TV SHOW, held to what a show offers ([`DetailPart::SHOW`]).
+    pub show_details: DetailParts,
+    /// A library grid sorted by something other than Title or Random shows the sort's value under
+    /// every card (the Movies, TV Shows, Seasons and Episodes grids; the Library's `registry::sort_info`). On by default.
+    pub sort_value: bool,
+}
+
+/// What [`UnderPosters`] is read from and written as: each field soft-parsed on its own, and the
+/// fields a record may lack kept optional so absence can be told from a choice.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct UnderPostersWire {
+    #[serde(deserialize_with = "de_soft_under_posters_title")]
+    title: bool,
+    /// The old single choice (movies): read when `detail_parts` is absent, written as the nearest rung.
+    #[serde(deserialize_with = "de_soft_under_posters_ladder")]
+    details: UnderPostersLadder,
+    #[serde(deserialize_with = "de_soft_show_ladder", skip_serializing_if = "Option::is_none")]
+    show_details: Option<UnderPostersLadder>,
+    #[serde(deserialize_with = "de_soft_parts", skip_serializing_if = "Option::is_none")]
+    detail_parts: Option<Vec<String>>,
+    #[serde(deserialize_with = "de_soft_parts", skip_serializing_if = "Option::is_none")]
+    show_detail_parts: Option<Vec<String>>,
+    #[serde(rename = "sort_value_off", with = "sort_value_off", skip_serializing_if = "sort_value_off::is_on")]
+    sort_value: bool,
+}
+
+impl Default for UnderPostersWire {
+    fn default() -> Self {
+        Self { title: false, details: UnderPostersLadder::default(), show_details: None, detail_parts: None, show_detail_parts: None, sort_value: true }
+    }
+}
+
+/// The parts a stored list names: unknown spellings are dropped.
+fn parts_named(names: &[String]) -> DetailParts {
+    DetailParts::of(&names.iter().filter_map(|n| DetailPart::from_name(n)).collect::<Vec<_>>())
+}
+
+fn names_of(parts: DetailParts) -> Vec<String> {
+    parts.iter().map(|p| p.name().to_owned()).collect()
+}
+
+impl From<UnderPostersWire> for UnderPosters {
+    fn from(w: UnderPostersWire) -> Self {
+        let details = match &w.detail_parts {
+            Some(names) => parts_named(names).for_movies(),
+            None => w.details.movie_parts(),
+        };
+        let show_details = match (&w.show_detail_parts, w.show_details) {
+            (Some(names), _) => parts_named(names).for_shows(),
+            (None, Some(rung)) => rung.show_parts(),
+            (None, None) => w.details.show_parts(),
+        };
+        UnderPosters { title: w.title, details, show_details, sort_value: w.sort_value }
+    }
+}
+
+impl From<UnderPosters> for UnderPostersWire {
+    fn from(v: UnderPosters) -> Self {
+        UnderPostersWire {
+            title: v.title,
+            details: UnderPostersLadder::nearest(v.details),
+            show_details: Some(UnderPostersLadder::nearest(v.show_details)),
+            detail_parts: Some(names_of(v.details)),
+            show_detail_parts: Some(names_of(v.show_details)),
+            sort_value: v.sort_value,
+        }
+    }
+}
+
+impl Default for UnderPosters {
+    fn default() -> Self { Self::DEFAULT }
+}
+
+/// `sort_value` on the wire: the key `sort_value_off` is written only while the value is Off, and
+/// any absent, malformed or non-boolean entry reads as On (the default), the way every other
+/// field of the setting is soft-parsed.
+mod sort_value_off {
+    use serde::{Deserializer, Serializer};
+
+    pub fn is_on(on: &bool) -> bool { *on }
+
+    pub fn serialize<S: Serializer>(on: &bool, s: S) -> Result<S::Ok, S::Error> { s.serialize_bool(!*on) }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+        super::de_soft_bool(d).map(|off| !off)
+    }
+}
+
+fn de_soft_under_posters_title<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let Ok(v) = Value::deserialize(d) else { return Ok(false) };
+    Ok(v.as_bool().unwrap_or(false))
+}
+
+fn de_soft_under_posters_ladder<'de, D: Deserializer<'de>>(d: D) -> Result<UnderPostersLadder, D::Error> {
+    let Ok(v) = Value::deserialize(d) else { return Ok(UnderPostersLadder::default()) };
+    Ok(serde_json::from_value::<UnderPostersLadder>(v).unwrap_or_default())
+}
+
+/// `show_details`: a spelling this build knows is a choice, anything else reads as absent, so the
+/// movie value seeds it.
+fn de_soft_show_ladder<'de, D: Deserializer<'de>>(d: D) -> Result<Option<UnderPostersLadder>, D::Error> {
+    let Ok(v) = Value::deserialize(d) else { return Ok(None) };
+    Ok(serde_json::from_value::<UnderPostersLadder>(v).ok())
+}
+
+/// A part list: an array reads as the names in it (a non-string entry is skipped), anything else
+/// as absent, so the old key stands in.
+fn de_soft_parts<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    let Ok(Value::Array(items)) = Value::deserialize(d) else { return Ok(None) };
+    Ok(Some(items.into_iter().filter_map(|i| i.as_str().map(str::to_owned)).collect()))
+}
+
+impl UnderPosters {
+    /// The defaults, as a `const` for callers that compare against them.
+    pub const DEFAULT: UnderPosters =
+        UnderPosters { title: false, details: DetailParts::MOVIE_DEFAULT, show_details: DetailParts::SHOW_DEFAULT, sort_value: true };
+
+    /// Two bytes for the live cell: title in bit 0, "sort value Off" in bit 1, the movie parts in
+    /// bits 2-8 and the TV show parts in bits 9-15 (one bit per [`DetailPart`]).
+    pub const fn pack(self) -> u16 {
+        self.title as u16 | ((!self.sort_value as u16) << 1) | ((self.details.bits() as u16) << 2) | ((self.show_details.bits() as u16) << 9)
+    }
+
+    /// The inverse of [`UnderPosters::pack`]; each side is held to what its kind offers and to the
+    /// maximum ([`DetailParts::kept`]).
+    pub fn unpack(b: u16) -> UnderPosters {
+        UnderPosters {
+            title: b & 1 != 0,
+            sort_value: b & 2 == 0,
+            details: DetailParts::from_bits(((b >> 2) & 0x7F) as u8).for_movies(),
+            show_details: DetailParts::from_bits(((b >> 9) & 0x7F) as u8).for_shows(),
+        }
+    }
+}
+
+/// **Which "Hold [OK] for options" hints this install has been taught** (`plx_ui::hold_hint`): one
+/// flag per surface, `card` for any media card and `pill` for the Detail season tabs. Each is set
+/// once a read showing happened on that surface (or an item menu was opened, which sets both) and
+/// is never cleared, so the self-appearing hint stands once per INSTALL and survives relaunches.
+/// Install-wide: kept across sign-out, shared by every profile. Absence is "not taught yet";
+/// each flag is soft-parsed on its own, so garbage costs only that flag.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HoldHintTaught {
+    #[serde(default, deserialize_with = "de_soft_bool", skip_serializing_if = "std::ops::Not::not")]
+    pub card: bool,
+    #[serde(default, deserialize_with = "de_soft_bool", skip_serializing_if = "std::ops::Not::not")]
+    pub pill: bool,
+}
+
+impl HoldHintTaught {
+    /// Nothing taught: the default, and what an absent key reads.
+    pub const NONE: HoldHintTaught = HoldHintTaught { card: false, pill: false };
+
+    /// Both sets joined: a surface taught in either stays taught.
+    pub fn union(self, other: HoldHintTaught) -> HoldHintTaught {
+        HoldHintTaught { card: self.card || other.card, pill: self.pill || other.pill }
+    }
+}
+
+/// **The window the interface asks for at launch** (Settings > System > Interface resolution).
+///
+/// The UI is authored at 1920x1080 and `plx_base::surface` fits that canvas into whatever drawable
+/// webOS grants; a smaller one fills fewer pixels and the television's compositor upscales it.
+/// `Auto` is the native 1920x1080 canvas on EVERY set: a smaller window is always the owner's
+/// choice, because it trades text sharpness for smoother frames and only the owner can judge that trade
+/// on their own panel. Install-wide (not per profile) because the window is created once, before
+/// anyone is seated. Absence, and any spelling this build does not know, is `Auto`. The setting is
+/// offered, and the stored value honoured at boot, on webOS 1-3 only
+/// (`plx_os::tv::device::offers_ui_resolution`); elsewhere the stored value is kept but unused.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiResolution {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "900p")]
+    Hd900,
+    #[serde(rename = "720p")]
+    Hd720,
+    /// Half the canvas in each direction: the one scale at which every texel maps to a whole
+    /// number of canvas pixels (see `plx_base::surface`).
+    #[serde(rename = "540p")]
+    Sd540,
+}
+
+impl UiResolution {
+    /// Every option, the order the picker lists them in. There is no 1920x1080 entry: Automatic
+    /// already is the native canvas, and an explicit one would be the same choice twice.
+    pub const LADDER: [UiResolution; 4] =
+        [UiResolution::Auto, UiResolution::Hd900, UiResolution::Hd720, UiResolution::Sd540];
+
+    /// The option's position in [`UiResolution::LADDER`], the row a picker highlights.
+    pub fn index(self) -> usize {
+        Self::LADDER.iter().position(|&m| m == self).unwrap_or(0)
+    }
+
+    /// The option at a picker row; an index past the end is `Auto`.
+    pub fn from_index(index: usize) -> UiResolution {
+        Self::LADDER.get(index).copied().unwrap_or_default()
+    }
+
+    /// The serialized spelling, for an identity comparison that must not depend on the language.
+    pub fn tag(self) -> &'static str {
+        match self {
+            UiResolution::Auto => "auto",
+            UiResolution::Hd900 => "900p",
+            UiResolution::Hd720 => "720p",
+            UiResolution::Sd540 => "540p",
+        }
+    }
+
+    /// The window size this option asks for. `Auto` is the native canvas, so it names no
+    /// smaller window: `None`.
+    pub fn size(self) -> Option<(i32, i32)> {
+        match self {
+            UiResolution::Auto => None,
+                        UiResolution::Hd900 => Some((1600, 900)),
+            UiResolution::Hd720 => Some((1280, 720)),
+            UiResolution::Sd540 => Some((960, 540)),
+        }
+    }
+}
+
+/// **How bright the player's overlay and captions are drawn while the picture is HDR** — one per
+/// profile, like [`SubtitleTone`]. A television maps graphics white in an HDR picture to a far
+/// brighter level than the same white in SDR (the HUD and the captions are graphics; the panel
+/// treats them as part of the HDR scene), so a viewer in a dark room is dazzled by the transport
+/// and the subtitles. This is how far RGB is scaled down then; it never applies to an SDR picture.
+/// Absence is `ThreeQuarters`: the overlay is dimmed to 75% in an HDR picture unless the viewer
+/// chose otherwise (`Full` turns the dim off). The factor is a plain linear multiplier on the sRGB-encoded values (alpha is untouched), which is
+/// the same multiply the painter's `rgb` cascade already is.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HdrOverlayBrightness {
+    #[serde(rename = "full")]
+    Full,
+    #[default]
+    #[serde(rename = "three_quarters")]
+    ThreeQuarters,
+    #[serde(rename = "half")]
+    Half,
+}
+
+impl HdrOverlayBrightness {
+    /// Every rung, brightest first — the order the picker lists them in.
+    pub const LADDER: [HdrOverlayBrightness; 3] = [
+        HdrOverlayBrightness::Full,
+        HdrOverlayBrightness::ThreeQuarters,
+        HdrOverlayBrightness::Half,
+    ];
+
+    /// An in-memory index back to a rung — out of range is the default, never a neighbouring rung, for
+    /// the reason [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
+    pub fn from_index(i: u8) -> HdrOverlayBrightness {
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u8 {
+        Self::LADDER.iter().position(|&b| b == self).unwrap_or(0) as u8
+    }
+
+    /// The RGB multiplier this rung applies to an HDR picture's overlay, `1.0` for `Full`.
+    pub fn factor(self) -> f32 {
+        match self {
+            HdrOverlayBrightness::Full => 1.0,
+            HdrOverlayBrightness::ThreeQuarters => 0.75,
+            HdrOverlayBrightness::Half => 0.5,
+        }
+    }
+
+    /// The rung's percentage, for its label.
+    pub fn percent(self) -> i64 {
+        (self.factor() * 100.0).round() as i64
+    }
+}
 /// One profile's search history.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
@@ -1838,7 +2085,7 @@ pub struct PinnedLib {
 }
 
 /// The person's answer to "Connect without encryption?" for one server. See
-/// [`Session::plaintext_consent`].
+/// [`Preferences::plaintext_consent`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaintextChoice {
@@ -1874,7 +2121,7 @@ pub struct PlaintextConsent {
     pub extensions: OpaqueExtensions,
 }
 
-/// One server's remembered leaf public key. See [`Session::server_key_pins`].
+/// One server's remembered leaf public key. See [`Preferences::server_key_pins`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ServerKeyPin {
     pub machine_id: String,
@@ -1882,6 +2129,78 @@ pub struct ServerKeyPin {
     pub pin: String,
     #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
     pub extensions: OpaqueExtensions,
+}
+
+/// How many facet-clean proofs persist a refusal on its build (D6(c) of the playback-refusal plan):
+/// the first rescue of a play whose conversion changed only the refused facet is counted, the second
+/// applies. A transient `601` coinciding with one Load cannot teach alone.
+pub const LEARNED_REFUSAL_PROOFS: u32 = 2;
+
+/// One native audio combination the TV's pipeline was watched refusing on this install: the
+/// firmware family, the codec and the refused track's channel count. See
+/// [`Preferences::native_audio_refused`] and `devcaps::Refusal`. **Identity** is `(build, codec,
+/// channels)` with the raw channel count (`refusal_ceiling` is applied only when a play start
+/// derives its capability value, `devcaps::Caps::minus`); the firmware codename is a stamped field
+/// that only records which set taught it (a build implies its codename, so applying a row does not
+/// ask it).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeAudioRefusal {
+    pub firmware: String,
+    pub codec: String,
+    pub channels: u32,
+    /// The exact firmware build it was watched on; absent from a record written before builds were
+    /// recorded, which reads as empty and counts as stale (see [`Session::with_native_audio_refusal`]).
+    #[serde(default)]
+    pub build: String,
+    /// Facet-clean proofs seen on `build` (D6(c)). ABSENT = a refusal that named the codec
+    /// (`type=18 num=200` or the stall, and every row written before S2a): applied at once. Capped
+    /// at [`LEARNED_REFUSAL_PROOFS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proofs: Option<u32>,
+    #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
+    pub extensions: OpaqueExtensions,
+}
+
+impl NativeAudioRefusal {
+    /// The row for `facet` on `firmware`'s `build`, or `None` when it cannot be stored. `proofs`
+    /// `None` names the codec; `Some(n)` counts proofs. A PROOF of unknown width (`channels == 0`)
+    /// is not stored: `refusal_ceiling(0)` would remove the whole codec, too broad for a counted
+    /// lesson; a named refusal keeps that behaviour. The `Facet::Video` arm returns `None`: video
+    /// rows never persist (D6(c): a video facet never proves), and this row has no video fields to
+    /// hold one.
+    pub fn of_facet(facet: &plx_os::devcaps::Facet, firmware: &str, build: &str, proofs: Option<u32>) -> Option<Self> {
+        match facet {
+            plx_os::devcaps::Facet::Audio { codec, channels } => {
+                if *channels == 0 && proofs.is_some() {
+                    return None;
+                }
+                Some(NativeAudioRefusal {
+                    firmware: firmware.to_owned(),
+                    codec: plx_os::devcaps::audio_codec_id(codec).into_owned(),
+                    channels: *channels,
+                    build: build.to_owned(),
+                    proofs,
+                    extensions: Default::default(),
+                })
+            }
+            plx_os::devcaps::Facet::Video { .. } => None,
+        }
+    }
+
+    /// Whether the row is in force: a named row (and every row written before S2a) at once, a
+    /// counted one from [`LEARNED_REFUSAL_PROOFS`] proofs.
+    pub fn applies(&self) -> bool {
+        self.proofs.is_none_or(|n| n >= LEARNED_REFUSAL_PROOFS)
+    }
+
+    /// Whether `other` is the same combination on the same build (the row's identity).
+    fn same_as(&self, other: &Self) -> bool {
+        self.build == other.build && self.codec == other.codec && self.channels == other.channels
+    }
+
+    fn to_devcaps(&self) -> plx_os::devcaps::Refusal {
+        plx_os::devcaps::Refusal { codec: self.codec.clone(), channels: self.channels, build: self.build.clone() }
+    }
 }
 
 /// Is `pin` shaped like `plx_base::spki::pin_from_pem`'s answer: `sha256//` and the 44 base64
@@ -1895,7 +2214,7 @@ fn is_key_pin(pin: &str) -> bool {
     })
 }
 
-/// One profile's last-browsed library per content type. See [`Session::last_library`].
+/// One profile's last-browsed library per content type. See [`Preferences::last_library`].
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct LastLibrary {
@@ -1952,7 +2271,7 @@ impl LastLibrary {
     }
 }
 
-/// One profile's remembered library views. See [`Session::library_views`].
+/// One profile's remembered library views. See [`Preferences::library_views`].
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct LibraryViews {
@@ -1967,8 +2286,22 @@ pub struct LibraryViews {
     pub extensions: OpaqueExtensions,
 }
 
-/// Everything one person chose in one library's view: the section, and what the Library screen's
-/// toolbar changed about it.
+/// A page left open above the library grid.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryPage {
+    Collections,
+    Recommended,
+    #[default]
+    #[serde(other)]
+    Grid,
+}
+
+impl LibraryPage {
+    fn is_grid(&self) -> bool { *self == Self::Grid }
+}
+
+/// Everything one person chose in one library's view: the section, its open page and toolbar choices.
 ///
 /// `machine_id`, `key`, `sort` and `desc` are the entry's ORIGINAL fields, always written, so an
 /// older build reads the sort back from a file this one wrote; every field added since is omitted
@@ -2008,6 +2341,8 @@ pub struct LibraryView {
     /// The direction of `listing_sort`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub listing_desc: bool,
+    #[serde(skip_serializing_if = "LibraryPage::is_grid")]
+    pub page: LibraryPage,
     #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
     pub extensions: OpaqueExtensions,
 }
@@ -2032,6 +2367,7 @@ impl LibraryView {
     pub fn is_default(&self) -> bool {
         self.sort.is_empty() && !self.desc && !self.unwatched && self.genre.is_empty()
             && self.listing.is_empty() && self.listing_sort.is_empty() && !self.listing_desc
+            && self.page.is_grid()
             && self.extensions.is_empty()
     }
     /// This view with every field a record may not carry dropped back to its default: a sort
@@ -2062,7 +2398,9 @@ impl LibraryViews {
     /// Libraries remembered per profile. A household changes a handful; the cap exists so a
     /// television that has browsed many shares over the years cannot grow the public payload
     /// (256 KiB for everything, `storage::state`) without bound — ~200 bytes an entry at its
-    /// fullest, so a full list is ~5 KiB per profile.
+    /// fullest, so a full list is ~5 KiB per profile. It bounds ONE profile: past 256 KiB for the
+    /// whole document the document guard (`persistence::fit_document`, `prefs::shed_memory`) may
+    /// also evict this list's oldest entries from the largest record.
     pub const CAP: usize = 24;
     /// Longest sort key recorded. Real keys are a few words (`show.titleSort,episode.index` is
     /// the longest PMS advertises); anything longer is not a key worth carrying across restarts.
@@ -2094,20 +2432,13 @@ impl LibraryViews {
     }
 }
 
-/// One profile's remembered subtitle sync-timing corrections. See [`Session::subtitle_offsets`].
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
-#[serde(default)]
-pub struct SubtitleOffsets {
-    /// The Plex Home user's `uuid`, or **empty for the account owner** — [`LastLibrary`]'s
-    /// convention, and for the same reason.
-    pub user: String,
-    /// Oldest first: [`SubtitleOffsets::set`] moves a re-tuned item to the end, and the cap
-    /// drops from the front.
-    #[serde(deserialize_with = "de_soft_vec")]
-    pub items: Vec<SubtitleOffsetEntry>,
-    #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
-    pub extensions: OpaqueExtensions,
-}
+/// One profile's remembered subtitle sync-timing corrections. See [`Preferences::subtitle_offsets`].
+///
+/// The first tenant of the memory door ([`prefs::ProfileList`]): `{user, items, extensions}` on
+/// disk exactly as it was before the door existed (`account` is skipped while empty; the tenant is
+/// account-bound, so a record carries its account's stamp and sign-out drops the list). Oldest
+/// first: a re-tuned item moves to the end and the cap drops from the front ([`SubtitleOffsetEntry`]'s [`MemoryEntry`] impl names the cap and the key).
+pub type SubtitleOffsets = prefs::ProfileList<SubtitleOffsetEntry>;
 
 /// One item's remembered subtitle sync-timing correction, in milliseconds
 /// (`player::SUBTITLE_OFFSET_LATEST_MS`'s own unit and clamp).
@@ -2119,40 +2450,6 @@ pub struct SubtitleOffsetEntry {
     pub offset_ms: i64,
     #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
     pub extensions: OpaqueExtensions,
-}
-
-impl SubtitleOffsets {
-    /// A household corrects a handful of mistimed files; the cap keeps the public payload bounded
-    /// the same way [`LibraryViews::CAP`] does, for the same reason.
-    pub const CAP: usize = 24;
-
-    /// This profile's remembered correction for one item, if it ever tuned one.
-    pub fn get(&self, machine_id: &str, rating_key: &str) -> Option<i64> {
-        if machine_id.is_empty() || rating_key.is_empty() {
-            return None;
-        }
-        self.items.iter().find(|e| e.machine_id == machine_id && e.rating_key == rating_key)
-            .map(|e| e.offset_ms)
-    }
-    /// Record an item's correction as the most recent, or FORGET it with `None` (the viewer set
-    /// the offset back to Original, which needs no record to be restored). Evicts the oldest
-    /// entries past [`CAP`](Self::CAP). An item with no machine id or ratingKey is never
-    /// recorded — [`LastLibrary::set`]'s reason.
-    pub fn set(&mut self, machine_id: &str, rating_key: &str, offset_ms: Option<i64>) {
-        self.items.retain(|e| !(e.machine_id == machine_id && e.rating_key == rating_key));
-        let Some(offset_ms) = offset_ms else { return };
-        if machine_id.is_empty() || rating_key.is_empty() || offset_ms == 0 {
-            return;
-        }
-        self.items.push(SubtitleOffsetEntry {
-            machine_id: machine_id.to_string(),
-            rating_key: rating_key.to_string(),
-            offset_ms,
-            extensions: Default::default(),
-        });
-        let excess = self.items.len().saturating_sub(Self::CAP);
-        self.items.drain(..excess);
-    }
 }
 
 /// **One profile's FAVOURITE libraries** — the first-run route's record (`Shared Sources.dc.html`
@@ -2291,129 +2588,6 @@ where
     Ok(serde_json::from_value::<Option<Location>>(v).unwrap_or(None))
 }
 
-/// Future or malformed direct-play policies retain the automatic compatibility checks.
-fn de_soft_direct_play_mode<'de, D>(d: D) -> Result<DirectPlayMode, D::Error>
-where D: Deserializer<'de> {
-    let value = serde_json::Value::deserialize(d)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
-}
-
-/// Playback quality is a preference, not a credential gate. A value written by a newer build or
-/// damaged by a hand edit therefore degrades to the legacy-safe Original mode rather than making
-/// the enclosing [`Session`] disappear.
-fn de_soft_playback_quality<'de, D>(d: D) -> Result<Option<PlaybackQuality>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(None);
-    };
-    Ok(serde_json::from_value::<Option<PlaybackQuality>>(v).unwrap_or(None))
-}
-
-/// The subtitle tone is a preference too: a spelling this build does not know degrades to white.
-fn de_soft_subtitle_tone<'de, D>(d: D) -> Result<SubtitleTone, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(SubtitleTone::White);
-    };
-    Ok(serde_json::from_value::<SubtitleTone>(v).unwrap_or_default())
-}
-
-/// The subtitle size is a preference too: a spelling this build does not know degrades to Medium.
-fn de_soft_subtitle_size<'de, D>(d: D) -> Result<SubtitleSize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(SubtitleSize::Medium);
-    };
-    Ok(serde_json::from_value::<SubtitleSize>(v).unwrap_or_default())
-}
-
-/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
-fn is_default_subtitle_size(size: &SubtitleSize) -> bool {
-    *size == SubtitleSize::default()
-}
-
-/// The subtitle position is a preference too: a spelling this build does not know degrades to Low.
-fn de_soft_subtitle_position<'de, D>(d: D) -> Result<SubtitlePosition, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(SubtitlePosition::Low);
-    };
-    Ok(serde_json::from_value::<SubtitlePosition>(v).unwrap_or_default())
-}
-
-/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
-fn is_default_subtitle_position(position: &SubtitlePosition) -> bool {
-    *position == SubtitlePosition::default()
-}
-
-/// The next-episode mode is a preference too: a spelling this build does not know degrades to Countdown.
-fn de_soft_next_episode_mode<'de, D>(d: D) -> Result<NextEpisodeMode, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(NextEpisodeMode::Countdown);
-    };
-    Ok(serde_json::from_value::<NextEpisodeMode>(v).unwrap_or_default())
-}
-
-/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
-fn is_default_next_episode_mode(mode: &NextEpisodeMode) -> bool {
-    *mode == NextEpisodeMode::default()
-}
-
-/// The skip interval is a preference too: a spelling this build does not know degrades to 10 s.
-fn de_soft_skip_interval<'de, D>(d: D) -> Result<SkipInterval, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(SkipInterval::default());
-    };
-    Ok(serde_json::from_value::<SkipInterval>(v).unwrap_or_default())
-}
-
-/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
-fn is_default_skip_interval(interval: &SkipInterval) -> bool {
-    *interval == SkipInterval::default()
-}
-
-/// The deck-press mode is a preference too: a spelling this build does not know degrades to Details.
-fn de_soft_deck_press<'de, D>(d: D) -> Result<DeckPress, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(DeckPress::default());
-    };
-    Ok(serde_json::from_value::<DeckPress>(v).unwrap_or_default())
-}
-
-/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
-fn is_default_deck_press(mode: &DeckPress) -> bool {
-    *mode == DeckPress::default()
-}
-
-/// The audio-enhancement toggle is a preference too: an unknown shape degrades to both flags
-/// off rather than failing the enclosing [`Session`].
-fn de_soft_audio_enhancements<'de, D>(d: D) -> Result<crate::plex::AudioEnhancements, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(crate::plex::AudioEnhancements::NONE);
-    };
-    Ok(serde_json::from_value::<crate::plex::AudioEnhancements>(v).unwrap_or(crate::plex::AudioEnhancements::NONE))
-}
-
 /// A preference switch: garbage degrades to off rather than failing the enclosing [`Session`].
 fn de_soft_bool<'de, D>(d: D) -> Result<bool, D::Error>
 where
@@ -2430,7 +2604,8 @@ fn default_true() -> bool {
 }
 
 /// Same soft parse as [`de_soft_bool`], but garbage and a missing value stay on. Used where the
-/// product default is on ([`Session::trailer_autoplay`]).
+/// product default is on ([`Session::trailer_autoplay`], the frozen install-wide fallback of the
+/// per-profile hero trailer switch).
 fn de_soft_bool_on<'de, D>(d: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -2489,50 +2664,57 @@ impl Session {
     /// The effective persisted playback quality. Absence is the literal legacy migration rule:
     /// builds that predate the field played Original, so they continue to play Original.
     #[allow(dead_code)]
-    pub fn direct_play_mode(&self) -> DirectPlayMode { self.direct_play_mode }
-
-    pub fn with_direct_play_mode(&self, mode: DirectPlayMode) -> Self {
-        let mut next = self.clone();
-        next.direct_play_mode = mode;
-        next
-    }
+    pub fn direct_play_mode(&self) -> DirectPlayMode { self.prefs.direct_play_mode }
 
     pub fn playback_quality(&self) -> PlaybackQuality {
-        self.playback_quality.unwrap_or(PlaybackQuality::Original)
-    }
-
-    /// Record an explicit user choice while leaving every unrelated session field intact.
-    pub fn with_playback_quality(&self, quality: PlaybackQuality) -> Self {
-        let mut next = self.clone();
-        next.playback_quality = Some(quality);
-        next
+        self.prefs.playback_quality.unwrap_or(PlaybackQuality::Original)
     }
 
     pub fn auto_sign_in(&self) -> bool {
-        self.auto_sign_in
+        self.prefs.auto_sign_in
+    }
+
+    /// The Interface resolution the NEXT launch draws at; see [`UiResolution`].
+    pub fn ui_resolution(&self) -> UiResolution {
+        self.prefs.ui_resolution
+    }
+
+    /// Which hold hints this install has been taught; see [`HoldHintTaught`].
+    pub fn hold_hint_taught(&self) -> HoldHintTaught {
+        self.prefs.hold_hint_taught
+    }
+
+    /// This session with `taught` joined into what it already holds (a lesson is never unlearned).
+    pub fn with_hold_hint_taught(&self, taught: HoldHintTaught) -> Self {
+        let mut next = self.clone();
+        next.prefs.hold_hint_taught = next.prefs.hold_hint_taught.union(taught);
+        next
+    }
+
+    pub fn with_ui_resolution(&self, mode: UiResolution) -> Self {
+        let mut next = self.clone();
+        next.prefs.ui_resolution = mode;
+        next
     }
 
     /// Record the Settings switch while leaving every unrelated session field intact.
     pub fn with_auto_sign_in(&self, on: bool) -> Self {
         let mut next = self.clone();
-        next.auto_sign_in = on;
+        next.prefs.auto_sign_in = on;
         next
     }
 
+    /// The install-wide hero trailer autoplay key: the FALLBACK every profile reads until it picks
+    /// its own (`prefs::stored_effective::<TrailerAutoplayPref>` is what a profile sees). No pick
+    /// writes it; session creation sets it on.
     pub fn trailer_autoplay(&self) -> bool {
-        self.trailer_autoplay
-    }
-
-    pub fn with_trailer_autoplay(&self, on: bool) -> Self {
-        let mut next = self.clone();
-        next.trailer_autoplay = on;
-        next
+        self.prefs.trailer_autoplay
     }
 
     /// The answer `account` (`plex::grant::account_key`) recorded for one server —
-    /// [`PlaintextChoice::Undecided`] when it was never asked (see [`Session::plaintext_consent`]).
+    /// [`PlaintextChoice::Undecided`] when it was never asked (see [`Preferences::plaintext_consent`]).
     pub fn plaintext_choice(&self, account: &str, machine_id: &str) -> PlaintextChoice {
-        self.plaintext_consent
+        self.prefs.plaintext_consent
             .iter()
             .find(|c| c.account == account && c.machine_id == machine_id)
             .map_or(PlaintextChoice::Undecided, |c| c.choice)
@@ -2543,9 +2725,9 @@ impl Session {
     /// be honoured again while this one answers, and the file keeps only the live account's.
     pub fn with_plaintext_choice(&self, account: &str, machine_id: &str, choice: PlaintextChoice) -> Self {
         let mut next = self.clone();
-        next.plaintext_consent.retain(|c| c.account == account && c.machine_id != machine_id);
+        next.prefs.plaintext_consent.retain(|c| c.account == account && c.machine_id != machine_id);
         if choice != PlaintextChoice::Undecided && !machine_id.is_empty() && !account.is_empty() {
-            next.plaintext_consent.push(PlaintextConsent {
+            next.prefs.plaintext_consent.push(PlaintextConsent {
                 machine_id: machine_id.to_owned(),
                 account: account.to_owned(),
                 choice,
@@ -2558,7 +2740,7 @@ impl Session {
     /// The pin remembered for `machine_id`, or `None` when none was learned (or the stored string
     /// is not a pin). Read by [`project_server_keys`], which hands it to `net::keypin` (issue #378).
     pub fn server_key_pin(&self, machine_id: &str) -> Option<&str> {
-        self.server_key_pins
+        self.prefs.server_key_pins
             .iter()
             .find(|k| k.machine_id == machine_id)
             .map(|k| k.pin.as_str())
@@ -2573,8 +2755,8 @@ impl Session {
             return None;
         }
         let mut next = self.clone();
-        next.server_key_pins.retain(|k| k.machine_id != machine_id);
-        next.server_key_pins.push(ServerKeyPin {
+        next.prefs.server_key_pins.retain(|k| k.machine_id != machine_id);
+        next.prefs.server_key_pins.push(ServerKeyPin {
             machine_id: machine_id.to_owned(),
             pin: pin.to_owned(),
             extensions: Default::default(),
@@ -2582,54 +2764,58 @@ impl Session {
         Some(next)
     }
 
-    pub fn subtitle_tone(&self) -> SubtitleTone {
-        self.subtitle_tone
+    /// The native audio refusals this install has learned.
+    pub fn native_audio_refused(&self) -> &[NativeAudioRefusal] {
+        &self.prefs.native_audio_refused
     }
 
-    pub fn with_subtitle_tone(&self, tone: SubtitleTone) -> Self {
+    /// This session with `refusal` remembered, or `None` when nothing would change (so the caller
+    /// skips the write). **The one way the list changes**: it takes the new entry and drops what
+    /// another firmware build learned (and what an older record never tagged), because an LG update
+    /// replaces the decoder a refusal was watched on, so the new firmware gets a fresh native try.
+    /// An entry without a build (the set did not name one) judges nothing and drops nothing. The
+    /// stale entries are inert until then: `devcaps` ignores a refusal watched on another build.
+    /// For the same identity the counts merge: a named row always wins (`proofs` `None`) and a
+    /// proof never downgrades it, two proofs add up to [`LEARNED_REFUSAL_PROOFS`] and no further.
+    pub fn with_native_audio_refusal(&self, refusal: &NativeAudioRefusal) -> Option<Self> {
+        if refusal.firmware.is_empty() || refusal.codec.is_empty() {
+            return None;
+        }
         let mut next = self.clone();
-        next.subtitle_tone = tone;
-        next
+        let list = &mut next.prefs.native_audio_refused;
+        if !refusal.build.is_empty() {
+            list.retain(|r| r.build == refusal.build);
+        }
+        match list.iter_mut().find(|r| r.same_as(refusal)) {
+            Some(old) => {
+                old.proofs = match (old.proofs, refusal.proofs) {
+                    (None, _) | (_, None) => None,
+                    (Some(a), Some(b)) => Some(a.saturating_add(b).min(LEARNED_REFUSAL_PROOFS)),
+                };
+            }
+            None => list.push(refusal.clone()),
+        }
+        (*list != self.prefs.native_audio_refused).then_some(next)
+    }
+
+    pub fn subtitle_tone(&self) -> SubtitleTone {
+        self.prefs.subtitle_tone
     }
 
     pub fn subtitle_size(&self) -> SubtitleSize {
-        self.subtitle_size
-    }
-
-    pub fn with_subtitle_size(&self, size: SubtitleSize) -> Self {
-        let mut next = self.clone();
-        next.subtitle_size = size;
-        next
+        self.prefs.subtitle_size
     }
 
     pub fn subtitle_position(&self) -> SubtitlePosition {
-        self.subtitle_position
-    }
-
-    pub fn with_subtitle_position(&self, position: SubtitlePosition) -> Self {
-        let mut next = self.clone();
-        next.subtitle_position = position;
-        next
+        self.prefs.subtitle_position
     }
 
     pub fn next_episode_mode(&self) -> NextEpisodeMode {
-        self.next_episode_mode
-    }
-
-    pub fn with_next_episode_mode(&self, mode: NextEpisodeMode) -> Self {
-        let mut next = self.clone();
-        next.next_episode_mode = mode;
-        next
+        self.prefs.next_episode_mode
     }
 
     pub fn skip_interval(&self) -> SkipInterval {
-        self.skip_interval
-    }
-
-    pub fn with_skip_interval(&self, interval: SkipInterval) -> Self {
-        let mut next = self.clone();
-        next.skip_interval = interval;
-        next
+        self.prefs.skip_interval
     }
 
     pub fn rating_source(&self) -> RatingSource { self.rating_source }
@@ -2638,23 +2824,19 @@ impl Session {
     }
 
     pub fn deck_press(&self) -> DeckPress {
-        self.deck_press
+        self.prefs.deck_press
     }
 
-    pub fn with_deck_press(&self, mode: DeckPress) -> Self {
-        let mut next = self.clone();
-        next.deck_press = mode;
-        next
+    pub fn under_posters(&self) -> UnderPosters {
+        self.prefs.under_posters
+    }
+
+    pub fn hdr_overlay_brightness(&self) -> HdrOverlayBrightness {
+        self.prefs.hdr_overlay_brightness
     }
 
     pub fn audio_enhancements(&self) -> crate::plex::AudioEnhancements {
-        self.audio_enhancements
-    }
-
-    pub fn with_audio_enhancements(&self, enhancements: crate::plex::AudioEnhancements) -> Self {
-        let mut next = self.clone();
-        next.audio_enhancements = enhancements;
-        next
+        self.prefs.audio_enhancements
     }
 
     /// Interactive boot with a multi-user Plex Home shows the who's-watching picker unless
@@ -2675,7 +2857,7 @@ impl Session {
         if automated {
             return false;
         }
-        !(self.auto_sign_in && self.seated_in_roster())
+        !(self.prefs.auto_sign_in && self.seated_in_roster())
     }
 
     /// True when [`Session::user`]'s uuid names someone still on the cached Plex Home roster.
@@ -2894,7 +3076,7 @@ impl Session {
 
     /// One profile's remembered library views — `None` for a profile that never changed one.
     pub fn views_for(&self, user: &str) -> Option<&LibraryViews> {
-        self.library_views.iter().find(|views| views.user == user)
+        self.prefs.library_views.iter().find(|views| views.user == user)
     }
 
     /// Record one library's view for one profile (a view that is the default forgets the entry —
@@ -2902,43 +3084,52 @@ impl Session {
     /// [`Session::set_recents_for`]'s reason. A profile whose last entry is forgotten loses its
     /// record entirely, so the list never carries empties.
     pub fn set_view_for(&mut self, user: &str, view: LibraryView) {
-        match self.library_views.iter_mut().find(|views| views.user == user) {
+        match self.prefs.library_views.iter_mut().find(|views| views.user == user) {
             Some(slot) => slot.set(view),
             None => {
                 let mut fresh = LibraryViews { user: user.to_string(), ..Default::default() };
                 fresh.set(view);
-                self.library_views.push(fresh);
+                self.prefs.library_views.push(fresh);
             }
         }
-        self.library_views.retain(|views| !views.libs.is_empty());
+        self.prefs.library_views.retain(|views| !views.libs.is_empty());
     }
 
     /// One profile's remembered subtitle sync-timing correction for one item, `None` for a
-    /// profile that never tuned one (or a different item/server).
+    /// profile that never tuned one (or a different item/server). Reads the profile's record
+    /// whatever its account stamp: the player's read is [`prefs::ProfileMemory::get`] under the
+    /// signed-in account's stamp, which is what hides another account's record.
     pub fn subtitle_offset_for(&self, user: &str, machine_id: &str, rating_key: &str) -> Option<i64> {
-        self.subtitle_offsets.iter().find(|o| o.user == user)
+        self.prefs.subtitle_offsets.iter().find(|o| o.user == user)
             .and_then(|o| o.get(machine_id, rating_key))
     }
 
     /// Record (or, with `None`, forget) one item's subtitle offset for one profile, leaving every
     /// other profile's alone — [`Session::set_view_for`]'s reason. A profile whose last entry is
-    /// forgotten loses its record entirely, so the list never carries empties.
+    /// forgotten loses its record entirely, so the list never carries empties. The in-memory
+    /// half of the memory door's `upsert_with` ([`prefs::ProfileMemory`]), stamping the record with
+    /// this session's own account (`grant::account_key`; none without an account token).
     pub fn set_subtitle_offset_for(&mut self, user: &str, machine_id: &str, rating_key: &str, offset_ms: Option<i64>) {
-        match self.subtitle_offsets.iter_mut().find(|o| o.user == user) {
-            Some(slot) => slot.set(machine_id, rating_key, offset_ms),
-            None => {
-                let mut fresh = SubtitleOffsets { user: user.to_string(), ..Default::default() };
-                fresh.set(machine_id, rating_key, offset_ms);
-                self.subtitle_offsets.push(fresh);
-            }
-        }
-        self.subtitle_offsets.retain(|o| !o.items.is_empty());
+        let entry = offset_ms.map(|offset_ms| SubtitleOffsetEntry {
+            machine_id: machine_id.to_string(),
+            rating_key: rating_key.to_string(),
+            offset_ms,
+            extensions: Default::default(),
+        });
+        let key = (machine_id.to_string(), rating_key.to_string());
+        let account = super::grant::account_key(&self.account_token);
+        self.prefs.subtitle_offsets.upsert_with(user, &account, &key, |_| entry);
     }
 }
 
 /// Which profile's history is in play: the active Plex Home user's `uuid`, or `""` for the owner
-/// with no Home selection. One accessor, so the reader and the writer cannot key on different
-/// things — which would look exactly like the leak this scoping exists to prevent.
+/// with no Home selection AND for "no profile published yet" (the boot picker, a sign-out), which
+/// this cannot tell apart from the owner. It does not say whether anyone is SEATED either: a profile
+/// published without a sign-in stamp (a dev token) has a key here and seats nobody. Who is seated,
+/// as a comparable value that also names the sign-in, is [`current_seat`] / [`Seat`]; the ten
+/// per-profile settings (the player's nine and trailer autoplay) key on that, never on this. One accessor, so the reader and the
+/// writer cannot key on different things — which would look exactly like the leak this scoping
+/// exists to prevent.
 pub fn current_profile_key() -> String {
     current().map(|u| u.uuid).unwrap_or_default()
 }
@@ -3003,16 +3194,17 @@ enum Cached {
     /// next write installs or drops it.
     Settled(std::sync::Arc<ReadState>),
     /// [`ReadState::Locked`], `Blocked`, or fallback `Ready`: a transient failure (a helper timeout, a keymanager
-    /// hiccup), not a fact about the file — served only until `retry_at`, never latched forever.
+    /// hiccup), not a fact about the file — served as the last known state, never latched forever:
+    /// [`refresh_need`] asks for another read and the session owner decides when (its backoff clock is
+    /// the frame tick, [`LOCKED_RETRY_MS`]).
     Transient {
         state: std::sync::Arc<ReadState>,
-        retry_at: std::time::Instant,
     },
 }
 
 /// **The live read cache** — what [`peek`] answers from memory instead of taking [`IO`]. A hit is
-/// one short `Mutex` lock and an `Arc` clone; a miss schedules a single worker refresh and serves
-/// the previous snapshot (or the empty session). See the module doc for the full invariant list;
+/// one short `Mutex` lock and an `Arc` clone; a miss serves the previous snapshot (or the empty
+/// session) and leaves the refill to the session owner's `RefreshCache` effect ([`refresh_need`]). See the module doc for the full invariant list;
 /// the two that matter for reasoning about a deadlock: nobody takes `IO` while holding this
 /// lock, and a writer always re-reads the authority under `IO` rather than trusting
 /// whatever is cached, so a miss can never overwrite a newer write. `player::preview`'s own
@@ -3021,12 +3213,13 @@ enum Cached {
 /// closure, unchanged by the cache.
 static CACHE: Mutex<Cached> = Mutex::new(Cached::Unloaded);
 
-/// How long a Locked/Blocked answer or fallback Ready is served from [`CACHE`] before
-/// the next reader tries canonical storage again, measured from the end of the read. These are
-/// transient by definition (see [`ReadState`]'s doc), so the interval only needs to be short enough
-/// that a real recovery is felt quickly, and long enough to limit background retries to about
-/// once a second. Per-frame callers never pay for these reads.
-const LOCKED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long (in frame-tick milliseconds) the session owner holds back another refresh of the
+/// generation whose read came back Locked/Blocked or as a fallback Ready, and of every generation
+/// after a refused or unwound job. These are transient by definition (see [`ReadState`]'s doc), so
+/// the interval only needs to be short enough that a real recovery is felt quickly, and long
+/// enough to limit background retries to about once a second. Per-frame callers never pay for
+/// these reads, and nothing here reads a clock: the owner measures it on `cx.tick.ms`.
+pub const LOCKED_RETRY_MS: u32 = 1000;
 
 /// The `Session` every non-`Ready` read answers with, shared so a Locked/Blocked retry window does
 /// not allocate a fresh default every time.
@@ -3039,73 +3232,64 @@ fn empty_session() -> std::sync::Arc<Session> {
 fn session_of(state: &ReadState) -> std::sync::Arc<Session> {
     match state {
         ReadState::Ready { session, .. } => session.clone(),
-        ReadState::Cleared { language } | ReadState::Locked { language } =>
-            std::sync::Arc::new(Session { language: *language, ..Default::default() }),
+        ReadState::Cleared { kept } | ReadState::Locked { kept } => std::sync::Arc::new(kept.into_session()),
         ReadState::Missing | ReadState::Blocked => empty_session(),
     }
 }
 
-/// Which [`Cached`] arm a fresh [`ReadState`] belongs in — shared by [`refresh_locked`] (a read)
-/// and [`install_locked`] (a write's proven outcome). `now` anchors a `Transient` arm's
-/// `retry_at`; a read supplies the later of the caller's clock and its completion time. Using
-/// only the caller's clock would install an already-expired entry after a slow helper timeout.
-/// `peek_at` supplies a simulated completion clock too, so its exact retry boundaries remain
-/// deterministic and a miss in the simulated future cannot move the retry anchor backwards.
-fn cached_arm(state: std::sync::Arc<ReadState>, now: std::time::Instant) -> Cached {
-    match &*state {
-        ReadState::Locked { .. } | ReadState::Blocked | ReadState::Ready { retry_canonical: true, .. } => Cached::Transient {
-            state,
-            retry_at: now + LOCKED_RETRY,
-        },
-        ReadState::Ready { .. } | ReadState::Missing | ReadState::Cleared { .. } => Cached::Settled(state),
+/// Whether a [`ReadState`] is a transient failure to read rather than a fact about the file.
+fn is_transient(state: &ReadState) -> bool {
+    match state {
+        ReadState::Locked { .. } | ReadState::Blocked | ReadState::Ready { retry_canonical: true, .. } => true,
+        ReadState::Ready { .. } | ReadState::Missing | ReadState::Cleared { .. } => false,
     }
 }
 
-/// A cache hit as of `now`, if one exists. Never takes [`IO`].
-fn cached_at(now: std::time::Instant) -> Option<std::sync::Arc<ReadState>> {
+/// Which [`Cached`] arm a fresh [`ReadState`] belongs in — shared by [`refresh_locked`] (a read)
+/// and [`install_locked`] (a write's proven outcome).
+fn cached_arm(state: std::sync::Arc<ReadState>) -> Cached {
+    if is_transient(&state) { Cached::Transient { state } } else { Cached::Settled(state) }
+}
+
+/// A settled cache hit, if one exists. Never takes [`IO`]. A transient entry is a miss here: the
+/// boot and background callers that ask ([`load_with_id`]) want a fact about the file.
+fn cached_settled() -> Option<std::sync::Arc<ReadState>> {
     match &*CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
-        Cached::Unloaded | Cached::Revoked => None,
         Cached::Settled(state) => Some(state.clone()),
-        Cached::Transient { state, retry_at } if now < *retry_at => Some(state.clone()),
-        Cached::Transient { .. } => None,
+        Cached::Unloaded | Cached::Revoked | Cached::Transient { .. } => None,
     }
 }
 
 /// Read the authority (the caller must already hold [`IO`]), install the result into [`CACHE`],
 /// and return it. Publishes identities on a `Ready` read — the same hook [`load`] and every write
 /// already carry, so a cache-filling read is covered by the scrubber exactly as an uncached one
-/// always was. The retry anchor is at least `now` and at least the read's completion time, so a
-/// slow read cannot consume its own cache lifetime before the next frame gets to use it.
-fn refresh_locked(now: std::time::Instant) -> std::sync::Arc<ReadState> {
-    refresh_if_current_locked(now, None)
+/// always was.
+fn refresh_locked() -> std::sync::Arc<ReadState> {
+    read_into_cache_locked(None).0
 }
 
-fn refresh_if_current_locked(now: std::time::Instant, expected: Option<u64>) -> std::sync::Arc<ReadState> {
+/// [`refresh_locked`] that installs only while the cache generation is still `expected`, and says
+/// whether it did (`false`: a write, a drop or a revocation got in first, and the read was discarded).
+fn read_into_cache_locked(expected: Option<u64>) -> (std::sync::Arc<ReadState>, bool) {
     #[cfg(not(any(test, feature = "test-support")))]
     let state = std::sync::Arc::new(read_live_locked());
     #[cfg(any(test, feature = "test-support"))]
     let state = std::sync::Arc::new(CACHE_READ_FOR_TEST.with(|read| {
         read.get().unwrap_or(read_live_locked)()
     }));
-    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
-    plx_base::eventlog::log("session: authority read reason=miss");
-    #[cfg(not(any(test, feature = "test-support")))]
-    let finished = std::time::Instant::now();
-    #[cfg(any(test, feature = "test-support"))]
-    let finished = CACHE_NOW_FOR_TEST.with(|clock| clock.get().unwrap_or_else(std::time::Instant::now));
-    let now = now.max(finished);
-    if !replace_cache(cached_arm(state.clone(), now), expected, false) { return state; }
+    if storage_authority() == Authority::Helper {
+        plx_base::eventlog::log("session: authority read reason=miss");
+    }
+    if !replace_cache(cached_arm(state.clone()), expected, false) { return (state, false); }
     if let ReadState::Ready { session, .. } = &*state { publish_identities(session); }
-    state
+    (state, true)
 }
 
 /// Install a proven [`ReadState`] — a completed read, or the outcome of a write that IS provably
 /// the record (`Durable`, or on the `TEST_FILE` path a legacy persist that returned `Some(_)`) —
 /// as the new cache content. The caller must already hold [`IO`]; see the module doc's invariants.
-/// Always anchored to real wall-clock time: none of this function's callers are exercised through
-/// `peek_at`'s simulated clock, only real reads and writes.
 fn install_locked(state: std::sync::Arc<ReadState>) {
-    set_cache_locked(cached_arm(state, std::time::Instant::now()));
+    set_cache_locked(cached_arm(state));
 }
 
 /// Drop whatever is cached: a write whose outcome is not provably the record (`Uncertain`,
@@ -3138,6 +3322,80 @@ pub fn learn_server_key(machine_id: &str, pin: &str) -> bool {
     // sign-out repopulate the table that sign-out just emptied.
     let (machine_id, pin) = (machine_id.to_owned(), pin.to_owned());
     queue_update(move |cur| cur.with_server_key_pin(&machine_id, &pin))
+}
+
+/// Remember that this install has been taught the hold hints in `taught` (`plx_ui::hold_hint`),
+/// off the caller's thread and best-effort: the frame thread calls it on the rising edge, the
+/// cached session says whether anything is new (nothing is queued when the stored flags already
+/// cover `taught`), and the queued edit re-checks under IO and writes only a change. Returns
+/// whether an edit was queued, not whether it was saved. With no stored session the edit finds
+/// nothing to write and the hint teaches once more on the next install of a session.
+pub fn learn_hold_hint_taught(taught: HoldHintTaught) -> bool {
+    let stored = peek().hold_hint_taught();
+    if stored.union(taught) == stored {
+        return false;
+    }
+    queue_update(move |cur| {
+        let next = cur.with_hold_hint_taught(taught);
+        (next.prefs.hold_hint_taught != cur.prefs.hold_hint_taught).then_some(next)
+    })
+}
+
+/// **The pipeline refused a native audio track and named it** (`type=18 num=200` with the audio fed
+/// natively, or the stall watchdog): record `(this build, codec, channels)` as refused, applied at
+/// once. See [`record_refusal_proof`] for the counted kind. Returns whether a write was queued (a set
+/// that cannot learn and an unstorable facet return false); what the write changes is decided when it
+/// lands, against the record then current.
+pub fn record_named_refusal(facet: &plx_os::devcaps::Facet) -> bool {
+    record(facet, None)
+}
+
+/// **A conversion rescued a play and changed only the refused facet** (S2a's facet-clean proof):
+/// count one proof for `(this build, codec, channels)`; the row applies from
+/// [`LEARNED_REFUSAL_PROOFS`]. Returns whether a write was queued, as [`record_named_refusal`] does.
+pub fn record_refusal_proof(facet: &plx_os::devcaps::Facet) -> bool {
+    record(facet, Some(1))
+}
+
+/// The one body of both writers: stamp the row with the learning firmware
+/// (`devcaps::learning_firmware`, a read) and queue the merge as an install preference off the
+/// caller's thread, best effort like [`learn_hold_hint_taught`]. The merge runs on the storage worker
+/// against the record it finds there (no read of the cached record here), and logs only when it
+/// changes something. Nothing here changes `devcaps::caps()`, which is write-once: a row reaches a
+/// play through the next play-start edge (`devcaps::start_caps` over [`Session::applied_refusals`])
+/// once the queued write has landed, and the request in flight already narrowed its own attempt. This
+/// is the store's property for every preference, not this one's: a write that does not land
+/// (unwritable storage) leaves the record as it was, and the next play loads the combination, is
+/// refused once more, and the ladder converts it, one refused Load slower.
+fn record(facet: &plx_os::devcaps::Facet, proofs: Option<u32>) -> bool {
+    let Some((firmware, build)) = plx_os::devcaps::learning_firmware() else {
+        return false;
+    };
+    let Some(row) = NativeAudioRefusal::of_facet(facet, &firmware, &build, proofs) else {
+        return false;
+    };
+    queue_update(move |cur| {
+        let merged = cur.with_native_audio_refusal(&row)?;
+        let applies = merged.native_audio_refused().iter().any(|r| r.same_as(&row) && r.applies());
+        plx_base::eventlog::log(&format!(
+            "native audio: the pipeline refused {} with {} channels on firmware {firmware:?} ({}); remembered{}",
+            row.codec,
+            row.channels,
+            if proofs.is_some() { "proved by its conversion" } else { "named by the pipeline" },
+            if applies { ", later plays convert it" } else { ", not yet applied" }
+        ));
+        Some(merged)
+    });
+    true
+}
+
+impl Session {
+    /// The stored native-audio rows in force, as `devcaps` takes them (a counted row below the
+    /// threshold is stored and not applied). PURE: the play-start edge reads it from `peek()` and
+    /// passes it to `devcaps::start_caps`, the one place a stored row narrows a capability value.
+    pub fn applied_refusals(&self) -> Vec<plx_os::devcaps::Refusal> {
+        self.prefs.native_audio_refused.iter().filter(|r| r.applies()).map(NativeAudioRefusal::to_devcaps).collect()
+    }
 }
 
 /// The UI may retain the receipt while showing its pending preference locally.
@@ -3195,44 +3453,94 @@ pub fn queue_update_settled(
 /// [`load`].
 ///
 /// **Cached** — see [`CACHE`]. Returns the same `Arc<Session>` across repeated calls as long as
-/// nothing in this process has written since the last one. Neither hits nor misses take [`IO`].
-/// A miss schedules at most one background read and immediately returns the last known state,
-/// or an empty session before the first read. A visible change advances a generation that the
-/// frame thread observes before invalidating; unchanged retries leave a settled UI alone.
+/// nothing in this process has written since the last one. **A pure read of memory:** it takes no
+/// [`IO`], submits nothing and reads no clock, so it answers the last known state (or the empty
+/// session before the first read) on a miss. Refilling a missing or transient cache is the session
+/// owner's job: [`refresh_need`] says what is missing, the owner's `RefreshCache` effect runs
+/// [`refresh_cache_job`], and the frame thread observes the visible generation move before
+/// invalidating; unchanged retries leave a settled UI alone.
 pub fn peek() -> std::sync::Arc<Session> {
-    peek_impl(std::time::Instant::now())
+    match &*CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+        Cached::Unloaded | Cached::Revoked => empty_session(),
+        Cached::Settled(state) | Cached::Transient { state } => session_of(state),
+    }
 }
 
-/// [`peek`], parameterized on "now" so a test can simulate [`LOCKED_RETRY`] elapsing without an
-/// actual one-second sleep. The supplied clock stays fixed through the read; call again with
-/// that same instant plus `LOCKED_RETRY` (or more) to observe the retry.
-#[cfg(any(test, feature = "test-support"))]
-pub fn peek_at(now: std::time::Instant) -> std::sync::Arc<Session> {
-    struct RestoreClock(Option<std::time::Instant>);
-    impl Drop for RestoreClock {
-        fn drop(&mut self) {
-            CACHE_NOW_FOR_TEST.with(|clock| clock.set(self.0));
+/// What the cache is missing, for the session owner's refresh decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RefreshNeed {
+    /// The cache generation the need was observed at; the refresh installs only while it still holds.
+    pub generation: u64,
+    /// The cache holds a transient failure to read (a retry), not an `Unloaded` cache.
+    pub transient: bool,
+}
+
+/// Whether the cache needs a read, and at which generation. Pure: it takes no [`IO`] and reads no
+/// clock. `Settled` and `Revoked` need nothing; `Unloaded` and `Transient` do. Only the app's
+/// frame step asks, and answers with a `RefreshCache` effect once the owner's backoff allows it.
+pub fn refresh_need() -> Option<RefreshNeed> {
+    let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let transient = match &*cache {
+        Cached::Unloaded => false,
+        Cached::Transient { .. } => true,
+        Cached::Settled(_) | Cached::Revoked => return None,
+    };
+    Some(RefreshNeed { generation: CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed), transient })
+}
+
+/// How a refresh job ended. `Refused` is never produced by [`refresh_cache_job`]: it is reported
+/// when the job never ran to completion. The adapter reports it when the queue refused the job or
+/// the job panicked; the app's bridge reports it, from its frame-step reconcile, when the adapter
+/// that began the job was replaced or dropped and so lost it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CacheRefreshOutcome {
+    /// A write, a drop or a revocation moved the cache before the read could land; nothing installed.
+    Superseded,
+    /// The read installed a fact about the file.
+    Settled,
+    /// The read installed a transient failure (Locked, Blocked, fallback Ready). `generation` is
+    /// the cache generation that entry stands at: the install itself moved it, so the owner holds
+    /// back only observations of THIS generation, and a drop or a write (which move it again)
+    /// refresh at once.
+    Transient { generation: u64 },
+    /// The job did not complete.
+    Refused,
+}
+
+/// The body of one cache refresh, for the storage worker: take [`IO`], quit if the cache generation
+/// moved since `generation` was observed, otherwise read the authority and install it (still
+/// fenced by `generation`, so a sign-out or write that lands mid-read wins). The two sign-out
+/// fences, [`CACHE_GENERATION`] and [`replace_cache`]'s Revoked guard, are exactly the ones the old
+/// scheduled refresh used. The test read substitute is captured here, on the submitting thread.
+pub fn refresh_cache_job(generation: u64) -> impl FnOnce() -> CacheRefreshOutcome + Send + 'static {
+    #[cfg(any(test, feature = "test-support"))]
+    let read = CACHE_READ_FOR_TEST.with(|read| read.get());
+    move || {
+        let _io = io();
+        if CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed) != generation {
+            return CacheRefreshOutcome::Superseded;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        CACHE_READ_FOR_TEST.with(|slot| slot.set(read));
+        let (state, installed) = read_into_cache_locked(Some(generation));
+        #[cfg(any(test, feature = "test-support"))]
+        CACHE_READ_FOR_TEST.with(|slot| slot.set(None));
+        match (installed, is_transient(&state)) {
+            (false, _) => CacheRefreshOutcome::Superseded,
+            (true, true) => CacheRefreshOutcome::Transient {
+                generation: CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            (true, false) => CacheRefreshOutcome::Settled,
         }
     }
-    let _clock = RestoreClock(CACHE_NOW_FOR_TEST.with(|clock| clock.replace(Some(now))));
-    peek_blocking_at(now)
 }
 
+/// Fill the cache from the authority now, on the calling thread, and return what it says: for tests
+/// that need a filled cache without driving the owner's `RefreshCache` effect.
 #[cfg(any(test, feature = "test-support"))]
-fn peek_blocking_at(now: std::time::Instant) -> std::sync::Arc<Session> {
-    if let Some(state) = cached_at(now) {
-        return session_of(&state);
-    }
+pub fn refresh_blocking_for_test() -> std::sync::Arc<Session> {
     let _io = io();
-    // Two callers can both miss and then take turns on `IO`: by the time this one finally gets
-    // the lock, the caller ahead of it may have already installed the answer. Re-check before
-    // paying for another read of storage — the whole reason this cache exists is that a read is a
-    // `recv(2)` round trip to the storage helper (~27 ms/frame), so serving the second miss from
-    // the first one's fill rather than redoing it is not an optimization, it is the point.
-    if let Some(state) = cached_at(now) {
-        return session_of(&state);
-    }
-    session_of(&refresh_locked(now))
+    session_of(&refresh_locked())
 }
 
 /// A queued refresh is invalidated by any intervening write or cache drop. The worker checks
@@ -3245,14 +3553,14 @@ fn set_cache_locked(value: Cached) {
 
 /// Only an explicit, proven credential write may end local revocation.
 fn install_proven_locked(state: std::sync::Arc<ReadState>, generation: u64) {
-    replace_cache(cached_arm(state, std::time::Instant::now()), Some(generation), true);
+    replace_cache(cached_arm(state), Some(generation), true);
 }
 
 fn install_write_locked(state: std::sync::Arc<ReadState>, authority: SaveAuthority, generation: u64) {
     if authority == SaveAuthority::FreshReauthentication {
         install_proven_locked(state, generation);
     } else {
-        replace_cache(cached_arm(state, std::time::Instant::now()), Some(generation), false);
+        replace_cache(cached_arm(state), Some(generation), false);
     }
 }
 
@@ -3268,15 +3576,45 @@ static VISIBLE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub fn install_transient_for_test(locked: bool) {
     plx_base::testlock::assert_held("session read fixture");
     let _io = io();
-    install_locked(std::sync::Arc::new(if locked { ReadState::Locked { language: plx_platform::i18n::saved_preference() } } else { ReadState::Blocked }));
+    install_locked(std::sync::Arc::new(if locked { ReadState::Locked { kept: install_preferences::Retained { language: plx_os::i18n::saved_preference(), ..Default::default() } } } else { ReadState::Blocked }));
 }
 
 pub fn visible_generation() -> u64 {
     VISIBLE_GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// Host-only publication fence for retained screen inputs, including signed-out defaults.
+/// The cache revision is read under CACHE: replace_cache assigns its content, advances the
+/// counter, and projects keys before releasing that same lock. CURRENT is read separately
+/// to avoid lock-order coupling; a before/after pair fences both publications without allocation.
+pub fn screen_input_revision() -> (u64, u64) {
+    let cache_revision = {
+        let _cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let profile_revision = {
+        let _current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+        CURRENT_PUBLICATION.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    (cache_revision, profile_revision)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_cleared_for_test(ui_resolution: UiResolution) {
+    plx_base::testlock::assert_held("cleared screen input fixture");
+    let kept = Retained { language: plx_os::i18n::Preference::System, ui_resolution };
+    set_cache_locked(Cached::Settled(std::sync::Arc::new(ReadState::Cleared { kept })));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_locked_defaults_for_test(ui_resolution: UiResolution) {
+    plx_base::testlock::assert_held("locked screen input fixture");
+    let kept = Retained { language: plx_os::i18n::Preference::System, ui_resolution };
+    set_cache_locked(Cached::Transient { state: std::sync::Arc::new(ReadState::Locked { kept }) });
+}
+
 /// Per-consumer cursor for cached session-derived views. Poll on Tick, including while storage
-/// is unavailable: peek schedules the bounded retry without blocking the frame.
+/// is unavailable: the owner's `RefreshCache` effect runs the bounded retry, so the frame never blocks.
 #[derive(Default)]
 pub struct VisibleSessionWatch(Option<(u64, bool)>);
 impl VisibleSessionWatch {
@@ -3292,7 +3630,6 @@ impl VisibleSessionWatch {
 /// A settled visible authority, or None while a read is unloaded/Locked/Blocked. Local revocation
 /// is settled for UI purposes: retaining a pre-sign-out account would be misleading.
 pub fn peek_settled() -> Option<std::sync::Arc<Session>> {
-    let _ = peek();
     match &*CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
         Cached::Settled(state) => Some(session_of(state)),
         Cached::Revoked => Some(empty_session()),
@@ -3302,7 +3639,7 @@ pub fn peek_settled() -> Option<std::sync::Arc<Session>> {
 
 fn same_visible_session(previous: &Cached, next: &Cached) -> bool {
     let ready = |cache: &Cached| match cache {
-        Cached::Settled(state) | Cached::Transient { state, .. } => match &**state {
+        Cached::Settled(state) | Cached::Transient { state } => match &**state {
             ReadState::Ready { session, .. } => Some(session.clone()),
             _ => None,
         },
@@ -3334,6 +3671,7 @@ fn same_visible_session(previous: &Cached, next: &Cached) -> bool {
 /// a session that is live.
 pub fn project_server_keys(session: &Session, signed_out: bool) {
     let pins: Vec<(String, String)> = session
+        .prefs
         .server_key_pins
         .iter()
         .filter_map(|k| session.server_key_pin(&k.machine_id).map(|p| (k.machine_id.clone(), p.to_owned())))
@@ -3359,7 +3697,7 @@ fn key_projection(value: &Cached) -> Option<(std::sync::Arc<Session>, bool)> {
     match value {
         Cached::Revoked => Some((empty_session(), true)),
         Cached::Unloaded => None,
-        Cached::Settled(state) | Cached::Transient { state, .. } => match &**state {
+        Cached::Settled(state) | Cached::Transient { state } => match &**state {
             ReadState::Ready { session, .. } => Some((session.clone(), false)),
             ReadState::Missing | ReadState::Cleared { .. } => Some((empty_session(), true)),
             ReadState::Locked { .. } | ReadState::Blocked => None,
@@ -3386,7 +3724,9 @@ fn replace_cache(value: Cached, expected: Option<u64>, proven: bool) -> bool {
         CACHE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Under the cache lock, so two replacements project in the order they landed.
         // `net::keypin` takes its own lock and never calls back into this module.
-        if let Some((session, signed_out)) = &projection { project_server_keys(session, *signed_out); }
+        if let Some((session, signed_out)) = &projection {
+            project_server_keys(session, *signed_out);
+        }
         if changed { VISIBLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release); }
         return true;
     }
@@ -3401,82 +3741,8 @@ pub fn revoke_cached_session() {
     set_cache_locked(Cached::Revoked);
 }
 
-struct Refresh {
-    in_flight: bool,
-    retry_at: Option<std::time::Instant>,
-}
-static REFRESH: Mutex<Refresh> = Mutex::new(Refresh { in_flight: false, retry_at: None });
-
-struct RefreshFlight { completed: bool }
-impl Drop for RefreshFlight {
-    fn drop(&mut self) {
-        let mut refresh = REFRESH.lock().unwrap_or_else(|e| e.into_inner());
-        refresh.in_flight = false;
-        // Back off only refused/unwinding jobs. A completed read has its own cache deadline;
-        // an intervening write that drops that cache must be able to refresh immediately.
-        refresh.retry_at = (!self.completed).then(|| std::time::Instant::now() + LOCKED_RETRY);
-    }
-}
-
-fn peek_impl(now: std::time::Instant) -> std::sync::Arc<Session> {
-    let (last, needs_refresh, generation) = {
-        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let (last, needs_refresh) = match &*cache {
-            Cached::Unloaded => (empty_session(), true),
-            Cached::Revoked => (empty_session(), false),
-            Cached::Settled(state) => (session_of(state), false),
-            Cached::Transient { state, retry_at } => (session_of(state), now >= *retry_at),
-        };
-        (last, needs_refresh, CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed))
-    };
-    if needs_refresh { schedule_refresh(now, generation); }
-    last
-}
-
-fn schedule_refresh(now: std::time::Instant, generation: u64) {
-    // Shared asynchronous fixtures opt in by holding testlock::serial. Its teardown drains the
-    // FIFO before another test can own the cache; incidental readers cannot leak jobs into it.
-    #[cfg(any(test, feature = "test-support"))]
-    if !plx_base::testlock::held() { return; }
-    {
-        let mut refresh = REFRESH.lock().unwrap_or_else(|e| e.into_inner());
-        if refresh.in_flight || refresh.retry_at.is_some_and(|retry| now < retry) { return; }
-        refresh.in_flight = true;
-    }
-    let flight = RefreshFlight { completed: false };
-    #[cfg(any(test, feature = "test-support"))]
-    let read = CACHE_READ_FOR_TEST.with(|read| read.get());
-    // The shared bounded FIFO uses task::spawn (Builder::spawn with an error return).
-    // A discarded ticket does not cancel the job; its result is the cache publication itself.
-    let _ = plx_base::storage_worker::submit(move || {
-        let mut flight = flight;
-        let _io = io();
-        if CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed) != generation {
-            flight.completed = true;
-            return;
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        CACHE_READ_FOR_TEST.with(|slot| slot.set(read));
-        refresh_if_current_locked(std::time::Instant::now(), Some(generation));
-        flight.completed = true;
-        #[cfg(any(test, feature = "test-support"))]
-        CACHE_READ_FOR_TEST.with(|slot| slot.set(None));
-    });
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn drain_refresh_for_test() {
-    if REFRESH.lock().unwrap_or_else(|e| e.into_inner()).in_flight {
-        plx_base::storage_worker::drain_for_test();
-    }
-}
-
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// `peek_at` advances this clock explicitly; ordinary `peek` still measures real read time.
-    static CACHE_NOW_FOR_TEST: std::cell::Cell<Option<std::time::Instant>> = const {
-        std::cell::Cell::new(None)
-    };
     /// Substitute a slow authority read without changing the storage or legacy-file paths.
     static CACHE_READ_FOR_TEST: std::cell::Cell<Option<fn() -> ReadState>> = const {
         std::cell::Cell::new(None)
@@ -3491,7 +3757,7 @@ mod cache_timing_tests {
     // serial fixture: a later test's time zero would otherwise wrap the keepalive arithmetic.
     struct ResetIdle;
     impl Drop for ResetIdle {
-        fn drop(&mut self) { plx_machine::idle::reset_for_test(); }
+        fn drop(&mut self) { plx_machine::motion::report::reset_for_test(); }
     }
 
     /// What a frame thread's landing step reads of the cache: whether the visible generation moved
@@ -3507,39 +3773,72 @@ mod cache_timing_tests {
         }
     }
 
+    /// `peek` is a read of memory and nothing else: it never submits a refresh, so an invalidated
+    /// cache stays invalidated until the session owner's `RefreshCache` effect runs
+    /// ([`refresh_need`]).
     #[test]
-    fn a_slow_production_peek_is_single_flight_and_lands_on_the_frame_step() {
-        use std::sync::{atomic::{AtomicUsize, Ordering}, mpsc::{self, Receiver, Sender}};
-        static CHANNELS: Mutex<Option<(Sender<()>, Receiver<()>)>> = Mutex::new(None);
+    fn peek_never_reads_storage() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         static READS: AtomicUsize = AtomicUsize::new(0);
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("peek-never-reads");
+        { let _io = io(); install_locked(std::sync::Arc::new(ReadState::Blocked)); }
+        invalidate_for_test();
+        READS.store(0, Ordering::SeqCst);
+        CACHE_READ_FOR_TEST.with(|slot| slot.set(Some(|| {
+            READS.fetch_add(1, Ordering::SeqCst);
+            ReadState::Missing
+        })));
+        for _ in 0..30 { assert!(peek().client_id.is_empty()); }
+        plx_base::storage_worker::drain_for_test();
+        CACHE_READ_FOR_TEST.with(|slot| slot.set(None));
+        assert_eq!(READS.load(Ordering::SeqCst), 0, "peek must not schedule a storage read");
+    }
+
+    #[test]
+    fn a_slow_refresh_job_never_blocks_peek_and_lands_on_the_frame_step() {
+        use std::sync::mpsc::{self, Receiver, Sender};
+        static CHANNELS: Mutex<Option<(Sender<()>, Receiver<()>)>> = Mutex::new(None);
+        // Set by the read once its release (or its 5 s fallback) came: the clockless witness that a
+        // peek taking the read's `IO` would have had to wait for it.
+        static READ_RETURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        READ_RETURNED.store(false, std::sync::atomic::Ordering::SeqCst);
         let _serial = plx_base::testlock::serial();
         let _session = test_support::TempSession::new("slow-production-landing");
         let _idle = ResetIdle;
         { let _io = io(); install_locked(std::sync::Arc::new(ReadState::Blocked)); }
         let mut frame_step = FrameCursor::new();
         invalidate_for_test();
+        let need = refresh_need().expect("an invalidated cache needs a read");
+        assert!(!need.transient);
         let (started, entered) = mpsc::channel();
         let (release, held) = mpsc::channel();
         *CHANNELS.lock().unwrap() = Some((started, held));
-        READS.store(0, Ordering::SeqCst);
         CACHE_READ_FOR_TEST.with(|slot| slot.set(Some(|| {
-            READS.fetch_add(1, Ordering::SeqCst);
             let (started, held) = CHANNELS.lock().unwrap().take().unwrap();
             started.send(()).unwrap();
             let _ = held.recv_timeout(std::time::Duration::from_secs(5));
+            READ_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
             ReadState::Ready { session: std::sync::Arc::new(test_support::signed_in()), plaintext: false, retry_canonical: false }
         })));
-        plx_machine::idle::reset_for_test();
-        let start = std::time::Instant::now();
-        for _ in 0..30 { assert!(peek().client_id.is_empty()); }
+        plx_machine::motion::report::reset_for_test();
+        let ticket = plx_base::storage_worker::submit_retained(refresh_cache_job(need.generation));
         CACHE_READ_FOR_TEST.with(|slot| slot.set(None));
-        assert!(start.elapsed() < std::time::Duration::from_millis(200));
         entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert_eq!(READS.load(Ordering::SeqCst), 1);
+        for _ in 0..30 { assert!(peek().client_id.is_empty()); }
+        assert!(
+            !READ_RETURNED.load(std::sync::atomic::Ordering::SeqCst),
+            "peek must not wait for the read: the peeks finished only after the parked read had returned"
+        );
         release.send(()).unwrap();
+        assert_eq!(ticket.wait_blocking().unwrap(), CacheRefreshOutcome::Settled);
         plx_base::storage_worker::drain_for_test();
-        assert!(!plx_machine::idle::should_present(0), "the worker only publishes data");
-        assert_eq!(plx_machine::idle::take_local_damage(), 0, "the peeks raise no frame damage of their own");
+        let mut present = plx_machine::present::Present::new();
+        present.take(0);
+        present.acknowledge(0);
+        plx_machine::motion::report::collect_into(&mut present, 0);
+        assert!(!present.take(0), "the worker only publishes data");
+        assert!(!present.take(1), "the peeks raise no owned frame damage of their own");
         let _frame = plx_base::task::FrameScope::enter();
         assert!(frame_step.lands(), "the frame step observes the published session");
         assert_eq!(peek().client_id, "cid-1");
@@ -3605,13 +3904,15 @@ mod cache_timing_tests {
     fn a_queued_refresh_cannot_overwrite_a_newer_write() {
         let _serial = plx_base::testlock::serial();
         let _session = test_support::TempSession::new("cache-queued-write");
+        let need = refresh_need().expect("an unloaded cache needs a read");
         let held = io();
-        assert!(peek().client_id.is_empty());
+        let ticket = plx_base::storage_worker::submit_retained(refresh_cache_job(need.generation));
         install_locked(std::sync::Arc::new(ReadState::Ready {
             session: std::sync::Arc::new(test_support::signed_in()), plaintext: false, retry_canonical: false,
         }));
         drop(held);
-        drain_refresh_for_test();
+        assert_eq!(ticket.wait_blocking().unwrap(), CacheRefreshOutcome::Superseded,
+            "a write that landed first fences the queued read out");
         assert_eq!(peek().client_id, "cid-1");
     }
 
@@ -3630,53 +3931,16 @@ mod cache_timing_tests {
             let _ = release.recv_timeout(std::time::Duration::from_secs(5));
             ReadState::Ready { session: std::sync::Arc::new(test_support::signed_in()), plaintext: false, retry_canonical: false }
         })));
-        let _ = peek();
+        let need = refresh_need().expect("an unloaded cache needs a read");
+        let ticket = plx_base::storage_worker::submit_retained(refresh_cache_job(need.generation));
         CACHE_READ_FOR_TEST.with(|read| read.set(None));
         entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         revoke_cached_session();
         assert!(peek().account_token.is_empty());
         release_tx.send(()).unwrap();
-        drain_refresh_for_test();
+        assert_eq!(ticket.wait_blocking().unwrap(), CacheRefreshOutcome::Superseded);
         assert!(peek().account_token.is_empty(), "an old read must not republish revoked credentials");
         assert!(matches!(*CACHE.lock().unwrap(), Cached::Revoked));
-    }
-
-    #[test]
-    fn peek_does_not_wait_for_a_slow_backend() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static READS: AtomicUsize = AtomicUsize::new(0);
-        static FINISHED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-        let _serial = plx_base::testlock::serial();
-        let _session = test_support::TempSession::new("cache-background-blocked");
-        let _idle = ResetIdle;
-        struct ResetRead;
-        impl Drop for ResetRead {
-            fn drop(&mut self) {
-                plx_base::storage_worker::drain_for_test();
-                CACHE_READ_FOR_TEST.with(|read| read.set(None));
-            }
-        }
-        let _reset = ResetRead;
-        READS.store(0, Ordering::SeqCst);
-        CACHE_READ_FOR_TEST.with(|read| read.set(Some(|| {
-            READS.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(LOCKED_RETRY + std::time::Duration::from_millis(50));
-            *FINISHED.lock().unwrap() = Some(std::time::Instant::now());
-            ReadState::Blocked
-        })));
-        plx_machine::idle::reset_for_test();
-        plx_machine::idle::note_present(10_000);
-        assert!(!plx_machine::idle::should_present(10_001));
-        let started = std::time::Instant::now();
-        for _ in 0..30 { assert!(peek().client_id.is_empty()); }
-        assert!(started.elapsed() < std::time::Duration::from_millis(200),
-            "per-frame peeks must return while the backend is still blocked");
-        plx_base::storage_worker::drain_for_test();
-        assert_eq!(READS.load(Ordering::SeqCst), 1, "one refresh for all thirty frames");
-        let finished = FINISHED.lock().unwrap().unwrap();
-        assert!(cached_at(finished + LOCKED_RETRY / 2).is_some(),
-            "a background timeout gets a full retry window after completion");
-        assert!(!plx_machine::idle::should_present(10_001), "an unchanged landing must leave the UI settled");
     }
 
     #[test]
@@ -3693,7 +3957,7 @@ mod cache_timing_tests {
         frame_step.lands();
         for (read, landed) in [
             ((|| ReadState::Blocked) as fn() -> ReadState, false),
-            ((|| ReadState::Locked { language: plx_platform::i18n::Preference::System }) as fn() -> ReadState, false),
+            ((|| ReadState::Locked { kept: Default::default() }) as fn() -> ReadState, false),
             ((|| ReadState::Ready {
                 session: std::sync::Arc::new(test_support::signed_in()), plaintext: false, retry_canonical: false,
             }) as fn() -> ReadState, true),
@@ -3702,62 +3966,66 @@ mod cache_timing_tests {
                 session: std::sync::Arc::new(test_support::signed_in()), plaintext: true, retry_canonical: false,
             }) as fn() -> ReadState, false),
         ] {
-            plx_machine::idle::reset_for_test();
-            plx_machine::idle::note_present(10_000);
+            plx_machine::motion::report::reset_for_test();
+            let mut present = plx_machine::present::Present::new();
+            present.take(10_000);
+            present.acknowledge(10_000);
             CACHE_READ_FOR_TEST.with(|slot| slot.set(Some(read)));
-            schedule_refresh(std::time::Instant::now(),
-                CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed));
+            let job = refresh_cache_job(CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed));
             CACHE_READ_FOR_TEST.with(|slot| slot.set(None));
+            drop(plx_base::storage_worker::submit_retained(job));
             plx_base::storage_worker::drain_for_test();
-            assert!(!plx_machine::idle::should_present(10_001), "workers cannot wake the UI");
-            assert_eq!(plx_machine::idle::take_local_damage(), 0);
+            plx_machine::motion::report::collect_into(&mut present, 10_001);
+            assert!(!present.take(10_001), "workers cannot wake the UI");
+            assert!(!present.take(10_001), "only the owned landing boundary can damage the gate");
             let _frame = plx_base::task::FrameScope::enter();
             assert_eq!(frame_step.lands(), landed);
             assert!(!frame_step.lands(), "one landing per change");
-            assert_eq!(plx_machine::idle::take_local_damage(), 0, "landing the cache raises no frame damage of its own");
-        }
-    }
-
-    #[test]
-    fn an_unserialized_peek_cannot_leak_a_refresh_into_another_test() {
-        let _serial = plx_base::testlock::serial();
-        let _session = test_support::TempSession::new("cache-unserialized-peek");
-        let held = io();
-        std::thread::Builder::new().spawn(|| {
-            assert!(!plx_base::testlock::held());
-            assert!(peek().client_id.is_empty());
-        }).unwrap().join().unwrap();
-        let in_flight = REFRESH.lock().unwrap().in_flight;
-        drop(held);
-        drain_refresh_for_test();
-        assert!(!in_flight, "a caller outside the serial fixture cannot admit shared work");
-    }
-
-    #[test]
-    fn a_slow_blocked_read_is_cached_from_its_completion() {
-        let _serial = plx_base::testlock::serial();
-        let _session = test_support::TempSession::new("cache-slow-blocked");
-        struct ResetRead;
-        impl Drop for ResetRead {
-            fn drop(&mut self) {
-                CACHE_READ_FOR_TEST.with(|read| read.set(None));
+            assert!(!present.take(10_001), "landing the cache raises no owned damage of its own");
+            if landed {
+                plx_machine::machine::PresentHandle::of(&mut present).note(
+                    plx_machine::present::PresentEvent::Damage(plx_machine::present::Provenance::Lifecycle));
             }
+            assert_eq!(present.take(10_001), landed, "the caller attributes the typed landing once");
         }
-        let _reset = ResetRead;
-        CACHE_READ_FOR_TEST.with(|read| read.set(Some(|| {
-            READS_FOR_TEST.with(|count| count.set(count.get() + 1));
-            std::thread::sleep(LOCKED_RETRY + std::time::Duration::from_millis(50));
-            ReadState::Blocked
-        })));
-        reset_reads_for_test();
+    }
 
-        let started = std::time::Instant::now();
-        assert!(peek_blocking_at(started).client_id.is_empty());
-        let finished = std::time::Instant::now();
-        assert!(finished.duration_since(started) > LOCKED_RETRY);
-        assert_eq!(reads_for_test(), 1);
-        assert!(peek_at(finished + LOCKED_RETRY / 2).client_id.is_empty());
-        assert_eq!(reads_for_test(), 1, "the retry window must start after the slow read ends");
+    #[test]
+    fn refresh_need_reports_what_the_cache_lacks() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refresh-need");
+        invalidate_for_test();
+        let unloaded = refresh_need().expect("Unloaded needs a read");
+        assert!(!unloaded.transient);
+        { let _io = io(); install_locked(std::sync::Arc::new(ReadState::Blocked)); }
+        let transient = refresh_need().expect("Transient needs a retry");
+        assert!(transient.transient);
+        assert_ne!(transient.generation, unloaded.generation, "the install moved the generation");
+        { let _io = io(); install_locked(std::sync::Arc::new(ReadState::Missing)); }
+        assert_eq!(refresh_need(), None, "Settled needs nothing");
+        revoke_cached_session();
+        assert_eq!(refresh_need(), None, "a local revocation is never refilled");
+    }
+
+    #[test]
+    fn a_refresh_job_reports_how_it_ended() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refresh-outcomes");
+        let run = |read: fn() -> ReadState, generation: u64| {
+            CACHE_READ_FOR_TEST.with(|slot| slot.set(Some(read)));
+            let job = refresh_cache_job(generation);
+            CACHE_READ_FOR_TEST.with(|slot| slot.set(None));
+            plx_base::storage_worker::submit_retained(job).wait_blocking().unwrap()
+        };
+        invalidate_for_test();
+        let g = refresh_need().unwrap().generation;
+        assert_eq!(run(|| ReadState::Blocked, g), CacheRefreshOutcome::Transient { generation: g + 1 },
+            "the install moved the generation; the outcome names the one the entry stands at");
+        let g = refresh_need().unwrap().generation;
+        assert_eq!(run(|| ReadState::Missing, g), CacheRefreshOutcome::Settled);
+        assert_eq!(run(|| ReadState::Missing, g), CacheRefreshOutcome::Superseded,
+            "the generation the job was given has moved on");
+        assert_eq!(refresh_need(), None);
     }
 }
 
@@ -3808,8 +4076,7 @@ fn peek_locked() -> Session {
 fn session_from_read(read: &ReadState) -> Session {
     match read {
         ReadState::Ready { session, .. } => (**session).clone(),
-        ReadState::Cleared { language } | ReadState::Locked { language } =>
-            Session { language: *language, ..Default::default() },
+        ReadState::Cleared { kept } | ReadState::Locked { kept } => kept.into_session(),
         ReadState::Missing | ReadState::Blocked => Session::default(),
     }
 }
@@ -3820,9 +4087,10 @@ const SECURE_FORMAT: &str = "plxnative-secure-session";
 struct SecureEnvelope {
     format: String,
     version: u8,
-    sealed: plx_platform::tv::secure::Sealed,
+    sealed: plx_os::tv::secure::Sealed,
 }
 
+#[derive(Clone)]
 enum ReadState {
     Missing,
     Ready {
@@ -3834,7 +4102,7 @@ enum ReadState {
     /// A recognized encrypted file whose device key is temporarily or permanently unavailable.
     /// It must shadow every lower-priority candidate: treating it as corrupt and then writing a
     /// fresh client id would destroy the only copy of the credentials.
-    Locked { language: plx_platform::i18n::Preference },
+    Locked { kept: install_preferences::Retained },
     /// The canonical authority could not answer safely. It shadows legacy candidates exactly as
     /// `Locked` does, so a fresh client id can never overwrite the only copy of the credentials.
     Blocked,
@@ -3845,7 +4113,7 @@ enum ReadState {
     /// variant rather than `Missing` itself for the one property it does NOT share with `Missing`:
     /// it must still shadow a reappearing legacy file, exactly as `Locked`/`Blocked` do, so a
     /// stale pre-DB8 `auth.json` can never resurrect a tenure this device already cleared.
-    Cleared { language: plx_platform::i18n::Preference },
+    Cleared { kept: install_preferences::Retained },
 }
 
 /// The canonical authority's answer, retaining whether protected data exists but cannot be opened.
@@ -3874,8 +4142,8 @@ fn read_locked(canonical: persistence::CanonicalRead) -> ReadState {
         // It is also deliberately not Blocked/Locked: those carry locked/blocked UI framing that a
         // cleanly signed-out device must not present. `ReadState::Cleared` is its own variant so
         // downstream `match`es are forced to decide, rather than silently inheriting either policy.
-        persistence::CanonicalRead::Cleared { language, .. } => ReadState::Cleared { language },
-        persistence::CanonicalRead::Locked { public, .. } => ReadState::Locked { language: public.language },
+        persistence::CanonicalRead::Cleared { kept, .. } => ReadState::Cleared { kept },
+        persistence::CanonicalRead::Locked { public, .. } => ReadState::Locked { kept: install_preferences::Retained::of(&public) },
         persistence::CanonicalRead::Pending { .. } => ReadState::Blocked,
         persistence::CanonicalRead::Blocked(_) => ReadState::Blocked,
     }
@@ -3887,6 +4155,10 @@ fn read_locked(canonical: persistence::CanonicalRead) -> ReadState {
 fn read_live_locked() -> ReadState {
     #[cfg(any(test, feature = "test-support"))]
     READS_FOR_TEST.with(|c| c.set(c.get() + 1));
+    // Above every fixture redirect below: a platform with no credential store reads no store.
+    if memory_only::active() {
+        return memory_only::read_locked();
+    }
     #[cfg(any(test, feature = "test-support"))]
     if TEST_FILE.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
         // A redirected scratch path is an explicit host fixture. It is also deliberately not
@@ -3896,7 +4168,7 @@ fn read_live_locked() -> ReadState {
     }
     match read_canonical_locked() {
         persistence::CanonicalRead::Missing => migrate_missing_fallback_locked(read_legacy_locked()),
-        persistence::CanonicalRead::Blocked(plx_platform::storage::StoreError::HelperUnavailable) => {
+        persistence::CanonicalRead::Blocked(plx_os::storage::StoreError::HelperUnavailable) => {
             match read_legacy_filtered_locked(true) {
                 ReadState::Ready {
                     session, plaintext, ..
@@ -3905,8 +4177,8 @@ fn read_live_locked() -> ReadState {
                     plaintext,
                     retry_canonical: true,
                 },
-                ReadState::Locked { language } => ReadState::Locked { language },
-                ReadState::Cleared { language } => ReadState::Locked { language },
+                ReadState::Locked { kept } => ReadState::Locked { kept },
+                ReadState::Cleared { kept } => ReadState::Locked { kept },
                 _ => ReadState::Blocked,
             }
         }
@@ -3985,9 +4257,9 @@ fn read_legacy_filtered_locked(fallback_only: bool) -> ReadState {
         }
         if let Ok(envelope) = serde_json::from_slice::<SecureEnvelope>(&bytes) {
             if envelope.format == SECURE_FORMAT && envelope.version == 1 {
-                let Some(plain) = plx_platform::tv::secure::open(&envelope.sealed) else {
+                let Some(plain) = plx_os::tv::secure::open(&envelope.sealed) else {
                     plx_base::eventlog::log("session: secure file is present but its device key is unavailable");
-                    return ReadState::Locked { language: install_preferences::load().unwrap_or_default() };
+                    return ReadState::Locked { kept: install_preferences::load().unwrap_or_default() };
                 };
                 return serde_json::from_slice::<Session>(&plain)
                     .map(|session| ReadState::Ready {
@@ -3995,12 +4267,12 @@ fn read_legacy_filtered_locked(fallback_only: bool) -> ReadState {
                         plaintext: false,
                         retry_canonical: marked,
                     })
-                    .unwrap_or(ReadState::Locked { language: install_preferences::load().unwrap_or_default() });
+                    .unwrap_or(ReadState::Locked { kept: install_preferences::load().unwrap_or_default() });
             }
         }
         if identifies_secure_envelope(&bytes) {
             plx_base::eventlog::log("session: unsupported or damaged secure envelope is locked");
-            return ReadState::Locked { language: install_preferences::load().unwrap_or_default() };
+            return ReadState::Locked { kept: install_preferences::load().unwrap_or_default() };
         }
         if let Ok(session) = serde_json::from_value::<Session>(value) {
             return ReadState::Ready {
@@ -4010,7 +4282,7 @@ fn read_legacy_filtered_locked(fallback_only: bool) -> ReadState {
             };
         }
     }
-    install_preferences::load().map_or(ReadState::Missing, |language| ReadState::Cleared { language })
+    install_preferences::load().map_or(ReadState::Missing, |kept| ReadState::Cleared { kept })
 }
 
 
@@ -4039,8 +4311,8 @@ fn has_unmarked_secure_locked() -> bool {
 /// even when it omitted `client_id`; otherwise opening the Auto gate in a future build would turn
 /// that old install into a fresh one merely because its identifier also needed repair.
 fn seed_fresh_quality(s: &mut Session, persisted: bool, auto_ready: bool) {
-    if !persisted && s.playback_quality.is_none() {
-        s.playback_quality = Some(PlaybackQuality::fresh_default(auto_ready));
+    if !persisted && s.prefs.playback_quality.is_none() {
+        s.prefs.playback_quality = Some(PlaybackQuality::fresh_default(auto_ready));
     }
 }
 
@@ -4063,17 +4335,16 @@ fn auto_quality_ready() -> bool {
 }
 
 /// **The telemetry/consent legacy-file sweep that follows a durable canonical clear**
-/// ([`clear_for_erase`]'s ARM arm): `telemetry` owns the files and sits above `plex`, so the app
-/// installs its `cleanup_after_account_clear` as a hook ([`install_account_clear_cleanup`];
-/// `app::boot::install_plex_seams`). It answers whether every candidate was retired. Unset there is
-/// nothing registered to retire, which reads as retired, so the "could not be retired" branch is
-/// never taken without a sweep that failed. Compiled where the sweep is: ARM, not the simulator,
-/// not a test build.
-#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+/// ([`clear_for_erase`] where the storage helper is canonical): `telemetry` owns the files and sits
+/// above `plex`, so the app installs its `cleanup_after_account_clear` as a hook
+/// ([`install_account_clear_cleanup`]; `app::boot::install_plex_seams`). It answers whether every
+/// candidate was retired. Unset there is nothing registered to retire, which reads as retired, so
+/// the "could not be retired" branch is never taken without a sweep that failed. The sweep runs
+/// only where the platform states [`Authority::Helper`]; elsewhere the files it retires are not
+/// deferred to a sign-out, so an installed hook is never asked.
 static ACCOUNT_CLEAR_CLEANUP: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
 
 /// Install the sweep [`ACCOUNT_CLEAR_CLEANUP`] runs. Once; later calls are ignored.
-#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
 pub fn install_account_clear_cleanup(sweep: fn() -> bool) {
     let _ = ACCOUNT_CLEAR_CLEANUP.set(sweep);
 }
@@ -4149,11 +4420,11 @@ fn read_identity(read: &ReadState) -> Vec<u8> {
     match read {
         ReadState::Missing => vec![0],
         ReadState::Blocked => vec![1],
-        ReadState::Locked { language } => [vec![1], language.tag().as_bytes().to_vec()].concat(),
+        ReadState::Locked { kept } => [vec![1], kept.language.tag().as_bytes().to_vec(), kept.ui_resolution.tag().as_bytes().to_vec()].concat(),
         // Its own bucket, distinct from both Missing and Locked/Blocked: a concurrent transition
         // into or out of Cleared must be detectable by `DeferredLoad::apply`'s identity check, not
         // silently matched against whichever of those two buckets it happens to share a vec! with.
-        ReadState::Cleared { language } => [vec![2], language.tag().as_bytes().to_vec()].concat(),
+        ReadState::Cleared { kept } => [vec![2], kept.language.tag().as_bytes().to_vec(), kept.ui_resolution.tag().as_bytes().to_vec()].concat(),
         ReadState::Ready { session, .. } => serde_json::to_vec(&**session).expect("Session serialization"),
     }
 }
@@ -4166,7 +4437,8 @@ impl DeferredLoad {
         if read_identity(&read) != self.expected {
             // Refused, exactly like `update_with_outcome`'s own refusal path: install the record
             // this capture lost the race against, rather than leaving the cache empty for the
-            // next `peek()` to queue a duplicate of the read this call just took under `IO`.
+            // session owner to refill with a second read of what this call just established
+            // under `IO`.
             install_locked(read);
             return Err("session changed during capture");
         }
@@ -4176,8 +4448,8 @@ impl DeferredLoad {
             save_locked(&self.session);
         } else {
             // No write happens on this path, but the read above IS the verified record: install
-            // it so the boot path's first `peek()` does not queue a redundant read for a fact
-            // this call already established under `IO`.
+            // it so the cache is not left empty for the session owner to refill with a second
+            // read of what this call just established under `IO`.
             install_locked(read);
         }
         publish_identities(&self.session);
@@ -4216,8 +4488,7 @@ fn established(read: &ReadState) -> bool {
 
 fn load_with_id(mint: impl FnOnce() -> String) -> Session {
     if cache_revoked() { return Session::default(); }
-    let now = std::time::Instant::now();
-    if let Some(read) = cached_at(now) {
+    if let Some(read) = cached_settled() {
         if established(&read) {
             let (s, save) = prepare_load(&read, mint);
             debug_assert!(!save, "an established, protected record must never need a resave");
@@ -4229,7 +4500,7 @@ fn load_with_id(mint: impl FnOnce() -> String) -> Session {
     // The same race a synchronous cache fill guards against: another caller may have installed an established
     // record while this one waited for `IO`, in which case re-reading storage here would be a
     // second, needless read of a record already proved.
-    if let Some(read) = cached_at(now) {
+    if let Some(read) = cached_settled() {
         if established(&read) {
             let (s, save) = prepare_load(&read, mint);
             debug_assert!(!save, "an established, protected record must never need a resave");
@@ -4237,7 +4508,7 @@ fn load_with_id(mint: impl FnOnce() -> String) -> Session {
             return s;
         }
     }
-    let read = refresh_locked(now);
+    let read = refresh_locked();
     if cache_revoked() { return Session::default(); }
     let (s, save) = prepare_load(&read, mint);
     if save { save_locked(&s); }
@@ -4264,8 +4535,9 @@ fn prepare_load(read: &ReadState, mint: impl FnOnce() -> String) -> (Session, bo
         ReadState::Missing | ReadState::Locked { .. } | ReadState::Blocked | ReadState::Cleared { .. } => {
             let mut fresh = session_from_read(read);
             // Product default is on. `Default` for a bool is off, and this is the path that
-            // writes the first file, so set it before that save.
-            fresh.trailer_autoplay = true;
+            // writes the first file, so set it before that save. Like `fresh_default` quality, it
+            // sets the install-wide default the profiles with no value of their own fall back to.
+            fresh.prefs.trailer_autoplay = true;
             fresh
         }
     };
@@ -4299,15 +4571,40 @@ pub fn update(edit: impl FnOnce(&Session) -> Option<Session>) -> bool {
 
 /// Blocking persistence seam; Language settings dispatches it on the storage worker.
 /// A next-launch promise requires the same confirmed durability as playback preferences.
-pub fn set_language(language: plx_platform::i18n::Preference) -> bool {
+pub fn set_language(language: plx_os::i18n::Preference) -> bool {
     let saved = update_with_outcome(|current| {
         let mut next = current.clone();
         next.language = language;
         Some(next)
-    }).is_some_and(|write| matches!(write.classify(),
-        async_persistence::CompletionOutcome::Durable(_)));
-    if saved { plx_platform::i18n::set_saved_preference(language); }
+    }).is_some_and(|write| kept_for_next_launch(&write));
+    if saved { plx_os::i18n::set_saved_preference(language); }
     saved
+}
+
+/// Whether `write` keeps its choice for the NEXT launch: a store's confirmed commit, or, on a
+/// platform with no credential store, the install's own file ([`memory_only`]), which is where
+/// the language and the Interface resolution live there. A write held in memory alone does not.
+fn kept_for_next_launch(write: &async_persistence::LiveWrite) -> bool {
+    match write.classify() {
+        async_persistence::CompletionOutcome::Durable(_) => true,
+        async_persistence::CompletionOutcome::Ephemeral => write.install_choices_kept(),
+        async_persistence::CompletionOutcome::Uncertain { .. }
+        | async_persistence::CompletionOutcome::Failed(_)
+        | async_persistence::CompletionOutcome::ProtectionUncertain(_)
+        | async_persistence::CompletionOutcome::Superseded => false,
+    }
+}
+
+/// Blocking persistence seam for the Interface resolution picker, dispatched on the storage
+/// worker. The choice applies at the NEXT launch, so a pick is only claimed once it is durable.
+pub fn set_ui_resolution(mode: UiResolution) -> bool {
+    let mut already = false;
+    let write = update_with_outcome(|current| {
+        already = current.ui_resolution() == mode;
+        (!already).then(|| current.with_ui_resolution(mode))
+    });
+    // Already the stored choice is a pick that landed; an unreadable or refused record is not.
+    already || write.is_some_and(|write| kept_for_next_launch(&write))
 }
 
 
@@ -4389,13 +4686,45 @@ pub fn replace_after_reauthentication_guarded_with_outcome(
         install_locked(read);
         return Err(());
     }
-    let next = edit(&cur);
+    let mut next = edit(&cur);
     if next.account_token.is_empty() {
         install_locked(read);
         return Ok(None);
     }
+    // The one login that is not a sign-out: the stored session is still on disk, so no `ClearTenure`
+    // ran. A different account must not open on the previous one's library views, which carry no
+    // account stamp to read as nothing under (`ACCOUNT_BOUND_PREFERENCES` is what sign-out clears),
+    // nor on its Home pins and search history: those are keyed by profile `uuid` with `""` for the
+    // owner of EVERY account, and sign-out drops them with the file.
+    //
+    // "Different account" is the OWNER'S IDENTITY (`owner_identity` of the roster each side holds),
+    // never the token: a fresh QR sign-in always mints a new plex.tv token, so the same person
+    // signing in again differs by token and must keep their pins, searches and library memory.
+    // Unknown on either side (a roster not yet fetched, or one without a nameable admin) clears.
+    if !cur.account_token.is_empty() && !same_owner(&cur.home_users, &next.home_users) {
+        next.prefs.last_library.clear();
+        next.prefs.library_views.clear();
+        next.home_pins.clear();
+        next.recent_searches.clear();
+    }
     if !may_write() { return Err(()); }
     Ok(Some(save_locked_with_authority(&next, SaveAuthority::FreshReauthentication)))
+}
+
+/// The stable identity of the account a roster belongs to: its admin entry's plex.tv account id
+/// (the same id space as `account::Resource::owner_id`), else that entry's uuid when an old file
+/// carries no id. `None` when the roster is empty ("unknown", not "nobody"), has no admin, or the
+/// admin names neither. A token is NOT an identity: every sign-in mints a new one.
+pub fn owner_identity(roster: &[HomeUserRef]) -> Option<String> {
+    let admin = roster.iter().find(|u| u.admin)?;
+    if admin.id != 0 { Some(format!("id:{}", admin.id)) }
+    else if !admin.uuid.is_empty() { Some(format!("uuid:{}", admin.uuid)) }
+    else { None }
+}
+
+/// Do two rosters name the SAME account? Fails safe: an identity either side cannot name is "no".
+pub fn same_owner(a: &[HomeUserRef], b: &[HomeUserRef]) -> bool {
+    matches!((owner_identity(a), owner_identity(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// What the routine-authority write actually did — the canonical verdict beside the
@@ -4463,23 +4792,27 @@ fn save_locked_with_authority(
     // Before the write, not after: a failed persist still means these names are live in THIS run,
     // and the log wants them redacted either way.
     publish_identities(s);
+    // Above the fixture redirect and the platform selection below: no credential store is written.
+    if memory_only::active() {
+        return memory_only::save_locked(s, authority, cache_generation);
+    }
     #[cfg(any(test, feature = "test-support"))]
     if TEST_FILE.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
         let legacy = save_legacy_locked(s);
         install_or_drop_after_write(s, legacy, authority, cache_generation);
         return async_persistence::LiveWrite::legacy(legacy);
     }
-    plx_platform::storage::wire::failure::clear();
+    plx_os::storage::wire::failure::clear();
     CANDIDATE_ERRNOS.with(|slot| slot.set([None; 8]));
     let protected_before = has_protected_authority();
-    let commit = persistence::write_session(s, authority);
+    let commit = persistence::write_session_timed(s, authority);
     // Uncertain helper replies already own their evidence in CanonicalCommit. Only the older
     // StoreError-only failure variants still need this immediate thread-local snapshot.
     let helper_failure = match &commit {
-        persistence::CanonicalCommit::Failed(plx_platform::storage::StoreError::HelperUnavailable
-            | plx_platform::storage::StoreError::HelperAuthentication | plx_platform::storage::StoreError::HelperProtocol) =>
-            Some(plx_platform::storage::wire::failure::last().unwrap_or_else(||
-                plx_platform::storage::wire::failure::HelperFailure::new(plx_platform::storage::wire::failure::Stage::Unknown, None))),
+        persistence::CanonicalCommit::Failed(plx_os::storage::StoreError::HelperUnavailable
+            | plx_os::storage::StoreError::HelperAuthentication | plx_os::storage::StoreError::HelperProtocol) =>
+            Some(plx_os::storage::wire::failure::last().unwrap_or_else(||
+                plx_os::storage::wire::failure::HelperFailure::new(plx_os::storage::wire::failure::Stage::Unknown, None))),
         _ => None,
     };
     let durable = matches!(commit, persistence::CanonicalCommit::Durable { .. });
@@ -4509,7 +4842,7 @@ fn save_locked_with_authority(
         };
         // A `Durable` commit IS the record now — install it rather than drop it, so the very next
         // `peek()` (even the caller's own, right after this returns) is served from memory instead
-        // of forcing a re-read of what this call just proved.
+        // of finding the cache left `Unloaded` until the session owner refills it.
         install_write_locked(std::sync::Arc::new(ReadState::Ready {
             session: std::sync::Arc::new(s.clone()),
             plaintext: protection.is_none(),
@@ -4580,7 +4913,7 @@ fn save_legacy_fallback_locked(
         plx_base::eventlog::log("session: preserving the existing protected record; refusing an unprotected downgrade");
         return None;
     }
-    if let Some(sealed) = plx_platform::tv::secure::seal(&serde_json::to_vec_pretty(s).ok()?) {
+    if let Some(sealed) = plx_os::tv::secure::seal(&serde_json::to_vec_pretty(s).ok()?) {
         let envelope = SecureEnvelope {
             format: SECURE_FORMAT.to_string(),
             version: 1,
@@ -4664,7 +4997,7 @@ fn save_legacy_locked(s: &Session) -> Option<bool> {
     let Ok(json) = serde_json::to_vec_pretty(s) else {
         return None;
     };
-    if let Some(sealed) = plx_platform::tv::secure::seal(&json) {
+    if let Some(sealed) = plx_os::tv::secure::seal(&json) {
         let envelope = SecureEnvelope {
             format: SECURE_FORMAT.to_string(),
             version: 1,
@@ -4698,7 +5031,7 @@ fn save_legacy_locked(s: &Session) -> Option<bool> {
 fn has_protected_authority() -> bool {
     match read_canonical_locked() {
         persistence::CanonicalRead::Locked { protection, .. } => protection.is_some_and(|outcome| {
-            !matches!(outcome.class, plx_platform::storage::wire::ProtectionClass::Db8AclOnly)
+            !matches!(outcome.class, plx_os::storage::wire::ProtectionClass::Db8AclOnly)
         }),
         _ => false,
     }
@@ -5051,7 +5384,7 @@ fn clear_cleanup_outcome(outcome: persistence::ClearCleanupOutcome) -> ClearOutc
 /// load. The old-path copy goes too, or the migration fallback would resurrect the stale session.
 /// **And commits an explicit Cleared record to the canonical authority** — the legacy-file sweep
 /// below only ever touches pre-DB8 candidates; on a build where `persistence::load`/`write_session`
-/// actually read/write the canonical store (DB8 or its host/ARM equivalent), that store is a
+/// actually read/write the canonical store (DB8 or its host equivalent), that store is a
 /// SEPARATE copy of the account token and roster, and clearing only the legacy files would leave a
 /// clean-looking sign-out that the canonical authority still hands back on the next boot.
 ///
@@ -5069,23 +5402,29 @@ pub fn clear() -> ClearOutcome {
 /// Worker receipt: retaining/resetting a public preference never republishes credentials.
 pub struct Erasure {
     pub outcome: ClearOutcome,
-    pub retained_language: plx_platform::i18n::Preference,
+    /// What the next launch reads: kept by sign-out; after delete-all, the language is System and
+    /// (on the file backend, where the whole retained file goes) the resolution is Automatic.
+    pub retained: Retained,
     pub preference_failures: Vec<String>,
 }
 
 /// Clear the credentials for a sign-out (`all_local == false`), which retains the install-wide
-/// language, or for "Delete all local data", which then resets that language to System.
+/// language and Interface resolution, or for "Delete all local data", which then resets the
+/// language to System.
 ///
-/// A retry carries the first worker's confirmed language, so a failed auxiliary write cannot
-/// replace it with System after the credentials themselves have already been cleared.
-pub fn clear_for_erase(all_local: bool, retry_language: Option<plx_platform::i18n::Preference>) -> Erasure {
+/// A retry carries the first worker's confirmed choices, so a failed auxiliary write cannot
+/// replace them with the defaults after the credentials themselves have already been cleared.
+pub fn clear_for_erase(all_local: bool, retry: Option<Retained>) -> Erasure {
     let _io = io();
-    let language = retry_language.unwrap_or_else(|| session_from_read(&read_live_locked()).language);
-    let native = cfg!(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))));
+    if memory_only::active() {
+        return memory_only::clear_locked(all_local, retry);
+    }
+    let kept = retry.unwrap_or_else(|| Retained::of(&session_from_read(&read_live_locked())));
+    let native = storage_authority() == Authority::Helper;
     // File backends need a credential-free resource before the credential file disappears.
     let mut preference_failures = Vec::new();
-    if !all_local && !native && !install_preferences::save(language) {
-        preference_failures.push("language preference could not be retained".into());
+    if !all_local && !native && !install_preferences::save(kept) {
+        preference_failures.push("install preferences could not be retained".into());
     }
     // Signing out changes what `peek` answers exactly as durably as a save does — and it must drop
     // the cached `Arc<Session>` immediately rather than merely marking it stale: that `Arc` holds
@@ -5133,22 +5472,20 @@ pub fn clear_for_erase(all_local: bool, retry_language: Option<plx_platform::i18
             // `auth_paths()` above only ever covered `paths::session_candidates()` — the legacy
             // sign-in file and its pre-relocation predecessor. The recognized migration source set
             // is bigger (`paths::session_migration_candidates()`, plus the pre-DB8 canonical JSON
-            // wrapper on ARM), and a candidate this sweep never visits is a live account token left
+            // wrapper where the helper is canonical), and a candidate this sweep never visits is a live account token left
             // on a rooted, world-readable install prefix after a sign-out that otherwise looked
             // clean. `cleanup_after_confirmed_clear` re-reads the authority to confirm it really is
             // Cleared before retiring anything, so this can only ever remove residue, never data a
             // concurrent re-login just wrote.
-            #[allow(unused_mut)] // only mutated on the ARM cfg arm below
             let mut outcome = clear_cleanup_outcome(persistence::cleanup_after_confirmed_clear());
             // Telemetry/consent's own legacy files are a SEPARATE candidate set from the session
             // auth-token sweep above (`persistence::cleanup_after_confirmed_clear` never touches
             // them — see `paths::telemetry_candidates` vs `paths::session_migration_candidates`).
-            // On ARM, `telemetry::persistence::forget_at` defers their removal to exactly this
-            // moment, once this canonical commit is confirmed durable (Copilot review on PR #105,
-            // finding 7; ported from `release/v0.6`'s `telemetry::cleanup_after_account_clear`,
-            // called here in that release).
-            #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
-            if !ACCOUNT_CLEAR_CLEANUP.get().is_none_or(|sweep| sweep()) {
+            // Where the storage helper is canonical, `telemetry::persistence::forget_at` defers their
+            // removal to exactly this moment, once this canonical commit is confirmed durable
+            // (Copilot review on PR #105, finding 7; ported from `release/v0.6`'s
+            // `telemetry::cleanup_after_account_clear`, called here in that release).
+            if native && !ACCOUNT_CLEAR_CLEANUP.get().is_none_or(|sweep| sweep()) {
                 plx_base::eventlog::log(
                     "session: canonical clear is durable but a telemetry/consent legacy \
                      candidate could not be retired — it remains on disk and will be swept \
@@ -5194,7 +5531,7 @@ pub fn clear_for_erase(all_local: bool, retry_language: Option<plx_platform::i18
         if let Some(bytes) = read_owned_regular(&path) {
             if let Ok(envelope) = serde_json::from_slice::<SecureEnvelope>(&bytes) {
                 if envelope.format == SECURE_FORMAT && envelope.version == 1 {
-                    plx_platform::tv::secure::remove(&envelope.sealed.backend, &envelope.sealed.key);
+                    plx_os::tv::secure::remove(&envelope.sealed.backend, &envelope.sealed.key);
                 }
             }
         }
@@ -5206,7 +5543,7 @@ pub fn clear_for_erase(all_local: bool, retry_language: Option<plx_platform::i18
     if let ClearOutcome::Durable { legacy_swept: complete } = &mut outcome {
         *complete &= legacy_swept;
     }
-    let mut retained_language = language;
+    let mut retained = kept;
     if all_local {
         // Native ClearTenure deliberately retains preferences. Remove only language with a
         // public-only, same-generation CAS after confirmed clearing, never ReplaceAuth.
@@ -5214,13 +5551,18 @@ pub fn clear_for_erase(all_local: bool, retry_language: Option<plx_platform::i18
             persistence::CanonicalCommit::Durable { .. });
         if !reset { preference_failures.push("stored language preference could not be reset".into()); }
         preference_failures.extend(install_preferences::erase());
-        if reset && preference_failures.is_empty() { retained_language = plx_platform::i18n::Preference::System; }
+        if reset && preference_failures.is_empty() {
+            retained.language = plx_os::i18n::Preference::System;
+            // The file backend's retained file is gone whole. Native ClearTenure keeps every other
+            // public preference, and its Cleared state accepts the removal of `language` alone.
+            if !native { retained.ui_resolution = UiResolution::Auto; }
+        }
     } else if native && !matches!(outcome, ClearOutcome::Durable { .. })
-        && !install_preferences::save(language) {
+        && !install_preferences::save(kept) {
         // A failed helper clear can still leave only an explicitly supported file fallback.
-        preference_failures.push("fallback language preference could not be retained".into());
+        preference_failures.push("fallback install preferences could not be retained".into());
     }
-    Erasure { outcome, retained_language, preference_failures }
+    Erasure { outcome, retained, preference_failures }
 }
 
 /// Sibling markers are independent of auth.json: a read-only credential inode/directory can
@@ -5315,11 +5657,11 @@ fn retry_pending_revocation_removals_locked() -> bool {
             // Discard obsolete permission without touching the marker for a newer sign-out.
             true
         } else {
-            match plx_platform::storage::unlink(&marker) {
+            match plx_os::storage::unlink(&marker) {
                 Ok(()) => sync_retired_candidate_parent(&marker),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => sync_retired_candidate_parent(&marker),
                 // The same rule as `retire_session_candidate`: absence proven behind a refusal.
-                Err(error) => match plx_platform::storage::prove_absent_after_refused_unlink(&marker, error) {
+                Err(error) => match plx_os::storage::prove_absent_after_refused_unlink(&marker, error) {
                     Ok(()) => true,
                     Err(error) => {
                         plx_base::eventlog::log(&format!("session: revocation retirement failed errno={}",
@@ -5447,14 +5789,14 @@ fn sync_retired_candidate_parent(path: &std::path::Path) -> bool {
 /// lookup, and a neutralize open (no O_CREAT) answering ENOENT is the same proof. Only a name
 /// that exists, or cannot be looked at, stays a failure for the caller to retry.
 fn retire_session_candidate(path: &std::path::Path) -> bool {
-    let unlink = match plx_platform::storage::unlink(path) {
+    let unlink = match plx_os::storage::unlink(path) {
         Ok(()) => return sync_retired_candidate_parent(path),
         // May be the retry of our own unlink whose parent sync failed, so it syncs too.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return sync_retired_candidate_parent(path),
         Err(error) => error,
     };
     // A refusal changed nothing on disk, so absence proven behind it has nothing to flush.
-    let Err(unlink) = plx_platform::storage::prove_absent_after_refused_unlink(path, unlink) else { return true };
+    let Err(unlink) = plx_os::storage::prove_absent_after_refused_unlink(path, unlink) else { return true };
     match neutralize_session_candidate(path) {
         Ok(()) => true,
         // Opened without O_CREAT: the name vanished after the lookup above.
@@ -5636,9 +5978,26 @@ pub mod persistence;
 #[cfg(test)]
 mod migration_tests;
 
+#[cfg(test)]
+mod prefs_characterisation_tests;
+
 #[allow(dead_code)] // Stage B connects typed owner admission/completions.
 pub mod async_persistence;
 mod install_preferences;
+mod memory_only;
+#[cfg(test)]
+mod memory_only_tests;
+pub use install_preferences::Retained;
+pub mod prefs;
+#[cfg(test)]
+mod prefs_tests;
+#[cfg(test)]
+mod memory_tests;
+
+#[cfg(test)]
+mod v0;
+#[cfg(test)]
+mod tier1_characterisation_tests;
 
 #[cfg(test)]
 mod direct_play_mode_tests {
@@ -5650,11 +6009,11 @@ mod direct_play_mode_tests {
             assert_eq!(session.direct_play_mode(), DirectPlayMode::Auto);
         }
         for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced, DirectPlayMode::Disabled] {
-            let session = Session::default().with_direct_play_mode(mode);
+            let session = Session::default().with_pref::<DirectPlayModePref>(mode);
             let round: Session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
             assert_eq!(round.direct_play_mode(), mode);
             let prefs: CanonicalSessionPreferences = serde_json::from_value(split_public(&session).unwrap().preferences).unwrap();
-            assert_eq!(prefs.direct_play_mode, mode);
+            assert_eq!(prefs.prefs.direct_play_mode, mode);
         }
     }
 }
@@ -5691,7 +6050,7 @@ mod next_episode_mode_tests {
     #[test]
     fn a_pick_round_trips_through_both_formats() {
         for mode in [NextEpisodeMode::AfterCredits, NextEpisodeMode::Off] {
-            let session = Session::default().with_next_episode_mode(mode);
+            let session = Session::default().with_pref::<NextEpisodeModePref>(mode);
             let json = serde_json::to_string(&session).unwrap();
             assert!(json.contains("next_episode_mode"), "{json}");
             let round: Session = serde_json::from_str(&json).unwrap();
@@ -5735,7 +6094,7 @@ mod deck_press_tests {
 
     #[test]
     fn a_pick_round_trips_through_both_formats() {
-        let session = Session::default().with_deck_press(DeckPress::Play);
+        let session = Session::default().with_pref::<DeckPressPref>(DeckPress::Play);
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains("deck_press"), "{json}");
         let round: Session = serde_json::from_str(&json).unwrap();
@@ -5753,6 +6112,120 @@ mod deck_press_tests {
         for mode in DeckPress::LADDER {
             assert_eq!(DeckPress::from_index(mode.index()), mode);
         }
+    }
+}
+
+/// `Session::ui_resolution`: absent or unknown is Automatic, the default is not serialized (so
+/// committed replay fixtures and every session written before the field serialize unchanged),
+/// a pick round-trips through both formats, and the option maps to the window it asks for.
+#[cfg(test)]
+mod ui_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_unknown_is_automatic() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"ui_resolution": null}),
+            serde_json::json!({"ui_resolution": "8k"}),
+            serde_json::json!({"ui_resolution": "576p"}),
+            serde_json::json!({"ui_resolution": 720}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.ui_resolution(), UiResolution::Auto, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_default_is_not_serialized() {
+        let session = Session::default();
+        assert_eq!(session.ui_resolution(), UiResolution::Auto);
+        assert!(!serde_json::to_string(&session).unwrap().contains("ui_resolution"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("ui_resolution"), "{prefs}");
+    }
+
+    #[test]
+    fn a_pick_round_trips_through_both_formats() {
+        let session = Session::default().with_ui_resolution(UiResolution::Hd720);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"ui_resolution\":\"720p\""), "{json}");
+        let round: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.ui_resolution(), UiResolution::Hd720);
+        let (public, protected) = split_canonical(&session).unwrap();
+        assert_eq!(join_canonical(&public, &protected).unwrap().ui_resolution(), UiResolution::Hd720);
+        assert_eq!(public_session(&public).ui_resolution(), UiResolution::Hd720);
+    }
+
+    #[test]
+    fn the_ladder_lists_the_options_and_automatic_is_the_native_canvas() {
+        assert_eq!(UiResolution::Auto.size(), None, "Automatic asks for no smaller window on any set");
+        assert_eq!(UiResolution::Hd900.size(), Some((1600, 900)));
+        assert_eq!(UiResolution::Hd720.size(), Some((1280, 720)));
+        assert_eq!(UiResolution::Sd540.size(), Some((960, 540)));
+        assert_eq!(UiResolution::LADDER, [UiResolution::Auto, UiResolution::Hd900, UiResolution::Hd720, UiResolution::Sd540]);
+        for mode in UiResolution::LADDER {
+            assert_eq!(UiResolution::from_index(mode.index()), mode);
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(mode.tag()), "tag is the serialized spelling");
+        }
+        assert_eq!(UiResolution::from_index(UiResolution::LADDER.len()), UiResolution::Auto);
+    }
+
+    /// An earlier build offered an explicit 1080p, which was the native canvas spelled out. It is no
+    /// option now, and a stored one reads as Automatic (which is the same window).
+    #[test]
+    fn a_stored_1080p_is_automatic() {
+        let session: Session = serde_json::from_value(serde_json::json!({"ui_resolution": "1080p"})).unwrap();
+        assert_eq!(session.ui_resolution(), UiResolution::Auto);
+        let (public, protected) = split_canonical(&Session::default()).unwrap();
+        let mut public = serde_json::to_value(&public).unwrap();
+        public["preferences"]["ui_resolution"] = serde_json::json!("1080p");
+        let public: plx_os::storage::state::PublicPayload = serde_json::from_value(public).unwrap();
+        assert_eq!(join_canonical(&public, &protected).unwrap().ui_resolution(), UiResolution::Auto);
+    }
+
+    /// A signed-out read (Cleared or Locked) carries the resolution exactly as it carries the
+    /// language, in the cached session `peek` serves and in the owned one a writer starts from.
+    #[test]
+    fn a_signed_out_read_carries_the_resolution_like_the_language() {
+        let kept = Retained { language: plx_os::i18n::Preference::Be, ui_resolution: UiResolution::Sd540 };
+        for read in [ReadState::Cleared { kept }, ReadState::Locked { kept }] {
+            for session in [session_from_read(&read), (*session_of(&read)).clone()] {
+                assert_eq!(session.language, plx_os::i18n::Preference::Be);
+                assert_eq!(session.ui_resolution(), UiResolution::Sd540);
+                assert!(session.account_token.is_empty());
+            }
+        }
+        let other = Retained { ui_resolution: UiResolution::Hd720, ..kept };
+        assert_ne!(read_identity(&ReadState::Cleared { kept }), read_identity(&ReadState::Cleared { kept: other }),
+            "a change of resolution is a change of identity for a deferred load");
+    }
+
+    /// The retained file holds the resolution beside the language, a spelling this build does not
+    /// know (or the retired 1080p) costs the resolution and never the language, and Automatic is not written.
+    #[test]
+    fn the_retained_file_is_soft_about_the_resolution() {
+        let _serial = plx_base::testlock::serial();
+        let dir = std::env::temp_dir().join(format!("plx-retained-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        redirect_candidates_for_test(Some(vec![dir.join("auth.json")]));
+        let path = dir.join("auth.language.json");
+        for (body, language, resolution) in [
+            (r#"{"version":1,"language":"be","ui_resolution":"8k"}"#, plx_os::i18n::Preference::Be, UiResolution::Auto),
+            (r#"{"version":1,"language":"be","ui_resolution":"1080p"}"#, plx_os::i18n::Preference::Be, UiResolution::Auto),
+            (r#"{"version":1,"language":"be"}"#, plx_os::i18n::Preference::Be, UiResolution::Auto),
+            (r#"{"version":1,"language":"be","ui_resolution":"720p"}"#, plx_os::i18n::Preference::Be, UiResolution::Hd720),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let loaded = install_preferences::load();
+            assert_eq!(loaded, Some(Retained { language, ui_resolution: resolution }), "{body}");
+        }
+        assert!(install_preferences::save(Retained { language: plx_os::i18n::Preference::Be, ui_resolution: UiResolution::Auto }));
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("ui_resolution"), "Automatic is not written");
+        redirect_candidates_for_test(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -5788,7 +6261,7 @@ mod skip_interval_tests {
     #[test]
     fn a_pick_round_trips_through_both_formats() {
         for interval in SkipInterval::LADDER.into_iter().filter(|&i| i != SkipInterval::default()) {
-            let session = Session::default().with_skip_interval(interval);
+            let session = Session::default().with_pref::<SkipIntervalPref>(interval);
             let json = serde_json::to_string(&session).unwrap();
             assert!(json.contains("skip_interval"), "{json}");
             let round: Session = serde_json::from_str(&json).unwrap();
@@ -5871,7 +6344,7 @@ mod audio_enhancements_tests {
             crate::plex::AudioEnhancements { boost_dialog: false, normalize_loudness: true },
             crate::plex::AudioEnhancements { boost_dialog: true, normalize_loudness: true },
         ] {
-            let session = Session::default().with_audio_enhancements(enh);
+            let session = Session::default().with_pref::<AudioEnhancementsPref>(enh);
             assert_eq!(session.audio_enhancements(), enh);
 
             // Legacy fallback format: the whole `Session` serialized directly.
@@ -5942,7 +6415,7 @@ mod audio_enhancements_tests {
     }
 }
 
-/// Issue #380: `Session::server_key_pins` — each server's remembered leaf public key. The reader
+/// Issue #380: `Preferences::server_key_pins` — each server's remembered leaf public key. The reader
 /// is [`project_server_keys`] (issue #378); these pin the storage contract it relies on.
 #[cfg(test)]
 mod server_key_pin_tests {
@@ -5966,12 +6439,12 @@ mod server_key_pin_tests {
         let _serial = plx_base::testlock::serial();
         let key = keypin::key_of("session-signed-in.invalid", 32400);
         let _scoped = keypin::Scoped::watch_machine("m-session-live", &key);
-        let language = plx_platform::i18n::Preference::En;
+        let language = plx_os::i18n::Preference::En;
         let live = || Cached::Settled(std::sync::Arc::new(ReadState::Ready {
             session: std::sync::Arc::new(Session::default()), plaintext: false, retry_canonical: false,
         }));
         for (what, ended) in [
-            ("a cleared record", Cached::Settled(std::sync::Arc::new(ReadState::Cleared { language }))),
+            ("a cleared record", Cached::Settled(std::sync::Arc::new(ReadState::Cleared { kept: install_preferences::Retained { language, ..Default::default() } }))),
             ("a missing record", Cached::Settled(std::sync::Arc::new(ReadState::Missing))),
             ("a local revocation", Cached::Revoked),
         ] {
@@ -5988,7 +6461,7 @@ mod server_key_pin_tests {
     #[test]
     fn an_absent_key_is_no_pins_and_an_empty_list_is_not_written() {
         let old: Session = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(old.server_key_pins.is_empty());
+        assert!(old.prefs.server_key_pins.is_empty());
         assert_eq!(old.server_key_pin("m"), None);
         let session = Session::default();
         assert!(!serde_json::to_string(&session).unwrap().contains("server_key_pins"));
@@ -6001,13 +6474,13 @@ mod server_key_pin_tests {
         let session = stored("m1", &pin(1)).with_server_key_pin("m2", &pin(2)).unwrap();
         // Legacy: the whole `Session` serialized directly.
         let round: Session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
-        assert_eq!(round.server_key_pins, session.server_key_pins);
+        assert_eq!(round.prefs.server_key_pins, session.prefs.server_key_pins);
         assert_eq!(round.server_key_pin("m1"), Some(pin(1).as_str()));
         // Canonical split/join, and the locked-bundle public snapshot.
         let (public, protected) = split_canonical(&session).unwrap();
         let joined = join_canonical(&public, &protected).unwrap();
-        assert_eq!(joined.server_key_pins, session.server_key_pins);
-        assert_eq!(public_session(&public).server_key_pins, session.server_key_pins);
+        assert_eq!(joined.prefs.server_key_pins, session.prefs.server_key_pins);
+        assert_eq!(public_session(&public).prefs.server_key_pins, session.prefs.server_key_pins);
     }
 
     #[test]
@@ -6023,11 +6496,11 @@ mod server_key_pin_tests {
             ]
         }))
         .unwrap();
-        let machines: Vec<&str> = session.server_key_pins.iter().map(|k| k.machine_id.as_str()).collect();
+        let machines: Vec<&str> = session.prefs.server_key_pins.iter().map(|k| k.machine_id.as_str()).collect();
         assert_eq!(machines, ["m1", "m3"]);
         let not_a_list: Session =
             serde_json::from_value(serde_json::json!({"server_key_pins": {"m1": "x"}})).unwrap();
-        assert!(not_a_list.server_key_pins.is_empty());
+        assert!(not_a_list.prefs.server_key_pins.is_empty());
     }
 
     #[test]
@@ -6049,7 +6522,7 @@ mod server_key_pin_tests {
         let one = stored("m", &pin(1));
         assert!(one.with_server_key_pin("m", &pin(1)).is_none(), "same pin: nothing to write");
         let replaced = one.with_server_key_pin("m", &pin(2)).unwrap();
-        assert_eq!(replaced.server_key_pins.len(), 1);
+        assert_eq!(replaced.prefs.server_key_pins.len(), 1);
         assert_eq!(replaced.server_key_pin("m"), Some(pin(2).as_str()));
         let two = replaced.with_server_key_pin("n", &pin(3)).unwrap();
         assert_eq!(two.server_key_pin("m"), Some(pin(2).as_str()), "another machine's entry is left alone");
@@ -6076,7 +6549,264 @@ mod server_key_pin_tests {
         assert_eq!(peek().account_token, "acct", "the credentials are untouched");
 
         clear();
-        assert!(peek().server_key_pins.is_empty(), "cleared with the credentials");
+        assert!(peek().prefs.server_key_pins.is_empty(), "cleared with the credentials");
+    }
+
+    /// The native audio refusals this install learned live in the PUBLIC install preferences, and
+    /// that list is the ONE place they are kept: a session that never learned one writes nothing, one
+    /// that did round-trips it, a malformed entry costs only itself, only a refusal watched on a newer
+    /// firmware build retires the older build's, and sign-out leaves them (a property of the
+    /// television's firmware, not of an account).
+    #[test]
+    fn native_audio_refusals_persist_as_an_install_fact_and_only_a_new_build_retires_them() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("native-audio-refusals");
+        let refusal = |codec: &str, channels: u32| NativeAudioRefusal {
+            firmware: "kisscurl-koli".into(),
+            codec: codec.into(),
+            channels,
+            build: "6.5.3-47".into(),
+            proofs: None,
+            extensions: Default::default(),
+        };
+        let session = test_support::signed_in();
+        assert!(!serde_json::to_string(&session).unwrap().contains("native_audio_refused"), "empty is not written");
+        let with = session.with_native_audio_refusal(&refusal("vorbis", 2)).expect("news");
+        assert!(with.with_native_audio_refusal(&refusal("vorbis", 2)).is_none(), "a known one is not");
+        assert!(with.with_native_audio_refusal(&refusal("vorbis", 6)).is_some(), "another channel count is");
+        assert!(session.with_native_audio_refusal(&NativeAudioRefusal { firmware: String::new(), ..refusal("x", 2) }).is_none());
+        let round: Session = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(round.native_audio_refused(), with.native_audio_refused());
+        // A firmware update drops what another build learned, and what an older record never tagged,
+        // with the next refusal it watches; a set that did not name its build judges nothing.
+        let untagged: Session = serde_json::from_value(serde_json::json!({
+            "native_audio_refused": [{"firmware": "kisscurl-koli", "codec": "opus", "channels": 6}]
+        }))
+        .unwrap();
+        assert_eq!(untagged.native_audio_refused()[0].build, "", "an old record reads as unrecorded");
+        let updated = with.with_native_audio_refusal(&NativeAudioRefusal { build: "6.5.3-48".into(), ..refusal("flac", 6) }).expect("news");
+        assert_eq!(updated.native_audio_refused().len(), 1, "the 6.5.3-47 lesson went with the old decoder");
+        assert_eq!(updated.native_audio_refused()[0].build, "6.5.3-48");
+        let relearned = untagged.with_native_audio_refusal(&refusal("vorbis", 2)).expect("news");
+        assert_eq!(relearned.native_audio_refused().len(), 1, "an unrecorded entry is stale");
+        assert_eq!(relearned.native_audio_refused()[0].codec, "vorbis");
+        let blind = with.with_native_audio_refusal(&NativeAudioRefusal { build: String::new(), ..refusal("flac", 6) }).expect("news");
+        assert_eq!(blind.native_audio_refused().len(), 2, "no build named: nothing is judged stale");
+        let mixed: Session = serde_json::from_value(serde_json::json!({
+            "native_audio_refused": [{"firmware": "f", "codec": "flac", "channels": 6}, "garbage", {"codec": 1}]
+        }))
+        .unwrap();
+        assert_eq!(mixed.native_audio_refused().len(), 1, "a malformed entry costs only itself");
+
+        save(&with);
+        assert_eq!(peek().native_audio_refused().len(), 1);
+        clear();
+        // The sign-out keeps install facts in the stored preferences, but the cleared session itself is empty.
+        assert!(peek().native_audio_refused().is_empty());
+    }
+
+    // ---- S2a: a refusal is learned from a facet-clean proof, counted, and applied at the threshold ----
+
+    fn dts6() -> plx_os::devcaps::Facet {
+        plx_os::devcaps::Facet::Audio { codec: "dca".into(), channels: 6 }
+    }
+
+    fn opus6() -> plx_os::devcaps::Facet {
+        plx_os::devcaps::Facet::Audio { codec: "opus".into(), channels: 6 }
+    }
+
+    /// This thread's set: names its firmware and build, so it can record a refusal.
+    fn firmware_build(build: &str) -> plx_os::devcaps::CapsGuard {
+        plx_os::devcaps::firmware_on_this_thread_for_test("fw", build, plx_os::devcaps::Caps::assumed())
+    }
+
+    fn row(codec: &str, channels: u32, build: &str, proofs: Option<u32>) -> NativeAudioRefusal {
+        NativeAudioRefusal { firmware: "fw".into(), codec: codec.into(), channels, build: build.into(), proofs, extensions: Default::default() }
+    }
+
+    /// One proof is stored and counted, not applied: the record says so and `applied_refusals` (what
+    /// the play start hands `devcaps::start_caps`) holds nothing.
+    #[test]
+    fn a_first_proof_is_stored_counted_once_and_not_applied() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refusal-proof-one");
+        let _fw = firmware_build("B");
+        save(&test_support::signed_in());
+        assert!(record_refusal_proof(&dts6()), "the write is queued");
+        plx_base::storage_worker::drain_for_test();
+        let rows = peek().native_audio_refused().to_vec();
+        assert_eq!(rows, [row("dts", 6, "B", Some(1))], "dca is stored in the pipeline's spelling");
+        assert!(!rows[0].applies());
+        assert!(peek().applied_refusals().is_empty(), "a counted row is never handed to the play start");
+    }
+
+    /// The second proof persists the refusal (it applies and projects); a third has nothing to add
+    /// and writes nothing.
+    #[test]
+    fn a_second_proof_persists_and_a_third_writes_nothing() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refusal-proof-two");
+        let _fw = firmware_build("B");
+        save(&test_support::signed_in());
+        assert!(record_refusal_proof(&dts6()));
+        plx_base::storage_worker::drain_for_test();
+        assert!(!peek().applied_refusals().iter().any(|r| r.codec == "dts"), "one proof applies nothing");
+        assert!(record_refusal_proof(&dts6()));
+        plx_base::storage_worker::drain_for_test();
+        let rows = peek().native_audio_refused().to_vec();
+        assert_eq!(rows, [row("dts", 6, "B", Some(LEARNED_REFUSAL_PROOFS))]);
+        assert!(rows[0].applies());
+        assert_eq!(peek().applied_refusals().len(), 1);
+        assert!(record_refusal_proof(&dts6()), "queued again");
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(peek().native_audio_refused(), rows, "a third proof writes nothing");
+        assert!(peek().with_native_audio_refusal(&row("dts", 6, "B", Some(1))).is_none(), "a third proof changes nothing");
+    }
+
+    /// A refusal that names the codec applies at once; no proof downgrades it; a counted row that is
+    /// then named upgrades to a named one.
+    #[test]
+    fn a_named_refusal_applies_at_once_and_no_proof_downgrades_it() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refusal-named");
+        let _fw = firmware_build("B");
+        save(&test_support::signed_in());
+        assert!(record_named_refusal(&opus6()));
+        plx_base::storage_worker::drain_for_test();
+        let rows = peek().native_audio_refused().to_vec();
+        assert_eq!(rows, [row("opus", 6, "B", None)]);
+        assert!(rows[0].applies());
+        assert!(record_refusal_proof(&opus6()));
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(peek().native_audio_refused(), rows, "a proof on a named row writes nothing");
+        assert!(peek().with_native_audio_refusal(&row("opus", 6, "B", Some(1))).is_none(), "a proof never downgrades");
+        // Separately: a counted row followed by the same combination named.
+        assert!(record_refusal_proof(&dts6()));
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(peek().native_audio_refused()[1].proofs, Some(1));
+        assert!(record_named_refusal(&dts6()));
+        plx_base::storage_worker::drain_for_test();
+        let upgraded = peek().native_audio_refused().iter().find(|r| r.codec == "dts").cloned().expect("the dts row");
+        assert_eq!(upgraded.proofs, None, "the count-1 row upgrades to a named row");
+        assert!(upgraded.applies());
+    }
+
+    /// A set that announces Opus 5.1, so a recorded Opus refusal WOULD move `caps()` if anything wrote it.
+    fn opus_announcing_caps() -> plx_os::devcaps::Caps {
+        plx_os::devcaps::Caps { audio: "aac,ac3,eac3,opus".into(), ..plx_os::devcaps::Caps::assumed() }
+    }
+
+    /// `devcaps` is write-once (#1047): a recorded refusal lands in the install's record and moves
+    /// nothing under a running play, however the record is installed. `caps()` answers the same `Arc`
+    /// before the write, after it, and after the record is installed again on this thread.
+    #[test]
+    fn caps_is_one_arc_across_a_recorded_refusal() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refusal-one-arc");
+        let _fw = plx_os::devcaps::firmware_on_this_thread_for_test("fw", "B", opus_announcing_caps());
+        save(&test_support::signed_in());
+        let before = plx_os::devcaps::caps();
+        assert!(before.audio_supports("opus", 6), "sanity: the set announces Opus 5.1");
+        assert!(record_named_refusal(&opus6()));
+        plx_base::storage_worker::drain_for_test();
+        save(&peek());
+        assert_eq!(peek().native_audio_refused().len(), 1, "the row is stored");
+        let after = plx_os::devcaps::caps();
+        assert!(std::sync::Arc::ptr_eq(&before, &after), "the stored row moved caps(): opus ceiling {:?} -> {:?}", before.audio_channels.get("opus"), after.audio_channels.get("opus"));
+    }
+
+    /// A firmware update retires counted rows as it retires named ones: only the new build's remains.
+    #[test]
+    fn a_build_change_clears_counted_and_named_rows() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("refusal-build-change");
+        save(&test_support::signed_in());
+        {
+            let _b = firmware_build("B");
+            assert!(record_named_refusal(&opus6()));
+            assert!(record_refusal_proof(&dts6()));
+            plx_base::storage_worker::drain_for_test();
+            assert_eq!(peek().native_audio_refused().len(), 2);
+        }
+        let _c = firmware_build("C");
+        assert!(record_refusal_proof(&dts6()));
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(peek().native_audio_refused(), [row("dts", 6, "C", Some(1))], "B's named and counted rows went with the old decoder");
+    }
+
+    /// A record written before S2a (no `proofs` key) is a persisted refusal; a counted one is not
+    /// applied; a malformed count costs only its own entry.
+    #[test]
+    fn a_pre_s2a_row_reads_as_persisted() {
+        let session: Session = serde_json::from_value(serde_json::json!({
+            "native_audio_refused": [
+                {"firmware": "f", "codec": "opus", "channels": 6, "build": "b"},
+                {"firmware": "f", "codec": "dts", "channels": 6, "build": "b", "proofs": 1},
+                {"firmware": "f", "codec": "flac", "channels": 6, "build": "b", "proofs": "x"}
+            ]
+        }))
+        .unwrap();
+        let rows = session.native_audio_refused();
+        assert_eq!(rows.len(), 2, "the malformed count dropped only itself");
+        assert!(rows[0].applies(), "an old row is applied, not one proof");
+        assert_eq!(rows[0].proofs, None);
+        assert!(!rows[1].applies(), "a counted row below the threshold is not");
+        assert_eq!(session.applied_refusals().len(), 1);
+        let json = serde_json::to_string(&session.native_audio_refused()[0]).unwrap();
+        assert!(!json.contains("proofs"), "a named row round-trips with no proofs key: {json}");
+    }
+
+    /// The play start is handed the rows in force and nothing else: a named row and a twice-proved
+    /// one, in the record's order, as `devcaps` rows; a once-proved row is stored and absent.
+    #[test]
+    fn applied_refusals_hands_over_named_and_twice_proved_rows_only() {
+        let mut session = Session::default();
+        session.prefs.native_audio_refused = vec![
+            row("opus", 6, "B", None),
+            row("dts", 6, "B", Some(LEARNED_REFUSAL_PROOFS)),
+            row("flac", 6, "B", Some(1)),
+        ];
+        let refusal = |codec: &str| plx_os::devcaps::Refusal { codec: codec.into(), channels: 6, build: "B".into() };
+        assert_eq!(session.applied_refusals(), [refusal("opus"), refusal("dts")]);
+        assert!(Session::default().applied_refusals().is_empty());
+    }
+
+    /// A proof of unknown width (the pipeline was fed no channel count) is not stored: it would
+    /// remove the whole codec. A named refusal keeps the unguarded behaviour.
+    #[test]
+    fn a_proof_of_unknown_width_is_not_stored() {
+        let unknown = plx_os::devcaps::Facet::Audio { codec: "dts".into(), channels: 0 };
+        assert_eq!(NativeAudioRefusal::of_facet(&unknown, "fw", "B", Some(1)), None);
+        assert!(NativeAudioRefusal::of_facet(&unknown, "fw", "B", None).is_some());
+    }
+
+    /// A video facet never proves (D6(c)) and has no field on this row to be stored in: it is the
+    /// attempt's alone, so the next play retries the raster once.
+    #[test]
+    fn a_video_facet_is_never_stored() {
+        let video = plx_os::devcaps::Facet::Video { codec: "h264".into(), width: 3840, height: 2160 };
+        assert_eq!(NativeAudioRefusal::of_facet(&video, "fw", "b", Some(1)), None);
+        assert_eq!(NativeAudioRefusal::of_facet(&video, "fw", "b", None), None);
+    }
+
+    /// `plx_ui::hold_hint` hands the application what an install was taught: the learn door queues a
+    /// write only for news, never un-teaches, and writes through the same ticketed door every
+    /// install-wide preference uses.
+    #[test]
+    fn learning_a_taught_hold_hint_writes_once_and_never_unlearns() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("hold-hint-learn");
+        save(&test_support::signed_in());
+        let card = HoldHintTaught { card: true, pill: false };
+        assert!(learn_hold_hint_taught(card), "news is queued");
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(peek().hold_hint_taught(), card);
+        assert!(!learn_hold_hint_taught(card), "the same lesson is not");
+        assert!(!learn_hold_hint_taught(HoldHintTaught::NONE), "nothing taught is not news");
+        assert!(learn_hold_hint_taught(HoldHintTaught { card: false, pill: true }), "another surface is");
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(peek().hold_hint_taught(), HoldHintTaught { card: true, pill: true }, "joined, never replaced");
+        assert_eq!(peek().account_token, "acct", "the credentials are untouched");
     }
 
     // ---- Issue #378: the session → `net::keypin` projection. Each test uses its own machine id and
@@ -6186,6 +6916,9 @@ mod server_key_pin_tests {
     }
 }
 
+// Fork Rofocale11: Nuvio Native's rating-source preference (IMDb vs Rotten Tomatoes) is a fork-only
+// canonical-session setting with no plex.tv equivalent; keep its DB8 split round-trip regression
+// test alongside upstream's new screen-input-revision tests below.
 #[cfg(test)]
 mod rating_source_tests {
     use super::*;
@@ -6198,5 +6931,40 @@ mod rating_source_tests {
         assert!(!serde_json::to_string(&Session::default()).unwrap().contains("rating_source"));
         let unknown: Session = serde_json::from_value(serde_json::json!({"rating_source":"future"})).unwrap();
         assert_eq!(unknown.rating_source(), RatingSource::Imdb);
+    }
+}
+
+#[cfg(test)]
+mod screen_input_revision_tests {
+    use super::*;
+    #[test]
+    fn screen_input_revision_observes_cleared_defaults_without_a_visible_generation_change() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("screen-revision-defaults");
+        install_cleared_for_test(UiResolution::Auto);
+        let before = screen_input_revision();
+        let visible = visible_generation();
+        install_cleared_for_test(UiResolution::Hd720);
+        assert_ne!(screen_input_revision().0, before.0);
+        assert_eq!(visible_generation(), visible);
+        assert_eq!(peek_settled().unwrap().ui_resolution(), UiResolution::Hd720);
+    }
+    #[test]
+    fn screen_input_revision_waits_for_the_cache_publication_lock() {
+        let _serial = plx_base::testlock::serial();
+        let _session = test_support::TempSession::new("screen-revision-lock");
+        let expected = screen_input_revision();
+        let cache = CACHE.lock().unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let (answer, result) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            answer.send(screen_input_revision()).unwrap();
+        });
+        start.recv().unwrap();
+        assert!(matches!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        drop(cache);
+        assert_eq!(result.recv_timeout(std::time::Duration::from_secs(2)).unwrap(), expected);
+        reader.join().unwrap();
     }
 }

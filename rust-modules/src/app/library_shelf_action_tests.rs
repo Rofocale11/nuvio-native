@@ -6,6 +6,9 @@ use plx_ui::screen::Focusable;
 use super::test_support::*;
 use super::test_support::{frame};
 
+/// The page the Library header's Recommended control pushes; the hubs are its rows.
+const RECOMMENDED: AppArg = AppArg::LibraryRecommended { section: 0 };
+
 #[test]
 fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
     let _guard = plx_base::testlock::serial();
@@ -26,7 +29,8 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
             plx_plex::plex::register_for_test("shelf-shared", "127.0.0.1", 10, "synthetic", "fixture");
         plx_plex::plex::set_current(own);
         let mut d = Dispatcher::<AppHost>::new();
-        let mut rig = Bridge::for_test(|| 0);
+        let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+        let mut rig = owner.bridge();
         rig.stores.browse.borrow_mut().seed_registered_table_for_test([own, shared]);
         rig.refresh_browse_directory();
         rig.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
@@ -41,18 +45,18 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
             browse.seed_landscape_for_test(0, "Synthetic show");
         }
         for i in 0..80 {
-            frame(&mut d, &mut rig, AppArg::Library, tick(i), vec![]);
+            frame(&mut d, &mut rig, RECOMMENDED, tick(i), vec![]);
         }
         let position = |d: &Dispatcher<AppHost>| {
             d.top_screen()
                 .unwrap()
                 .as_any()
                 .unwrap()
-                .downcast_ref::<plx_screens::library::LibraryScreen>()
+                .downcast_ref::<plx_screens::library::RecommendedScreen>()
                 .unwrap()
                 .probe_viewport(d.focus())
         };
-        assert_eq!(rig.section_hubs.view().shelves().len(), 2);
+        assert_eq!(rig.retained.section_hubs.view().shelves().len(), 2);
         let mut i = 80;
         while position(&d).0 != "shelf" || position(&d).1 != row {
             assert!(
@@ -63,7 +67,7 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
             frame(
                 &mut d,
                 &mut rig,
-                AppArg::Library,
+                RECOMMENDED,
                 tick(i),
                 script_key(Key::Down, tick(i)),
             );
@@ -72,13 +76,13 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
         frame(
             &mut d,
             &mut rig,
-            AppArg::Library,
+            RECOMMENDED,
             tick(i),
             script_key(Key::Right, tick(i)),
         );
         i += 1;
         for n in i..i + 80 {
-            frame(&mut d, &mut rig, AppArg::Library, tick(n), vec![]);
+            frame(&mut d, &mut rig, RECOMMENDED, tick(n), vec![]);
         }
         i += 80;
         assert_eq!(
@@ -102,11 +106,11 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
                 },
             }]
         };
-        rig.take_library_reqs();
+        rig.take_observed_library_commands();
         frame(
             &mut d,
             &mut rig,
-            AppArg::Library,
+            RECOMMENDED,
             tick(i),
             key_input(Edge::Down, i),
         );
@@ -116,8 +120,14 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
         let mut saw_scaled_press = false;
         let rect = |r: plx_ui::Rect| [r.x, r.y, r.w, r.h];
         for n in i + 1..i + 80 {
-            frame(&mut d, &mut rig, AppArg::Library, tick(n), vec![]);
-            assert_eq!(d.focus(), Some(key));
+            frame(&mut d, &mut rig, RECOMMENDED, tick(n), vec![]);
+            if super::item_menu_up(&d) {
+                assert_ne!(d.focus().map(|focus| focus.entry), Some(key.entry),
+                    "the product runner transfers input to the held card's menu");
+                assert_eq!(d.nav.top_page().unwrap().id, key.entry, "the host stays retained");
+            } else {
+                assert_eq!(d.focus(), Some(key));
+            }
             let page = d
                 .nav
                 .entry(key.entry)
@@ -128,22 +138,18 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
                 .screen
                 .as_any()
                 .unwrap()
-                .downcast_ref::<plx_screens::library::LibraryScreen>()
+                .downcast_ref::<plx_screens::library::RecommendedScreen>()
                 .unwrap();
             let parts = CxParts {
+                modal: d.modal_presentation().read, page_image: d.page_image_read(), hold_hint: d.input.hold_hint,
                 tick: tick(n),
-                press: plx_machine::machine::PressRead {
-                    scale: d.input.press.scale(),
-                    is_long: d.input.press.was_long(),
-                    held_ms: None,
-                    owner: d.input.dip_owner,
-                },
+                press: d.input.press_read(tick(n).ms),
                 focus: d.input.engine.read(InputOwner::Entry(key.entry)),
                 owner: InputOwner::Entry(key.entry),
             };
             let cx = parts.cx::<AppHost>(
                 rig.views_with(plx_media::route::idle_session_for_test()),
-                &rig.measure,
+                &rig.retained.measure,
             );
             let placed = page.place(&key.elem, &cx, At::Drawn).unwrap();
             let (selected, opener) = rig.library_selection(&d, key.entry, Some(key)).unwrap();
@@ -159,7 +165,7 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
                     "the bridge opener must not inherit the pressed card's shrink"
                 );
             }
-            requests.extend(rig.take_library_reqs().into_iter().filter(|(_, req, _)| {
+            requests.extend(rig.take_observed_library_commands().into_iter().filter(|(_, req, _)| {
                 matches!(
                     req,
                     LibraryReq::ItemMenu { .. }
@@ -186,23 +192,22 @@ fn shelf_physical_hold_captures_engine_item_deck_flag_and_bridge_rest_opener() {
             }
         );
         assert_eq!(requests[0].2.focus, Some(key));
-        let (selected, opener) = rig
-            .library_selection(&d, key.entry, requests[0].2.focus)
-            .unwrap();
+        let (selected, opener) =
+            rig.library_selection(&d, key.entry, requests[0].2.focus).unwrap();
         assert_eq!((selected.sid, selected.rk), (item.sid, item.rk));
         assert!(opener.rect.is_some());
         frame(
             &mut d,
             &mut rig,
-            AppArg::Library,
+            RECOMMENDED,
             tick(i + 80),
             key_input(Edge::Up, i + 80),
         );
         for n in i + 81..i + 120 {
-            frame(&mut d, &mut rig, AppArg::Library, tick(n), vec![]);
+            frame(&mut d, &mut rig, RECOMMENDED, tick(n), vec![]);
         }
         assert!(
-            !rig.take_library_reqs().iter().any(|(_, req, _)| matches!(
+            !rig.take_observed_library_commands().iter().any(|(_, req, _)| matches!(
                 req,
                 LibraryReq::ItemMenu { .. } | LibraryReq::Play { .. } | LibraryReq::Detail { .. }
             )),

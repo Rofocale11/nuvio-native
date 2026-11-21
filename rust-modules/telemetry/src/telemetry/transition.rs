@@ -39,6 +39,13 @@ pub fn commit(previous: &Consent, next: &Consent) {
         super::playback::clear_error_trace();
     }
     crate::telemetry::spool::purge_withdrawn(next);
+    // The release-health session follows the crash-report decision: withdrawn, it is forgotten
+    // and its persisted state deleted; newly enabled, the app is in use right now.
+    if !effectively_allows_errors(next) {
+        crate::telemetry::session::stop();
+    } else if enabling_errors {
+        crate::telemetry::session::start();
+    }
     crate::telemetry::native::sync_change(next);
     persist_record_off_thread(next.clone());
 }
@@ -50,7 +57,13 @@ pub fn commit(previous: &Consent, next: &Consent) {
 fn persist_record_off_thread(next: Consent) {
     let submitted = plx_base::storage_worker::submit(move || {
         let outcome = crate::telemetry::persistence::record(&next);
-        if outcome.write != crate::telemetry::persistence::PersistResult::Durable {
+        // `NotAttempted` is a platform that persists no consent by design (`StoreMode::MemoryOnly`),
+        // not a failed write.
+        if !matches!(
+            outcome.write,
+            crate::telemetry::persistence::PersistResult::Durable
+                | crate::telemetry::persistence::PersistResult::NotAttempted
+        ) {
             plx_base::eventlog::log(&format!("telemetry: the decision is not durably persisted: {outcome:?}"));
         }
     });
@@ -80,6 +93,7 @@ pub fn forget(_prior: &Consent) {
     super::playback::clear_error_trace();
     crate::telemetry::delivery::forget();
     crate::telemetry::spool::purge_all_local();
+    crate::telemetry::session::stop();
     crate::telemetry::native::sync_change(&next);
     persist_forget_off_thread();
 }
@@ -91,6 +105,7 @@ fn persist_forget_off_thread() {
             outcome.write,
             crate::telemetry::persistence::PersistResult::Durable
                 | crate::telemetry::persistence::PersistResult::Delegated
+                | crate::telemetry::persistence::PersistResult::NotAttempted
         ) {
             plx_base::eventlog::log(&format!("telemetry: sign-out could not durably clear the decision: {outcome:?}"));
         }

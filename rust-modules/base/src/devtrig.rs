@@ -80,6 +80,7 @@ pub fn listed(_triggers: &[String], _name: &str) -> bool {
 /// Is the trigger `name` (bare, without the `plxnative-` prefix) present?
 #[cfg(feature = "devtriggers")]
 pub fn flag(name: &str) -> bool {
+    crate::step::assert_io_allowed("developer trigger flag");
     path(name).exists()
 }
 #[cfg(not(feature = "devtriggers"))]
@@ -128,6 +129,7 @@ pub use __latched_flag as latched_flag;
 /// empty file must not read the same as an absent one.
 #[cfg(feature = "devtriggers")]
 pub fn read(name: &str) -> Option<String> {
+    crate::step::assert_io_allowed("developer trigger read");
     std::fs::read_to_string(path(name))
         .ok()
         .map(|s| s.trim().to_string())
@@ -177,7 +179,7 @@ pub fn no_wan() -> Option<NoWan> {
 /// **Hold the Load-returned flag** — `plxnative-holdload[=ms]`.
 ///
 /// `Some(ms)` when armed (default 30000 for a bare/empty trigger, per its own `parse` fallback),
-/// else `None`. `player::threads::load_thread` sleeps this many milliseconds right after the real
+/// else `None`. `plx_play_feed::native_load::load_thread` sleeps this many milliseconds right after the real
 /// `sf_load` call returns and BEFORE `Shared::mark_native_load_returned` publishes that fact — so
 /// issue #74 D.1's budget (the pump's `deferring` line, then, past `NATIVE_LOAD_BUDGET`, the
 /// failure read-out) becomes observable on a real television on demand, rather than only on a

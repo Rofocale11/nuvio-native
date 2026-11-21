@@ -10,7 +10,8 @@
 //! two cannot drift on what a push saves or what the replay canon says about it.
 //!
 //! The root is the EMPTY stack, not a value of `P`.
-use crate::form::{FormTable, RowKey};
+use crate::a11y::{A11y, A11yPath, Role};
+use crate::form::{FormTable, RowKey, RowKind};
 use crate::geom::IndexElem;
 use plx_machine::machine::{Canon, EntryId, FocusKey, GroupId, Host, Measure};
 use crate::panel_motion::PanelMotion;
@@ -159,6 +160,45 @@ pub fn popover_group_of<S: PopoverPanel, E: IndexElem>(
     s.form().index_of_key(RowKey(key.index()?)).map(|_| group)
 }
 
+/// **The accessibility projection of one popover row** (`a11y`): the id `name` gives the row's
+/// identity, and the role its [`RowKind`] says (a drill-in or a choice is a `Row`, a switch a
+/// `Toggle`, a command a `Button`). The title band's pointer-only key is not a row and projects
+/// nothing. The one implementation every popover shares (`plx_appkit::more_menu::MoreMenuPart`,
+/// `plx_appkit::track_menu::TrackMenuPart`, the Library's sort and view menu); each names its own
+/// rows. It takes the popover's FORM, not a [`PopoverPanel`], because a menu that is itself a screen
+/// (the Library's) has the form and no panel.
+pub fn popover_a11y<Id: PartialEq + Clone, A: Clone, D: Clone, E: IndexElem>(
+    form: &FormTable<Id, A, D>,
+    key: &E,
+    name: impl FnOnce(&Id) -> A11yPath,
+) -> Option<A11y<'static>> {
+    let binding = form.binding_at(form.index_of_key(RowKey(key.index()?))?)?;
+    let role = match binding.kind {
+        RowKind::Nav(_) | RowKind::Choice => Role::Row,
+        RowKind::Toggle => Role::Toggle,
+        RowKind::Button => Role::Button,
+    };
+    Some(A11y::new(name(&binding.id), role))
+}
+
+/// **Every row of the popover's one group**, in row order, for `a11y_elems`: the keys the form
+/// binds (separators and notes have none), nothing for a group that is not `group`.
+pub fn popover_a11y_elems<Id: PartialEq + Clone, A: Clone, D: Clone, E: IndexElem>(
+    form: &FormTable<Id, A, D>,
+    g: GroupId,
+    group: GroupId,
+    out: &mut Vec<E>,
+) {
+    if g != group {
+        return;
+    }
+    out.extend(
+        (0..form.table.n_rows())
+            .filter_map(|i| form.key_at(i as usize))
+            .map(|k| E::of_index(k.0)),
+    );
+}
+
 /// UP/DOWN step through the form's focusable rows; LEFT/RIGHT are the screen's.
 pub fn popover_neighbour<S: PopoverPanel, E: IndexElem>(
     s: &S,
@@ -192,17 +232,16 @@ pub fn popover_place<S: PopoverPanel, E: IndexElem>(
     let natural = s.panel_rect(measure);
     let clip = s.shown_rect(measure);
     let dx = s.motion().live_dx();
-    let placed = |rest: Rect, index: Option<u32>| Placed {
-        rect: Rect::new(rest.x + dx, rest.y, rest.w, rest.h),
-        rest_rect: rest,
-        clip,
-        index,
-    };
     if key.index() == Some(TITLE_KEY) {
-        return Some(placed(s.form().table.title_rect(natural)?, None));
+        return Some(panel_stop(s.form().table.title_rect(natural)?, clip, dx, None));
     }
     let i = s.form().index_of_key(RowKey(key.index()?))? as u32;
-    Some(placed(s.form().table.row_frame(natural, i as i32)?, Some(i)))
+    Some(panel_stop(s.form().table.row_frame(natural, i as i32)?, clip, dx, Some(i)))
+}
+
+/// Place a stop on a sliding page with its resting geometry intact for focus travel.
+pub fn panel_stop(rest_rect: Rect, clip: Rect, dx: f32, index: Option<u32>) -> Placed {
+    Placed { rect: Rect { x: rest_rect.x + dx, ..rest_rect }, rest_rect, clip, index }
 }
 
 /// The key focus seats on when the group is entered: the cursor's row, else the opening row.

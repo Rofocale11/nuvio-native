@@ -49,6 +49,8 @@ fn addressed_instance_commit_validates_identity_and_selects_before_query() {
             choice: false,
             query: Some(QueryEdit::Unwatched(true)),
         },
+        &ClientKeys::default(),
+        &mut Vec::new(),
     ));
     assert_eq!(state.cur(), 0);
     assert_eq!(state.query_gen(), 0);
@@ -60,6 +62,8 @@ fn addressed_instance_commit_validates_identity_and_selects_before_query() {
             choice: false,
             query: Some(QueryEdit::Unwatched(true)),
         },
+        &ClientKeys::default(),
+        &mut Vec::new(),
     ));
     assert_eq!(state.cur(), 1);
     assert!(!state.states[0].unwatched);
@@ -95,9 +99,9 @@ fn retained_pages_copy_only_changed_page_and_keep_sparse_holes() {
     let old = items.clone();
     assert!(super::Arc::ptr_eq(&old.pages, &items.pages));
     assert_eq!(items.pages.iter().flatten().count(), 2);
-    assert!(!items.set_watched(sid, "missing", false));
+    assert!(!items.apply_view(&crate::viewstate::ViewAt::leaf(sid, "missing"), crate::viewstate::ViewEdit::Watched(false)).1);
     assert!(super::Arc::ptr_eq(&old.pages, &items.pages));
-    assert!(items.set_watched(sid, "7", false));
+    assert!(items.apply_view(&crate::viewstate::ViewAt::leaf(sid, "7"), crate::viewstate::ViewEdit::Watched(false)).1);
     assert!(!super::Arc::ptr_eq(&old.pages, &items.pages));
     assert!(!super::Arc::ptr_eq(
         old.pages[0].as_ref().unwrap(),

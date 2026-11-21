@@ -13,6 +13,14 @@ import check_steps
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = "_ZN17StarfishMediaAPIs20callbackFunctionHookEixPKc"
 LOAD = "_ZN17StarfishMediaAPIs4LoadEPKcPFvixS1_PvES2_"
+HOOK_ROW = f"1: 00000000 16 FUNC GLOBAL DEFAULT 1 {HOOK}\n"
+# src/exit.c's `exit` as the executable's .dynsym shows it (a definition prints bare), and the import
+# it replaces (an import prints with its symbol version).
+EXIT_ROW = "2: 00010440 8 FUNC GLOBAL DEFAULT 13 exit\n"
+EXIT_IMPORT_ROW = "3: 00000000 0 FUNC GLOBAL DEFAULT UND exit@GLIBC_2.4 (2)\n"
+# src/access.c's `access`, likewise: defined bare when the link exports it, and the import it replaces.
+ACCESS_ROW = "4: 00010460 120 FUNC GLOBAL DEFAULT 13 access\n"
+ACCESS_IMPORT_ROW = "5: 00000000 0 FUNC GLOBAL DEFAULT UND access@GLIBC_2.4 (2)\n"
 FILLER = "synthetic-padding-line\n" * 100000  # More than 2 MiB, far beyond a pipe buffer.
 # Hang guards, not budgets. This file's own timeouts used to be 20 s per gate run and 5 s for the
 # parallel-invocation rendezvous, which a quiet machine meets many times over; on a 3-core macOS runner
@@ -31,7 +39,10 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 tool = Path(sys.argv[0]).name
 key = tool + (":" + sys.argv[1] if tool == "readelf" else "")
 spec = json.loads(Path(os.environ["ELF_TEST_SPEC"]).read_text())
-if key == "readelf:-h" and "ELF_TEST_BARRIER" in os.environ:
+# Only the main binary's header read is the synchronised observation: the gate also reads the storage
+# helper's header later, after the other run may already have exited and removed its scratch, and that
+# call must not overwrite the snapshot.
+if key == "readelf:-h" and Path(sys.argv[-1]).name == "synthetic.elf" and "ELF_TEST_BARRIER" in os.environ:
     barrier = Path(os.environ["ELF_TEST_BARRIER"])
     (barrier / ("ready-" + os.environ["ELF_TEST_RUN"])).touch()
     until = time.monotonic() + RENDEZVOUS_HANG_GUARD
@@ -55,15 +66,23 @@ def defaults():
     return {key: {"output": value} for key, value in {
         "readelf:-h": "Class: ELF32\nMachine: ARM\nFlags: soft-float\nType: EXEC\n",
         "readelf:-A": "Tag_CPU_arch: v7\n",
-        "readelf:--dyn-syms": f"1: 00000000 16 FUNC GLOBAL DEFAULT 1 {HOOK}\n",
+        "readelf:--dyn-syms": HOOK_ROW + EXIT_ROW + ACCESS_ROW,
         "readelf:-rW": "No relocations\n",
         "readelf:-l": "  LOAD 0x000000 0x00010000 0x00010000\n",
         "readelf:-n": "Build ID: " + "a" * 40 + "\n",
         "readelf:-d": "Shared library: [libalpha.so]\nShared library: [libbeta.so]\n",
         "readelf:-d:plxnative-storage": "Shared library: [libgamma.so]\nShared library: [libalpha.so]\n",
-        "objdump": "  00: dmb ish\n" * 101,
+        "objdump": "  00: dmb ish\n" * 101 + "  04: vmul.f32 s0, s1, s2\n" * 200 + "  08: bl 0x100 <__aeabi_fmul>\n" * 5,
         "strings": "YOUR_PMS_HOST\n",
     }.items()}
+
+
+def uri_defaults():
+    spec = defaults()
+    # No Starfish hook, but src/exit.c's and src/access.c's interposers are linked whatever the backend set.
+    spec["readelf:--dyn-syms"]["output"] = EXIT_ROW + ACCESS_ROW
+    spec["readelf:-d"]["output"] = "Shared library: [libalpha.so]\n"
+    return spec
 
 
 class ElfGateTests(unittest.TestCase):
@@ -81,6 +100,7 @@ class ElfGateTests(unittest.TestCase):
         self.script = self.root / "ci/check-elf.sh"
         self.script.write_text(source)
         (self.root / "ci/expected-dt-needed.txt").write_text("libalpha.so\nlibbeta.so\n")
+        (self.root / "ci/expected-dt-needed-uri.txt").write_text("libalpha.so\n")
         (self.root / "ci/expected-dt-needed-storage.txt").write_text("libalpha.so\nlibgamma.so\n")
         (self.root / "plxnative-storage").write_text("synthetic helper")
         for name in ("readelf", "objdump", "strings"):
@@ -89,7 +109,7 @@ class ElfGateTests(unittest.TestCase):
             path.chmod(0o755)
         self.spec = self.root / "spec.json"
 
-    def run_gate(self, spec=None, extra_env=None):
+    def run_gate(self, spec=None, extra_env=None, mode_arg=None):
         if spec is not None:
             self.spec.write_text(json.dumps(spec))
         env = os.environ.copy()
@@ -97,10 +117,19 @@ class ElfGateTests(unittest.TestCase):
                     "OBJDUMP": str(self.root / "tools/objdump"),
                     "PATH": str(self.root / "tools") + os.pathsep + env.get("PATH", ""),
                     "TMPDIR": str(self.root / "scratch"), "CI": "true",
-                    "ELF_TEST_SPEC": str(self.spec)})
+                    "ELF_TEST_SPEC": str(self.spec),
+                    "PLAYBACK_BACKENDS": "both"})
         env.update(extra_env or {})
-        return subprocess.run(["bash", str(self.script), "synthetic.elf"], cwd=self.root,
+        args = ["bash", str(self.script), "synthetic.elf"]
+        if mode_arg is not None:
+            args.append(mode_arg)
+        return subprocess.run(args, cwd=self.root,
                               env=env, capture_output=True, text=True, timeout=GATE_HANG_GUARD)
+
+    def gate_scratch(self):
+        # macOS may create xcrun_db in TMPDIR while looking up host tools. The gate owns only
+        # check-elf.* scratch directories, and those must all be removed on every exit path.
+        return list((self.root / "scratch").glob("check-elf.*"))
 
     def assert_pass(self, spec):
         result = self.run_gate(spec)
@@ -109,6 +138,51 @@ class ElfGateTests(unittest.TestCase):
 
     def test_small_valid_artifact(self):
         self.assert_pass(defaults())
+
+    def test_uri_mode_requires_an_exact_nonfeed_import_set_and_no_hook(self):
+        result = self.run_gate(uri_defaults(), extra_env={"PLAYBACK_BACKENDS": "uri"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("all ELF assertions passed", result.stdout)
+        result = self.run_gate(uri_defaults(), extra_env={"PLAYBACK_BACKENDS": "both"}, mode_arg="uri")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_uri_mode_rejects_any_feed_hook_or_library(self):
+        for label, change, diagnostic in [
+            ("hook", lambda spec: spec["readelf:--dyn-syms"].update(output=HOOK_ROW + EXIT_ROW + ACCESS_ROW), "callbackFunctionHook"),
+            ("player", lambda spec: spec["readelf:-d"].update(output="Shared library: [libalpha.so]\nShared library: [libplayerAPIs.so.1]\n"), "Feed library"),
+            ("pipeline", lambda spec: spec["readelf:-d"].update(output="Shared library: [libalpha.so]\nShared library: [libpf-1.0.so.1]\n"), "Feed library"),
+        ]:
+            with self.subTest(label=label):
+                spec = uri_defaults()
+                change(spec)
+                result = self.run_gate(spec, extra_env={"PLAYBACK_BACKENDS": "uri"})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(diagnostic, result.stdout)
+
+    def test_uri_mode_rejects_extra_and_missing_nonfeed_imports(self):
+        for output in ("Shared library: [libalpha.so]\nShared library: [libbeta.so]\n", ""):
+            with self.subTest(output=output):
+                spec = uri_defaults()
+                spec["readelf:-d"]["output"] = output
+                result = self.run_gate(spec, extra_env={"PLAYBACK_BACKENDS": "uri"})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("DT_NEEDED drifted", result.stdout)
+
+    def test_feed_mode_keeps_the_hook_requirement_and_full_import_set(self):
+        result = self.run_gate(defaults(), extra_env={"PLAYBACK_BACKENDS": "feed"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        spec = defaults()
+        spec["readelf:--dyn-syms"]["output"] = EXIT_ROW + ACCESS_ROW
+        result = self.run_gate(spec, extra_env={"PLAYBACK_BACKENDS": "feed"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("callbackFunctionHook interposer", result.stdout)
+
+    def test_unknown_or_empty_backend_mode_is_rejected(self):
+        for backend in ("none", "uri feed", "", "surprise"):
+            with self.subTest(backend=backend):
+                result = self.run_gate(defaults(), extra_env={"PLAYBACK_BACKENDS": backend})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("PLAYBACK_BACKENDS", result.stdout)
 
     def test_early_required_placeholder_with_large_tail(self):
         spec = defaults()
@@ -177,19 +251,98 @@ class ElfGateTests(unittest.TestCase):
                 spec[key]["output"] += FILLER
                 result = self.run_gate(spec)
                 self.assertNotEqual(result.returncode, 0, "producer failed but gate passed: " + key)
-                self.assertEqual(list((self.root / "scratch").iterdir()), [])
+                self.assertEqual(self.gate_scratch(), [])
 
     def test_predicates_still_reject_invalid_artifacts(self):
         for key, replacement in [("readelf:-A", "Tag_CPU_arch: v6\n"),
                                  ("readelf:-n", "Build ID: abc\n"),
                                  ("readelf:-d", "Shared library: [unexpected.so]\n"),
                                  ("readelf:--dyn-syms", ""), ("strings", "no placeholder\n"),
-                                 ("objdump", "  00: dmb ish\n")]:
+                                 ("objdump", "  00: dmb ish\n"),
+                                 # float math without VFP: no vmul.f32 at all, and a libcall instead
+                                 ("objdump", "  00: dmb ish\n" * 101 + "  04: bl 0x100 <__aeabi_fmul>\n" * 200),
+                                 # VFP present but the libcalls are not the rare exception (the bound is 1 call per 20 vmul.f32)
+                                 ("objdump", "  00: dmb ish\n" * 101 + "  04: vmul.f32 s0, s1, s2\n" * 150
+                                  + "  08: bl 0x100 <__aeabi_fmul>\n" * 20)]:
             with self.subTest(key=key):
                 spec = defaults()
                 spec[key]["output"] = replacement
                 result = self.run_gate(spec)
                 self.assertNotEqual(result.returncode, 0, key)
+
+    def test_exit_interposer_must_be_defined_once_and_never_imported(self):
+        for label, rows in [
+                ("missing", HOOK_ROW + ACCESS_ROW),
+                ("only imported", HOOK_ROW + EXIT_IMPORT_ROW + ACCESS_ROW),
+                ("defined and imported", HOOK_ROW + EXIT_ROW + EXIT_IMPORT_ROW + ACCESS_ROW),
+                ("defined twice", HOOK_ROW + EXIT_ROW + EXIT_ROW + ACCESS_ROW),
+                ("a data object", HOOK_ROW + "2: 00010440 8 OBJECT GLOBAL DEFAULT 13 exit\n" + ACCESS_ROW),
+                ("undefined without a version", HOOK_ROW + "2: 00000000 0 FUNC GLOBAL DEFAULT UND exit\n" + ACCESS_ROW),
+                ("local", HOOK_ROW + "2: 00010440 8 FUNC LOCAL DEFAULT 13 exit\n" + ACCESS_ROW)]:
+            with self.subTest(label=label):
+                spec = defaults()
+                spec["readelf:--dyn-syms"]["output"] = rows
+                result = self.run_gate(spec)
+                self.assertNotEqual(result.returncode, 0, "exit interposer drift was allowed: " + result.stdout)
+                self.assertIn("libc exit interposer", result.stdout)
+
+    def test_access_interposer_must_be_defined_once_and_never_imported(self):
+        for label, rows in [
+                ("missing", HOOK_ROW + EXIT_ROW),
+                ("only imported", HOOK_ROW + EXIT_ROW + ACCESS_IMPORT_ROW),
+                ("defined and imported", HOOK_ROW + EXIT_ROW + ACCESS_ROW + ACCESS_IMPORT_ROW),
+                ("defined twice", HOOK_ROW + EXIT_ROW + ACCESS_ROW + ACCESS_ROW),
+                ("a data object", HOOK_ROW + EXIT_ROW + "4: 00010460 120 OBJECT GLOBAL DEFAULT 13 access\n"),
+                ("undefined without a version", HOOK_ROW + EXIT_ROW + "4: 00000000 0 FUNC GLOBAL DEFAULT UND access\n"),
+                ("local", HOOK_ROW + EXIT_ROW + "4: 00010460 120 FUNC LOCAL DEFAULT 13 access\n")]:
+            with self.subTest(label=label):
+                spec = defaults()
+                spec["readelf:--dyn-syms"]["output"] = rows
+                result = self.run_gate(spec)
+                self.assertNotEqual(result.returncode, 0, "access interposer drift was allowed: " + result.stdout)
+                self.assertIn("libc access interposer", result.stdout)
+
+    def test_importing_faccessat_is_not_importing_access(self):
+        spec = defaults()
+        spec["readelf:--dyn-syms"]["output"] += "6: 00000000 0 FUNC GLOBAL DEFAULT UND faccessat@GLIBC_2.4 (2)\n"
+        self.assert_pass(spec)
+
+    def test_importing_underscore_exit_is_not_importing_exit(self):
+        spec = defaults()
+        spec["readelf:--dyn-syms"]["output"] += "4: 00000000 0 FUNC GLOBAL DEFAULT UND _exit@GLIBC_2.4 (2)\n"
+        self.assert_pass(spec)
+
+    def test_local_libm_body_is_rejected(self):
+        # compiler_builtins' weak soft-float copy won over glibc's libm: the objdump has a local body.
+        for name in ("roundf", "round", "floorf", "ceilf", "ceil", "trunc", "fmodf", "fmod",
+                     "cbrtf", "sqrtf", "sqrt", "fma"):
+            with self.subTest(name=name):
+                spec = defaults()
+                spec["objdump"]["output"] += f"0001a2b4 <{name}>:\n  00: bl 0x100 <__aeabi_fadd>\n"
+                result = self.run_gate(spec)
+                self.assertNotEqual(result.returncode, 0, "local libm body was allowed: " + result.stdout)
+                self.assertIn("local definitions of libm functions", result.stdout)
+                self.assertIn(name, result.stdout)
+
+    def test_too_many_soft_arithmetic_calls_are_rejected(self):
+        spec = defaults()
+        # Few fmul (the existing ratio check stays happy); the new bound counts every soft kind.
+        spec["objdump"]["output"] += "  08: bl 0x100 <__aeabi_fadd>\n" * 6 + "  0c: bl 0x100 <__aeabi_ddiv>\n" * 6
+        result = self.run_gate(spec)
+        self.assertNotEqual(result.returncode, 0, "17 soft arithmetic calls were allowed: " + result.stdout)
+        self.assertIn("soft-float arithmetic libcalls", result.stdout)
+
+    def test_fixed_link_shape_passes_with_libm_undefined_and_int_conversions(self):
+        spec = defaults()
+        # Math names are only CALLED (PLT stubs, not local bodies), 9 soft calls remain (core's
+        # float parsing) and the i64<->float conversions, which VFPv3 cannot do, are not counted.
+        spec["objdump"]["output"] += ("  10: bl 0x200 <roundf@plt>\n" * 30
+                                      + "  14: bl 0x100 <__aeabi_dmul>\n" * 4
+                                      + "  18: bl 0x100 <__aeabi_l2d>\n" * 53
+                                      + "  1c: bl 0x100 <__aeabi_d2lz>\n" * 20)
+        result = self.run_gate(spec)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no local libm bodies, 9 soft-float arithmetic calls", result.stdout)
 
     def test_storage_helper_dt_needed_is_graded_against_its_own_list(self):
         for label, output in [("an extra library", "Shared library: [libalpha.so]\nShared library: [libgamma.so]\n"
@@ -247,7 +400,7 @@ class ElfGateTests(unittest.TestCase):
             seen = json.loads((barrier / f"seen-{n}").read_text())
             self.assertEqual(len(seen), 2, "each invocation must reserve private scratch")
             self.assertEqual(len(set(seen)), 2)
-        self.assertEqual(list((self.root / "scratch").iterdir()), [])
+        self.assertEqual(self.gate_scratch(), [])
 
 
 class MakeCheckContractTests(unittest.TestCase):

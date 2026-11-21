@@ -14,17 +14,19 @@
 //! fixed 2026-09-28). `NavStack::apply`'s `SelectTab` "cover-and-mint" arm — a peer pill pressed
 //! while a DIFFERENT root is up, e.g. Home or Search → TV Shows — used `Self::fresh`
 //! (`FocusTarget::FirstInGroup`, `By::Restore`) exactly like a `Push`/`Root` mint, which several
-//! screens (`library::LibraryScreen`'s `pop_from_rest`) treat as "restored to where it was" and
-//! do not animate. A tab press always arrives FROM the visible strip, so that read was never
-//! right the first time a tab is visited this session, and it produced a hard snap onto the
-//! first content tile with no transition. `Self::fresh_tab` (`FocusTarget::
-//! FirstInGroupAnimated`, `By::Dir`) is the fix: same seat, reported as a deliberate move, so the
-//! arrival animates the same as it already did for a Movies → TV Shows peer switch — which never
-//! reaches `NavStack` at all (`app::bridge::nav_peer`'s early return: both are `AppArg::Library`,
-//! `same_instance` by `id()` alone regardless of section — see `registry.rs`), so its own
-//! directional DOWN press into the grid was always `By::Dir` already. The fix is in the shared
-//! `SelectTab` mint path, not a TV Shows special case: it applies to every peer pill equally.
-//! See `machine.rs`'s doc on `FocusTarget::FirstInGroupAnimated` and the regression test
+//! screens (at the time `library::LibraryScreen`'s `pop_from_rest`, gated on `By::Dir |
+//! By::Pointer`) treated as "restored to where it was" and did not animate. A tab press always
+//! arrives FROM the visible strip, so that read was never right the first time a tab is visited
+//! this session, and it produced a hard snap onto the first content tile with no transition.
+//! `Self::fresh_tab` (`FocusTarget::FirstInGroupAnimated`, `By::Dir`) is the fix: same seat,
+//! reported as a deliberate move, so the arrival animates the same as it already did for a Movies →
+//! TV Shows peer switch — which never reaches `NavStack` at all (`app::bridge::nav_peer`'s early
+//! return: both are `AppArg::Library`, `same_instance` by `id()` alone regardless of section — see
+//! `registry.rs`), so its own directional DOWN press into the grid was always `By::Dir` already.
+//! The fix is in the shared `SelectTab` mint path, not a TV Shows special case: it applies to every
+//! peer pill equally. Today the shared card grid reads a `By::Dir | By::Pointer | By::Script` move
+//! as deliberate (`ui/src/cards/mod.rs`'s `Seen::of`). See `machine.rs`'s doc on
+//! `FocusTarget::FirstInGroupAnimated` and the regression test
 //! `containers::tests::a_fresh_tab_mint_reports_a_deliberate_move_not_a_restore`.
 
 use plx_machine::machine::{EntryId, GroupId, Host};
@@ -59,6 +61,15 @@ pub struct TabContainer<H: Host> {
     /// Preferred surviving destination if the focused member disappears. Independent of visual
     /// order: a profile chip may be first without being the application's recovery destination.
     pub strip_fallback: Option<H::Elem>,
+    /// **The page's OWN pill** — the member whose destination is the page on top (or the one being
+    /// travelled to), published by the application with the members. It is where a move UP from the
+    /// page lands on the strip (the tvOS convention: you go back to the tab you are on), whichever
+    /// page and wherever on it focus was. `None` publishes no preference and the strip seats the
+    /// pill nearest the key that left the page.
+    ///
+    /// Not hashed, like the members' geometry: it is rewritten every frame from state the hash
+    /// already holds (the route and the directory), so two replays of one input stream agree on it.
+    pub strip_selected: Option<H::Elem>,
     /// The selected pill: the destination's while a transition is in flight (`ui::nav::view_tab`).
     pub selected: usize,
 }
@@ -70,6 +81,7 @@ impl<H: Host> TabContainer<H> {
             pills: Vec::new(),
             strip: Vec::new(),
             strip_fallback: None,
+            strip_selected: None,
             selected: 0,
         }
     }

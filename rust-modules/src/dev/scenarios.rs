@@ -9,7 +9,7 @@
 //! the ONE struct, owned by `App` as `app.scenarios`, that gathers every arm's own retry counter,
 //! oscillator phase and boot-time latch, so a field used by no production code has exactly one
 //! home instead of living beside `route`/`trail`/`pages` on `App` itself. A field genuine
-//! production code also reads (`t0`, `refresh_hubs_at`) stayed on `App`, as the phase's own
+//! production code also reads (`t0`, `refresh_hubs`) stayed on `App`, as the phase's own
 //! instructions require.
 //!
 //! **Entry points, called from the loop at the exact positions the arms used to sit at:**
@@ -31,6 +31,10 @@
 //! [`rec_trigger`] / [`recplay_trigger`] below, for the same reason every other read in this crate
 //! goes through one door. The DIAG list itself stays in `dev.rs`.
 
+//! Metadata M4 is an intentional later exception to the historical PURE MOVE above: its source
+//! trigger is captured at Detail execution rather than first draw; its extracted stand-in host
+//! preserves the full TLS origin, resolve pin and connection facts during fallback registration.
+
 use crate::app::App;
 use crate::app::run::Frame;
 use plx_screens::registry::AppArg;
@@ -38,6 +42,9 @@ use plx_screens::registry::HomeCmd;
 use plx_machine::machine::{Key, Tick};
 use std::os::raw::c_int;
 
+mod metadata;
+#[allow(unused_imports)]
+pub(crate) use metadata::{metadata_alt_stand_in, metadata_source, metadata_source_scripted, with_metadata_source};
 pub(crate) mod bench;
 pub(crate) mod screenshot;
 #[cfg(feature = "devtriggers")]
@@ -114,6 +121,8 @@ pub(crate) struct Scenarios {
     /// `/tmp/plxnative-acct`'s value, once read (see `acct_arm`).
     pub(crate) acct_rest: Option<Option<u32>>,
     pub(crate) auto_tried: bool,
+    /// `/tmp/plxnative-playurl`, once the `autoplay` arm has asked (see `playurl_latched`).
+    pub(crate) playurl_armed: Option<bool>,
     pub(crate) replay_left: u32,
     pub(crate) grid_tried: bool,
     pub(crate) settings_tried: bool,
@@ -166,7 +175,7 @@ pub(crate) struct Scenarios {
     pub(crate) hold_bench: Option<bench::PressBench>,
     /// The boot-time trigger flags the loop consults every frame after.
     pub(crate) dev: DevFlags,
-    /// The screenshot pipeline's arms (`plxnative-libtype`, `-libgrid`, `-libshelf`, `-libmenu`, `-clockstop`) — see [`screenshot`].
+    /// The screenshot pipeline's arms (`plxnative-libtype`, `-libgrid`, `-libshelf`, `-libmenu`, `-clockstop`) and the debt `-autopause` owes the settled capture — see [`screenshot`].
     pub(crate) shots: screenshot::ScreenshotArms,
 }
 
@@ -281,10 +290,11 @@ pub(crate) fn arm_glassload(glass: &mut plx_ui::frame::glass::GlassPlan) {
 }
 
 /// `/tmp/plxnative-navblur` — the blurred-route-transition prototype.
-pub(crate) fn arm_navblur(glass: &mut plx_ui::frame::glass::GlassPlan) {
+pub(crate) fn arm_navblur(glass: &mut plx_ui::frame::glass::GlassPlan) -> bool {
     if let Some(v) = plx_base::devtrig::read("navblur") {
         glass.configure_navblur(&v);
     }
+    glass.blur_dissolve()
 }
 
 /// `/tmp/plxnative-overdraw` — the CPU-side per-draw-class overdraw ledger.
@@ -294,19 +304,30 @@ pub(crate) fn arm_overdraw() {
     }
 }
 
-/// `/tmp/plxnative-drawmask=<classes>` — refuse every draw of the named classes.
+/// `/tmp/plxnative-drawmask=<classes>` — refuse every draw of the named classes, or, for the card
+/// class, one PART of its work (`card.interior`, `card.ring`, `card.focus`: `plx_gfx::overdraw`).
 pub(crate) fn arm_drawmask() {
     if let Some(spec) = plx_base::devtrig::read("drawmask") {
         plx_gfx::overdraw::set_mask(&spec);
     }
 }
 
-/// `/tmp/plxnative-heroground` — the one-pass hero ground A/B.
-pub(crate) fn arm_heroground() {
-    if plx_base::devtrig::flag("heroground") {
-        plx_ui::widgets::set_hero_ground(true);
-        #[cfg(feature = "devtriggers")]
-        plx_base::eventlog::log("hero: one-pass ground ENABLED by /tmp/plxnative-heroground");
+/// `/tmp/plxnative-nocardsplit` — draw every resting card WHOLE again, as before the split of a
+/// resting card into its interior and ring (`gfx::draw_tex_core_in`). Unarmed the split is on,
+/// which is the shipped behaviour; present, the very same binary is the control leg of a split
+/// on/off A/B, with the card-path ledger (`plxnative-overdraw`) booking the whole draws as `off`.
+pub(crate) fn arm_cardsplit() {
+    if plx_base::devtrig::flag("nocardsplit") {
+        plx_gfx::overdraw::set_card_split(false);
+    }
+    // `/tmp/plxnative-nopreviewcache` draws every cached region live every frame (the Under posters
+    // preview and Home's parked backdrop, as before `gfx::region_paint`); `/tmp/plxnative-previewsnap`
+    // puts the cached quad on whole pixels.
+    if plx_base::devtrig::flag("nopreviewcache") {
+        plx_gfx::overdraw::set_region_cache(false);
+    }
+    if plx_base::devtrig::flag("previewsnap") {
+        plx_gfx::overdraw::set_region_snap(true);
     }
 }
 
@@ -341,23 +362,23 @@ pub(crate) fn arm_cpuprof() {
 }
 
 /// `/tmp/plxnative-noidle` — turn the whole-frame present gate off.
-pub(crate) fn arm_noidle() {
+pub(crate) fn arm_noidle(present: &mut plx_machine::present::Present) {
     if plx_base::devtrig::flag("noidle") {
-        plx_machine::idle::set_enabled(false);
+        present.set_enabled(false);
         #[cfg(feature = "devtriggers")]
         plx_base::eventlog::log("idle: present gate DISABLED by /tmp/plxnative-noidle");
     }
 }
 
-/// `/tmp/plxnative-audioenh=off|boost|loudness` — force the PERSISTED Boost Dialog / Normalize
-/// Loudness preference (issue #266) at boot, harness-only.
+/// `/tmp/plxnative-audioenh=off|boost|loudness` — force the Boost Dialog / Normalize Loudness
+/// preference (issue #266) at boot, harness-only.
 ///
 /// Every other boot override here (`dev::playback_quality_override`, `arm_glassload`, …) is
 /// deliberately in-memory-only, so a test can never mutate a real person's saved preference. This
 /// one is the one exception, and on purpose: `player::set_audio_enhancements` is the SAME call a
-/// person's own track-menu pick makes (it both updates the live route and re-persists through the
-/// storage worker), and an on-device harness case needs the persisted value itself pinned before
-/// boot, not just the in-memory copy — one case proves the cold-start "a saved preference turns an
+/// person's own track-menu pick makes (it both updates the live route and, for a seated profile,
+/// re-persists through the storage worker), and an on-device harness case needs its starting value
+/// pinned before boot — one case proves the cold-start "a saved preference turns an
 /// otherwise-direct-playable route into a remux" path (`route::plan`'s cold-start audio branch) by
 /// booting with the preference already ON, and the very next boot must not inherit whatever a
 /// FAILED previous case's toggle left behind. A toggle-based reset cannot promise that: if the
@@ -365,6 +386,26 @@ pub(crate) fn arm_noidle() {
 /// Forcing the value at boot, every time, is what makes a case's starting preference a property of
 /// the manifest instead of of history — the same argument `run_case`'s per-case viewOffset reset
 /// already makes for resume position.
+///
+/// **Whose record it forces (P1a).** The preference is a PROFILE's, so the persisted value is the
+/// SEATED profile's, and it only exists once a profile is seated. The arm runs twice, both through
+/// the same setter. Boot runs it with nobody seated, which sets the live cell alone (the door
+/// refuses to save for nobody). The seat trigger (`app::bridge::SeatWatch`) runs it again right
+/// after the restore of the process's first `Unseated` to `Seated` change, which writes that
+/// profile's record. Whether that second run happens depends on how the harness boots:
+///
+/// * A token-injected boot (the default, `--guest` included, since `tools/tv-session.sh` and
+///   `tests/run.py` both write `plxnative-token`) is a dev-token boot that never seats, so the arm
+///   sets the live value only, and the next dev-token boot reads the fallback rather than a previous
+///   run's pick.
+/// * A `session: stored` case (`offline_play`, `offline_play_v6` and `offline_pick_cached` in
+///   `tests/manifest.json`) skips the token and boots the install's own sign-in, which seats.
+///   `triggers_for_case` still writes `plxnative-audioenh` for it (`off` by default), so the second
+///   run writes that real profile's own record, and under §3.8.4 it records an own value even for
+///   `off`: such a case leaves `audio_enhancements: NONE` in the install's signed-in profile.
+///
+/// Either way no boot inherits what a failed case left: the token boots never persist it, and a
+/// seated boot overwrites it.
 ///
 /// `off` clears both flags; `boost`/`loudness` sets exactly one (never both — no case here needs
 /// both at once, and a value this test-only can grow a second name later without breaking the
@@ -388,6 +429,79 @@ pub(crate) fn arm_audio_enhancements() {
         "audioenh: forced boost_dialog={} normalize_loudness={} by /tmp/plxnative-audioenh",
         a.boost_dialog, a.normalize_loudness,
     ));
+}
+
+/// `/tmp/plxnative-trackmemory=clear` — forget everything the seated profile's track memory holds,
+/// harness-only.
+///
+/// Track memory is the per-profile record a harness case writes without meaning to: a menu pick on
+/// an episode (`route::commit_audio_pick` / `commit_subtitle_pick`) lands in it, and the next case
+/// that plays the same show would then start from the previous case's tracks. `tests/run.py` writes
+/// `clear` for every case beside `plxnative-audioenh`, so a case's starting memory is a property of
+/// the manifest instead of of history, the argument `arm_audio_enhancements` makes for the
+/// preference. An unrecognised value is ignored rather than guessed at.
+///
+/// **It needs a seat, and so does the memory it clears.** The entries are the seated profile's, read
+/// and removed through the memory door (`route::recall_all`, then `route::remember` with a removal:
+/// the same refusal, the same queued delta, never a write around the door), which refuses for nobody.
+/// A dev-token boot never seats, so it neither remembers nor has anything to clear. The seat trigger
+/// (`app::bridge::SeatWatch`) runs this once, right after the restore of the process's first
+/// `Unseated` to `Seated` change and beside `arm_audio_enhancements`, with the profile it seated: a
+/// stored-session boot (the harness's seated cases) or a picker boot.
+pub(crate) fn arm_track_memory(user: &str) {
+    use plx_plex::plex::session::prefs::{MemoryEntry, TrackMemoryEntry};
+    let Some(v) = plx_base::devtrig::read("trackmemory") else { return };
+    let v = v.trim();
+    if let Some(count) = v.strip_prefix("fill") {
+        fill_track_memory(user, count.strip_prefix(':').unwrap_or(""));
+        return;
+    }
+    if v != "clear" {
+        #[cfg(feature = "devtriggers")]
+        plx_base::eventlog::log(&format!("trackmemory: unrecognised value {v:?} — ignored"));
+        return;
+    }
+    let cleared = plx_media::route::recall_all::<TrackMemoryEntry>(user)
+        .into_iter()
+        .filter(|entry| plx_media::route::remember::<TrackMemoryEntry>(user, entry.key(), |_| None))
+        .count();
+    #[cfg(feature = "devtriggers")]
+    plx_base::eventlog::log(&format!("trackmemory: cleared {cleared} shows by /tmp/plxnative-trackmemory"));
+    #[cfg(not(feature = "devtriggers"))]
+    let _ = cleared;
+}
+
+/// `/tmp/plxnative-trackmemory=fill[:N]` — give the seated profile `N` (default and ceiling: the
+/// per-profile cap, 64) remembered shows with every string at its bound, harness-only.
+///
+/// This is what makes the DB8 write cost of a document carrying `track_memory` at its budget
+/// readable from the log (`session: db8 document bytes=… track_memory=…`, then `session: canonical
+/// write took … ms`): one profile's 64 worst-case entries are the household budget's size
+/// (`one_profile_keeps_64_worst_case_entries`), which no sequence of menu picks reaches on a mock with
+/// a handful of shows. The entries are keyed on a machine id no server has, so they never match a
+/// playback, and are written through the same door as a menu pick (`route::remember`), so a seatless
+/// boot refuses them exactly as it refuses a pick. `clear` removes them.
+fn fill_track_memory(user: &str, count: &str) {
+    use plx_plex::plex::session::prefs::{MemoryEntry, TrackMemoryEntry};
+    // The per-profile cap is the ceiling: a larger count would only evict its own first entries.
+    let cap = plx_plex::plex::session::prefs::TRACK_MEMORY_CAP;
+    let wanted = if count.is_empty() { Some(cap) } else { count.parse::<usize>().ok() };
+    let Some(wanted) = wanted.filter(|n| (1..=cap).contains(n)) else {
+        #[cfg(feature = "devtriggers")]
+        plx_base::eventlog::log(&format!("trackmemory: fill count {count:?} is not 1..={cap} — ignored"));
+        return;
+    };
+    let written = (0..wanted as u32)
+        .map(TrackMemoryEntry::worst_case)
+        .filter(|entry| {
+            let value = entry.clone();
+            plx_media::route::remember::<TrackMemoryEntry>(user, entry.key(), move |_| Some(value.clone()))
+        })
+        .count();
+    #[cfg(feature = "devtriggers")]
+    plx_base::eventlog::log(&format!("trackmemory: filled {written} of {wanted} shows by /tmp/plxnative-trackmemory"));
+    #[cfg(not(feature = "devtriggers"))]
+    let _ = written;
 }
 
 /// `/tmp/plxnative-nobudget` — the frame budget's A/B CONTROL LEG (spec §8.1, phase 11).
@@ -654,18 +768,19 @@ pub(crate) fn advance_content_boot(app: &mut App, fr: &Frame) {
     let ready = if boot.waiting_person {
         app.pages.nav.top_page().is_some_and(|entry| {
             let AppArg::Content(ContentArg::Person { sid, key, .. }) = &entry.arg else { return false };
-            app.bridge.person_view().current().is_some_and(|p| p.sid == *sid && p.key == *key
+            app.runtime.person_view().current().is_some_and(|p| p.sid == *sid && p.key == *key
                 // **The BIO sheet waits for the person, not for the CREDITS.** The filmography
                 // needs `credited`/`landed` because it is a list of them; the biography needs the
                 // person's own facts, which the header already has. Requiring the credits here
                 // would be requiring something a headless boot cannot have: they come from
-                // plex.tv, which answers an injected server token 401 (`account: … HTTP 401` in
-                // the event log), so the wait would never end and the trigger would present
+                // the Discover provider: a dev-token boot with no Discover stand-in armed has the
+                // read REFUSED locally (`discover: GET … refused` in the event log), and one with
+                // the mock's stand-in armed gets the credits' 401 (no account token), so the wait would never end and the trigger would present
                 // nothing at all — measured on the simulator, 2026-09-10.
                 && (boot.bio || (p.credited && p.landed)))
         })
     } else {
-        let meta = app.bridge.metadata_view();
+        let meta = app.runtime.metadata_view();
         let loaded = meta.current().map(|d|
             (d.sid, d.rk.as_str(), d.seasons.get(d.cur_season).map(|s| s.index)));
         boot.is_top(&app.pages)
@@ -681,7 +796,8 @@ pub(crate) fn advance_content_boot(app: &mut App, fr: &Frame) {
         // door OK on the header uses (`ContentPanel::Bio`) and gated on the same predicate, so the
         // trigger cannot open a sheet an interactive press would have refused. It exists because
         // this sheet has no other headless route: OK on the header only opens it when the prose is
-        // TRUNCATED, and the bio comes from plex.tv, which answers an injected server token 401 —
+        // TRUNCATED, and the bio comes from the Discover provider, which a dev-token boot either
+        // refuses locally (no stand-in armed) or gets only the mock's synthetic prose from —
         // so pair it with `/tmp/plxnative-personbio=<text>` for a boot that has any prose at all.
         let available = app
             .pages
@@ -690,7 +806,7 @@ pub(crate) fn advance_content_boot(app: &mut App, fr: &Frame) {
             .and_then(|e| e.inst.as_ref())
             .and_then(|i| i.screen.as_any())
             .and_then(|a| a.downcast_ref::<plx_screens::person::PersonScreen>())
-            .is_some_and(|page| page.bio_available(app.bridge.person_view()));
+            .is_some_and(|page| page.bio_available(app.runtime.person_view()));
         if let (Some(host), true) = (app.pages.top_page(), available) {
             bridge::open_content_panel(
                 &mut app.pages,
@@ -732,7 +848,7 @@ pub(crate) fn advance_content_boot(app: &mut App, fr: &Frame) {
             // page would refuse: availability is the PAGE's answer about the page's own item.
             if let Some(pg) = app.boot_initial.is_none().then(|| plx_base::devtrig::read("tracks")).flatten() {
                 let host = app.pages.top_page();
-                let meta = app.bridge.metadata_view();
+                let meta = app.runtime.metadata_view();
                 let available = app
                     .pages
                     .nav
@@ -792,6 +908,110 @@ fn detail_boot_ready(sid: plx_plex::plex::ServerId, rk: &str, want_season: Optio
     loaded: Option<(plx_plex::plex::ServerId, &str, Option<i64>)>, detail_loading: bool, season_loading: bool) -> bool {
     !detail_loading && !season_loading && loaded.is_some_and(|(server, key, season)|
         server == sid && key == rk && want_season.is_none_or(|wanted| season == Some(wanted)))
+}
+
+#[cfg(test)]
+mod track_memory_arm_tests {
+    use super::arm_track_memory;
+    use plx_media::route::{recall_all, remember, seed_memory_for_test, unseed_memory_for_test};
+    use plx_plex::plex::session::prefs::{AudioMemo, TrackMemoryEntry};
+    use plx_plex::plex::session::{self, Session, TempSession};
+
+    const MACHINE: &str = "machine-1";
+
+    fn entry(show: &str) -> TrackMemoryEntry {
+        let japanese = AudioMemo { lang: "jpn".into(), codec: "eac3".into(), channels: 6, ..Default::default() };
+        TrackMemoryEntry::new(MACHINE, show, Some(japanese), None)
+    }
+
+    fn held(user: &str) -> usize {
+        recall_all::<TrackMemoryEntry>(user).len()
+    }
+
+    fn filed() -> usize {
+        session::load().prefs.track_memory.iter().map(|list| list.items.len()).sum()
+    }
+
+    /// **`plxnative-trackmemory=clear` forgets what the SEATED profile remembered, through the door.**
+    /// Each case in the harness starts from empty memory, so a pick one case made is not the next
+    /// case's starting tracks. Armed with `clear` only; another profile's seat clears nothing of
+    /// this one's; the file loses the entries too, not just the mirror.
+    #[test]
+    fn trackmemory_clear_forgets_the_seated_profiles_shows_and_nothing_else() {
+        let _serial = plx_base::testlock::serial();
+        assert!(plx_base::devtrig::ENABLED, "this test arms a dev trigger, which a build without devtriggers cannot");
+        let session = TempSession::new("arm-track-memory");
+        session::save(&Session { client_id: "cid-1".into(), account_token: "acct".into(), ..Default::default() });
+        session.seated("", "acct");
+        seed_memory_for_test::<TrackMemoryEntry>(&session::peek());
+        for show in ["100", "200"] {
+            assert!(remember::<TrackMemoryEntry>("", (MACHINE.to_string(), show.to_string()), move |_| Some(entry(show))));
+        }
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!((held(""), filed()), (2, 2), "setup: two shows remembered, in the mirror and in the file");
+
+        plx_base::devtrig::with_private_triggers(|| {
+            arm_track_memory("");
+            assert_eq!(held(""), 2, "nothing is armed, so nothing is forgotten");
+
+            std::fs::write(plx_base::devtrig::path("trackmemory"), "keep").unwrap();
+            arm_track_memory("");
+            assert_eq!(held(""), 2, "an unrecognised value is ignored, not guessed at");
+
+            std::fs::write(plx_base::devtrig::path("trackmemory"), "clear").unwrap();
+            arm_track_memory("kid");
+            assert_eq!(held(""), 2, "a profile that is not the seated one clears nothing");
+
+            arm_track_memory("");
+            assert_eq!(held(""), 0, "armed with clear, the seated profile's shows are forgotten");
+        });
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(filed(), 0, "and the file forgot them through the same queued update");
+        unseed_memory_for_test::<TrackMemoryEntry>();
+    }
+
+    /// **`plxnative-trackmemory=fill[:N]` writes `N` worst-case shows through the door, and `clear`
+    /// takes them back.** The count defaults to, and is bounded by, the per-profile cap; a count
+    /// outside `1..=CAP` or one that is not a number writes nothing (a guess would put an unplanned
+    /// document size on the set); a profile that is not the seated one gets none.
+    #[test]
+    fn trackmemory_fill_writes_worst_case_shows_through_the_door_and_clear_takes_them_back() {
+        let _serial = plx_base::testlock::serial();
+        assert!(plx_base::devtrig::ENABLED, "this test arms a dev trigger, which a build without devtriggers cannot");
+        let session = TempSession::new("arm-track-memory-fill");
+        session::save(&Session { client_id: "cid-1".into(), account_token: "acct".into(), ..Default::default() });
+        session.seated("", "acct");
+        seed_memory_for_test::<TrackMemoryEntry>(&session::peek());
+        let cap = plx_plex::plex::session::prefs::TRACK_MEMORY_CAP;
+
+        plx_base::devtrig::with_private_triggers(|| {
+            let arm = |value: &str, user: &str| {
+                std::fs::write(plx_base::devtrig::path("trackmemory"), value).unwrap();
+                arm_track_memory(user);
+            };
+            for refused in ["fill:0", &format!("fill:{}", cap + 1), "fill:many", "fill:-3"] {
+                arm(refused, "");
+                assert_eq!(held(""), 0, "{refused:?} is not a count in 1..={cap}, so it fills nothing");
+            }
+            arm("fill:3", "kid");
+            assert_eq!(held(""), 0, "a profile that is not the seated one is given nothing");
+
+            arm("fill:3", "");
+            assert_eq!(held(""), 3, "fill:3 writes three shows");
+            arm("fill", "");
+            assert_eq!(held(""), cap, "a bare fill writes the cap, and the three it overlaps are the same shows");
+            plx_base::storage_worker::drain_for_test();
+            assert_eq!(filed(), cap, "the file holds them too, not only the mirror");
+            assert!(recall_all::<TrackMemoryEntry>("").iter().all(|e| e.audio.is_some() && e.subtitle.is_some()),
+                "each is the worst-case shape, both halves present");
+
+            arm("clear", "");
+            assert_eq!(held(""), 0, "clear takes the filled shows back like any others");
+        });
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(filed(), 0, "and the file forgot them");
+        unseed_memory_for_test::<TrackMemoryEntry>();
+    }
 }
 
 #[cfg(test)]
@@ -919,14 +1139,98 @@ mod script_schedule_tests {
 /// here at the exact points the arms always called it.
 use crate::app::run::pin_headless_hud;
 
+/// Whether the `autoplay`/`playurl` arm may take its one shot this frame.
+///
+/// `autoplay`/`playidx` choose a catalog item, so they need a page that has a catalog: never the
+/// player (already playing), and never the sign-in or picker pages. `playurl` chooses no item and
+/// needs no session ("no home grid to press OK on", `docs/agent-reference.md`), so it may also fire
+/// from those two pages: a boot with no stored session parks on the QR sign-in, and that is exactly
+/// the boot the pipeline test tier runs. The caller spends `auto_tried` only when this answers true,
+/// so on those pages without `playurl` the shot is still unspent for the Home the sign-in leads to.
+///
+/// `playurl` is asked LAST and only on those two pages, because answering it is a `stat` and this
+/// runs every frame of a screen that may sit open for as long as nobody signs in.
+fn autoplay_arm_due(route: &AppArg, auto_tried: bool, elapsed_ms: u32, playurl: impl FnOnce() -> bool) -> bool {
+    if auto_tried || elapsed_ms <= 2000 {
+        return false;
+    }
+    match route {
+        AppArg::Player => false,
+        AppArg::Login | AppArg::Profiles => playurl(),
+        _ => true,
+    }
+}
+
+/// `/tmp/plxnative-playurl` as the `autoplay` arm sees it: read once, then held (see [`latched`]).
+/// Armed before boot like every boot trigger, and `tests/run.py` clears the `/tmp` triggers between
+/// cases, so a later read could answer differently mid-run.
+fn playurl_latched(slot: &mut Option<bool>) -> bool {
+    latched(slot, || Some(plx_base::devtrig::flag("playurl"))) == Some(true)
+}
+
+#[cfg(test)]
+mod autoplay_arm_due_tests {
+    use super::autoplay_arm_due;
+    use plx_screens::registry::AppArg;
+
+    const PAST_DELAY: u32 = 2001;
+
+    #[test]
+    fn playurl_fires_from_the_sign_in_and_picker_routes() {
+        for route in [AppArg::Login, AppArg::Profiles] {
+            assert!(autoplay_arm_due(&route, false, PAST_DELAY, || true),
+                "a boot with no session parks on the sign-in page, which has no home grid for `playurl` to need");
+        }
+    }
+
+    #[test]
+    fn a_catalog_trigger_still_waits_for_a_page_with_a_catalog() {
+        for route in [AppArg::Login, AppArg::Profiles] {
+            assert!(!autoplay_arm_due(&route, false, PAST_DELAY, || false),
+                "autoplay/playidx pick a catalog item, so they must not fire (or spend `auto_tried`) here");
+        }
+    }
+
+    #[test]
+    fn home_fires_without_asking_for_playurl() {
+        let mut reads = 0;
+        assert!(autoplay_arm_due(&AppArg::Home, false, PAST_DELAY, || { reads += 1; false }));
+        assert_eq!(reads, 0, "Home needs no `playurl` answer to be due");
+    }
+
+    #[test]
+    fn the_player_is_never_due_even_for_playurl() {
+        assert!(!autoplay_arm_due(&AppArg::Player, false, PAST_DELAY, || true));
+    }
+
+    #[test]
+    fn the_boot_delay_and_the_one_shot_hold_on_every_route() {
+        for route in [AppArg::Home, AppArg::Login, AppArg::Profiles] {
+            assert!(!autoplay_arm_due(&route, false, 2000, || true), "fired at the delay, not after it");
+            assert!(!autoplay_arm_due(&route, true, PAST_DELAY, || true), "fired a second time");
+        }
+    }
+
+    #[test]
+    fn playurl_is_asked_last_and_only_when_it_decides() {
+        let reads = std::cell::Cell::new(0);
+        let ask = || { reads.set(reads.get() + 1); true };
+        assert!(!autoplay_arm_due(&AppArg::Login, true, PAST_DELAY, ask));
+        assert!(!autoplay_arm_due(&AppArg::Login, false, 2000, ask));
+        assert_eq!(reads.get(), 0, "a stat per frame on the sign-in page while no trigger is armed");
+        assert!(autoplay_arm_due(&AppArg::Login, false, PAST_DELAY, ask));
+        assert_eq!(reads.get(), 1);
+    }
+}
+
 fn autoplay_arm(app: &mut App, fr: &mut Frame) {
     use plx_screens::player::input::HUD_HEADLESS_MS;
-    if !app.scenarios.auto_tried
-        && !matches!(app.route(), AppArg::Player | AppArg::Login | AppArg::Profiles)
-        && fr.now.wrapping_sub(app.t0) > 2000
-    {
+    let route = app.route();
+    let (auto_tried, elapsed) = (app.scenarios.auto_tried, fr.now.wrapping_sub(app.t0));
+    let armed = &mut app.scenarios.playurl_armed;
+    if autoplay_arm_due(&route, auto_tried, elapsed, || playurl_latched(armed)) {
         app.scenarios.auto_tried = true;
-        let playurl = plx_base::devtrig::flag("playurl");
+        let playurl = playurl_latched(&mut app.scenarios.playurl_armed);
         if plx_base::devtrig::flag("autoplay") || playurl {
             let requested = if playurl || plx_base::devtrig::flag("h265") {
                 plx_media::route::clear_url(&mut app.player.session);
@@ -935,13 +1239,13 @@ fn autoplay_arm(app: &mut App, fr: &mut Frame) {
                 let pidx = plx_base::devtrig::read("playidx")
                     .and_then(|s| s.parse::<c_int>().ok())
                     .unwrap_or(0);
-                let snapshot = app.bridge.hubs_snapshot();
+                let snapshot = app.runtime.bridge(&mut app.bridge).hubs_snapshot();
                 let pmm = usize::try_from(pidx).ok().and_then(|i| {
                     let (hub, col) = (i / crate::app::COLS as usize, i % crate::app::COLS as usize);
                     snapshot.view().hub(hub).and_then(|h| h.items.get(col))
                 });
                 if let Some(pmm) = pmm {
-                    let requested = plx_media::route::request_play_movie(&mut app.player.session, app.bridge.metadata_mut(), pmm, &crate::app::playback::movie_ctx(pmm));
+                    let requested = plx_media::route::request_play_movie(&mut app.player.session, app.runtime.metadata_mut(), crate::app::playback::start_caps(), pmm, &crate::app::playback::movie_ctx(pmm), None);
                     if requested {
                         // ASYNC (phase 11): nothing here reads `metadata::current()` — the play
                         // plan came from the catalog row itself. The detail is wanted only so the
@@ -949,7 +1253,7 @@ fn autoplay_arm(app: &mut App, fr: &mut Frame) {
                         // `install_landed_detail` calls the same `sync_now_playing` the blocking
                         // load did. So there is nothing to wait for, and no reason to spend two
                         // PMS round trips of the SDL thread on the frame that starts a playback.
-                        app.bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid: pmm.sid, rk: pmm.rk.to_string() });
+                        app.runtime.bridge(&mut app.bridge).metadata_run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid: pmm.sid, rk: pmm.rk.to_string() });
                     }
                     requested
                 } else {
@@ -964,7 +1268,7 @@ fn autoplay_arm(app: &mut App, fr: &mut Frame) {
                     HUD_HEADLESS_MS,
                     None,
                     &mut app.pages,
-                    &mut app.bridge,
+                    &mut app.runtime.bridge(&mut app.bridge),
                 );
             }
         }
@@ -977,61 +1281,107 @@ fn grid_library_search_heroidx_arm(app: &mut App, _fr: &mut Frame) {
         // `grid` alone (or `itemmenu`) seats the first card; `grid=<row>,<col>` any other.
         if let Some(v) = plx_base::devtrig::read("grid").or_else(|| plx_base::devtrig::flag("itemmenu").then(String::new)) {
             let (row, col) = screenshot::parse_cell(&v).unwrap_or((0, 0));
-            app.bridge.home_command(HomeCmd::FocusGrid { row, col });
+            app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::FocusGrid { row, col });
         }
         if let Some(s) = plx_base::devtrig::read("library") {
             let kind = match s.parse::<usize>().unwrap_or(0) {
                 1 => plx_data::stores::browse::SecKind::Show,
                 _ => plx_data::stores::browse::SecKind::Movie,
             };
-            app.bridge.enter_library(kind);
+            app.runtime.bridge(&mut app.bridge).enter_library(kind);
             // Same pill semantics as the search trigger above: boot has already rooted Home,
             // so this is `SelectTab`, not a `Root` that would discard it.
             crate::app::bridge::nav_select_tab(&mut app.pages, AppArg::Library);
         }
         if let Some(q) = plx_base::devtrig::read("search") {
-            apply_search_boot_trigger(&q, &mut app.pages, &mut app.bridge);
+            apply_search_boot_trigger(&q, &mut app.pages, &mut app.runtime.bridge(&mut app.bridge));
+        }
+        // `/tmp/plxnative-watchlist` — boot straight onto the Watchlist page (`SelectTab`, as the
+        // Library and Search triggers above). Pair it with `plxnative-discover=<mock url>` (or a
+        // `plxnative-plextv` redirect, which Discover follows); a dev-token boot with neither armed
+        // has its Discover reads refused, logged at boot as `discover: base=real reads=refused`.
+        // `tools/tv-session.sh --mock-plextv` arms both.
+        if plx_base::devtrig::flag("watchlist") {
+            crate::app::bridge::nav_select_tab(&mut app.pages, AppArg::Watchlist);
+        }
+        // `/tmp/plxnative-catalog=<24 hex>` — boot straight onto the catalog page of that title (a
+        // `ContentArg::Catalog` push over Home, as a Watchlist tile's OK opens it). The page reads
+        // the discover host like the Watchlist page, so pair it with `plxnative-discover=<mock
+        // url>`; a value that is not 24 hex digits arms nothing.
+        if let Some(hex) = plx_base::devtrig::read("catalog").and_then(|v| plx_data::watchlist::decode_hex(v.trim())) {
+            crate::app::bridge::open_catalog(&mut app.pages, hex, None);
         }
         if let Some(s) = plx_base::devtrig::read("heroidx") {
             if let Ok(n) = s.parse::<c_int>() {
-                app.bridge.home_command(HomeCmd::SelectHero(n));
+                app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::SelectHero(n));
             }
         }
         // `/tmp/plxnative-heropin=<n>` — `heroidx`, then HOLD that billboard (no auto-advance):
         // the screenshot pipeline's pin, so a settled capture shows the slot its scene named.
         if let Some(s) = plx_base::devtrig::read("heropin") {
             if let Ok(n) = s.parse::<c_int>() {
-                app.bridge.home_command(HomeCmd::PinHero(n));
+                app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::PinHero(n));
             }
         }
     }
+}
+
+/// The page a `plxnative-settings=<target>` boot target names, or `None` for a target this build does not know.
+/// `tests/manifest.json`'s `settings-*` fps scenes select on the heartbeat word of the page this returns, and
+/// `surface_navigation_tests` pins each of those words.
+pub(crate) fn settings_boot_page(target: &str) -> Option<plx_screens::family::SettingsPage> {
+    use plx_screens::family::{PickerKind, PosterKind, SettingsPage};
+    Some(match target {
+        "" | "root" => SettingsPage::Root,
+        "home" => SettingsPage::Favourites,
+        "privacy" => SettingsPage::Privacy,
+        "legal" => SettingsPage::Legal,
+        "language" => SettingsPage::Language,
+        "contribute" => SettingsPage::Contribute,
+        "playback" => SettingsPage::Playback,
+        // root → Playback → the Rating source picker.
+        // Fork Rofocale11: Nuvio Native keeps a rating-source preference in its own account backend
+        // (IMDb vs Rotten Tomatoes), so upstream's table has no `RatingSource` picker target. Keep the
+        // fork's `settings-boot picker-ratings` dev scenario here in the shared helper upstream added.
+        "picker-ratings" => SettingsPage::Picker(PickerKind::RatingSource),
+        // root → Playback → the Quality picker (`SettingsPage::boot_trail`; BACK dismisses the surface, see there).
+        "picker-quality" => SettingsPage::Picker(PickerKind::Quality),
+        "picker-next-episode" => SettingsPage::Picker(PickerKind::NextEpisode),
+        "picker-deck-press" => SettingsPage::Picker(PickerKind::DeckPress),
+        "picker-hdr-overlay" => SettingsPage::Picker(PickerKind::HdrOverlay),
+        // root → the Interface resolution picker
+        "picker-resolution" => SettingsPage::Picker(PickerKind::UiResolution),
+        "picker-instant-dpad-seeking" => SettingsPage::Picker(PickerKind::InstantDpadSeeking),
+        "picker-dolby-vision" => SettingsPage::Picker(PickerKind::DolbyVision),
+        "picker-uri-engine" => SettingsPage::Picker(PickerKind::UriEngine),
+        "picker-skip-interval" => SettingsPage::Picker(PickerKind::SkipInterval),
+        // root → Playback → the Player HUD page (`SettingsPage::boot_trail`; BACK dismisses the surface, see there)
+        "player-hud" => SettingsPage::PlayerHud,
+        "audio" => SettingsPage::AudioSubtitles,
+        "diagnostics" => SettingsPage::Diagnostics,
+        // Prints `overlay=legal`, the Legal index's word (a `DocumentPage` answers `word::LEGAL`), so no fps scene
+        // selects on it.
+        "about" => SettingsPage::About,
+        "under-posters" => SettingsPage::UnderPosters,
+        // root → Under posters → the details picker of one kind (`SettingsPage::boot_trail`)
+        "under-posters-movie" => SettingsPage::UnderPostersDetails(PosterKind::Movie),
+        "under-posters-show" => SettingsPage::UnderPostersDetails(PosterKind::Show),
+        _ => return None,
+    })
 }
 
 fn settings_boot_arm(app: &mut App, fr: &mut Frame) {
     if !app.scenarios.settings_tried && fr.now.wrapping_sub(app.t0) > 800 {
         if matches!(app.route(), AppArg::Home) {
             app.scenarios.settings_tried = true;
-            let page = match app.scenarios.dev.settings_boot.as_deref().map(str::trim).unwrap_or("root") {
-                "" | "root" => plx_screens::family::SettingsPage::Root,
-                "home" => plx_screens::family::SettingsPage::Favourites,
-                "privacy" => plx_screens::family::SettingsPage::Privacy,
-                "legal" => plx_screens::family::SettingsPage::Legal,
-                "language" => plx_screens::family::SettingsPage::Language,
-                "contribute" => plx_screens::family::SettingsPage::Contribute,
-                "playback" => plx_screens::family::SettingsPage::Playback,
-                // root → Playback → the Quality picker (`SettingsPage::boot_trail`), so BACK works.
-                "picker-ratings" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::RatingSource),
-                "picker-quality" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::Quality),
-                "picker-next-episode" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::NextEpisode),
-                "picker-deck-press" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::DeckPress),
-                "picker-skip-interval" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::SkipInterval),
-                "audio" => plx_screens::family::SettingsPage::AudioSubtitles,
-                _other => {
-                    #[cfg(feature = "devtriggers")]
-                    plx_base::eventlog::log(&format!("BADTRIGGER settings-boot target {_other:?} unknown; opened root instead"));
-                    plx_screens::family::SettingsPage::Root
-                }
-            };
+            // Take upstream's refactor: the target table lives in the shared `settings_boot_page`
+            // helper (which now also carries the fork's `picker-ratings` target).
+            let target = app.scenarios.dev.settings_boot.as_deref().map(str::trim).unwrap_or("root");
+            let page = settings_boot_page(target).unwrap_or_else(|| {
+                #[cfg(feature = "devtriggers")]
+                plx_base::eventlog::log(&format!("BADTRIGGER settings-boot target {target:?} unknown; opened root instead"));
+                plx_screens::family::SettingsPage::Root
+            });
             crate::app::bridge::open_settings_at(&mut app.pages, page);
         } else if fr.now.wrapping_sub(app.t0) > 12_000 {
             app.scenarios.settings_tried = true;
@@ -1044,7 +1394,7 @@ fn press_arm(app: &mut App, fr: &mut Frame) {
     if !app.scenarios.press_tried && fr.now.wrapping_sub(app.t0) > 1600 {
         app.scenarios.press_tried = true;
         if plx_base::devtrig::flag("press")
-            && ((matches!(app.route(), AppArg::Home) && app.bridge.home_grid_focused(&app.pages))
+            && ((matches!(app.route(), AppArg::Home) && app.runtime.bridge(&mut app.bridge).home_grid_focused(&app.pages))
                 || (matches!(app.route(), AppArg::Library) && crate::app::bridge::Bridge::library_card_focused(&app.pages)))
         {
             app.inputs.push(crate::app::bridge::script_key(Key::Ok,
@@ -1054,7 +1404,7 @@ fn press_arm(app: &mut App, fr: &mut Frame) {
     }
     if app.scenarios.press_release_at != 0 && fr.now.wrapping_sub(app.scenarios.press_release_at) < 0x8000_0000 {
         app.scenarios.press_release_at = 0;
-        app.input.press.release(fr.now);
+
         app.inputs.push(crate::app::bridge::script_key(Key::Ok,
             Tick { ms: fr.now, dt_us: 0 })[1].clone());
     }
@@ -1081,7 +1431,8 @@ fn acct_arm(app: &mut App, fr: &mut Frame) {
     let Some(rest) = latched(&mut app.scenarios.acct_rest, crate::dev::scenarios::acct_armed) else {
         return;
     };
-    if screenshot::at_rest(fr.now, rest) && matches!(app.route(), AppArg::Home) && app.pages.top_page().is_some() {
+    if screenshot::at_rest(fr.now, rest, app.pages.present.last_change_ms(),
+            app.pages.present.changed() || plx_machine::motion::report::present_moving()) && matches!(app.route(), AppArg::Home) && app.pages.top_page().is_some() {
         app.scenarios.acct_tried = true;
         crate::app::bridge::open_account_menu(&mut app.pages);
     } else if fr.now.wrapping_sub(app.t0) > 12_000 {
@@ -1100,14 +1451,16 @@ fn acct_arm(app: &mut App, fr: &mut Frame) {
 ///
 /// **Done means the SURFACE is up**, not that the command was queued (phase 10). The queue is
 /// data-dependent — `deliver_home_commands` holds `ItemMenu` back until the first catalog arrives,
-/// and `request_home_menu` refuses while focus is on the strip rather than the grid — so latching
+/// and `request_home_menu` refuses until a card the menu may open on is focused (the Home page's
+/// own rule, `HomeScreen::item_menu_reachable`: a grid card, or one of the Continue Watching row,
+/// which holds focus with the page still at rest on the hero) — so latching
 /// on the enqueue could mark the scene armed for a panel that never appeared, which reads on the
 /// television as an fps scene measuring the wrong screen. The 12 s ceiling is what stops it
 /// retrying forever on a boot that never reaches a grid at all.
 fn itemmenu_arm(app: &mut App, fr: &mut Frame) {
     if !app.scenarios.itemmenu_tried && fr.now.wrapping_sub(app.t0) > 1800 {
         if plx_base::devtrig::flag("itemmenu") && matches!(app.route(), AppArg::Home) {
-            app.bridge.request_home_menu(&app.pages);
+            app.runtime.bridge(&mut app.bridge).request_home_menu(&app.pages);
             app.scenarios.itemmenu_tried = crate::app::bridge::item_menu_up(&app.pages)
                 || fr.now.wrapping_sub(app.t0) > 12_000;
         } else {
@@ -1145,13 +1498,13 @@ fn detail_arm(app: &mut App, fr: &mut Frame) -> bool {
                         return false;
                     }
                 };
-                app.bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: rk.to_string() });
+                app.runtime.bridge(&mut app.bridge).metadata_run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: rk.to_string() });
                 #[cfg(feature = "devtriggers")]
                 plx_base::eventlog::log(&format!("plxnative-detail: rk={rk} server={} start", sid.raw()));
                 // A HARD CUT onto the page: at boot there is no outgoing screen to replace, so a
                 // dip would fade the page up out of nothing and read as a slow app rather than a
                 // navigated one. `push_detail` + `seed_node` in one call.
-                crate::app::bridge::open_detail(&mut app.pages, &mut app.bridge, sid, rk, None, None);
+                crate::app::bridge::open_detail(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), sid, rk, None, None);
                 app.scenarios.content_boot = Some(ContentBoot::new(sid, rk.to_string()));
             }
         }
@@ -1175,10 +1528,24 @@ fn collection_arm(app: &mut App, fr: &mut Frame) -> bool {
     };
     crate::app::bridge::nav_push(&mut app.pages, AppArg::Content(
         plx_screens::registry::ContentArg::Collection(plx_plex::plex::collections::CollectionRef::by_rk(
-            sid, &rk, 0, plx_platform::i18n::msg::browse_collection_kind()))));
+            sid, &rk, 0, plx_os::i18n::msg::browse_collection_kind()))));
     #[cfg(feature = "devtriggers")]
     plx_base::eventlog::log(&format!("plxnative-collection: rk={rk} server={} start", sid.raw()));
     true
+}
+
+/// `/tmp/plxnative-hud=<path>` — draw the package at that path instead of the chosen HUD (classic unless a package was picked). Read ONCE, on the first
+/// player frame (`run::refresh_hud`); the file is read here, the bytes are compiled by the owner, and a
+/// file that does not read or compile is remembered ([`DevPackage`]), so it is neither re-read nor
+/// recompiled every frame. Without the `devtriggers` feature the trigger reads as absent.
+pub(crate) fn hud_trigger() -> plx_appkit::player_hud::loaded::DevHud {
+    use plx_appkit::player_hud::loaded::{dev_package_path, DevHud, DevPackage};
+    let Some(value) = plx_base::devtrig::read("hud") else { return DevHud::Off };
+    let Some(path) = dev_package_path(&value) else { return DevHud::Off };
+    let bytes = crate::app::hud_source::read_artifact(std::path::Path::new(path)).map_err(|e| e.to_string());
+    #[cfg(feature = "devtriggers")]
+    plx_base::eventlog::log(&format!("plxnative-hud: path={path} read={}", bytes.as_ref().map_or_else(|e| e.clone(), |b| format!("{} bytes", b.len()))));
+    DevHud::Package(DevPackage::new(path.to_owned(), bytes))
 }
 
 /// `/tmp/plxnative-play=<rk>` — fetch that item and play its leaf, headless. TWO frames at least,
@@ -1219,7 +1586,7 @@ fn play_arm(app: &mut App, fr: &mut Frame) -> bool {
                         return false;
                     }
                 };
-                app.bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: rk.to_string() });
+                app.runtime.bridge(&mut app.bridge).metadata_run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: rk.to_string() });
                 #[cfg(feature = "devtriggers")]
                 plx_base::eventlog::log(&format!("plxnative-play: rk={rk} server={} request", sid.raw()));
                 app.scenarios.play_await = Some((sid, rk.to_string(), fr.now.wrapping_add(12_000)));
@@ -1238,7 +1605,7 @@ fn play_await_tick(app: &mut App, fr: &mut Frame) {
         app.scenarios.play_await = None;
         return;
     }
-    let leaf = app.bridge.metadata_view().current()
+    let leaf = app.runtime.metadata_view().current()
         .filter(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, &rk)))
         .map(|d| {
             if !d.part.is_empty() {
@@ -1252,7 +1619,7 @@ fn play_await_tick(app: &mut App, fr: &mut Frame) {
     let Some((part, vc, ac, title, resume_ms, dur_ms)) = leaf else {
         // nothing published for this item yet. Give up when the request itself has settled with
         // something else in place (a failed fetch keeps the previous item), or on the ceiling.
-        let settled = app.bridge.metadata_view().detail_request_status(sid, &rk) == Some(false);
+        let settled = app.runtime.metadata_view().detail_request_status(sid, &rk) == Some(false);
         let expired = fr.now.wrapping_sub(deadline) < u32::MAX / 2;
         if settled || expired {
             app.scenarios.play_await = None;
@@ -1273,7 +1640,7 @@ fn play_await_tick(app: &mut App, fr: &mut Frame) {
     }
     #[cfg(feature = "devtriggers")]
     plx_base::eventlog::log(&format!("plxnative-play: rk={rk} server={} start", sid.raw()));
-    if plx_media::route::request_play(&mut app.player.session, app.bridge.metadata_mut(), sid, &rk, &part, &vc, &ac, &title, "") {
+    if plx_media::route::request_play(&mut app.player.session, app.runtime.metadata_mut(), crate::app::playback::start_caps(), sid, &rk, &part, &vc, &ac, &title, "", None, "") {
         let resume = plx_data::metadata::resume_ns(resume_ms, dur_ms);
         crate::app::playback::start_playback(&mut app.player.session,
             &mut app.adapters.player,
@@ -1282,7 +1649,7 @@ fn play_await_tick(app: &mut App, fr: &mut Frame) {
             HUD_LINGER_MS,
             None,
             &mut app.pages,
-            &mut app.bridge,
+            &mut app.runtime.bridge(&mut app.bridge),
         );
     }
 }
@@ -1290,7 +1657,8 @@ fn play_await_tick(app: &mut App, fr: &mut Frame) {
 fn autoseek_arm(app: &mut App, fr: &mut Frame) {
     if !app.scenarios.seek_tried
         && matches!(app.route(), AppArg::Player)
-        && crate::app::playback::dur() > 0
+        && crate::app::playback::dur(&app.player.session).is_some_and(|dur| dur > 0)
+        && crate::app::playback::playpos(&app.player.session).is_some()
         && fr.now.wrapping_sub(app.t0) > 12000
     {
         app.scenarios.seek_tried = true;
@@ -1311,7 +1679,8 @@ fn autoseek_arm(app: &mut App, fr: &mut Frame) {
             if steps.is_empty() {
                 steps.push("140".to_string());
             }
-            app.scenarios.seek_script_last = plx_media::player::playpos_ns();
+            app.scenarios.seek_script_last = crate::app::playback::playpos(&app.player.session)
+                .expect("the autoseek arm required an observed position");
             app.scenarios.seek_script_at = fr.now.wrapping_sub(app.scenarios.seek_gap_ms).wrapping_add(first_delay_ms);
             app.scenarios.seek_script = steps;
         }
@@ -1331,7 +1700,8 @@ fn autoseek_arm(app: &mut App, fr: &mut Frame) {
         }.max(0);
         app.scenarios.seek_script_last = t;
         plx_base::eventlog::log(&format!("autoseek: step → {}s ({} left)", t / 1_000_000_000, app.scenarios.seek_script.len()));
-        crate::app::playback::request_seek(t);
+        crate::app::playback::request_seek(&mut app.player.session,
+            &mut app.adapters.player, t);
     }
 }
 
@@ -1339,7 +1709,7 @@ fn qualityswitch_arm(app: &mut App, fr: &mut Frame) {
     if !app.scenarios.quality_tried {
         const QUALITY_SWITCH_OBSERVE_MS: u32 = 12_000;
         let playing = matches!(app.route(), AppArg::Player)
-            && crate::app::playback::dur() > 0
+            && crate::app::playback::dur(&app.player.session).is_some_and(|dur| dur > 0)
             && plx_media::player::is_playing(&app.player.session);
         if !playing {
             app.scenarios.quality_playing_since = None;
@@ -1375,33 +1745,42 @@ fn autopause_arm(app: &mut App, fr: &mut Frame) {
         }
     }
     if let Some((pause_at, hold_ms, at_ms)) = app.scenarios.pause_script {
+        #[cfg(all(feature = "hostsim", not(feature = "play-feed")))]
+        if at_ms.is_some() {
+            plx_base::eventlog::log("autopause: exact at= unavailable without Feed simulator clock");
+            app.scenarios.pause_script = None;
+            return;
+        }
         // In the simulator the clock sink is also told to stop on `at` exactly, so the pause
         // (accepted a little after the gate opens) freezes that position rather than wherever
-        // scheduling had got to: the same frame and clock every run (`ffi_host.rs::stop_clock_at`).
+        // scheduling had got to: the same frame and clock every run (`HostSink::stop_clock_at`).
         // Re-armed every frame until accepted: a Load in between rebases the fed timeline, and
         // the stop is kept in movie time, so re-arming is idempotent.
-        #[cfg(feature = "hostsim")]
+        #[cfg(all(feature = "hostsim", feature = "play-feed"))]
         if let Some(ms) = at_ms {
-            plx_media::player::stop_sim_clock_at(Some(i64::from(ms) * 1_000_000));
+            crate::app::adapters::hostsim::stop_sim_clock_at(Some(i64::from(ms) * 1_000_000));
         }
-        let reached = at_ms.is_none_or(|ms| crate::app::playback::playpos() >= i64::from(ms) * 1_000_000);
+        let reached = at_ms.is_none_or(|ms| crate::app::playback::playpos(&app.player.session)
+            .is_some_and(|pos| pos >= i64::from(ms) * 1_000_000));
         if matches!(app.route(), AppArg::Player) && script_step_due(fr.now, pause_at, 0) && reached {
-            if crate::app::lifecycle::set_transport_paused(&mut app.adapters.player, true) {
+            if crate::app::lifecycle::set_transport_paused(&mut app.player.session,
+                &mut app.adapters.player, true) {
                 plx_base::eventlog::log(&format!(
                     "autopause: Pause accepted hold={}ms",
                     hold_ms.map_or_else(|| "forever".to_string(), |ms| ms.to_string()),
                 ));
                 app.scenarios.pause_script = None;
                 app.scenarios.pause_resume_at = hold_ms.map(|hold| fr.now.wrapping_add(hold));
-                #[cfg(feature = "hostsim")]
-                plx_media::player::stop_sim_clock_at(None);
+                #[cfg(all(feature = "hostsim", feature = "play-feed"))]
+                crate::app::adapters::hostsim::stop_sim_clock_at(None);
                 pin_headless_hud(app, fr.now, None);
             }
         }
     }
     if let Some(resume_at) = app.scenarios.pause_resume_at {
         if matches!(app.route(), AppArg::Player) && script_step_due(fr.now, resume_at, 0) {
-            if crate::app::lifecycle::set_transport_paused(&mut app.adapters.player, false) {
+            if crate::app::lifecycle::set_transport_paused(&mut app.player.session,
+                &mut app.adapters.player, false) {
                 plx_base::eventlog::log("autopause: Resume accepted");
                 app.scenarios.pause_resume_at = None;
             }
@@ -1414,22 +1793,22 @@ fn menu_arm(app: &mut App, fr: &mut Frame) {
         app.scenarios.menu_tried = true;
         if let Some(t) = plx_base::devtrig::read("menu") {
             crate::app::bridge::open_player_overlay(&mut app.player.session,
-                app.bridge.metadata_view(),
+                app.runtime.metadata_view(),
                 &mut app.pages,
                 plx_screens::player::overlay::OverlayKind::Tracks { tab: t.parse::<c_int>().unwrap_or(0) },
             );
             pin_headless_hud(app, fr.now, None);
         }
         if plx_base::devtrig::flag("more") {
-            crate::app::bridge::open_player_overlay(&mut app.player.session, app.bridge.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::More { quality: false });
+            crate::app::bridge::open_player_overlay(&mut app.player.session, app.runtime.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::More { page: None });
             pin_headless_hud(app, fr.now, None);
         }
         if plx_base::devtrig::flag("info") {
-            crate::app::bridge::open_player_overlay(&mut app.player.session, app.bridge.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::Info);
+            crate::app::bridge::toggle_player_section(&mut app.pages, plx_appkit::player_hud::command::Section::Info);
             pin_headless_hud(app, fr.now, Some(0));
         }
         if plx_base::devtrig::flag("chapters") {
-            crate::app::bridge::open_player_overlay(&mut app.player.session, app.bridge.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::Chapters);
+            crate::app::bridge::toggle_player_section(&mut app.pages, plx_appkit::player_hud::command::Section::Chapters);
             pin_headless_hud(app, fr.now, Some(1));
         }
     }
@@ -1445,6 +1824,12 @@ fn menu_arm(app: &mut App, fr: &mut Frame) {
 /// itself, which is the issue #266 PR4 fix this trigger inherits (see
 /// `TrackMenuState::row_for_audio_target`'s doc for that history). An unrecognized name logs a
 /// clear line and commits nothing, same shape as the existing "row already active" no-commit log.
+///
+/// **The pick is a viewer's.** It goes through the menu's own commit, so it carries the pick's
+/// descriptor and `commit_track` remembers it for the show (seated, episode, accepted), exactly as a
+/// press would; `plxnative-trackmemory=clear` ([`arm_track_memory`]) is what keeps one case's pick
+/// out of the next case's starting tracks. [`subtiming_arm`] and the other setup arms commit with no
+/// descriptor and remember nothing.
 fn menupick_arm(app: &mut App, fr: &mut Frame) {
     if !app.scenarios.menupick_tried && matches!(app.route(), AppArg::Player) && fr.now.wrapping_sub(app.t0) > 7000 {
         app.scenarios.menupick_tried = true;
@@ -1452,32 +1837,15 @@ fn menupick_arm(app: &mut App, fr: &mut Frame) {
             let mut it = s.split(',');
             let tab = it.next().and_then(|x| x.trim().parse::<c_int>().ok()).unwrap_or(0);
             let target = it.next().map(|x| x.trim().to_string()).unwrap_or_else(|| "0".to_string());
-            crate::app::bridge::open_player_overlay(&mut app.player.session, app.bridge.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::Tracks { tab });
+            crate::app::bridge::open_player_overlay(&mut app.player.session, app.runtime.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::Tracks { tab });
             app.scenarios.menupick_target = Some(target);
         }
     }
     if let Some(target) = app.scenarios.menupick_target.take() {
-        let meta = app.bridge.metadata_view();
-        match crate::app::bridge::player_overlay_mut(&mut app.pages) {
-            Some(surface) => match surface.resolve_menupick_track(&target) {
-                Some(i) => match surface.pick_sub_track(meta, i) {
-                    Some(commit) => crate::app::playback::commit_track(&mut app.player.session, commit),
-                    None => plx_base::eventlog::log(&format!("menupick: track {i} gave no commit")),
-                },
-                None => match surface.resolve_menupick_row(&target) {
-                    Some(row) => match surface.pick_track_row(meta, row) {
-                        Some(commit) => crate::app::playback::commit_track(&mut app.player.session, commit),
-                        // The menu's own on_ok treats picking the already-active row as a no-op: no
-                        // commit, no route transition line. Without this, a manifest case whose row
-                        // no longer differs from the start pick (e.g. #210's file-default rule) fails
-                        // downstream as "no route transition" with nothing pointing back at menupick.
-                        None => plx_base::eventlog::log(&format!("menupick: row {row} already active — no commit")),
-                    },
-                    None => plx_base::eventlog::log(&format!("menupick: unknown target {target:?} — no commit")),
-                },
-            },
-            None => app.scenarios.menupick_target = Some(target),
-        }
+        if crate::app::bridge::player_overlay(&app.pages).is_some() {
+            crate::app::bridge::send_player_overlay_message(&mut app.pages,
+                plx_screens::registry::AppMsg::PlayerOverlayPick(target));
+        } else { app.scenarios.menupick_target = Some(target); }
     }
 }
 
@@ -1545,15 +1913,15 @@ fn submenuosc_arm(app: &mut App, fr: &mut Frame) {
     if period == 0 || !matches!(app.route(), AppArg::Player) || fr.now.wrapping_sub(app.t0) < 7000 {
         return;
     }
-    plx_machine::idle::wake();
+    app.pages.present.note(plx_machine::present::PresentEvent::Wake);
     if fr.now.wrapping_sub(app.scenarios.submenu_osc.last) < period {
         return;
     }
     app.scenarios.submenu_osc.last = fr.now;
-    let probe = crate::app::bridge::player_overlay_mut(&mut app.pages).and_then(|s| s.tracks_probe());
+    let probe = crate::app::bridge::player_overlay(&app.pages).and_then(|s| s.tracks_probe());
     let Some((tab, depth, has_other)) = probe else {
         if !crate::app::bridge::player_overlay_up(&app.pages) {
-            crate::app::bridge::open_player_overlay(&mut app.player.session, app.bridge.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::Tracks { tab: 1 });
+            crate::app::bridge::open_player_overlay(&mut app.player.session, app.runtime.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::Tracks { tab: 1 });
             pin_headless_hud(app, fr.now, None);
             app.scenarios.submenu_osc.step = 0;
         }
@@ -1564,11 +1932,8 @@ fn submenuosc_arm(app: &mut App, fr: &mut Frame) {
     }
     let step = submenuosc_next(app.scenarios.submenu_osc.step, tab, depth, app.scenarios.submenu_osc.has_other);
     if let Some(row) = step.seat {
-        if let Some(surface) = crate::app::bridge::player_overlay_mut(&mut app.pages) {
-            if !surface.seat_track_row(row) {
-                plx_base::eventlog::log(&format!("submenuosc: no row {row:?} on tab {tab} depth {depth} — skipping the step"));
-            }
-        }
+        crate::app::bridge::send_player_overlay_message(&mut app.pages,
+            plx_screens::registry::AppMsg::PlayerOverlayTrackRow(row));
     }
     plx_base::eventlog::log(&format!("submenuosc: step {} -> {} tab={tab} depth={depth} key={:?}", app.scenarios.submenu_osc.step, step.next, step.key));
     app.scenarios.submenu_osc.step = step.next;
@@ -1592,26 +1957,22 @@ fn moreosc_arm(app: &mut App, fr: &mut Frame) {
     if period == 0 || !matches!(app.route(), AppArg::Player) || fr.now.wrapping_sub(app.t0) < 7000 {
         return;
     }
-    plx_machine::idle::wake();
+    app.pages.present.note(plx_machine::present::PresentEvent::Wake);
     if fr.now.wrapping_sub(app.scenarios.more_osc.last) < period {
         return;
     }
     app.scenarios.more_osc.last = fr.now;
-    let Some(depth) = crate::app::bridge::player_overlay_mut(&mut app.pages).and_then(|s| s.more_probe()) else {
+    let Some(depth) = crate::app::bridge::player_overlay(&app.pages).and_then(|s| s.more_probe()) else {
         if !crate::app::bridge::player_overlay_up(&app.pages) {
-            crate::app::bridge::open_player_overlay(&mut app.player.session, app.bridge.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::More { quality: false });
+            crate::app::bridge::open_player_overlay(&mut app.player.session, app.runtime.metadata_view(), &mut app.pages, plx_screens::player::overlay::OverlayKind::More { page: None });
             pin_headless_hud(app, fr.now, None);
         }
         return;
     };
     let (seat, key) = moreosc_next(depth);
     if seat {
-        let seated = crate::app::bridge::player_overlay_mut(&mut app.pages).is_some_and(|s| s.seat_more_quality());
-        if !seated {
-            // Nothing to push: say so, rather than let the scene grade a panel that never moved.
-            plx_base::eventlog::log("moreosc: no Quality row");
-            return;
-        }
+        crate::app::bridge::send_player_overlay_message(&mut app.pages,
+            plx_screens::registry::AppMsg::PlayerOverlayQuality);
     }
     plx_base::eventlog::log(&format!("moreosc: depth={depth} key={key:?}"));
     app.inputs.extend(crate::app::bridge::script_key(key, Tick { ms: fr.now, dt_us: 0 }));
@@ -1735,7 +2096,7 @@ fn subtiming_arm(app: &mut App, fr: &mut Frame) {
     {
         return;
     }
-    let Some(item) = app.bridge.metadata_view().playing() else { return };
+    let Some(item) = app.runtime.metadata_view().playing() else { return };
     let idx = item
         .subs
         .iter()
@@ -1758,11 +2119,15 @@ fn subtiming_arm(app: &mut App, fr: &mut Frame) {
     app.scenarios.subtiming.pending = Some(SubtimingPending { sid: stream_id, armed_at: fr.now });
     crate::app::playback::commit_track(
         &mut app.player.session,
+        &mut app.adapters.player,
+        app.runtime.metadata_mut(),
         plx_appkit::track_menu::TrackCommit::Subtitle {
             render_ordinal,
             stream_id,
             sidecar_key: None,
             sidecar_codec: String::new(),
+            // A setup commit, not the viewer's choice: it remembers nothing.
+            memo: None,
         },
     );
 }
@@ -1771,7 +2136,7 @@ fn subtiming_arm(app: &mut App, fr: &mut Frame) {
 fn open_timing(app: &mut App) {
     crate::app::bridge::open_player_overlay(
         &app.player.session,
-        app.bridge.metadata_view(),
+        app.runtime.metadata_view(),
         &mut app.pages,
         plx_screens::player::overlay::OverlayKind::Timing,
     );
@@ -1863,14 +2228,15 @@ fn marker_arm(app: &mut App, _fr: &mut Frame) {
                 } else {
                     plx_data::metadata::MarkerKind::Credits
                 };
-                let meta = app.bridge.metadata_view();
+                let meta = app.runtime.metadata_view();
                 let markers = meta.playing_markers();
                 if !markers.is_empty() {
                     app.scenarios.marker_tried = true;
                     if let Some(m) = markers.iter().find(|m| m.kind == want) {
                         let t = (m.start_ms - 5_000).max(0) * 1_000_000;
                         plx_base::eventlog::log(&format!("marker trigger: seek to {}s (5s before {:?})", t / 1_000_000_000, want));
-                        crate::app::playback::request_seek(t);
+                        crate::app::playback::request_seek(&mut app.player.session,
+                            &mut app.adapters.player, t);
                     } else {
                         plx_base::eventlog::log(&format!("marker trigger: item has no {want:?} marker"));
                     }
@@ -1946,6 +2312,9 @@ pub(crate) unsafe fn each_frame(app: &mut App, fr: &mut Frame) -> bool {
     screenshot::libshelf_arm(app, fr);
     screenshot::libmenu_arm(app, fr);
     screenshot::clockstop_arm(app, fr);
+    // What `autopause` still owes the settled capture (`screenshot::PauseDebt`).
+    #[cfg(feature = "hostsim")]
+    screenshot::autopause_debt(app, fr);
     if !detail_arm(app, fr) {
         return false;
     }
@@ -1983,7 +2352,7 @@ pub(crate) fn controlled_each_frame(app: &mut App, fr: &mut Frame) -> bool {
         if let Some(input) = app.boot_initial.as_ref().and_then(|init| init.content.as_ref()) {
             let sid = plx_plex::plex::ServerId::from_raw(0);
             app.scenarios.content_boot = Some(ContentBoot::controlled(sid, input));
-            crate::app::bridge::open_detail(&mut app.pages, &mut app.bridge, sid, &input.detail, None, None);
+            crate::app::bridge::open_detail(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), sid, &input.detail, None, None);
         }
     }
     true
@@ -2001,8 +2370,8 @@ pub(crate) fn controlled_each_frame(app: &mut App, fr: &mut Frame) -> bool {
 pub(crate) fn pickuser_tick(app: &mut App) {
     if !(matches!(app.route(), AppArg::Profiles)
         && app.scenarios.pick_user.is_some()
-        && app.bridge.auth_read().0.phase == plx_session::auth::Phase::Profiles
-        && !app.bridge.auth_read().0.users.is_empty())
+        && app.runtime.auth_read().0.phase == plx_session::auth::Phase::Profiles
+        && !app.runtime.auth_read().0.users.is_empty())
     {
         return;
     }
@@ -2011,7 +2380,7 @@ pub(crate) fn pickuser_tick(app: &mut App) {
     // because this call site cannot reach that method to ask it FOR us — see the phase-9 report
     // this arm's comment used to carry for the full account of why a protected roster index
     // refuses here rather than attempting a PIN-less switch plex.tv would refuse anyway.
-    let protected = app.bridge.auth_read().0.users.get(idx).map(|u| u.protected).unwrap_or(false);
+    let protected = app.runtime.auth_read().0.users.get(idx).map(|u| u.protected).unwrap_or(false);
     if protected {
         plx_base::eventlog::log(&format!(
             "pickuser: roster index {idx} is PROTECTED — refusing rather than attempting \
@@ -2034,24 +2403,22 @@ pub(crate) fn nav_osc_tick(app: &mut App, now: u32) {
         match app.route() {
             AppArg::Home if !app.scenarios.dev.nav_osc_rk.is_empty() => {
                 let rk = app.scenarios.dev.nav_osc_rk.clone();
-                crate::app::bridge::open_detail(&mut app.pages, &mut app.bridge,
-                    plx_plex::plex::current_server(), &rk, None, None);
+                crate::app::bridge::open_detail(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), plx_plex::plex::current_server(), &rk, None, None);
             }
             AppArg::Content(_) => crate::app::bridge::nav_pop(&mut app.pages),
             AppArg::Home => {
-                if let Some(kind) = app.bridge.browse_directory().tab_kind(0) {
+                if let Some(kind) = app.runtime.bridge(&mut app.bridge).browse_directory().tab_kind(0) {
                     let tab = match kind {
                         plx_data::stores::browse::SecKind::Show => HomeTab::Shows,
                         _ => HomeTab::Movies,
                     };
-                    crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, tab, None, None);
+                    crate::app::bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), tab, None, None);
                 }
             }
             AppArg::Library => {
                 let origin = crate::app::chrome::pill_at(
-                    app.bridge.browse_directory(), 1);
-                crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge,
-                    HomeTab::Home, Some(origin), None);
+                    app.runtime.bridge(&mut app.bridge).browse_directory(), 1);
+                crate::app::bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), HomeTab::Home, Some(origin), None);
             }
             _ => {}
         }
@@ -2062,7 +2429,7 @@ pub(crate) fn nav_osc_tick(app: &mut App, now: u32) {
 pub(crate) fn hero_osc_tick(app: &mut App, now: u32) {
     if app.scenarios.dev.hero_osc && now.wrapping_sub(app.scenarios.hero_osc_last) > 700 {
         app.scenarios.hero_osc_last = now;
-        app.bridge.home_command(HomeCmd::Flip(1));
+        app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::Flip(1));
     }
 }
 
@@ -2071,9 +2438,9 @@ pub(crate) fn home_fold_osc_tick(app: &mut App, now: u32) {
     if app.scenarios.dev.home_fold_osc && now.wrapping_sub(app.scenarios.home_fold_osc_last) > 700 {
         app.scenarios.home_fold_osc_last = now;
         if app.scenarios.home_fold_down {
-            app.bridge.home_command(HomeCmd::FocusGrid { row: 0, col: 0 });
+            app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::FocusGrid { row: 0, col: 0 });
         } else {
-            app.bridge.home_command(HomeCmd::Hero);
+            app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::Hero);
         }
         app.scenarios.home_fold_down = !app.scenarios.home_fold_down;
     }
@@ -2090,15 +2457,20 @@ pub(crate) fn home_osc_tick(app: &mut App, now: u32) {
     }
 }
 
-/// `/tmp/plxnative-libosc` — the Library twin of `homeosc`.
+/// `/tmp/plxnative-libosc` — the Library twin of `homeosc`. Sweeps whichever page of the library
+/// family is up (the grid, its Collections page, its Recommended shelves): all three answer
+/// `LibraryCmd::Sweep`, and `fps:library-collections` is this sweep on the Collections page.
 pub(crate) fn lib_osc_tick(app: &mut App, now: u32) {
-    if app.scenarios.dev.lib_osc && matches!(app.route(), AppArg::Library) && now.wrapping_sub(app.scenarios.lib_osc_last) > 350 {
+    if app.scenarios.dev.lib_osc && app.route().is_library_family() && now.wrapping_sub(app.scenarios.lib_osc_last) > 350 {
         app.scenarios.lib_osc_last = now;
         crate::app::bridge::Bridge::library_command(&mut app.pages, plx_screens::registry::LibraryCmd::Sweep);
     }
 }
 
-/// `/tmp/plxnative-libswitch` — cycle EVERY Library switch on a timer.
+/// `/tmp/plxnative-libswitch` — cycle EVERY Library switch on a timer. The full grid's alone, on
+/// purpose and unlike the sweep above: the switches it cycles (type, sort and filter, the library
+/// plate, Unwatched, the A-Z rail) are the grid header's controls, which the Collections page does
+/// not wear (its header is a crumb) and the Recommended page answers `Handled::No`.
 pub(crate) fn lib_switch_tick(app: &mut App, now: u32) {
     if app.scenarios.dev.lib_switch && matches!(app.route(), AppArg::Library) && now.wrapping_sub(app.scenarios.lib_switch_last) > 1400 {
         app.scenarios.lib_switch_last = now;
@@ -2121,7 +2493,7 @@ pub(crate) fn search_osc_tick(app: &mut App, now: u32) {
 /// `/tmp/plxnative-acctosc` — drive the profile menu's own TableView.
 pub(crate) fn account_osc_tick(app: &mut App, now: u32) {
     if app.scenarios.dev.account_osc && crate::app::bridge::account_menu_up(&app.pages) {
-        plx_machine::idle::wake();
+        app.pages.present.note(plx_machine::present::PresentEvent::Wake);
         if now.wrapping_sub(app.scenarios.account_osc_last) > 520 {
             app.scenarios.account_osc_last = now;
             // The surface's own focus engine moves the selection now, so the oscillator presses a
@@ -2243,8 +2615,7 @@ fn push_bench_open(app: &mut App, target: bench::PushTarget) -> bench::PushTarge
     match target {
         bench::PushTarget::Detail => {
             let rk = app.scenarios.push_bench.as_ref().unwrap().rk.clone();
-            crate::app::bridge::open_detail(&mut app.pages, &mut app.bridge,
-                plx_plex::plex::current_server(), &rk, None, None);
+            crate::app::bridge::open_detail(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), plx_plex::plex::current_server(), &rk, None, None);
             bench::PushTarget::Detail
         }
         bench::PushTarget::Person => {
@@ -2264,12 +2635,12 @@ fn push_bench_open(app: &mut App, target: bench::PushTarget) -> bench::PushTarge
             }
         }
         bench::PushTarget::Library => {
-            if let Some(kind) = app.bridge.browse_directory().tab_kind(0) {
+            if let Some(kind) = app.runtime.bridge(&mut app.bridge).browse_directory().tab_kind(0) {
                 let tab = match kind {
                     plx_data::stores::browse::SecKind::Show => HomeTab::Shows,
                     _ => HomeTab::Movies,
                 };
-                crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, tab, None, None);
+                crate::app::bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), tab, None, None);
             }
             bench::PushTarget::Library
         }
@@ -2284,8 +2655,8 @@ fn push_bench_close(app: &mut App, opened: bench::PushTarget) {
             crate::app::bridge::nav_pop(&mut app.pages);
         }
         bench::PushTarget::Library => {
-            let origin = crate::app::chrome::pill_at(app.bridge.browse_directory(), 1);
-            crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, HomeTab::Home, Some(origin), None);
+            let origin = crate::app::chrome::pill_at(app.runtime.bridge(&mut app.bridge).browse_directory(), 1);
+            crate::app::bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), HomeTab::Home, Some(origin), None);
         }
     }
 }
@@ -2297,7 +2668,7 @@ fn push_bench_close(app: &mut App, opened: bench::PushTarget) {
 /// open. Cheap relative to a bench cycle's own 1400 ms period, so it runs on every push-bench tick
 /// rather than only around the Detail leg.
 fn push_bench_refresh_person(app: &mut App) {
-    let Some(d) = app.bridge.metadata_view().current() else { return };
+    let Some(d) = app.runtime.metadata_view().current() else { return };
     let Some(c) = d.credit(0) else { return };
     let key = c.person_key();
     if key.is_empty() {
@@ -2377,6 +2748,8 @@ fn modal_bench_open(app: &mut App, target: bench::ModalTarget) {
                 anchor: [anchor_rect.x.to_bits(), anchor_rect.y.to_bits(), anchor_rect.w.to_bits(), anchor_rect.h.to_bits()],
                 loaded_episode: false,
                 from_home: true,
+                catalog: None,
+                watchlist: None,
             };
             crate::app::bridge::open_item_menu(&mut app.pages, arg);
         }
@@ -2431,7 +2804,7 @@ pub(crate) fn modal_bench_tick(app: &mut App, now: u32) {
 /// twin of `push_bench_refresh_person`, kept separate because it writes into `deep_bench` rather
 /// than `push_bench` (both benches may be armed at once, on different triggers).
 fn deep_bench_refresh_person(app: &mut App) {
-    let Some(d) = app.bridge.metadata_view().current() else { return };
+    let Some(d) = app.runtime.metadata_view().current() else { return };
     let Some(c) = d.credit(0) else { return };
     let key = c.person_key();
     if key.is_empty() {
@@ -2456,8 +2829,7 @@ fn deep_bench_open(app: &mut App, target: bench::PushTarget) -> bench::PushTarge
     match target {
         bench::PushTarget::Detail => {
             let rk = app.scenarios.deep_bench.as_ref().unwrap().rk.clone();
-            crate::app::bridge::open_detail(&mut app.pages, &mut app.bridge,
-                plx_plex::plex::current_server(), &rk, None, None);
+            crate::app::bridge::open_detail(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), plx_plex::plex::current_server(), &rk, None, None);
             bench::PushTarget::Detail
         }
         bench::PushTarget::Person => {
@@ -2559,7 +2931,7 @@ pub(crate) fn hero_bench_tick(app: &mut App, now: u32) {
             let dir = bench::hero_flip_dir(cycle);
             match app.scenarios.hero_bench.as_ref().unwrap().target {
                 bench::PongTarget::Hero => {
-                    app.bridge.home_command(HomeCmd::Flip(dir));
+                    app.runtime.bridge(&mut app.bridge).home_command(HomeCmd::Flip(dir));
                 }
                 bench::PongTarget::Grid => {
                     let key = if dir > 0 { Key::Right } else { Key::Left };
@@ -2585,12 +2957,12 @@ pub(crate) fn hero_bench_tick(app: &mut App, now: u32) {
 }
 
 /// The surface the press bench can press a card of right now, and whether a card is focused on it.
-fn press_host(app: &App) -> Option<(bench::PressHost, bool)> {
+fn press_host(app: &mut App) -> Option<(bench::PressHost, bool)> {
     match app.route() {
-        AppArg::Home => Some((bench::PressHost::Home, app.bridge.home_grid_focused(&app.pages))),
+        AppArg::Home => Some((bench::PressHost::Home, app.runtime.bridge(&mut app.bridge).home_grid_focused(&app.pages))),
         AppArg::Library => Some((bench::PressHost::Library, crate::app::bridge::Bridge::library_card_focused(&app.pages))),
         AppArg::Content(plx_screens::registry::ContentArg::Collection(_)) =>
-            Some((bench::PressHost::Collection, app.bridge.collection_card_focused(&app.pages))),
+            Some((bench::PressHost::Collection, app.runtime.bridge(&mut app.bridge).collection_card_focused(&app.pages))),
         _ => None,
     }
 }
@@ -2703,7 +3075,7 @@ pub(crate) fn alert_tick(app: &mut App, now: u32, dt: f32) {
 /// `/tmp/plxnative-settingsosc` — hold Settings open under a continuous focus sweep.
 pub(crate) fn settings_osc_tick(app: &mut App, now: u32, dt: f32) {
     if app.scenarios.dev.settings_osc && crate::app::bridge::settings_up(&app.pages) {
-        plx_machine::idle::wake();
+        app.pages.present.note(plx_machine::present::PresentEvent::Wake);
         if now.wrapping_sub(app.scenarios.settings_osc_last) > 520 {
             app.scenarios.settings_osc_last = now;
             let key = if app.scenarios.settings_osc_down { Key::Down } else { Key::Up };
@@ -2717,7 +3089,7 @@ pub(crate) fn settings_osc_tick(app: &mut App, now: u32, dt: f32) {
 /// `/tmp/plxnative-consentosc` — sweep the first-run consent question's focus.
 pub(crate) fn consent_osc_tick(app: &mut App, now: u32, dt: f32) {
     if app.scenarios.dev.consent_osc && crate::app::bridge::consent_up(&app.pages) {
-        plx_machine::idle::invalidate();
+        app.note_presentation_damage(plx_machine::present::Provenance::Input);
         if now.wrapping_sub(app.scenarios.consent_osc_last) > 520 {
             app.scenarios.consent_osc_last = now;
             let key = if app.scenarios.consent_osc_down { Key::Down } else { Key::Up };
@@ -2731,7 +3103,7 @@ pub(crate) fn consent_osc_tick(app: &mut App, now: u32, dt: f32) {
 /// `/tmp/plxnative-onboardosc` — sweep the first-run sources editor's focus.
 pub(crate) fn onboard_osc_tick(app: &mut App, now: u32, dt: f32) {
     if app.scenarios.dev.onboard_osc && matches!(app.route(), AppArg::Onboard) {
-        plx_machine::idle::invalidate();
+        app.note_presentation_damage(plx_machine::present::Provenance::Input);
         if now.wrapping_sub(app.scenarios.onboard_osc_last) > 520 {
             app.scenarios.onboard_osc_last = now;
             let key = if app.scenarios.onboard_osc_right { Key::Right } else { Key::Left };
@@ -2809,3 +3181,14 @@ pub(crate) fn app_init_value() -> Option<Result<serde_json::Value, &'static str>
 // layer — `auth`, `telemetry`, the login screen — and only read trigger files, so their reads
 // moved down beside them (`auth::scripted`, `telemetry::consent::state_override`,
 // `screens::login::harness_driven`) instead of being reached up into from here.
+
+/// Registry calibration uses the initialized television measurer once, before the frame loop.
+#[cfg(feature = "devtriggers")]
+pub(crate) fn arm_hud_text_metrics() {
+    if !plx_base::devtrig::flag("hud-text-metrics") { return; }
+    let path = plx_base::devtrig::path("hud-text-metrics.json");
+    match crate::hud_tools::dump_metrics(&path) {
+        Ok(count) => plx_base::eventlog::log(&format!("hud-text-metrics: wrote {count} samples")),
+        Err(reason) => plx_base::eventlog::log(&format!("hud-text-metrics: FAILED {reason}")),
+    }
+}

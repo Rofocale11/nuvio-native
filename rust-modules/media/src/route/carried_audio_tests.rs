@@ -77,6 +77,8 @@ fn none_round_trips_publication_projection_pending() {
         channels: 2,
         can_normalize_loudness: false,
         immersive: false,
+        sample_rate: 0,
+        bit_depth: 0,
     });
     install_route_projection(&mut installed, &projection);
     assert!(
@@ -146,11 +148,11 @@ fn candidate_audio_none_matches_legacy_payload() {
         },
         "rk-auto",
     );
-    crate::player::set_audio_track(3);
+    crate::player::set_audio_track(&mut ps, 3);
     assert_eq!(recover_auto_to_original(&mut ps, 120), Some(AutoOriginalReload::Direct));
     assert_eq!(stream_acodec(&ps), "eac3", "the file's own default codec, as the legacy payload");
     assert_eq!(
-        crate::player::SHARED.desired_audio_idx.load(std::sync::atomic::Ordering::Relaxed),
+        ps.readout().audio_choice(),
         -1,
         "no known ordinal: the demuxer feeds the file's default track",
     );
@@ -158,7 +160,7 @@ fn candidate_audio_none_matches_legacy_payload() {
     restore_quality(Quality::Original);
     reset_session(&mut ps);
     install_active_encoder("");
-    crate::player::reset_audio_track();
+    crate::player::reset_audio_track(&mut ps);
     crate::player::reset_subtitle();
 }
 
@@ -174,6 +176,8 @@ fn retarget_audio_marks_conversion_without_destroying_the_direct_facts() {
         channels: 8,
         can_normalize_loudness: true,
         immersive,
+        sample_rate: 0,
+        bit_depth: 0,
     };
     let mut c = test_original_candidate(Some(3));
     c.fps = 23.976;

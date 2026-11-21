@@ -7,9 +7,10 @@
 //! from the previous procedural version — only the presentation moved onto the table.
 //!
 //! **The Subtitles panel is grouped, not one flat list** (plan `subtitle-menu-capsule` §3,
-//! `/tmp/dsplayer/player.html:1104-1162`): Off and every single-track "yours" language sit under
-//! one "Subtitles" header; a "yours" language with several tracks gets its own section (header =
-//! language, `accessory("N tracks")`), ranked full < SDH < forced < commentary; everything else is
+//! `/tmp/dsplayer/player.html:1104-1162`): Off, Forced only and every single-track "yours"
+//! language sit under one "Subtitles" header; a "yours" language with several tracks gets its own
+//! section (header = language, `accessory("N tracks")`), ranked full < SDH < forced < commentary;
+//! everything else is
 //! ONE "Other languages" row (a drill-in to [`TrackPage::OtherLanguages`], one row per language
 //! A-Z; a multi-track language there drills in again to [`TrackPage::Language`], its tracks
 //! ranked); and a headerless section holds Timing and Style. That
@@ -31,8 +32,9 @@
 //! hand-off, not a page); OK on it does not step anything here — it returns
 //! [`TrackOk::OpenTiming`], which `screens::player::overlay`'s `activate` turns into a hand-off: it
 //! dismisses this panel and presents the Timing capsule overlay (`OverlayKind::Timing`,
-//! `appkit::timing_capsule`) in its place. The row is dim and inert while subtitles are Off (OK there
-//! neither opens the capsule nor closes the panel), and Timing together with Style is omitted
+//! `appkit::timing_capsule`) in its place. The row is dim and inert while no subtitle is drawn
+//! (Off, or Forced only with no forced track to show; OK there neither opens the capsule nor
+//! closes the panel), and Timing together with Style is omitted
 //! during an ordinary transcode, which burns captions into the picture where no client-side offset
 //! or style can reach. That omission now holds only while no subtitle is on: once the server draws
 //! the selected subtitle ([`plx_media::route::subtitle_presenter`] says `ServerBurn`: a remux that
@@ -40,6 +42,27 @@
 //! re-encode), both rows stay visible — dim, inert, with a one-line reason (`Row::note`) saying
 //! why the server is drawing it — rather than being found simply gone. An external sidecar over a
 //! remux is drawn by the app (`ClientOverRemux`), so there both rows are live with no reason.
+//!
+//! **Forced only is a MODE row, not a track** (FO, `docs/playback-settings.md`). It sits right after Off
+//! wherever Off is, whether or not the item carries a forced track, and holds exactly one checkmark
+//! with the tracks and Off: while the mode holds, the forced track it draws is NOT also checked on
+//! its own row, and Off is not checked. Its value is the language of what it draws (else the playing
+//! audio's), bounded (`sub_layout::forced_only_readout`) so a long name never clips the row's own
+//! words. OK commits [`TrackCommit::SubtitleForcedOnly`]: the forced track for the audio that plays
+//! ([`plx_media::route::forced_only_pick`], with the container's track names) or nothing; for audio
+//! that names no language it matches in the language the session fell back to
+//! ([`plx_media::route::forced_only_lang`]), as the resolve does. OK on the row that is already the
+//! mode recommits what is on screen and writes nothing.
+//!
+//! **A pick is the show's memory, and the menu says when the route cannot honour it.** An explicit
+//! pick in either tab commits its descriptor with the track ([`TrackCommit`]'s `memo`), which the
+//! app's `commit_track` hands to `route::commit_audio_pick`, and for the two subtitle arms to
+//! `route::commit_subtitle_and_sidecar` / `commit_forced_only_and_sidecar` (the pick commit plus its
+//! sidecar select or deselect); the `*_pick` commits write it to
+//! the show's track memory when the route accepted the pick, and the next episode's plan reads it
+//! back. When the memory chose a subtitle for this play and the route can show none of it (a copy
+//! remux the app cannot draw), Off is on screen, so the first group closes with one inert
+//! reason ([`table_form`]'s `memory_note`, `route::cur_memory_note`), absent everywhere else.
 //!
 //! **Style is a drill-in, and the Subtitles tab is a page stack** (`docs/player-submenus.md`). The
 //! Style row is a [`RowKind::Nav`] onto [`TrackPage::Style`], whose Size, Position and Color rows
@@ -55,9 +78,21 @@
 //! **What Style can reach depends on the active renderer** ([`SubRenderer`]): only the client's
 //! plain-text caption follows Size and Position, so under an image (PGS/VobSub) or native ASS/SSA
 //! subtitle those two rows are dim, focusable and inert, with a separate note each. Color stays
-//! live under every renderer: the subtitle ink tints bitmaps and ASS alike. Size and Position are
-//! persisted by `route::select_subtitle_size` / `select_subtitle_position` (live value first, a
-//! persist-only write second); Color by `player::set_subtitle_tone`.
+//! pickable under every renderer: a gray tints any of them (the bitmap tint,
+//! `player_hud::subtitle_tint`); Yellow is the colour of a synthesized text header and of the
+//! client's own drawn text, and in an authored ASS/SSA script it replaces the pure-white primary of
+//! every style that has one (`plx_media::player::ass_ink`). Whether the pick's colours reach the
+//! active subtitle is ONE media fact, `plx_media::player::subtitle_takes_colour` (a picture: never;
+//! text: always; ASS/SSA: when the header that reaches libass has a white-primary style), a pure read of
+//! the session (the header's half is a value of its readout that the app delivers once a tick,
+//! `player::deliver_subtitle_ink`: the menu reads no subtitle registry), taken into
+//! [`SubSig`] and [`TrackMenuState::takes_colour`]. Where it is false the Color picker shows the Yellow
+//! rung DISABLED (the shared disabled row: dim, focusable, inert; the grays stay live), with the reason
+//! as the page's note and on the Style page ("gray only dims"), and a stored Yellow pick stays the
+//! checked rung and the saved preference: the menu never rewrites the pick. Size and Position are
+//! persisted by `route::select_subtitle_size` / `select_subtitle_position` and Color by
+//! `player::set_subtitle_tone`: all three are one call into the one write door (`route::choose`,
+//! `How::Optimistic`: live value first, the durable write second, never republished).
 //!
 //! **A sub-page never outlives the root it was built on.** The root's [`SubSig`] — subs
 //! fingerprint, active index, renderer kind, transcoding, presenter and enhancement route — is
@@ -79,6 +114,7 @@ use plx_data::metadata;
 use plx_data::metadata::sub_layout::{self, LangId, OtherLang, RowBadge, RowTarget, SubHeader, SubModel, SubRow, SubTrack};
 use plx_data::metadata::track_label;
 use plx_plex::plex::session::{SubtitlePosition, SubtitleSize, SubtitleTone};
+use plx_ui::a11y::{A11y, A11yPath};
 use plx_ui::frame::Budget;
 use plx_ui::geom::IndexElem;
 use plx_machine::machine::{Canon, Cx, EntryId, FocusKey, GroupId, Host, Measure};
@@ -86,8 +122,8 @@ use plx_ui::popover::Popover;
 use plx_ui::screen::{At, Dir, DrawFrame, Focusable, GroupSpec, Part, Placed, Step};
 use plx_ui::form::{Activation, Form, FormId, FormSection, FormTable, RowKey, RowKind};
 use plx_ui::page_stack::{
-    self, popover_group_of, popover_groups, popover_neighbour, popover_place,
-    popover_register_stops, popover_seat, PageStack, PopoverPanel,
+    self, popover_a11y, popover_a11y_elems, popover_group_of, popover_groups, popover_neighbour,
+    popover_place, popover_register_stops, popover_seat, PageStack, PopoverPanel,
 };
 use plx_ui::panel_motion::PanelMotion;
 use plx_ui::table::{Badge, Row, Section, TableView};
@@ -115,6 +151,10 @@ pub enum TrackRow {
     Loudness,
     /// The Subtitles tab's Off row.
     SubOff,
+    /// The Subtitles tab's Forced only row, directly after Off: the third remembered state
+    /// (Off, a track, or the forced track in the playing audio's language). It is offered wherever
+    /// Off is, with or without a forced track on this item.
+    SubForcedOnly,
     /// A Subtitles-tab track row — the index into the playing item's subs list.
     Sub(usize),
     /// The Timing row (hands off to the Timing capsule).
@@ -155,6 +195,7 @@ impl From<RowTarget> for TrackRow {
     fn from(t: RowTarget) -> Self {
         match t {
             RowTarget::Off => TrackRow::SubOff,
+            RowTarget::ForcedOnly => TrackRow::SubForcedOnly,
             RowTarget::Sub(i) => TrackRow::Sub(i),
             RowTarget::Timing => TrackRow::Timing,
             RowTarget::Style => TrackRow::Style,
@@ -179,8 +220,17 @@ impl StyleField {
         self as u32
     }
 
+    /// The field's name in the menu's accessibility ids ([`TrackRow::a11y_path`]).
+    fn a11y_name(self) -> &'static str {
+        match self {
+            Self::Size => "size",
+            Self::Position => "position",
+            Self::Color => "color",
+        }
+    }
+
     fn label(self) -> &'static str {
-        use plx_platform::i18n::msg;
+        use plx_os::i18n::msg;
         match self {
             Self::Size => msg::widgets_tracks_style_size(),
             Self::Position => msg::widgets_tracks_style_position(),
@@ -202,7 +252,7 @@ impl StyleField {
         match self {
             Self::Size => subtitle_size_label(SubtitleSize::from_index(i as u8)),
             Self::Position => subtitle_position_label(SubtitlePosition::from_index(i as u8)),
-            Self::Color => tone_label(SubtitleTone::from_index(i as u8)),
+            Self::Color => subtitle_tone_label(SubtitleTone::from_index(i as u8)),
         }
     }
 }
@@ -232,14 +282,14 @@ impl TrackPage {
     /// model, [`TrackMenuState::other`]).
     fn title(self, other: &[OtherLang]) -> String {
         match self {
-            Self::Style => plx_platform::i18n::msg::widgets_tracks_style().to_string(),
+            Self::Style => plx_os::i18n::msg::widgets_tracks_style().to_string(),
             Self::Picker(field) => field.label().to_string(),
-            Self::OtherLanguages => plx_platform::i18n::msg::widgets_tracks_other_languages().to_string(),
+            Self::OtherLanguages => plx_os::i18n::msg::widgets_tracks_other_languages().to_string(),
             Self::Language(stream) => {
                 other.iter().find(|o| o.id.stream == stream).map(|o| o.name.clone()).unwrap_or_default()
             }
-            Self::Search => plx_platform::i18n::msg::widgets_tracks_search_open().to_string(),
-            Self::SearchLanguage => plx_platform::i18n::msg::widgets_tracks_search_language().to_string(),
+            Self::Search => plx_os::i18n::msg::widgets_tracks_search_open().to_string(),
+            Self::SearchLanguage => plx_os::i18n::msg::widgets_tracks_search_language().to_string(),
         }
     }
 
@@ -271,6 +321,7 @@ impl FormId for TrackRow {
             TrackRow::Boost => 0x0002_0000,
             TrackRow::Loudness => 0x0002_0001,
             TrackRow::SubOff => 0x0003_0000,
+            TrackRow::SubForcedOnly => 0x0003_0001,
             TrackRow::Sub(i) => 0x0004_0000 + i as u32,
             TrackRow::Timing => 0x0005_0000,
             TrackRow::Style => 0x0005_0001,
@@ -284,6 +335,64 @@ impl FormId for TrackRow {
             TrackRow::SearchHit(i) => 0x000C_0000 + (i as u32).min(0xFFFF),
             TrackRow::LangChoice(i) => 0x000D_0000 + (i as u32).min(0xFFFF),
         })
+    }
+}
+
+impl TrackRow {
+    /// **Does a press of this row WRITE to the playing title on the server?** A track pick selects the part's streams on
+    /// the PMS (`route`'s `select_streams`, `PUT /library/parts/{id}`: the transcoder encodes the SELECTED audio and burns
+    /// the SELECTED subtitle) and a search result installs its subtitle on the item (`PUT /library/metadata/{rk}/subtitles`),
+    /// so the overlay screen names the title playing on those rows (the harness's `press ... --rk`). Every other row
+    /// opens a page, picks a local setting (Style, Timing, the search language) or reconfigures the live stream (Boost
+    /// dialog, Normalize loudness) and writes nothing of the title's. An exhaustive match, so a new row cannot compile
+    /// without the decision.
+    pub fn writes_title(&self) -> bool {
+        match *self {
+            TrackRow::Audio(_) | TrackRow::SubOff | TrackRow::SubForcedOnly | TrackRow::Sub(_) | TrackRow::SearchHit(_) => true,
+            TrackRow::Boost
+            | TrackRow::Loudness
+            | TrackRow::Timing
+            | TrackRow::Style
+            | TrackRow::OpenOther
+            | TrackRow::OpenLang(_)
+            | TrackRow::OpenField(_)
+            | TrackRow::Choice(..)
+            | TrackRow::OpenSearch
+            | TrackRow::SearchLang
+            | TrackRow::SearchRetry
+            | TrackRow::LangChoice(_) => false,
+        }
+    }
+
+    /// **The row's name in the menu's accessibility ids** (`plx_ui::a11y`), relative to the menu:
+    /// what the row IS, and the index it already carries when it is one of a list (`audio.<i>`,
+    /// `sub.<i>`, `hit.<i>`, `lang.<slot>`, `language.<i>`). A singleton is its word: `boost`,
+    /// `loudness`, `off`, `forced`, `timing`, `style`, `other`, `search`, `search_language`, `retry`.
+    /// The Style page's drill-ins are `field.<size|position|color>` and a picker's rungs
+    /// `<field>.<rung>`. A page shows one of these sets at a time, so no two rows of a view share
+    /// an id. An exhaustive match, so a new row cannot compile without a name, as it cannot without
+    /// a focus key ([`FormId::key`]).
+    fn a11y_path(&self) -> A11yPath {
+        let path = A11yPath::new();
+        match *self {
+            TrackRow::Audio(i) => path.name("audio").index(i),
+            TrackRow::Boost => path.name("boost"),
+            TrackRow::Loudness => path.name("loudness"),
+            TrackRow::SubOff => path.name("off"),
+            TrackRow::SubForcedOnly => path.name("forced"),
+            TrackRow::Sub(i) => path.name("sub").index(i),
+            TrackRow::Timing => path.name("timing"),
+            TrackRow::Style => path.name("style"),
+            TrackRow::OpenField(field) => path.name("field").name(field.a11y_name()),
+            TrackRow::Choice(field, i) => path.name(field.a11y_name()).index(i),
+            TrackRow::OpenOther => path.name("other"),
+            TrackRow::OpenLang(lang) => path.name("lang").index(lang.slot),
+            TrackRow::OpenSearch => path.name("search"),
+            TrackRow::SearchLang => path.name("search_language"),
+            TrackRow::SearchRetry => path.name("retry"),
+            TrackRow::SearchHit(i) => path.name("hit").index(i),
+            TrackRow::LangChoice(i) => path.name("language").index(i),
+        }
     }
 }
 
@@ -301,33 +410,54 @@ type EnhState = (
     plx_media::route::SubtitleEffect,
 );
 
-/// **A tab root's natural panel rect** — the layout of `table` as the panel would hug it. Each
-/// tab hugs its own rows (shared menu rule); the right edge is fixed, so switching tabs moves only
-/// the left edge.
-fn table_natural(table: &TableView, measure: &dyn plx_machine::machine::Measure) -> Rect {
+/// **The tallest page this menu shows with app-owned rows** — what decides which SIDE of its opener
+/// the panel opens on (`plx_ui::popover::anchor_panel`'s `need_h`), so the side is the same on
+/// every page and never flips under a viewer who pushes one. A server-length list (audio dubs,
+/// subtitle tracks) may be taller and scrolls inside the panel. Classic's room above its row is
+/// 710, which this stays under, so classic always opens upward. `pub(crate)` because the HUD lint
+/// places this menu with it (`hud_format::lint_menus`, M2), through [`place_panel`].
+pub(crate) const NEED_H: f32 = 600.0;
+
+/// **The one call of the shared placer for this menu**: a panel of `size` beside `anchor`, on the side
+/// [`NEED_H`] decides, `PLAYER_MENU_GAP` away, inside `SAFE`. The live panel ([`table_natural`]), the
+/// overscan audit ([`overscan_rects`]) and the HUD lint (`hud_format::lint_menus`) all place through
+/// it, so none can drift from another.
+pub(crate) fn place_panel(anchor: Rect, size: (f32, f32)) -> plx_ui::popover::Anchored {
+    plx_ui::popover::anchor_panel(
+        anchor,
+        size,
+        NEED_H,
+        theme::layout::PLAYER_MENU_GAP,
+        plx_ui::popover::Placement::PLAYER_MENU,
+    )
+}
+
+/// **A tab root's natural panel**, placed beside `anchor` — the layout of `table` as the panel would
+/// hug it. Each tab hugs its own rows (shared menu rule); the edge the opener's segment ends at is
+/// fixed, so switching tabs moves only the far edge.
+///
+/// The panel grows away from the opener and its height is capped at the room on that side, so a
+/// long list (an item with many audio dubs) SCROLLS inside the panel instead of the panel itself
+/// spilling over the opener or past the safe frame.
+fn table_natural(
+    table: &TableView,
+    anchor: Rect,
+    measure: &dyn plx_machine::machine::Measure,
+) -> plx_ui::popover::Anchored {
     let pw = table.menu_panel_width(measure);
-    // the transport control row's own right edge — one number for the discs and both panels
-    let px = crate::player_hud::CTRL_RIGHT - pw;
-    // Bottom-anchored just above the control-button row (buttons top at SCR_H-288) with a clear gap.
-    // The panel grows UPWARD from this fixed bottom edge, and its height is capped so the top never
-    // crosses `top_min` — so a long list (an item with many audio dubs) SCROLLS inside the panel
-    // instead of the panel itself spilling down over the buttons. Switching Audio↔Subtitles keeps
-    // the bottom edge steady.
-    let bottom = theme::layout::PLAYER_MENU_BOTTOM; // 764 — ~28px above the buttons
     // A note row wraps, so its line count depends on the width: it is resolved HERE, against the
     // same `measure` and `pw` the panel is sized with, so no caller (`update`, hit-testing,
     // `draw`) can read the count a rebuild left stale. Idempotent and a few short strings.
     table.fit_notes(pw, measure);
-    let top_min = 60.0;
-    let ph = table.measured_height().clamp(160.0, bottom - top_min);
-    let py = bottom - ph; // ≥ top_min by construction
-    Rect::new(px, py, pw, ph)
+    let ph = table.measured_height().max(160.0);
+    place_panel(anchor, (pw, ph))
 }
 
 /// The renderer the ACTIVE subtitle is drawn by — what decides whether the caption's Size and
 /// Position can reach it. Only the client's plain-text caption draw follows them
 /// (`appkit::player_hud::draw_subtitle_message`); an image subtitle keeps its own bitmap geometry and
 /// native ASS/SSA its authored layout. The subtitle INK tints all three, so Color is always live.
+/// (Whether the pick's COLOUR reaches a styled one is [`plx_media::player::ass_ink`]'s rule.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubRenderer {
     Text,
@@ -346,12 +476,16 @@ impl SubRenderer {
         }
     }
 
-    /// The note under the Style rows, when Size and Position cannot reach this renderer.
-    fn note(self) -> Option<&'static str> {
+    /// The note under the Style rows, when Size and Position cannot reach this renderer. A styled
+    /// subtitle says which of its colours the pick reaches: `takes_colour` is the media fact
+    /// (`plx_media::player::subtitle_takes_colour`), so its white text follows the pick or none of it does.
+    fn note(self, takes_colour: bool) -> Option<&'static str> {
+        use plx_os::i18n::msg;
         match self {
             Self::Text => None,
-            Self::Image => Some(plx_platform::i18n::msg::widgets_tracks_style_image_note()),
-            Self::Styled => Some(plx_platform::i18n::msg::widgets_tracks_style_styled_note()),
+            Self::Image => Some(msg::widgets_tracks_style_image_note()),
+            Self::Styled if takes_colour => Some(msg::widgets_tracks_style_styled_note()),
+            Self::Styled => Some(msg::widgets_tracks_style_fixed_note()),
         }
     }
 }
@@ -359,18 +493,30 @@ impl SubRenderer {
 /// **What the Subtitles root's rows and locks were built from** — the rebuild signature. A live
 /// poll compares it to the current answers and rebuilds when any input changed: the subs list
 /// (stream ids and whether each is offered on this route), the active index, the renderer kind,
-/// whether the route is transcoding, and the enhancement route and subtitle effect (what the Style
-/// lock and Timing's omission read).
+/// whether the route is transcoding, the enhancement route and subtitle effect (what the Style
+/// lock and Timing's omission read), and whether the landing left a remembered subtitle unshown
+/// (the note under the first group).
 #[derive(Clone, Debug, PartialEq)]
 struct SubSig {
     subs: Vec<(i64, bool)>,
     active: c_int,
     renderer: SubRenderer,
+    /// Whether the Color pick's colours reach the active subtitle
+    /// (`plx_media::player::subtitle_takes_colour`): read once here, so the Color picker's dimmed rungs
+    /// follow it on a live poll (an ASS sidecar's header arrives after the pick).
+    takes_colour: bool,
     transcoding: bool,
     /// who draws the subtitle: what Timing and Style are gated and explained by
     presenter: plx_media::route::SubtitlePresenter,
     enhancement: Option<plx_media::route::EnhancementRoute>,
     effect: plx_media::route::SubtitleEffect,
+    /// the show's remembered subtitle was chosen for this play and the route shows none of it
+    /// ([`plx_media::route::cur_memory_note`]): the root says why
+    memory_note: bool,
+    /// Forced only is the mode, with the language its row reads out
+    /// ([`sub_layout::forced_only_readout`]); `None` off the mode. The row's check, the single
+    /// checkmark and the read-out all follow it, and the language moves with the playing audio.
+    forced_only: Option<String>,
 }
 
 impl SubSig {
@@ -398,6 +544,14 @@ pub struct TrackMenuState {
     tab: c_int, // 0=Audio, 1=Subtitles
     active_audio: c_int, // index into the playing item's audio list
     active_sub: c_int, // -1 = Off, else index into the playing item's subs list
+    /// Forced only is the mode ([`plx_media::route::cur_sub_mode`]). `active_sub` is then the
+    /// forced track it drew (or -1 when none matched) and is NOT what the root checks: the
+    /// checkmark sits on the Forced only row alone ([`Self::checked_sub`]).
+    forced_only: bool,
+    /// The language Forced only falls back to when the audio names none
+    /// ([`plx_media::route::forced_only_lang`]) as of the last open or poll. `on_ok` has no
+    /// session, so a pick matches and remembers by this copy; its own Forced only pick moves it.
+    forced_lang: String,
     /// Both tabs' rows, declared once each as a [`TrackForm`] and resolved by [`TrackRow`]
     /// identity — [`Self::on_ok`] reads back what the focused row IS from its id rather than from a
     /// position (and so cannot disagree with what was drawn, the way a fresh call to
@@ -424,6 +578,10 @@ pub struct TrackMenuState {
     /// The renderer of the ACTIVE subtitle, captured when the root is (re)built — what the Style
     /// page's Size and Position lock reads.
     renderer: SubRenderer,
+    /// Whether the Color pick's colours reach the ACTIVE subtitle, captured with [`Self::renderer`]
+    /// (the media fact `plx_media::player::subtitle_takes_colour`): the Color picker dims the rungs
+    /// that would not.
+    takes_colour: bool,
     /// What the Subtitles root was last built from; a live poll rebuilds when it moves.
     sub_sig: Option<SubSig>,
     /// The Other languages page's model — one entry per language, as of the last root build or
@@ -495,20 +653,35 @@ pub struct TrackMenuState {
     /// without the item in hand. A copy, refreshed wherever the subs list is re-read, so a
     /// subtitle that lands (or is replaced) while the page is up marks its hit at once.
     item_sidecars: Vec<metadata::Stream>,
+    /// The opener's rect, handed in when the menu opened ([`Self::with_anchor`]) and never read
+    /// from anywhere again: a stand-in taking the HUD row, or a language change, cannot move an
+    /// open panel.
+    anchor: Rect,
+    /// The side of [`Self::anchor`] the panel took, as of the last placement: where its rise
+    /// comes from.
+    side: std::cell::Cell<plx_ui::popover::Side>,
 }
 
 /// **What the track menu DECIDED**, for the loop to perform (spec §2.2).
 ///
 /// The panel owns its rows and its cursor; it does not own the playback, so it may not call
-/// `route::commit_audio_selection` / `commit_subtitle_selection` itself — those take the session's
+/// `route::commit_audio_pick` / `commit_subtitle_pick` itself — those take the session's
 /// `&mut`, and a screen is only ever shown the frame's publication. `None` means the pick changed
-/// nothing (audio only: a subtitle OK always republishes, because "Off" is a real choice that the
-/// panel cannot distinguish from "unchanged" without knowing what the renderer currently has).
+/// nothing (audio only: a subtitle OK always commits, so the route republishes, though the panel
+/// knows from `active_sub` whether the pick CHANGED the shown subtitle, and only a changed pick
+/// carries a `memo`).
+///
+/// **A track pick also says what to REMEMBER.** `memo` is the descriptor of the row the viewer
+/// picked, built here from the exact `metadata::Stream` the row was drawn from
+/// (`route::memo_of_audio` / `memo_of_subtitle`, the matchers' own predicates), so the loop can
+/// write the show's track memory without ever seeing the item's streams. `None` is a commit that
+/// is not the viewer's choice (a harness setup, or a subtitle OK on the row already checked) and
+/// remembers nothing; the pick commits write only when the route accepted it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TrackCommit {
     /// The frozen `CarriedAudio` snapshot for the picked row (issue #266), built via
     /// `CarriedAudio::from_stream` from the exact `metadata::Stream` the row was drawn from.
-    Audio(plx_media::route::CarriedAudio),
+    Audio { carried: plx_media::route::CarriedAudio, memo: Option<plx_plex::plex::session::prefs::AudioMemo> },
     /// The Audio tab's Boost dialog / Normalize loudness toggle rows (issue #266): the full
     /// preference after the flip, so the loop's `player::request_audio_enhancement` has both
     /// bits regardless of which row was pressed. Built from [`TrackMenuState::enhance_shown`],
@@ -517,12 +690,32 @@ pub enum TrackCommit {
     AudioEnhancement(plx_plex::plex::AudioEnhancements),
     /// `sidecar_key` is `Some` when the pick is an EXTERNAL text subtitle the client can draw
     /// on direct play (`metadata::Stream::sidecar_renderable`): it has no demuxer ordinal
-    /// (`render_ordinal` is -1), so the loop hands it to `player::sidecar` beside the unchanged
-    /// route commit. `sidecar_codec` preserves ASS/SSA on download; a key need not have an
-    /// extension. `None` — Off, or an embedded track — deselects any sidecar.
-    Subtitle { render_ordinal: c_int, stream_id: i64, sidecar_key: Option<String>, sidecar_codec: String },
+    /// (`render_ordinal` is -1), so `route::commit_subtitle_and_sidecar` hands it to `player::sidecar`
+    /// beside the unchanged route commit. `sidecar_codec` preserves ASS/SSA on download; a key need not have an
+    /// extension. `None` — Off, or an embedded track — deselects any sidecar. `memo` is
+    /// `SubtitleMemo::Off` for Off and `Track(..)` for every track, an embedded one, a sidecar or
+    /// a fresh download alike; `None` for an OK on the row that is already checked (a row that is
+    /// checked because the mode is Forced only is NOT: leaving Forced only is a change, so the
+    /// track it drew is a memo of its own when picked on its row).
+    Subtitle {
+        render_ordinal: c_int,
+        stream_id: i64,
+        sidecar_key: Option<String>,
+        sidecar_codec: String,
+        memo: Option<plx_plex::plex::session::prefs::SubtitleMemo>,
+    },
+    /// **Forced only** (FO): the panel matched the forced track in the
+    /// playing audio's language (`render_ordinal`/`stream_id`, `-1`/`0` when the item has none),
+    /// and the loop commits it, holds the mode and remembers `SubtitleMemo::ForcedOnly { lang }`
+    /// (the drawn track's language, else the audio's, else the language the session fell back to).
+    /// `changed` is false for OK on the row that is already the mode: the menu closes, the commit
+    /// carries what is on screen unchanged (that stream, or `-1`/`0` for nothing) and nothing is
+    /// written. Always an embedded track, never a sidecar: a forced track the client cannot demux is
+    /// not matched.
+    SubtitleForcedOnly { render_ordinal: c_int, stream_id: i64, lang: String, changed: bool },
     /// The caption's tone. Not a track at all, but it is picked in this panel and it is the
-    /// loop that performs it (`player::set_subtitle_tone` writes the session), like the two above.
+    /// loop that performs it (`player::set_subtitle_tone` saves through the one write door, `route::choose`),
+    /// like the two above.
     SubtitleTone(SubtitleTone),
     /// The caption's size, picked on the Style > Size page: the loop publishes it live and
     /// persists it (`route::select_subtitle_size`).
@@ -598,17 +791,33 @@ impl TrackMenuState {
         yours: Vec<String>,
         offer_search: bool,
     ) -> Self {
+        Self::new_with_preferences(ps, meta, tab, yours, offer_search,
+            plx_plex::plex::session::SubtitleSize::Medium, plx_plex::plex::session::SubtitlePosition::Low)
+    }
+
+    pub fn new_with_preferences(
+        ps: &plx_media::route::PlaybackSession,
+        meta: metadata::MetadataView<'_>,
+        tab: c_int,
+        yours: Vec<String>,
+        offer_search: bool,
+        size: plx_plex::plex::session::SubtitleSize,
+        position: plx_plex::plex::session::SubtitlePosition,
+    ) -> Self {
         let mut s = TrackMenuState {
             tab,
             active_audio: 0,
             active_sub: -1,
+            forced_only: false,
+            forced_lang: String::new(),
             form: TrackTable::new(BAND_BASE),
             offset_ms: plx_media::player::subtitle_offset_ms(),
             tone: plx_media::player::subtitle_tone(),
-            size: plx_media::route::subtitle_size(),
-            position: plx_media::route::subtitle_position(),
+            size,
+            position,
             pages: PageStack::new(),
             renderer: SubRenderer::Text,
+            takes_colour: true,
             sub_sig: None,
             other: Vec::new(),
             root_tracks: Vec::new(),
@@ -623,11 +832,28 @@ impl TrackMenuState {
             search: offer_search.then(|| plx_data::subsearch::SubSearchSnapshot::idle(0)),
             search_watching: false,
             item_sidecars: Vec::new(),
+            anchor: crate::player_hud::classic::ctrl_row_hit_rect(),
+            side: std::cell::Cell::new(plx_ui::popover::Side::Above),
         };
         s.form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
         s.sync_item(ps, meta);
         s.rebuild(ps, meta, tab, false);
         s
+    }
+
+    /// Open beside `anchor`, the rect of the control (widened to the end of its segment) that
+    /// opened the menu, as the player screen hands it over. Without it the menu opens where classic
+    /// does: the control row's rect, whose right edge is `CTRL_RIGHT`. Called once, on the
+    /// freshly built menu and before its first frame: the placement is cached against the table's
+    /// layout, and the anchor is latched for the menu's whole life.
+    pub fn with_anchor(mut self, anchor: Rect) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// The anchor the menu was opened with ([`Self::with_anchor`]).
+    pub fn anchor(&self) -> Rect {
+        self.anchor
     }
 
     /// The highlighted row, for the focus probe (`crate::focusprobe`) — a READ of the cursor the
@@ -715,9 +941,19 @@ impl TrackMenuState {
     pub fn active_audio(&self) -> c_int {
         self.active_audio
     }
-    /// -1 = subtitles off, else index into the playing item's subs list
+    /// -1 = subtitles off, else index into the playing item's subs list. Under Forced only, the
+    /// forced track it drew (-1 when none matched); [`Self::forced_only`] says which mode it is.
     pub fn active_sub(&self) -> c_int {
         self.active_sub
+    }
+    /// Is Forced only the subtitle mode (the checkmark is on its row)?
+    pub fn forced_only(&self) -> bool {
+        self.forced_only
+    }
+    /// The track the track rows check: the active one, or none while Forced only holds the
+    /// checkmark. Every row that checks a track reads this, never `active_sub` directly.
+    fn checked_sub(&self) -> c_int {
+        if self.forced_only { -1 } else { self.active_sub }
     }
     /// Plex stream id of the chosen audio track (for &audioStreamID), or 0
     pub fn audio_stream_id(&self, meta: metadata::MetadataView<'_>) -> i64 {
@@ -780,7 +1016,39 @@ impl TrackMenuState {
         let (audio, sub) = Self::derive_active(ps, meta);
         self.active_audio = audio;
         self.active_sub = sub;
+        self.forced_only = Self::derive_forced_only(ps);
+        self.forced_lang = plx_media::route::forced_only_lang(ps).to_string();
         self.read_item_sidecars(meta);
+    }
+
+    /// Is the playback in Forced only? The route owns that fact (`cur_sub_mode`): the drawn forced
+    /// track's stream id alone cannot tell it from a pick of that same track.
+    fn derive_forced_only(ps: &plx_media::route::PlaybackSession) -> bool {
+        plx_media::route::cur_sub_mode(ps) == plx_media::route::SubMode::ForcedOnly
+    }
+
+    /// The language the Forced only row reads out while it is the mode: the drawn track's, else the
+    /// playing audio's ([`sub_layout::forced_only_readout`]); for audio that names no language, the
+    /// one the mode fell back to, named by a track of the item that carries it. `None` off the mode.
+    fn forced_readout(
+        ps: &plx_media::route::PlaybackSession,
+        meta: metadata::MetadataView<'_>,
+        active: c_int,
+        forced: bool,
+    ) -> Option<String> {
+        forced.then(|| {
+            let item = tracks(meta);
+            let drawn = item.and_then(|t| t.subs.get(usize::try_from(active).ok()?));
+            let audio = item.and_then(|t| t.audio.get(usize::try_from(Self::derive_active_audio(ps, meta)).ok()?));
+            let audio_lang = audio.map_or("", |a| a.lang_code.as_str());
+            let language = plx_media::route::forced_only_language(audio_lang, plx_media::route::forced_only_lang(ps));
+            // the fallback stood in for audio that names none: no stream of that language need be
+            // drawn, so it is named by any track of the item that carries it
+            let stand_in = (drawn.is_none() && language != audio_lang)
+                .then(|| item.and_then(|t| t.subs.iter().chain(&t.audio).find(|s| metadata::lang_matches(language, &s.lang_code))))
+                .flatten();
+            sub_layout::forced_only_readout(drawn, stand_in.or(audio))
+        })
     }
 
     /// Re-read the playing item's external subtitles for the Search page ([`Self::item_sidecars`]).
@@ -815,11 +1083,17 @@ impl TrackMenuState {
     /// while a track list or enhancement change it does not read leaves it alone.
     fn poll_subtitle_state(&mut self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>) {
         let live_sub = Self::derive_active_sub(ps, meta);
-        let sig = self.sub_sig_for(ps, meta, live_sub);
+        let live_forced = Self::derive_forced_only(ps);
+        let live_lang = plx_media::route::forced_only_lang(ps);
+        if self.forced_lang != live_lang {
+            self.forced_lang = live_lang.to_string();
+        }
+        let sig = self.sub_sig_for(ps, meta, live_sub, Self::forced_readout(ps, meta, live_sub, live_forced));
         if self.sub_sig.as_ref() == Some(&sig) {
             return;
         }
         self.active_sub = live_sub;
+        self.forced_only = live_forced;
         self.read_item_sidecars(meta);
         let Some(first) = self.pages.first().copied() else {
             let form = self.layout(ps, meta);
@@ -843,7 +1117,10 @@ impl TrackMenuState {
             self.motion.cancel_slide();
         } else {
             // The page still holds: remember what the root is now built from (the pop back
-            // rebuilds it) and refresh this page in place, focus kept by id.
+            // rebuilds it) and refresh this page in place, focus kept by id. The media fact the Color
+            // rungs are dimmed by (an ASS header arriving after the page opened) moves without
+            // changing the page's availability, so it is taken here.
+            self.takes_colour = sig.takes_colour;
             self.sub_sig = Some(sig);
             if let Some(page) = self.pages.top() {
                 let form = self.page_form(page);
@@ -873,24 +1150,33 @@ impl TrackMenuState {
 
     /// The Subtitles root's rebuild signature for `active`, read fresh off the route and the
     /// item. [`Self::layout`] stores the same value it builds from.
-    fn sub_sig_for(&self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>, active: c_int) -> SubSig {
+    fn sub_sig_for(
+        &self,
+        ps: &plx_media::route::PlaybackSession,
+        meta: metadata::MetadataView<'_>,
+        active: c_int,
+        forced_only: Option<String>,
+    ) -> SubSig {
         let item = tracks(meta);
         let offered = visible_subs(ps, meta);
         let subs = item
             .map(|t| t.subs.iter().enumerate().map(|(i, s)| (s.id, offered.contains(&i))).collect())
             .unwrap_or_default();
-        let renderer = item
-            .and_then(|t| t.subs.get(usize::try_from(active).ok()?))
-            .map_or(SubRenderer::Text, |s| SubRenderer::of_codec(&s.codec));
+        let active_sub = item.and_then(|t| t.subs.get(usize::try_from(active).ok()?));
+        let renderer = active_sub.map_or(SubRenderer::Text, |s| SubRenderer::of_codec(&s.codec));
+        let takes_colour = active_sub.map_or(true, |s| plx_media::player::subtitle_takes_colour(ps, &s.codec));
         let (_, enhancement, _, effect) = Self::enh_state(ps);
         SubSig {
             subs,
             active,
             renderer,
+            takes_colour,
             transcoding: plx_media::route::is_transcoding(ps),
             presenter: plx_media::route::subtitle_presenter(ps),
             enhancement,
             effect,
+            memory_note: plx_media::route::cur_memory_note(ps),
+            forced_only,
         }
     }
 
@@ -921,11 +1207,14 @@ impl TrackMenuState {
         }
     }
 
-    /// The Subtitles ROOT's row carrying the checkmark: the active track, or Off — or, when the
-    /// active track is not listed on the root at all (its language is not "yours": a codeless or
-    /// unrecognised-language track, or one a live change moved), the Other languages row that
-    /// stands for it.
+    /// The Subtitles ROOT's row carrying the checkmark: Forced only while it is the mode, else the
+    /// active track, or Off — or, when the active track is not listed on the root at all (its
+    /// language is not "yours": a codeless or unrecognised-language track, or one a live change
+    /// moved), the Other languages row that stands for it.
     fn active_sub_id(&self) -> TrackRow {
+        if self.forced_only {
+            return TrackRow::SubForcedOnly;
+        }
         match self.active_sub {
             i if i >= 0 && self.other.iter().any(|o| o.tracks.iter().any(|t| t.i == i as usize)) => TrackRow::OpenOther,
             i if i >= 0 => TrackRow::Sub(i as usize),
@@ -1046,7 +1335,10 @@ impl TrackMenuState {
                                 feature: plx_telemetry::diag::schema::Feature::AudioTrack,
                             });
                             return TrackOk::Commit {
-                                commit: TrackCommit::Audio(plx_media::route::CarriedAudio::from_stream(s, ord)),
+                                commit: TrackCommit::Audio {
+                                    carried: plx_media::route::CarriedAudio::from_stream(s, ord),
+                                    memo: tracks(meta).and_then(|t| plx_media::route::memo_of_audio(&t.audio, i)),
+                                },
                                 keep_open: false,
                             };
                         }
@@ -1077,6 +1369,7 @@ impl TrackMenuState {
             TrackRow::Timing if self.active_sub >= 0 => TrackOk::OpenTiming,
             TrackRow::Timing => TrackOk::Inert, // dim and inert while subtitles are Off
             TrackRow::SubOff => self.commit_sub(-1, meta),
+            TrackRow::SubForcedOnly => self.commit_forced_only(meta),
             TrackRow::Sub(i) => self.commit_sub(i as c_int, meta),
             TrackRow::SearchHit(i) => self.search_download(i),
             TrackRow::SearchRetry => TrackOk::Search(plx_data::subsearch::SubSearchCmd::Retry),
@@ -1094,10 +1387,17 @@ impl TrackMenuState {
     }
 
     /// The subtitle commit behind OK on Off (`-1`) or on a track row: records the pick, and answers
-    /// the commit.
+    /// the commit. The commit is made whether or not the pick changed anything (the route
+    /// republishes), but it carries a memo only when it DID: the panel opens on the checked row, so
+    /// an OK there is closing the menu, not choosing, and an automatic pick (the ladder's Off, or
+    /// its track) must not become the show's memory.
     fn commit_sub(&mut self, new_sub: c_int, meta: metadata::MetadataView<'_>) -> TrackOk {
-        let changed = self.active_sub != new_sub;
+        // Leaving Forced only is a change even onto the stream it drew (the forced track's own row)
+        // or onto nothing (Off while no forced track matched): the index is the same, the state is
+        // not.
+        let changed = plx_media::route::subtitle_pick_changed(self.active_sub, new_sub, self.forced_only);
         self.active_sub = new_sub;
+        self.forced_only = false;
         // the client renderer takes the EMBEDDED-subtitle ordinal (what the demuxer
         // enumerates); an external pick has no demux ordinal — it is drawn by the sidecar
         // renderer on direct play, or burned
@@ -1120,6 +1420,69 @@ impl TrackMenuState {
                 stream_id: self.sub_stream_id(meta),
                 sidecar_key: sidecar.map(|s| s.key.clone()),
                 sidecar_codec: sidecar.map(|s| s.codec.clone()).unwrap_or_default(),
+                // Off is a choice of its own, remembered as Off; a track is remembered by what it
+                // IS. A row with no stream behind it remembers nothing, and neither does a pick
+                // that changed nothing.
+                memo: if !changed {
+                    None
+                } else if new_sub < 0 {
+                    Some(plx_plex::plex::session::prefs::SubtitleMemo::Off)
+                } else {
+                    tracks(meta)
+                        .and_then(|t| t.subs.get(new_sub as usize))
+                        .map(plx_media::route::memo_of_subtitle)
+                },
+            },
+            keep_open: false,
+        }
+    }
+
+    /// **OK on Forced only**: match the forced track for the audio that plays, commit it (or
+    /// nothing, when the item has none) and hold the mode. The match is the route's own
+    /// ([`plx_media::route::forced_only_pick`]) over the container's names, in the language the
+    /// resolve would use: the audio's, else the one the session fell back to ([`Self::forced_lang`]).
+    /// So the row and the next episode choose by one rule. The language remembered is the drawn
+    /// track's, else that same language.
+    ///
+    /// **A pick of the row that is already the mode is not a choice**: the menu opens on the checked
+    /// row, so OK there is how it is dismissed. It recommits what the route shows (that stream, or
+    /// nothing), unchanged and with `changed: false`, and matches nothing again: a re-match could
+    /// find no track where the resolve drew one (untagged audio drawn through the fallback), and
+    /// turn the subtitle off.
+    fn commit_forced_only(&mut self, meta: metadata::MetadataView<'_>) -> TrackOk {
+        let changed = !self.forced_only;
+        let item = tracks(meta);
+        let audio = item.and_then(|t| t.audio.get(usize::try_from(self.active_audio).ok()?));
+        let audio_lang = audio.map_or("", |a| a.lang_code.as_str());
+        let picked = if changed {
+            item.and_then(|t| {
+                let names = plx_media::player::SHARED.track_names_lenient();
+                plx_media::route::forced_only_pick(&t.subs, &names, audio_lang, &self.forced_lang)
+            })
+        } else {
+            usize::try_from(self.active_sub).ok()
+        };
+        let drawn = item.and_then(|t| {
+            let i = picked?;
+            Some((i, metadata::sub_render_ordinal(&t.subs, i), t.subs.get(i)?))
+        });
+        let lang = drawn
+            .map_or_else(|| plx_media::route::forced_only_language(audio_lang, &self.forced_lang), |(.., s)| s.lang_code.as_str())
+            .to_string();
+        self.active_sub = drawn.map_or(-1, |(i, ..)| i as c_int);
+        self.forced_only = true;
+        if changed {
+            self.forced_lang = lang.clone();
+            plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::FeatureUsed {
+                feature: plx_telemetry::diag::schema::Feature::SubtitleTrack,
+            });
+        }
+        TrackOk::Commit {
+            commit: TrackCommit::SubtitleForcedOnly {
+                render_ordinal: drawn.map_or(-1, |(_, ordinal, _)| ordinal),
+                stream_id: drawn.map_or(0, |(.., s)| s.id),
+                lang,
+                changed,
             },
             keep_open: false,
         }
@@ -1188,14 +1551,14 @@ impl TrackMenuState {
     /// pick row (checked when it is the active track); a multi-track one is a drill-in reading out
     /// its track count, or — when the active track is inside it — a check and that variant.
     fn other_form(&self) -> TrackForm {
-        let active = self.active_sub;
+        let active = self.checked_sub();
         let sec = self.other.iter().fold(FormSection::new(""), |sec, lang| match lang.tracks.as_slice() {
             [t] => sec.item(TrackRow::Sub(t.i), RowKind::Choice, (), flat_row(t, active)),
             tracks => {
                 let current = tracks.iter().find(|t| active >= 0 && t.i == active as usize);
                 let value = match current {
                     Some(t) => in_lang_label(t),
-                    None => plx_platform::i18n::msg::widgets_tracks_count(tracks.len() as i64),
+                    None => plx_os::i18n::msg::widgets_tracks_count(tracks.len() as i64),
                 };
                 let row = Row::new(lang.name.clone()).value(value).checked(current.is_some());
                 sec.item(TrackRow::OpenLang(lang.id), RowKind::Nav(TrackPage::Language(lang.id.stream)), (), row)
@@ -1206,7 +1569,7 @@ impl TrackMenuState {
 
     /// A language page: its tracks ranked full < SDH < forced < commentary, a pick row each.
     fn language_form(&self, stream: i64) -> TrackForm {
-        let active = self.active_sub;
+        let active = self.checked_sub();
         let tracks = self.other_lang(stream).map(|o| o.tracks.as_slice()).unwrap_or_default();
         let sec = tracks.iter().fold(FormSection::new(""), |sec, t| {
             sec.item(TrackRow::Sub(t.i), RowKind::Choice, (), in_lang_row(t, active))
@@ -1225,7 +1588,7 @@ impl TrackMenuState {
     /// failure is ever drawn as an alarm (`ui/src/CLAUDE.md`: failure read-outs are never red).
     fn search_form(&self) -> TrackForm {
         use plx_data::subsearch::{DownloadPhase, SearchFailure, SearchStatus};
-        use plx_platform::i18n::msg;
+        use plx_os::i18n::msg;
         let Some(s) = self.search.as_ref() else { return Form::new() };
         let busy = s.download.busy();
         let lang = if s.lang.is_empty() { String::new() } else { plx_plex::plex::languages::label(&s.lang).to_string() };
@@ -1418,6 +1781,8 @@ impl TrackMenuState {
             stream_id: stream.id,
             sidecar_key: sidecar.then(|| stream.key.clone()),
             sidecar_codec: if sidecar { stream.codec.clone() } else { String::new() },
+            // A subtitle the viewer fetched is the viewer's pick too: remembered by what it is.
+            memo: Some(plx_media::route::memo_of_subtitle(&sub)),
         };
         Some((sub, commit))
     }
@@ -1429,7 +1794,11 @@ impl TrackMenuState {
 
     /// The Style page: one drill-in per field, each reading out its current value. Under an image
     /// or styled subtitle Size and Position are disabled (dim, focusable, inert) and one note names
-    /// why; Color is live under every renderer — the subtitle ink tints bitmaps and ASS alike.
+    /// why. Color stays pickable under every renderer: a gray tints any of them
+    /// (`player_hud::subtitle_tint`); Yellow reaches a synthesized text track and the pure-white
+    /// primaries of an authored ASS/SSA script (`plx_media::player::ass_ink`), never a picture. Where the
+    /// media fact `takes_colour` says it cannot reach, [`Self::picker_form`] disables the Yellow rung and
+    /// the note on this page says why.
     fn style_form(&self) -> TrackForm {
         let field_row = |field: StyleField| {
             Row::new(field.label()).value(field.rung_label(self.current_rung(field)))
@@ -1456,18 +1825,35 @@ impl TrackMenuState {
                 (),
                 field_row(StyleField::Color),
             );
-        if let Some(note) = self.renderer.note() {
+        if let Some(note) = self.renderer.note(self.takes_colour) {
             sec = sec.note(note);
         }
         Form::new().section(sec)
     }
 
     /// A picker page: one choice per rung of `field`'s ladder, the current one checked.
+    ///
+    /// The Color picker under a subtitle the pick's colours cannot reach (`takes_colour` is false: a
+    /// picture, or an ASS/SSA script with no pure-white style) shows those rungs DISABLED (the shared
+    /// disabled-row state: dim, focusable, inert) with the reason as the page's note. The grays stay live
+    /// (they tint any renderer), and the stored pick stays the checked rung and the saved preference: the
+    /// page says the pick does not reach this subtitle, it never rewrites it.
     fn picker_form(&self, field: StyleField) -> TrackForm {
         let current = TrackRow::Choice(field, self.current_rung(field));
-        let sec = (0..field.rungs()).fold(FormSection::new(""), |sec, rung| {
+        let unreachable = |rung: usize| {
+            field == StyleField::Color
+                && !self.takes_colour
+                && SubtitleTone::from_index(rung as u8).text_rgb8().is_some()
+        };
+        let mut sec = (0..field.rungs()).fold(FormSection::new(""), |sec, rung| {
             sec.choice(TrackRow::Choice(field, rung), (), Row::new(field.rung_label(rung)), |id| *id == current)
+                .disabled(unreachable(rung))
         });
+        if field == StyleField::Color && !self.takes_colour {
+            if let Some(note) = self.renderer.note(false) {
+                sec = sec.note(note);
+            }
+        }
         Form::new().section(sec)
     }
 
@@ -1476,7 +1862,7 @@ impl TrackMenuState {
     /// drill-in) else the first, a language page on the active variant if it is inside, else its
     /// first track. `None` (a language already gone) leaves it to the table's opening row.
     fn page_initial(&self, page: TrackPage) -> Option<TrackRow> {
-        let active = usize::try_from(self.active_sub).ok();
+        let active = usize::try_from(self.checked_sub()).ok();
         let holds_active = |o: &OtherLang| active.is_some_and(|a| o.tracks.iter().any(|t| t.i == a));
         match page {
             TrackPage::Style => Some(TrackRow::OpenField(StyleField::Size)),
@@ -1570,11 +1956,14 @@ impl TrackMenuState {
     fn enh_reason_text(reason: plx_media::route::DisabledReason) -> String {
         use plx_media::route::DisabledReason;
         match reason {
-            DisabledReason::NotAnalyzed => plx_platform::i18n::msg::widgets_tracks_enh_reason_not_analyzed(),
-            DisabledReason::DolbyVisionUnusable => plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_unusable(),
-            DisabledReason::DolbyVisionSubtitle => plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_subtitle(),
-            DisabledReason::NotOriginalQuality => plx_platform::i18n::msg::widgets_tracks_enh_reason_quality(),
-            DisabledReason::ServerRefused => plx_platform::i18n::msg::widgets_tracks_enh_reason_refused(),
+            DisabledReason::NotAnalyzed => plx_os::i18n::msg::widgets_tracks_enh_reason_not_analyzed(),
+            DisabledReason::DolbyVisionUnusable => plx_os::i18n::msg::widgets_tracks_enh_reason_dv_unusable(),
+            DisabledReason::DolbyVisionSubtitle => plx_os::i18n::msg::widgets_tracks_enh_reason_dv_subtitle(),
+            DisabledReason::NotOriginalQuality => plx_os::i18n::msg::widgets_tracks_enh_reason_quality(),
+            DisabledReason::ForcedDirectPlay => plx_os::i18n::msg::widgets_tracks_enh_reason_forced(),
+            DisabledReason::ServerConverting => plx_os::i18n::msg::widgets_tracks_enh_reason_converting(),
+            DisabledReason::NotCopyable => plx_os::i18n::msg::widgets_tracks_enh_reason_not_copyable(),
+            DisabledReason::ServerRefused => plx_os::i18n::msg::widgets_tracks_enh_reason_refused(),
         }
         .to_string()
     }
@@ -1587,12 +1976,9 @@ impl TrackMenuState {
     ) -> Option<String> {
         use plx_media::route::{EnhancementRoute, SubtitleEffect};
         match route {
-            EnhancementRoute::Burn => Some(plx_platform::i18n::msg::widgets_tracks_enh_note_burn().to_string()),
-            EnhancementRoute::RemuxDropsDolbyVision => {
-                Some(plx_platform::i18n::msg::widgets_tracks_enh_note_dv_off().to_string())
-            }
+            EnhancementRoute::Burn => Some(plx_os::i18n::msg::widgets_tracks_enh_note_burn().to_string()),
             EnhancementRoute::Remux if subtitle_effect == SubtitleEffect::Sidecar => {
-                Some(plx_platform::i18n::msg::widgets_tracks_enh_note_sidecar().to_string())
+                Some(plx_os::i18n::msg::widgets_tracks_enh_note_sidecar().to_string())
             }
             EnhancementRoute::Remux => None,
         }
@@ -1605,8 +1991,9 @@ impl TrackMenuState {
     /// idiom the Subtitles tab's Timing/Style pair uses, plus an optional non-selectable note (an
     /// inert slot: it takes a layout row and has no identity). Mirrors [`Self::layout`] for the
     /// Subtitles tab.
-    fn audio_form(&self, meta: metadata::MetadataView<'_>) -> TrackForm {
+    fn audio_form(&self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>) -> TrackForm {
         self.audio_form_for(
+            ps,
             meta,
             (self.enhance_shown, self.enhance_route, self.enhance_disabled, self.enhance_subtitle_effect),
         )
@@ -1614,9 +2001,9 @@ impl TrackMenuState {
 
     /// [`Self::audio_form`] against an explicit enhancement answer ([`Self::enh_state`]'s shape),
     /// so the Audio root can be built while the menu shows Subtitles and has not stored one.
-    fn audio_form_for(&self, meta: metadata::MetadataView<'_>, enh: EnhState) -> TrackForm {
+    fn audio_form_for(&self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>, enh: EnhState) -> TrackForm {
         let (enhance_shown, enhance_route, enhance_disabled, enhance_subtitle_effect) = enh;
-        let mut sec = FormSection::new(plx_platform::i18n::msg::widgets_tracks_audio());
+        let mut sec = FormSection::new(plx_os::i18n::msg::widgets_tracks_audio());
         let d = match tracks(meta) {
             Some(t) => t,
             None => return Form::new().section(sec),
@@ -1624,12 +2011,12 @@ impl TrackMenuState {
         let names = plx_media::player::SHARED.track_names.lock().unwrap();
         for (i, s) in d.audio.iter().enumerate() {
             let lang = if s.lang.is_empty() {
-                plx_platform::i18n::msg::widgets_tracks_unknown()
+                plx_os::i18n::msg::widgets_tracks_unknown()
             } else {
                 s.lang.as_str()
             };
             let label = if s.default {
-                plx_platform::i18n::msg::widgets_tracks_original(lang)
+                plx_os::i18n::msg::widgets_tracks_original(lang)
             } else {
                 lang.to_string()
             };
@@ -1647,7 +2034,7 @@ impl TrackMenuState {
             } else {
                 name
             };
-            let sub = audio_sub_line(sub, s);
+            let sub = audio_sub_line(ps, sub, s);
             if !sub.is_empty() {
                 row = row.detail(sub);
             }
@@ -1663,13 +2050,13 @@ impl TrackMenuState {
                     TrackRow::Boost,
                     RowKind::Toggle,
                     (),
-                    Row::new(plx_platform::i18n::msg::widgets_tracks_boost_dialog()).toggle(shown.boost_dialog),
+                    Row::new(plx_os::i18n::msg::widgets_tracks_boost_dialog()).toggle(shown.boost_dialog),
                 )
                 .item(
                     TrackRow::Loudness,
                     RowKind::Toggle,
                     (),
-                    Row::new(plx_platform::i18n::msg::widgets_tracks_normalize_loudness()).toggle(shown.normalize_loudness),
+                    Row::new(plx_os::i18n::msg::widgets_tracks_normalize_loudness()).toggle(shown.normalize_loudness),
                 );
             if let Some(route) = enhance_route {
                 if let Some(note) = Self::enh_note_text(route, enhance_subtitle_effect) {
@@ -1686,13 +2073,13 @@ impl TrackMenuState {
                     TrackRow::Boost,
                     RowKind::Toggle,
                     (),
-                    Row::new(plx_platform::i18n::msg::widgets_tracks_boost_dialog()).toggle(false).dim(true),
+                    Row::new(plx_os::i18n::msg::widgets_tracks_boost_dialog()).toggle(false).dim(true),
                 )
                 .item(
                     TrackRow::Loudness,
                     RowKind::Toggle,
                     (),
-                    Row::new(plx_platform::i18n::msg::widgets_tracks_normalize_loudness()).toggle(false).dim(true),
+                    Row::new(plx_os::i18n::msg::widgets_tracks_normalize_loudness()).toggle(false).dim(true),
                 )
                 .note(Self::enh_reason_text(reason));
             form = form.section(enh);
@@ -1709,10 +2096,15 @@ impl TrackMenuState {
         // stay drawn (dim, with a reason) instead of being omitted the way an ordinary
         // non-enhancement transcode omits both — a viewer who turned the enhancement on must still
         // see why the control they had is gone, not just find it missing.
-        let sig = self.sub_sig_for(ps, meta, self.active_sub);
+        // The Forced only read-out is made once: the signature keeps it and the form shows it.
+        let forced_readout = Self::forced_readout(ps, meta, self.active_sub, self.forced_only);
+        let sig = self.sub_sig_for(ps, meta, self.active_sub, forced_readout);
         self.renderer = sig.renderer;
+        self.takes_colour = sig.takes_colour;
         self.sub_sig = Some(sig);
-        let (form, model) = self.sub_root_form(ps, meta);
+        let (form, model) = self.sub_root_form(
+            ps, meta, self.sub_sig.as_ref().and_then(|sig| sig.forced_only.as_deref()),
+        );
         self.root_tracks = model
             .sections
             .iter()
@@ -1728,7 +2120,9 @@ impl TrackMenuState {
 
     /// The Subtitles root's form and the model it was built from, storing nothing: [`Self::layout`]
     /// keeps what it needs from the model, [`Self::warm_other_tab`] only draws the form.
-    fn sub_root_form(&self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>) -> (TrackForm, SubModel) {
+    fn sub_root_form(
+        &self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>, forced: Option<&str>,
+    ) -> (TrackForm, SubModel) {
         let presenter = plx_media::route::subtitle_presenter(ps);
         let burn = match presenter {
             plx_media::route::SubtitlePresenter::ServerBurn(why) => Some(why),
@@ -1740,7 +2134,14 @@ impl TrackMenuState {
         let show_timing = !plx_media::route::is_transcoding(ps)
             || presenter != plx_media::route::SubtitlePresenter::None;
         let model = self.sub_model(ps, meta, show_timing);
-        let mut form = table_form(&model, self.active_sub, self.offset_ms, burn);
+        let mut form = table_form(
+            &model,
+            self.active_sub,
+            self.offset_ms,
+            burn,
+            plx_media::route::cur_memory_note(ps),
+            forced,
+        );
         if self.search.is_some() {
             // offered on direct play AND during a transcode: a downloaded sidecar is drawn by the
             // client on one and burned by the server on the other, so it reaches the picture either way
@@ -1748,7 +2149,7 @@ impl TrackMenuState {
                 TrackRow::OpenSearch,
                 RowKind::Nav(TrackPage::Search),
                 (),
-                Row::new(plx_platform::i18n::msg::widgets_tracks_search_open()),
+                Row::new(plx_os::i18n::msg::widgets_tracks_search_open()),
             ));
         }
         (form, model)
@@ -1786,7 +2187,7 @@ impl TrackMenuState {
     fn rebuild(&mut self, ps: &plx_media::route::PlaybackSession, meta: metadata::MetadataView<'_>, tab: c_int, slide: bool) {
         if tab == 0 {
             let (shown, route, disabled, subtitle_effect) = Self::enh_state(ps);
-            self.rebuild_audio(shown, route, disabled, subtitle_effect, meta, slide);
+            self.rebuild_audio(ps, shown, route, disabled, subtitle_effect, meta, slide);
         } else {
             let form = self.layout(ps, meta);
             let keep = self.active_sub_id();
@@ -1824,6 +2225,7 @@ impl TrackMenuState {
     /// below — landing on the checked track — is exactly the existing open/switch behaviour.
     fn rebuild_audio(
         &mut self,
+        ps: &plx_media::route::PlaybackSession,
         enhance_shown: Option<plx_plex::plex::AudioEnhancements>,
         enhance_route: Option<plx_media::route::EnhancementRoute>,
         enhance_disabled: Option<plx_media::route::DisabledReason>,
@@ -1844,7 +2246,7 @@ impl TrackMenuState {
         self.enhance_route = enhance_route;
         self.enhance_disabled = enhance_disabled;
         self.enhance_subtitle_effect = enhance_subtitle_effect;
-        let form = self.audio_form(meta);
+        let form = self.audio_form(ps, meta);
         // The offer is back: prefer the banked identity over `prev_target` (which names whatever
         // row the cursor happened to sit on while the rows were gone) whenever it still exists.
         let restored = if enhance_shown.is_some() { self.sticky_audio_target.take() } else { None };
@@ -1864,7 +2266,11 @@ impl TrackMenuState {
     /// [`TableView::layout_rev`]: text is measured when the table changed, not once per caller per
     /// frame. What is on screen is [`Self::shown_rect`], which springs toward this.
     fn panel_rect(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
-        self.motion.natural(self.form.table.layout_rev(), || table_natural(&self.form.table, measure))
+        self.motion.natural(self.form.table.layout_rev(), || {
+            let placed = table_natural(&self.form.table, self.anchor, measure);
+            self.side.set(placed.side);
+            placed.rect
+        })
     }
 
     /// The card as it is drawn this frame: its top and left edges on their springs toward
@@ -1902,7 +2308,7 @@ impl TrackMenuState {
                 || disabled != self.enhance_disabled
                 || subtitle_effect != self.enhance_subtitle_effect
             {
-                self.rebuild_audio(shown, route, disabled, subtitle_effect, meta, false);
+                self.rebuild_audio(ps, shown, route, disabled, subtitle_effect, meta, false);
             }
         } else {
             self.poll_subtitle_state(ps, meta);
@@ -1955,14 +2361,15 @@ impl TrackMenuState {
         // its recording lacks instead of refusing on it.
         let owner = plx_ui::rec::speculative(|| {
             let form = if self.tab == 0 {
-                self.sub_root_form(ps, meta).0
+                let forced = Self::forced_readout(ps, meta, self.active_sub, self.forced_only);
+                self.sub_root_form(ps, meta, forced.as_deref()).0
             } else {
-                self.audio_form_for(meta, Self::enh_state(ps))
+                self.audio_form_for(ps, meta, Self::enh_state(ps))
             };
             let mut other = TrackTable::new(BAND_BASE);
             other.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
             other.set(form, None);
-            let natural = table_natural(&other.table, measure);
+            let natural = table_natural(&other.table, self.anchor, measure).rect;
             PanelMotion::prewarm_background_text(natural, &other.table, measure)
         });
         self.background_owner = Some(owner);
@@ -1972,13 +2379,14 @@ impl TrackMenuState {
         // The appear fade/rise — the container drives the phase and the appear spring. The dim
         // over the video plane is the container's too (`PlayerOverlayScreen::scrim`,
         // `theme::underlay::DIM_PLAYER`), painted at the end of the player's page pass.
-        let p = Painter::root()
-            .alpha(appear)
-            .translate(0.0, Popover::RISE * (1.0 - appear));
+        // The panel rises from the side its opener is on (placed first: that is where the side is read).
+        let natural = self.panel_rect(measure);
+        let (dx, dy) = Popover::rise_offset(self.side.get(), Popover::RISE, appear);
+        let p = Painter::root().alpha(appear).translate(dx, dy);
         // frosted panel card — near-opaque dark (no true backdrop blur on the GLES plane, so a solid
         // dark card approximates it); only a hint of video shows through. ONE background at the
         // animated rect, the page(s) under its clip (`PanelMotion::draw`).
-        self.motion.draw(p, self.panel_rect(measure), 28.0, &self.form.table, measure);
+        self.motion.draw(p, natural, 28.0, &self.form.table, measure);
     }
 }
 
@@ -2059,6 +2467,27 @@ where
     fn seat(&self, _g: GroupId, _from: Placed, _cx: &Cx<'_, H>) -> FocusKey<H::Elem> {
         popover_seat(self.state, self.entry)
     }
+    /// A row is its [`TrackRow::a11y_path`], relative to the menu (the overlay screen that composes
+    /// this part places the menu under its own namespace). The inverse is the default walk: a page
+    /// of a popover is a list a viewer reads, not a library.
+    fn a11y(&self, key: &H::Elem, _cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        popover_a11y(&self.state.form, key, TrackRow::a11y_path)
+    }
+    fn a11y_elems(&self, g: GroupId, _cx: &Cx<'_, H>, out: &mut Vec<H::Elem>) {
+        popover_a11y_elems(&self.state.form, g, self.group, out)
+    }
+}
+
+impl TrackMenuPart<'_> {
+    /// **Does a press of the row `key` write to the playing title** ([`TrackRow::writes_title`]), read off the form's
+    /// binding the way `a11y` reads its id. The overlay screen asks it to name the title playing on those rows.
+    pub fn writes_title_at<E: IndexElem>(&self, key: &E) -> bool {
+        let form = &self.state.form;
+        key.index()
+            .and_then(|index| form.index_of_key(RowKey(index)))
+            .and_then(|at| form.binding_at(at))
+            .is_some_and(|binding| binding.id.writes_title())
+    }
 }
 
 impl<H: Host> Part<H> for TrackMenuPart<'_>
@@ -2102,32 +2531,34 @@ fn visible_subs(ps: &plx_media::route::PlaybackSession, meta: metadata::Metadata
 }
 
 /// Resolve the typed tone at the UI boundary; persisted values and technical logs stay stable.
-fn tone_label(tone: SubtitleTone) -> &'static str {
+pub fn subtitle_tone_label(tone: SubtitleTone) -> &'static str {
     match tone {
-        SubtitleTone::White => plx_platform::i18n::msg::widgets_tracks_tone_white(),
-        SubtitleTone::Silver => plx_platform::i18n::msg::widgets_tracks_tone_silver(),
-        SubtitleTone::LightGrey => plx_platform::i18n::msg::widgets_tracks_tone_light_grey(),
-        SubtitleTone::Grey => plx_platform::i18n::msg::widgets_tracks_tone_grey(),
-        SubtitleTone::DarkGrey => plx_platform::i18n::msg::widgets_tracks_tone_dark_grey(),
-        SubtitleTone::Charcoal => plx_platform::i18n::msg::widgets_tracks_tone_charcoal(),
+        SubtitleTone::White => plx_os::i18n::msg::widgets_tracks_tone_white(),
+        SubtitleTone::Yellow => plx_os::i18n::msg::widgets_tracks_tone_yellow(),
+        SubtitleTone::Silver => plx_os::i18n::msg::widgets_tracks_tone_silver(),
+        SubtitleTone::LightGrey => plx_os::i18n::msg::widgets_tracks_tone_light_grey(),
+        SubtitleTone::Grey => plx_os::i18n::msg::widgets_tracks_tone_grey(),
+        SubtitleTone::DarkGrey => plx_os::i18n::msg::widgets_tracks_tone_dark_grey(),
+        SubtitleTone::Charcoal => plx_os::i18n::msg::widgets_tracks_tone_charcoal(),
     }
 }
 
 /// The localized name of a caption size rung — the one place both the player's Style pages and
 /// Settings' Playback read it.
 pub fn subtitle_size_label(size: SubtitleSize) -> &'static str {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     match size {
         SubtitleSize::Small => msg::settings_playback_subtitle_size_small(),
         SubtitleSize::Medium => msg::settings_playback_subtitle_size_medium(),
         SubtitleSize::Large => msg::settings_playback_subtitle_size_large(),
         SubtitleSize::ExtraLarge => msg::settings_playback_subtitle_size_extra_large(),
+        SubtitleSize::Huge => msg::settings_playback_subtitle_size_huge(),
     }
 }
 
 /// The localized name of a caption position rung, shared like [`subtitle_size_label`].
 pub fn subtitle_position_label(position: SubtitlePosition) -> &'static str {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     match position {
         SubtitlePosition::Low => msg::settings_playback_subtitle_position_low(),
         SubtitlePosition::Middle => msg::settings_playback_subtitle_position_middle(),
@@ -2138,7 +2569,7 @@ pub fn subtitle_position_label(position: SubtitlePosition) -> &'static str {
 /// An offset as localized signed seconds to the tenth (`appkit::timing_capsule::offset_seconds_in`,
 /// the one offset formatter).
 fn format_offset(ms: i64) -> String {
-    crate::timing_capsule::offset_seconds_in(ms, true, plx_platform::i18n::current())
+    crate::timing_capsule::offset_seconds_in(ms, true, plx_os::i18n::current())
 }
 
 // ---- section building ----
@@ -2148,17 +2579,28 @@ use plx_data::metadata::track_label::Kind;
 /// The sub-line under an audio track, saying so when the server would convert it: a track the TV
 /// cannot decode ("AAC 7.1" here) plays through the server's remux with only its audio converted,
 /// and the menu names that on the track it concerns rather than leaving the viewer to learn it
-/// from a log. Whether a track is converted is the planner's capability answer
-/// (`route::audio_converted_by_server`). Always ONE line: the longest label is graded against the
-/// panel by `converted_audio_sub_lines_fit_the_panel_in_every_language`.
-fn audio_sub_line(sub: String, s: &metadata::Stream) -> String {
-    audio_sub_line_for(sub, plx_media::route::audio_converted_by_server(&s.codec, s.channels))
+/// from a log. Whether a track is converted is the planner's capability answer for THIS playback's
+/// attempt (`route::audio_converted_by_server`, which reads `ps`). A surround track the APP decodes
+/// (`route::audio_decoded_in_app`: a codec the recovery put in force as its very last rung, or the
+/// `appdecodelossy` debug trigger; never Force Direct Play, which refuses a surround track the set
+/// cannot decode instead of mixing it down) says it plays in stereo, since the descriptor ("DTS 5.1")
+/// would otherwise promise a layout the downmix does not keep; the server mark outranks it. Always ONE line: the
+/// longest label is graded against the panel by `converted_audio_sub_lines_fit_the_panel_in_every_language`.
+fn audio_sub_line(ps: &plx_media::route::PlaybackSession, sub: String, s: &metadata::Stream) -> String {
+    let converted = plx_media::route::audio_converted_by_server(ps, &s.codec, s.channels, s.sampling_rate);
+    let in_app = plx_os::devcaps::app_decode_mixes_down(s.channels)
+        && plx_media::route::audio_decoded_in_app(ps, &s.codec, s.channels, s.sampling_rate);
+    audio_sub_line_for(sub, converted, in_app)
 }
 
-/// [`audio_sub_line`] with the conversion fact given — the pure choice, host-testable.
-fn audio_sub_line_for(sub: String, converted: bool) -> String {
-    if converted && !sub.is_empty() {
-        plx_platform::i18n::msg::widgets_tracks_converted_by_server(&sub)
+/// [`audio_sub_line`] with the facts given — the pure choice, host-testable.
+fn audio_sub_line_for(sub: String, converted: bool, decoded_in_app: bool) -> String {
+    if sub.is_empty() {
+        sub
+    } else if converted {
+        plx_os::i18n::msg::widgets_tracks_converted_by_server(&sub)
+    } else if decoded_in_app {
+        plx_os::i18n::msg::widgets_tracks_decoded_in_app_stereo(&sub)
     } else {
         sub
     }
@@ -2171,8 +2613,8 @@ fn audio_descriptor(s: &metadata::Stream) -> String {
         channel_short(&s.layout)
     } else if s.channels > 0 {
         match s.channels {
-            1 => plx_platform::i18n::msg::widgets_tracks_mono().to_string(),
-            2 => plx_platform::i18n::msg::widgets_tracks_stereo().to_string(),
+            1 => plx_os::i18n::msg::widgets_tracks_mono().to_string(),
+            2 => plx_os::i18n::msg::widgets_tracks_stereo().to_string(),
             n => format!("{}.{}", n - 1, if n >= 6 { 1 } else { 0 }),
         }
     } else {
@@ -2190,8 +2632,8 @@ fn audio_descriptor(s: &metadata::Stream) -> String {
 fn channel_short(layout: &str) -> String {
     let base = layout.split('(').next().unwrap_or(layout).trim();
     match base {
-        "mono" => plx_platform::i18n::msg::widgets_tracks_mono().to_string(),
-        "stereo" => plx_platform::i18n::msg::widgets_tracks_stereo().to_string(),
+        "mono" => plx_os::i18n::msg::widgets_tracks_mono().to_string(),
+        "stereo" => plx_os::i18n::msg::widgets_tracks_stereo().to_string(),
         other => other.to_string(),
     }
 }
@@ -2210,7 +2652,7 @@ fn row_badge(b: &RowBadge) -> Badge {
     match b {
         RowBadge::Forced => Badge::Forced,
         RowBadge::Sdh => Badge::Sdh,
-        RowBadge::External => Badge::Text(plx_platform::i18n::msg::widgets_tracks_external_badge().to_string()),
+        RowBadge::External => Badge::Text(plx_os::i18n::msg::widgets_tracks_external_badge().to_string()),
         RowBadge::Codec(c) => Badge::Text((*c).to_string()),
     }
 }
@@ -2224,7 +2666,7 @@ fn flat_row(t: &SubTrack, active_sub: c_int) -> Row {
         parts.push(t.detail.clone());
     }
     if let Some(n) = t.ordinal {
-        parts.push(plx_platform::i18n::msg::widgets_tracks_track_ordinal(n as i64));
+        parts.push(plx_os::i18n::msg::widgets_tracks_track_ordinal(n as i64));
     }
     if !parts.is_empty() {
         row = row.detail(parts.join(" \u{b7} "));
@@ -2255,7 +2697,7 @@ fn in_lang_row(t: &SubTrack, active_sub: c_int) -> Row {
 /// A track's label inside its language: the source (+ "Track N" if needed), or the kind word for a
 /// nameless one. Also the value a language's drill-in reads out for its active variant.
 fn in_lang_label(t: &SubTrack) -> String {
-    let nth = t.ordinal.map(|n| plx_platform::i18n::msg::widgets_tracks_track_ordinal(n as i64));
+    let nth = t.ordinal.map(|n| plx_os::i18n::msg::widgets_tracks_track_ordinal(n as i64));
     if !t.detail.is_empty() {
         match &nth {
             Some(n) => format!("{} \u{b7} {}", t.detail, n),
@@ -2273,9 +2715,9 @@ fn in_lang_label(t: &SubTrack) -> String {
 }
 
 /// **Declare the Subtitles root** from its model (`metadata::sub_layout::sub_sections`) as a keyed
-/// form — the catalog words for each header, the checkmark on `active_sub` (-1 for Off), and the
-/// Timing read-out (`offset_ms`). Each row is declared once: a track carries its subs-list index
-/// as its id and key; Timing is dim while subtitles are Off and hands off to the capsule (so it has
+/// form — the catalog words for each header, the checkmark on `active_sub` (-1 for Off, unless
+/// Forced only holds it), and the Timing read-out (`offset_ms`). Each row is declared once: a track carries its subs-list index
+/// as its id and key; Timing is dim while no subtitle is drawn and hands off to the capsule (so it has
 /// no chevron); Style and Other languages are Nav rows, the drill-ins to [`TrackPage::Style`] and
 /// [`TrackPage::OtherLanguages`] (the latter reads out the language count, or — when the active
 /// track lives behind it — a check and that track's language).
@@ -2286,16 +2728,32 @@ fn in_lang_label(t: &SubTrack) -> String {
 /// non-selectable [`FormSection::note`] naming why (by the burn's reason) follows Style, the same "visible, dim, plain
 /// reason" idiom the Audio tab's own Boost dialog / Normalize loudness rows use when THEY are
 /// disabled.
+///
+/// `memory_note` (track memory): the show's remembered subtitle was chosen for this play and the
+/// route shows none of it, so Off is on screen although a track is remembered. One non-selectable
+/// [`FormSection::note`] closes the FIRST group (Off and the tracks), where the viewer's eye is when
+/// the checkmark sits on Off; it is declared only when the flag is set.
+///
+/// `forced_only` (FO) is `Some(read-out)` while Forced only is the
+/// mode, else `None`. The read-out is the language the row shows or looked for
+/// ([`sub_layout::forced_only_readout`]). **One checkmark**: the check sits on the Forced only row
+/// and on nothing else: not on Off and not on the forced track it drew, whose own row (and its
+/// Other languages row) stays unchecked. `active_sub` still says whether a track is drawn, which is
+/// what keeps Timing live, so Timing is dim only while nothing is drawn.
 fn table_form(
     model: &SubModel,
     active_sub: c_int,
     offset_ms: i64,
     burn: Option<plx_media::route::BurnReason>,
+    memory_note: bool,
+    forced_only: Option<&str>,
 ) -> TrackForm {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
+    // the track the rows check: the drawn one, unless Forced only holds the checkmark
+    let checked_sub = if forced_only.is_some() { -1 } else { active_sub };
     let active_other =
-        model.other.iter().find(|o| o.tracks.iter().any(|t| active_sub >= 0 && t.i == active_sub as usize));
-    model.sections.iter().fold(Form::new(), |form, sec| {
+        model.other.iter().find(|o| o.tracks.iter().any(|t| checked_sub >= 0 && t.i == checked_sub as usize));
+    model.sections.iter().enumerate().fold(Form::new(), |form, (at, sec)| {
         let head = match &sec.header {
             SubHeader::Subtitles => Section::new(msg::widgets_tracks_subtitles()),
             SubHeader::Language { name, tracks } => {
@@ -2311,10 +2769,19 @@ fn table_form(
                     id,
                     RowKind::Choice,
                     (),
-                    Row::new(msg::widgets_tracks_off()).checked(active_sub < 0),
+                    Row::new(msg::widgets_tracks_off()).checked(checked_sub < 0 && forced_only.is_none()),
                 ),
-                SubRow::Flat(t) => out.item(id, RowKind::Choice, (), flat_row(t, active_sub)),
-                SubRow::InLanguage(t) => out.item(id, RowKind::Choice, (), in_lang_row(t, active_sub)),
+                SubRow::ForcedOnly => {
+                    let row = Row::new(msg::widgets_tracks_forced_only()).checked(forced_only.is_some());
+                    // the read-out is a language name: the stream's own text, so it may elide
+                    // before the row's catalog words do
+                    out.item(id, RowKind::Choice, (), match forced_only {
+                        Some(language) => row.value(language).server_value(),
+                        None => row,
+                    })
+                }
+                SubRow::Flat(t) => out.item(id, RowKind::Choice, (), flat_row(t, checked_sub)),
+                SubRow::InLanguage(t) => out.item(id, RowKind::Choice, (), in_lang_row(t, checked_sub)),
                 SubRow::OtherLanguages { languages } => {
                     let (value, checked) = match active_other {
                         Some(o) => (o.name.clone(), true),
@@ -2349,22 +2816,19 @@ fn table_form(
                 }
             }
         });
-        form.section(out)
+        form.section(if at == 0 && memory_note { out.note(msg::widgets_tracks_sub_remembered_note()) } else { out })
     })
 }
 
 /// The panel at its WIDEST ([`plx_ui::table::MENU_MAX_W`], the shared cap — either tab may hug
-/// up to it) and TALLEST, for the overscan audit ([`plx_ui::consts::SAFE`]) — the full
-/// `top_min`→`bottom` span, since the measured height comes from a `TableView` no host test can
-/// measure.
+/// up to it) and TALLEST, for the overscan audit ([`plx_ui::consts::SAFE`]) — placed by the
+/// same placer as the live panel, beside the anchor of the compiled classic (`player_hud::audit_geometry`), with the height of the whole room (the
+/// measured height comes from a `TableView` no host test can measure).
 #[cfg(any(test, feature = "test-support"))]
 pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
-    let (bottom, top_min) = (theme::layout::PLAYER_MENU_BOTTOM, 60.0);
     let pw = plx_ui::table::MENU_MAX_W;
-    out.push((
-        "track menu panel (widest)",
-        Rect::new(crate::player_hud::CTRL_RIGHT - pw, top_min, pw, bottom - top_min),
-    ));
+    let placed = place_panel(crate::player_hud::audit_geometry().row, (pw, plx_ui::consts::SCR_H));
+    out.push(("track menu panel (widest)", placed.rect));
 }
 
 #[cfg(test)]
@@ -2393,7 +2857,7 @@ mod tests {
         let yours: Vec<String> = yours.iter().map(|y| y.to_string()).collect();
         let model = sub_layout::sub_sections(subs, offered, names, &yours, show_timing);
         let mut built = FormTable::new(plx_ui::table_screen::BAND_BASE);
-        built.set(table_form(&model, active_sub, offset_ms, None), None);
+        built.set(table_form(&model, active_sub, offset_ms, None, false, None), None);
         let ids = (0..built.table.n_rows() as usize).map(|i| built.id_at(i).copied()).collect();
         (std::mem::take(&mut built.table.sections), ids)
     }
@@ -2439,9 +2903,9 @@ mod tests {
         let names = TrackNames::new();
         let (sections, targets) = sub_layout(&subs, &[0], &names, &["spa"], -1, true, 0);
         assert_eq!(sections[0].header, "Subtitles");
-        assert_eq!(sections[0].rows.len(), 2, "Off + the one track");
-        assert_eq!(sections[0].rows[1].label, "Spanish");
-        assert_eq!(targets[1], Some(TrackRow::Sub(0)));
+        assert_eq!(sections[0].rows.len(), 3, "Off + Forced only + the one track");
+        assert_eq!(sections[0].rows[2].label, "Spanish");
+        assert_eq!(targets[2], Some(TrackRow::Sub(0)));
     }
 
     // ---- sub_layout: a nameless track reads as its kind, with no badge ------------------------
@@ -2499,34 +2963,34 @@ mod tests {
 
         let subs = vec![mk(true, false, "srt")];
         let (sections, _) = sub_layout(&subs, &[0], &names, &["eng"], -1, true, 0);
-        assert!(matches!(sections[0].rows[1].badges.as_slice(), [Badge::Sdh]));
+        assert!(matches!(sections[0].rows[2].badges.as_slice(), [Badge::Sdh]));
 
         let subs = vec![mk(false, true, "srt")];
         let (sections, _) = sub_layout(&subs, &[0], &names, &["eng"], -1, true, 0);
-        assert!(matches!(sections[0].rows[1].badges.as_slice(), [Badge::Text(t)] if t == "EXTERNAL"));
+        assert!(matches!(sections[0].rows[2].badges.as_slice(), [Badge::Text(t)] if t == "EXTERNAL"));
 
         let subs = vec![mk(true, true, "srt")];
         let (sections, _) = sub_layout(&subs, &[0], &names, &["eng"], -1, true, 0);
         assert!(
-            matches!(sections[0].rows[1].badges.as_slice(), [Badge::Sdh]),
+            matches!(sections[0].rows[2].badges.as_slice(), [Badge::Sdh]),
             "SDH beats EXTERNAL"
         );
 
         let subs = vec![mk(false, false, "pgs")];
         let (sections, _) = sub_layout(&subs, &[0], &names, &["eng"], -1, true, 0);
-        assert!(matches!(sections[0].rows[1].badges.as_slice(), [Badge::Text(t)] if t == "PGS"));
+        assert!(matches!(sections[0].rows[2].badges.as_slice(), [Badge::Text(t)] if t == "PGS"));
 
         // an image subtitle keeps its format whatever else it is: the codec chip follows the kind
         let subs = vec![mk(true, false, "pgs")];
         let (sections, _) = sub_layout(&subs, &[0], &names, &["eng"], -1, true, 0);
         assert!(
-            matches!(sections[0].rows[1].badges.as_slice(), [Badge::Sdh, Badge::Text(t)] if t == "PGS"),
+            matches!(sections[0].rows[2].badges.as_slice(), [Badge::Sdh, Badge::Text(t)] if t == "PGS"),
             "SDH + PGS"
         );
         // a text subtitle never shows a format, external or not
         let subs = vec![mk(false, true, "ass")];
         let (sections, _) = sub_layout(&subs, &[0], &names, &["eng"], -1, true, 0);
-        assert!(matches!(sections[0].rows[1].badges.as_slice(), [Badge::Text(t)] if t == "EXTERNAL"));
+        assert!(matches!(sections[0].rows[2].badges.as_slice(), [Badge::Text(t)] if t == "EXTERNAL"));
     }
 
     // ---- sub_layout: "Other languages" is ONE drill-in row on the root -------------------------
@@ -2540,7 +3004,10 @@ mod tests {
         ];
         let offered: Vec<usize> = (0..subs.len()).collect();
         let (sections, ids) = sub_layout(&subs, &offered, &TrackNames::new(), &[], -1, true, 0);
-        assert_eq!(ids, [Some(TrackRow::SubOff), Some(TrackRow::OpenOther), Some(TrackRow::Timing), Some(TrackRow::Style)]);
+        assert_eq!(
+            ids,
+            [Some(TrackRow::SubOff), Some(TrackRow::SubForcedOnly), Some(TrackRow::OpenOther), Some(TrackRow::Timing), Some(TrackRow::Style)]
+        );
         let row = &sections[1].rows[0];
         assert_eq!((row.label.as_str(), row.value.as_deref()), ("Other languages", Some("2")), "two languages, three tracks");
         assert!(!row.checked, "no active track behind it");
@@ -2552,7 +3019,7 @@ mod tests {
     /// server text and may elide; the fixture's sources are short so only app text is judged.)
     #[test]
     fn every_subtitles_row_fits_the_panel_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let mut subs = vec![
             stream(1, 0, "Russian", "rus", "forced, DVD R5"),
             stream(2, 1, "Russian", "rus", "Netflix"),
@@ -2586,7 +3053,7 @@ mod tests {
     /// accented vowels), the fixture's own server values, or letter-free.
     #[test]
     fn every_app_owned_subtitles_string_comes_from_the_catalog() {
-        let _pseudo = plx_platform::i18n::pseudo_on_this_thread_for_test();
+        let _pseudo = plx_os::i18n::pseudo_on_this_thread_for_test();
         // a title's own "Commentary" stays its source (the mock strips no commentary word), so it
         // is server text here like the rest
         let server = ["Russian", "Spanish", "Portuguese", "Netflix", "DVD R5", "Commentary"];
@@ -2681,7 +3148,7 @@ mod tests {
         let menu = TrackMenuState::new(&ps, store.view(), 1, vec!["eng".into()]);
         assert_eq!(
             menu.ids(),
-            vec![TrackRow::SubOff, TrackRow::Sub(0), TrackRow::Timing, TrackRow::Style]
+            vec![TrackRow::SubOff, TrackRow::SubForcedOnly, TrackRow::Sub(0), TrackRow::Timing, TrackRow::Style]
         );
     }
 
@@ -2771,11 +3238,13 @@ mod tests {
             },
         ]);
         let mut menu = TrackMenuState::new(&ps, store.view(), 1, vec!["eng".into(), "fre".into()]);
-        // Off(0), English(1), French sidecar(2), then the headerless Timing(3) / Style(4) section
+        // Off(0), Forced only(1), English(2), French sidecar(3), then the headerless Timing(4) /
+        // Style(5) section
         assert_eq!(
             menu.ids(),
             vec![
                 TrackRow::SubOff,
+                TrackRow::SubForcedOnly,
                 TrackRow::Sub(0),
                 TrackRow::Sub(1),
                 TrackRow::Timing,
@@ -2783,7 +3252,7 @@ mod tests {
             ]
         );
 
-        menu.focus_row(2);
+        menu.focus_row(3);
         assert_eq!(
             menu.on_ok(store.view()),
             TrackOk::Commit {
@@ -2792,12 +3261,20 @@ mod tests {
                     stream_id: 42,
                     sidecar_key: Some("/library/streams/42.srt".into()),
                     sidecar_codec: "srt".into(),
+                    memo: Some(plx_plex::plex::session::prefs::SubtitleMemo::Track(
+                        plx_plex::plex::session::prefs::SubtitleTrackMemo {
+                            lang: "fre".into(),
+                            kind: "text".into(),
+                            external: true,
+                            ..Default::default()
+                        }
+                    )),
                 },
                 keep_open: false,
             }
         );
 
-        menu.focus_row(3);
+        menu.focus_row(4);
         assert_eq!(
             menu.on_ok(store.view()),
             TrackOk::OpenTiming,
@@ -2805,7 +3282,7 @@ mod tests {
         );
 
         // Style -> Color -> the second tone: a Nav row pushes, a choice commits and the panel stays
-        menu.focus_row(4);
+        menu.focus_row(5);
         assert_eq!(menu.on_ok(store.view()), TrackOk::Navigated);
         assert_eq!(menu.on_ok(store.view()), TrackOk::Navigated, "Size is first and live for a text subtitle");
         assert_eq!(menu.page_path(), [TrackPage::Style, TrackPage::Picker(StyleField::Size)]);
@@ -2931,17 +3408,94 @@ mod tests {
         assert_eq!(
             outcome,
             TrackOk::Commit {
-                commit: TrackCommit::Audio(plx_media::route::CarriedAudio {
-                    sid: 20,
-                    ordinal: 1,
-                    codec: "eac3".into(),
-                    channels: 8,
-                    can_normalize_loudness: true,
-                    immersive: true,
-                }),
+                commit: TrackCommit::Audio {
+                    carried: plx_media::route::CarriedAudio {
+                        sid: 20,
+                        ordinal: 1,
+                        codec: "eac3".into(),
+                        channels: 8,
+                        can_normalize_loudness: true,
+                        immersive: true,
+                        sample_rate: 0,
+                        bit_depth: 0,
+                    },
+                    memo: Some(plx_plex::plex::session::prefs::AudioMemo {
+                        codec: "eac3".into(),
+                        channels: 8,
+                        ..Default::default()
+                    }),
+                },
                 keep_open: false,
             }
         );
+    }
+
+    /// **A subtitle pick says what to remember.** Off commits `SubtitleMemo::Off` (stream 0); a track
+    /// commits its descriptor as the MENU reads it, so a track whose NAME says forced is remembered
+    /// forced although its flag is unset; and the audio pick commits the picked row's descriptor,
+    /// commentary-ness and all.
+    #[test]
+    fn a_pick_commits_the_descriptor_to_remember() {
+        use plx_plex::plex::session::prefs::SubtitleMemo;
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let store = store_with(vec![
+            plx_data::metadata::Stream { id: 41, index: 0, lang: "English".into(), lang_code: "eng".into(), codec: "srt".into(), ..Default::default() },
+            plx_data::metadata::Stream {
+                id: 42,
+                index: 1,
+                lang: "Spanish".into(),
+                lang_code: "spa".into(),
+                codec: "srt".into(),
+                title: "Forced".into(),
+                ..Default::default()
+            },
+        ]);
+        let mut menu = TrackMenuState::new(&ps, store.view(), 1, vec!["eng".into(), "spa".into()]);
+        let commit_of = |menu: &mut TrackMenuState, row: i32| {
+            menu.focus_row(row);
+            match menu.on_ok(store.view()) {
+                TrackOk::Commit { commit: TrackCommit::Subtitle { stream_id, memo, .. }, .. } => (stream_id, memo),
+                other => panic!("row {row} did not commit a subtitle: {other:?}"),
+            }
+        };
+        let (stream_id, memo) = commit_of(&mut menu, 3);
+        assert_eq!(stream_id, 42);
+        let Some(SubtitleMemo::Track(track)) = memo else { panic!("a track is remembered as a Track: {memo:?}") };
+        assert_eq!((track.lang.as_str(), track.kind.as_str(), track.title.as_str()), ("spa", "text", "Forced"));
+        assert!(track.forced, "its name says forced, so the menu badges it FORCED and the memo says forced");
+        assert!(!track.external && !track.sdh);
+        // the picked track is now the checked one, so Off is a change
+        assert_eq!(commit_of(&mut menu, 0), (0, Some(SubtitleMemo::Off)), "Off is remembered as Off");
+    }
+
+    /// **An OK that changes nothing remembers nothing.** A subtitle OK always commits (the route
+    /// republishes), but the descriptor to remember rides only a CHANGED pick, as on the Audio tab:
+    /// the panel opens with the focus on the checked row, so a press to close it on an Off the
+    /// ladder chose, or on a track the ladder chose, is not the viewer's choice and must not become
+    /// the show's absolute memory. The commit itself is still made (the republish stays); a change
+    /// after it is written as before.
+    #[test]
+    fn an_ok_that_changes_no_subtitle_commits_without_a_memo() {
+        use plx_plex::plex::session::prefs::SubtitleMemo;
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let store = store_with(vec![
+            plx_data::metadata::Stream { id: 41, index: 0, lang: "English".into(), lang_code: "eng".into(), codec: "srt".into(), ..Default::default() },
+            plx_data::metadata::Stream { id: 42, index: 1, lang: "Spanish".into(), lang_code: "spa".into(), codec: "srt".into(), ..Default::default() },
+        ]);
+        let mut menu = TrackMenuState::new(&ps, store.view(), 1, vec!["eng".into(), "spa".into()]);
+        let commit_of = |menu: &mut TrackMenuState, row: i32| {
+            menu.focus_row(row);
+            match menu.on_ok(store.view()) {
+                TrackOk::Commit { commit: TrackCommit::Subtitle { stream_id, memo, .. }, .. } => (stream_id, memo),
+                other => panic!("row {row} did not commit a subtitle: {other:?}"),
+            }
+        };
+        assert_eq!(commit_of(&mut menu, 0), (0, None), "Off is what the route shows: OK on it commits, remembers nothing");
+        let (stream_id, memo) = commit_of(&mut menu, 3);
+        assert_eq!((stream_id, memo.is_some()), (42, true), "control: a changed pick carries its memo");
+        assert_eq!(commit_of(&mut menu, 3), (42, None), "OK on the track that is already checked remembers nothing");
+        assert_eq!(commit_of(&mut menu, 0), (0, Some(SubtitleMemo::Off)), "Off after a track is a change, remembered as Off");
+        assert_eq!(commit_of(&mut menu, 0), (0, None), "and OK on that Off again is not");
     }
 
     /// Re-picking the already-active row is not a change: no commit, same as the pre-refactor
@@ -3024,6 +3578,7 @@ mod enhancement_menu_tests {
 
     fn teardown(ps: &plx_media::route::PlaybackSession) {
         reset_player_control_for_test(ps);
+        plx_media::route::restore_quality(plx_media::route::Quality::Original);
         plx_plex::plex::reset_servers_for_test();
     }
 
@@ -3098,27 +3653,29 @@ mod enhancement_menu_tests {
         let (menu, ps) = audio_tab(EnhTestFixture { carried_capable: Some(false), ..Default::default() });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotAnalyzed));
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_not_analyzed());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_not_analyzed());
         teardown(&ps);
     }
 
-    /// M7: a usable-base-layer Dolby Vision source no longer hides the rows — the enhanced remux
-    /// simply never declares DV (`fill_direct_plan` is the only place that ever does), so turning
-    /// the toggle on plays the HDR10 base picture instead. The note says so in plain language.
+    /// M7: a usable-base-layer Dolby Vision source is offered the plain remux, with no
+    /// Dolby-Vision-off note: whether the copied remux keeps DV is settled by its `/decision`
+    /// (`copied_video_dv`), and a copy keeps it.
     #[test]
-    fn enh_rows_offered_dv_drops_declaration() {
+    fn enh_rows_offered_dv_is_plain_remux() {
         let _g = plx_base::testlock::serial();
         let (menu, ps) = audio_tab(EnhTestFixture { dv_declared: true, ..Default::default() });
-        assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::RemuxDropsDolbyVision));
+        assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::Remux));
         assert!(menu.enhance_shown.is_some());
-        let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_note_dv_off());
+        let last = menu.form.table.sections[1].rows.last().unwrap();
+        assert_ne!(last.label, plx_os::i18n::msg::widgets_tracks_enh_note_burn());
+        assert_ne!(last.label, plx_os::i18n::msg::widgets_tracks_enh_note_sidecar());
+        assert_eq!(menu.form.table.sections[1].rows.len(), 2, "the two DSP toggles and no note row");
         teardown(&ps);
     }
 
-    /// P5 (or P7 with an enhancement layer): no copy of the base layer is ever correct, so there is
-    /// nothing the enhancement's remux could decorate — Disabled, not Hidden (owner direction,
-    /// 2026-09-29).
+    /// P5 (or a dual layer without a cross-compatible base layer): no copy of the base layer is
+    /// ever correct, so there is nothing the enhancement's remux could decorate — Disabled, not
+    /// Hidden (owner direction, 2026-09-29).
     #[test]
     fn enh_rows_disabled_dv_unusable_base() {
         let _g = plx_base::testlock::serial();
@@ -3126,7 +3683,7 @@ mod enhancement_menu_tests {
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::DolbyVisionUnusable));
         assert_eq!(menu.enhance_shown, None);
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_unusable());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_dv_unusable());
         teardown(&ps);
     }
 
@@ -3143,7 +3700,7 @@ mod enhancement_menu_tests {
         });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::DolbyVisionSubtitle));
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_subtitle());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_dv_subtitle());
         teardown(&ps);
     }
 
@@ -3159,7 +3716,7 @@ mod enhancement_menu_tests {
         assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::Burn));
         assert!(menu.enhance_shown.is_some());
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_note_burn());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_note_burn());
         teardown(&ps);
     }
 
@@ -3175,46 +3732,141 @@ mod enhancement_menu_tests {
         assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::Remux));
         assert!(menu.enhance_shown.is_some());
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_note_sidecar());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_note_sidecar());
         teardown(&ps);
     }
 
-    /// I5 excludes every non-Direct/Remux shape identically (HLS, a fixed rung, a relay); one
-    /// `Other`-family route stands for the group, since the predicate cannot tell them apart. M7:
-    /// visible-and-dim, not hidden — "only at Original quality" is a plain reason.
+    /// A quality that is NOT Original in force (Auto on HLS, a fixed rung) is the one case that
+    /// may say "only at Original quality"; M7: visible-and-dim, not hidden.
     #[test]
-    fn enh_rows_disabled_hls() {
+    fn enh_rows_disabled_hls_under_auto_blames_quality() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            remux: Some(false),
+            quality: plx_media::route::Quality::Auto,
+            ..Default::default()
+        });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_quality());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_quality());
         teardown(&ps);
     }
 
     #[test]
-    fn enh_rows_disabled_reencode_rung() {
+    fn enh_rows_disabled_fixed_rung_blames_quality() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            remux: Some(false),
+            base_present: false,
+            quality: plx_media::route::Quality::P720,
+            ..Default::default()
+        });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
         teardown(&ps);
     }
 
+    /// The owner's report: the note said "only at Original quality" while the Quality row read
+    /// Original. A non-copy route under Original must never blame the quality.
     #[test]
-    fn enh_rows_disabled_relay() {
+    fn enh_rows_disabled_under_original_never_blames_quality() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        for fixture in [
+            EnhTestFixture {
+                base_present: false,
+                declined: Some(plx_media::route::OriginalDeclined::Relay),
+                ..Default::default()
+            },
+            EnhTestFixture {
+                base_present: false,
+                declined: Some(plx_media::route::OriginalDeclined::VideoNeedsConverting),
+                ..Default::default()
+            },
+            EnhTestFixture {
+                base_present: false,
+                declined: Some(plx_media::route::OriginalDeclined::TrackPickDropped),
+                ..Default::default()
+            },
+            EnhTestFixture { base_present: false, ..Default::default() },
+        ] {
+            let (menu, ps) = audio_tab(fixture);
+            assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotCopyable));
+            let note = menu.form.table.sections[1].rows.last().unwrap();
+            assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_not_copyable());
+            assert_ne!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_quality());
+            teardown(&ps);
+        }
+    }
+
+    /// A track pick the Original route could not follow dropped the candidate; under Auto (on HLS)
+    /// the quality in force is the honest reason.
+    #[test]
+    fn enh_rows_disabled_after_a_dropped_pick_under_auto_blames_quality() {
+        let _g = plx_base::testlock::serial();
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            remux: Some(false),
+            base_present: false,
+            quality: plx_media::route::Quality::Auto,
+            declined: Some(plx_media::route::OriginalDeclined::TrackPickDropped),
+            ..Default::default()
+        });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
         teardown(&ps);
     }
 
-    /// A forced direct play (or a fixed rung/relay/non-Original MDE) never computes an
-    /// `auto_original` candidate at all — `base_present: false` reproduces exactly that.
+    /// A burn re-encodes the picture, so the Quality row says "Converted"; the Audio tab explains
+    /// its own state there (the burn note) rather than a converting reason.
+    #[test]
+    fn enh_rows_under_a_burn_explain_the_burn_not_a_conversion() {
+        let _g = plx_base::testlock::serial();
+        for fixture in [
+            EnhTestFixture {
+                subtitle_effect: plx_media::route::SubtitleEffect::Embedded,
+                applied: plx_plex::plex::AudioEnhancements { boost_dialog: true, normalize_loudness: false },
+                applied_burn: true,
+                ..Default::default()
+            },
+            EnhTestFixture {
+                subtitle_effect: plx_media::route::SubtitleEffect::Embedded,
+                remux: Some(false),
+                ..Default::default()
+            },
+        ] {
+            let (menu, ps) = audio_tab(fixture);
+            assert!(plx_media::route::original_is_converted(&ps), "the picture is re-encoded");
+            assert_eq!(menu.enhance_route, Some(plx_media::route::EnhancementRoute::Burn));
+            assert_eq!(menu.enhance_disabled, None);
+            let note = menu.form.table.sections[1].rows.last().unwrap();
+            assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_note_burn());
+            teardown(&ps);
+        }
+    }
+
+    /// Original picked and the server converting the video: the Quality row reads
+    /// "Original · Converted" and the note agrees (one fact).
+    #[test]
+    fn enh_rows_disabled_while_the_server_converts() {
+        let _g = plx_base::testlock::serial();
+        let (menu, ps) = audio_tab(EnhTestFixture { remux: Some(false), ..Default::default() });
+        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::ServerConverting));
+        assert!(plx_media::route::original_is_converted(&ps));
+        let note = menu.form.table.sections[1].rows.last().unwrap();
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_converting());
+        teardown(&ps);
+    }
+
+    /// Force Direct Play never computes an `auto_original` candidate; the note names the setting.
     #[test]
     fn enh_rows_disabled_forced() {
         let _g = plx_base::testlock::serial();
-        let (menu, ps) = audio_tab(EnhTestFixture { base_present: false, ..Default::default() });
-        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::NotOriginalQuality));
+        let (menu, ps) = audio_tab(EnhTestFixture {
+            base_present: false,
+            quality: plx_media::route::Quality::Auto,
+            declined: Some(plx_media::route::OriginalDeclined::ForcedDirectPlay),
+            ..Default::default()
+        });
+        assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::ForcedDirectPlay));
+        let note = menu.form.table.sections[1].rows.last().unwrap();
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_forced());
         teardown(&ps);
     }
 
@@ -3224,7 +3876,7 @@ mod enhancement_menu_tests {
         let (menu, ps) = audio_tab(EnhTestFixture { refused: true, ..Default::default() });
         assert_eq!(menu.enhance_disabled, Some(plx_media::route::DisabledReason::ServerRefused));
         let note = menu.form.table.sections[1].rows.last().unwrap();
-        assert_eq!(note.label, plx_platform::i18n::msg::widgets_tracks_enh_reason_refused());
+        assert_eq!(note.label, plx_os::i18n::msg::widgets_tracks_enh_reason_refused());
         teardown(&ps);
     }
 
@@ -3247,8 +3899,8 @@ mod enhancement_menu_tests {
         let enh = &menu.form.table.sections[1];
         assert_eq!(enh.header, "");
         assert_eq!(enh.rows.len(), 2);
-        assert_eq!(enh.rows[0].label, plx_platform::i18n::msg::widgets_tracks_boost_dialog());
-        assert_eq!(enh.rows[1].label, plx_platform::i18n::msg::widgets_tracks_normalize_loudness());
+        assert_eq!(enh.rows[0].label, plx_os::i18n::msg::widgets_tracks_boost_dialog());
+        assert_eq!(enh.rows[1].label, plx_os::i18n::msg::widgets_tracks_normalize_loudness());
         teardown(&ps);
     }
 
@@ -3799,12 +4451,12 @@ mod enhancement_menu_tests {
     /// prose the viewer who HAS them ever reads.
     #[test]
     fn enh_locale_values_never_mention_plex_pass() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
             for value in [
-                plx_platform::i18n::msg::widgets_tracks_boost_dialog(),
-                plx_platform::i18n::msg::widgets_tracks_normalize_loudness(),
+                plx_os::i18n::msg::widgets_tracks_boost_dialog(),
+                plx_os::i18n::msg::widgets_tracks_normalize_loudness(),
             ] {
                 let lower = value.to_lowercase();
                 assert!(!lower.contains("plex pass"), "{language:?}: {value:?} names the gate");
@@ -3818,7 +4470,7 @@ mod enhancement_menu_tests {
     /// never heard the word "remux" and should not need to.
     #[test]
     fn enh_notes_and_reasons_never_use_jargon() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_os::i18n::{language_on_this_thread_for_test};
         const BANNED: &[&str] = &[
             "remux",
             "transcode",
@@ -3830,19 +4482,21 @@ mod enhancement_menu_tests {
             "base layer",
             "hdr10",
         ];
-        for language in [Preference::En, Preference::Es, Preference::Be] {
+        for language in plx_os::i18n::SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
             for (name, value) in [
-                ("enh_note_sidecar", plx_platform::i18n::msg::widgets_tracks_enh_note_sidecar()),
-                ("enh_note_burn", plx_platform::i18n::msg::widgets_tracks_enh_note_burn()),
-                ("enh_note_dv_off", plx_platform::i18n::msg::widgets_tracks_enh_note_dv_off()),
-                ("enh_reason_not_analyzed", plx_platform::i18n::msg::widgets_tracks_enh_reason_not_analyzed()),
-                ("enh_reason_dv_unusable", plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_unusable()),
-                ("enh_reason_dv_subtitle", plx_platform::i18n::msg::widgets_tracks_enh_reason_dv_subtitle()),
-                ("enh_reason_quality", plx_platform::i18n::msg::widgets_tracks_enh_reason_quality()),
-                ("enh_reason_refused", plx_platform::i18n::msg::widgets_tracks_enh_reason_refused()),
-                ("sub_burn_audio", plx_platform::i18n::msg::widgets_tracks_sub_burn_audio()),
-                ("sub_burn_quality", plx_platform::i18n::msg::widgets_tracks_sub_burn_quality()),
+                ("enh_note_sidecar", plx_os::i18n::msg::widgets_tracks_enh_note_sidecar()),
+                ("enh_note_burn", plx_os::i18n::msg::widgets_tracks_enh_note_burn()),
+                ("enh_reason_not_analyzed", plx_os::i18n::msg::widgets_tracks_enh_reason_not_analyzed()),
+                ("enh_reason_dv_unusable", plx_os::i18n::msg::widgets_tracks_enh_reason_dv_unusable()),
+                ("enh_reason_dv_subtitle", plx_os::i18n::msg::widgets_tracks_enh_reason_dv_subtitle()),
+                ("enh_reason_quality", plx_os::i18n::msg::widgets_tracks_enh_reason_quality()),
+                ("enh_reason_converting", plx_os::i18n::msg::widgets_tracks_enh_reason_converting()),
+                ("enh_reason_forced", plx_os::i18n::msg::widgets_tracks_enh_reason_forced()),
+                ("enh_reason_not_copyable", plx_os::i18n::msg::widgets_tracks_enh_reason_not_copyable()),
+                ("enh_reason_refused", plx_os::i18n::msg::widgets_tracks_enh_reason_refused()),
+                ("sub_burn_audio", plx_os::i18n::msg::widgets_tracks_sub_burn_audio()),
+                ("sub_burn_quality", plx_os::i18n::msg::widgets_tracks_sub_burn_quality()),
             ] {
                 let lower = value.to_lowercase();
                 for word in BANNED {
@@ -3867,7 +4521,7 @@ mod enhancement_menu_tests {
     /// string back; do not assume either phrase's width from the source text alone.
     #[test]
     fn enh_rows_fit_menu_cap_es_be() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let mut out = Vec::new();
         for language in SHIPPED {
             let _g = plx_base::testlock::serial();
@@ -3891,14 +4545,61 @@ mod enhancement_menu_tests {
     #[test]
     fn a_converted_track_names_the_server_on_its_sub_line_and_a_playable_one_does_not() {
         let _g = plx_base::testlock::serial();
-        assert_eq!(audio_sub_line_for("AAC 7.1".into(), true), "AAC 7.1 \u{b7} converted by your server");
-        assert_eq!(audio_sub_line_for("Dolby Digital 5.1".into(), false), "Dolby Digital 5.1");
-        assert_eq!(audio_sub_line_for(String::new(), true), "", "no descriptor, nothing to extend");
+        assert_eq!(audio_sub_line_for("AAC 7.1".into(), true, false), "AAC 7.1 \u{b7} converted by your server");
+        assert_eq!(audio_sub_line_for("Dolby Digital 5.1".into(), false, false), "Dolby Digital 5.1");
+        assert_eq!(audio_sub_line_for(String::new(), true, false), "", "no descriptor, nothing to extend");
+        assert_eq!(audio_sub_line_for(String::new(), false, true), "", "no descriptor, nothing to extend");
+        assert_eq!(
+            audio_sub_line_for("DTS 5.1".into(), true, true),
+            "DTS 5.1 \u{b7} converted by your server",
+            "the server mark outranks the app's"
+        );
         // the capability answer it is fed: TrueHD is outside the profile's audio list, AC-3 is not
         let truehd = metadata::Stream { codec: "truehd".into(), channels: 8, ..Default::default() };
         let ac3 = metadata::Stream { codec: "ac3".into(), channels: 6, ..Default::default() };
-        assert!(plx_media::route::audio_converted_by_server(&truehd.codec, truehd.channels));
-        assert!(!plx_media::route::audio_converted_by_server(&ac3.codec, ac3.channels));
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        assert!(plx_media::route::audio_converted_by_server(&ps, &truehd.codec, truehd.channels, truehd.sampling_rate));
+        assert!(!plx_media::route::audio_converted_by_server(&ps, &ac3.codec, ac3.channels, ac3.sampling_rate));
+    }
+
+    /// **A surround track the app decodes says it plays in stereo** (Auto's very last rung, which put DTS
+    /// in force on a set whose pipeline refused it): the descriptor alone ("DTS 5.1") would promise a
+    /// layout the downmix does not keep. Force Direct Play never takes a surround track down, so it says
+    /// nothing of the kind there. A stereo track, a track the set decodes itself and a codec nothing
+    /// enabled say nothing extra, and the server mark outranks it.
+    #[test]
+    fn an_app_decoded_surround_track_says_it_plays_in_stereo() {
+        let _g = plx_base::testlock::serial();
+        assert_eq!(audio_sub_line_for("DTS 7.1".into(), false, true), "DTS 7.1 \u{b7} played in stereo");
+        assert_eq!(audio_sub_line_for("DTS 7.1".into(), false, false), "DTS 7.1");
+        let dts = |channels| metadata::Stream { codec: "dca".into(), channels, sampling_rate: 48_000, ..Default::default() };
+        let measured = std::sync::Arc::new(plx_os::devcaps::Caps {
+            app_lossy: plx_os::devcaps::AppLossy::Measured,
+            ..plx_os::devcaps::Caps::assumed()
+        });
+        let mut ps = plx_media::route::PlaybackSession::IDLE;
+        plx_media::route::begin_attempt_for_test(&mut ps, measured.clone());
+        assert_eq!(audio_sub_line(&ps, "DTS 5.1".into(), &dts(6)), "DTS 5.1 \u{b7} converted by your server", "Auto: the server converts it");
+        // The recovery's last rung put DTS in force: the attempt now plays the 5.1 track as stereo.
+        let rung = std::sync::Arc::new((*measured).clone().with_app_lossy_for("dts"));
+        plx_media::route::begin_attempt_for_test(&mut ps, rung.clone());
+        assert_eq!(audio_sub_line(&ps, "DTS 5.1".into(), &dts(6)), "DTS 5.1 \u{b7} played in stereo");
+        assert_eq!(audio_sub_line(&ps, "DTS 2.0".into(), &dts(2)), "DTS 2.0", "a stereo track is not a downmix");
+        // Force Direct Play refuses a surround track the set cannot decode instead of mixing it down, even
+        // with the codec in force: no mark, because nothing plays it.
+        plx_media::route::set_direct_play_mode_for_test(&mut ps, plx_media::route::DirectPlayMode::Forced);
+        assert_eq!(audio_sub_line(&ps, "DTS 5.1".into(), &dts(6)), "DTS 5.1", "Forced: no downmix, so no mark");
+        plx_media::route::begin_attempt_for_test(&mut ps, measured.clone());
+        assert_eq!(audio_sub_line(&ps, "DTS 5.1".into(), &dts(6)), "DTS 5.1", "Forced on a measured set: the refusal, no mark");
+        let truehd = metadata::Stream { codec: "truehd".into(), channels: 8, sampling_rate: 48_000, ..Default::default() };
+        assert_eq!(audio_sub_line(&ps, "Dolby TrueHD 7.1".into(), &truehd), "Dolby TrueHD 7.1", "unmeasured: not decoded here");
+        let native = std::sync::Arc::new(plx_os::devcaps::Caps {
+            audio: "aac,ac3,eac3,dts".into(),
+            audio_channels: [("dts".into(), 6)].into(),
+            ..(*measured).clone()
+        });
+        plx_media::route::begin_attempt_for_test(&mut ps, native);
+        assert_eq!(audio_sub_line(&ps, "DTS 5.1".into(), &dts(6)), "DTS 5.1", "the set decodes it itself");
     }
 
     /// **The longest converted sub-line fits the Audio panel in every shipped language** — graded
@@ -3906,18 +4607,31 @@ mod enhancement_menu_tests {
     /// (`Dolby Digital Plus 7.1`, `Dolby TrueHD 7.1`).
     #[test]
     fn converted_audio_sub_lines_fit_the_panel_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let mut out = Vec::new();
         for language in SHIPPED {
             let _g = plx_base::testlock::serial();
             let _guard = language_on_this_thread_for_test(language);
-            let (ps, _sid) = enhancement_test_session(EnhTestFixture::default());
+            let (mut ps, _sid) = enhancement_test_session(EnhTestFixture::default());
             let mk = |id: i64, codec: &str| metadata::Stream {
                 id, index: id, lang: "English".into(), lang_code: "eng".into(),
                 codec: codec.into(), channels: 8, layout: "7.1".into(), default: id == 1, ..Default::default()
             };
             let store = super::tests::store_with_audio(vec![mk(1, "truehd"), mk(2, "eac3"), mk(3, "dts")]);
             let menu = TrackMenuState::new(&ps, store.view(), 0, Vec::new());
+            out.extend(menu.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, language.tag()));
+            // The same track menu once the recovery's last rung put DTS in force on a measured set: the DTS
+            // 7.1 track is decoded in the app, and its "played in stereo" line is graded the same way.
+            plx_media::route::begin_attempt_for_test(&mut ps, std::sync::Arc::new(
+                plx_os::devcaps::Caps {
+                    app_lossy: plx_os::devcaps::AppLossy::Measured,
+                    ..plx_os::devcaps::Caps::assumed()
+                }
+                .with_app_lossy_for("dts"),
+            ));
+            let menu = TrackMenuState::new(&ps, store.view(), 0, Vec::new());
+            let line = audio_sub_line(&ps, "DTS 7.1".into(), &mk(3, "dts"));
+            assert_ne!(line, "DTS 7.1", "{}: the app-decoded track says so", language.tag());
             out.extend(menu.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, language.tag()));
             teardown(&ps);
         }
@@ -3959,19 +4673,19 @@ mod enhancement_menu_tests {
         let timing_i = menu.form.index_of(&TrackRow::Timing).expect("Timing row present");
         let style_i = menu.form.index_of(&TrackRow::Style).expect("Style row present");
         let rows = flat_rows(&menu);
-        assert!(rows[timing_i].dim, "Timing is dim under a live burn");
-        assert!(rows[style_i].dim, "Style is dim under a live burn");
+        assert!(rows[timing_i].disabled, "Timing is disabled under a live burn");
+        assert!(rows[style_i].disabled, "Style is disabled under a live burn");
 
         let note_i = style_i + 1;
         assert_eq!(menu.form.id_at(note_i), None, "a note is an inert slot with no id");
-        assert_eq!(rows[note_i].label, plx_platform::i18n::msg::widgets_tracks_sub_burn_audio());
+        assert_eq!(rows[note_i].label, plx_os::i18n::msg::widgets_tracks_sub_burn_audio());
         assert!(rows[note_i].sep, "a note row is non-selectable");
 
         // The track rows themselves stay live: Off, and the embedded subtitle, neither dim.
         let off_i = menu.form.index_of(&TrackRow::SubOff).expect("Off row present");
-        assert!(!rows[off_i].dim);
+        assert!(!rows[off_i].disabled);
         let sub_i = menu.form.index_of(&TrackRow::Sub(0)).expect("Sub(0) row present");
-        assert!(!rows[sub_i].dim);
+        assert!(!rows[sub_i].disabled);
 
         teardown(&ps);
     }
@@ -3992,7 +4706,7 @@ mod enhancement_menu_tests {
         });
         assert!(!menu.server_burn_built());
         let timing_i = menu.form.index_of(&TrackRow::Timing).expect("Timing row present");
-        assert!(!flat_rows(&menu)[timing_i].dim);
+        assert!(!flat_rows(&menu)[timing_i].disabled);
         assert!(!menu.form.table.sections.iter().flat_map(|s| s.rows.iter()).any(|r| r.is_note()));
         teardown(&ps);
     }
@@ -4006,7 +4720,7 @@ mod enhancement_menu_tests {
         for (route, reason) in [
             (
                 EnhTestFixture { remux: Some(true), subtitle_effect: plx_media::route::SubtitleEffect::Embedded, ..Default::default() },
-                plx_platform::i18n::msg::widgets_tracks_sub_burn_audio(),
+                plx_os::i18n::msg::widgets_tracks_sub_burn_audio(),
             ),
             (
                 EnhTestFixture {
@@ -4015,14 +4729,14 @@ mod enhancement_menu_tests {
                     subtitle_effect: plx_media::route::SubtitleEffect::Embedded,
                     ..Default::default()
                 },
-                plx_platform::i18n::msg::widgets_tracks_sub_burn_quality(),
+                plx_os::i18n::msg::widgets_tracks_sub_burn_quality(),
             ),
         ] {
             let (mut menu, ps) = subtitles_tab(route);
             let timing_i = menu.form.index_of(&TrackRow::Timing).expect("Timing stays in the menu");
             let style_i = menu.form.index_of(&TrackRow::Style).expect("Style stays in the menu");
             let rows = flat_rows(&menu);
-            assert!(rows[timing_i].dim && rows[style_i].dim, "both dim");
+            assert!(rows[timing_i].disabled && rows[style_i].disabled, "both disabled");
             assert_eq!(menu.form.id_at(style_i + 1), None, "the reason is an inert slot");
             assert_eq!(rows[style_i + 1].label, reason);
             let store = super::tests::store_with(vec![super::tests::stream(999, 0, "English", "eng", "")]);
@@ -4053,7 +4767,7 @@ mod enhancement_menu_tests {
         let timing_i = menu.form.index_of(&TrackRow::Timing).expect("Timing row present");
         let style_i = menu.form.index_of(&TrackRow::Style).expect("Style row present");
         let rows = flat_rows(&menu);
-        assert!(!rows[timing_i].dim && !rows[style_i].dim, "both live");
+        assert!(!rows[timing_i].disabled && !rows[style_i].disabled, "both live");
         assert!(!menu.form.table.sections.iter().flat_map(|s| s.rows.iter()).any(|r| r.is_note()), "no reason line");
         teardown(&ps);
     }
@@ -4077,7 +4791,7 @@ mod enhancement_menu_tests {
         let timing_i = menu.form.index_of(&TrackRow::Timing).expect("Timing row present");
         let style_i = menu.form.index_of(&TrackRow::Style).expect("Style row present");
         let rows = flat_rows(&menu);
-        assert!(!rows[timing_i].dim && !rows[style_i].dim, "both live");
+        assert!(!rows[timing_i].disabled && !rows[style_i].disabled, "both live");
         assert!(!rows.iter().any(|r| r.is_note()), "no reason line");
         teardown(&ps);
     }
@@ -4094,7 +4808,7 @@ mod enhancement_menu_tests {
         let timing_i = menu.form.index_of(&TrackRow::Timing).expect("Timing");
         let style_i = menu.form.index_of(&TrackRow::Style).expect("Style");
         let rows = flat_rows(&menu);
-        assert!(!rows[timing_i].dim && !rows[style_i].dim);
+        assert!(!rows[timing_i].disabled && !rows[style_i].disabled);
         assert!(!rows.iter().any(|r| r.is_note()));
         teardown(&ps);
     }
@@ -4190,7 +4904,7 @@ mod enhancement_menu_tests {
         assert_eq!(menu.active_sub, 0, "the embedded track must read checked once the route shows it");
         assert!(menu.server_burn_built(), "Color/Timing must lock once the live route is really a Burn");
         let style_i = menu.form.index_of(&TrackRow::Style).expect("Style row present");
-        assert!(flat_rows(&menu)[style_i].dim, "Style must actually redraw dim, not just flag it internally");
+        assert!(flat_rows(&menu)[style_i].disabled, "Style must actually redraw disabled, not just flag it internally");
         let off_i = menu.form.index_of(&TrackRow::SubOff).expect("Off row present");
         assert!(!flat_rows(&menu)[off_i].checked, "Off must no longer read checked");
         let sub_i = menu.form.index_of(&TrackRow::Sub(0)).expect("Sub(0) row present");
@@ -4203,9 +4917,9 @@ mod enhancement_menu_tests {
     /// `enh_rows_fit_menu_cap_es_be` over the Audio panel.
     #[test]
     fn subtitles_locked_note_fits_menu_cap_es_be() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_os::i18n::{language_on_this_thread_for_test};
         let mut out = Vec::new();
-        for language in [Preference::En, Preference::Es, Preference::Be] {
+        for language in plx_os::i18n::SHIPPED {
             let _g = plx_base::testlock::serial();
             let _guard = language_on_this_thread_for_test(language);
             // the audio-conversion reason (a remux) and the quality reason, as well as the own burn
@@ -4233,6 +4947,168 @@ mod enhancement_menu_tests {
         plx_ui::table::assert_no_fit_failures(&out);
     }
 
+    /// The note rows a Subtitles tab draws, in order.
+    fn notes(menu: &TrackMenuState) -> Vec<String> {
+        flat_rows(menu).into_iter().filter(|r| r.is_note()).map(|r| r.label.clone()).collect()
+    }
+
+    /// **Track memory (C4): a remembered subtitle the route cannot show says so.** On a copy remux
+    /// the app cannot draw, the show's remembered subtitle is not on screen and Off reads checked;
+    /// without a reason the viewer would take the choice for forgotten. The reason is one inert
+    /// note under the first group (Off and the tracks), shown only while the landing set it.
+    #[test]
+    fn a_remembered_subtitle_the_route_cannot_show_is_explained_under_the_first_group() {
+        let _g = plx_base::testlock::serial();
+        let (without, ps_without) = subtitles_tab(EnhTestFixture { remux: Some(true), ..Default::default() });
+        assert!(notes(&without).is_empty(), "no landing note, no row: {:?}", notes(&without));
+        teardown(&ps_without);
+
+        let (menu, ps) =
+            subtitles_tab(EnhTestFixture { remux: Some(true), memory_note: true, ..Default::default() });
+        assert_eq!(notes(&menu), vec![plx_os::i18n::msg::widgets_tracks_sub_remembered_note()]);
+        let rows = flat_rows(&menu);
+        let note_i = rows.iter().position(|r| r.is_note()).expect("the note row");
+        assert_eq!(menu.form.id_at(note_i), None, "a note is an inert slot with no id");
+        let off_i = menu.form.index_of(&TrackRow::SubOff).expect("Off row present");
+        let sub_i = menu.form.index_of(&TrackRow::Sub(0)).expect("Sub(0) row present");
+        assert!(off_i < sub_i && sub_i < note_i, "the note closes the first group, after Off and the track");
+        assert_eq!(menu.form.index_of(&TrackRow::Timing), None, "an Off remux omits Timing, so the note is last");
+        assert_eq!(note_i, rows.len() - 1);
+        assert!(rows[off_i].checked, "Off is what is on screen, which is what the note explains");
+        teardown(&ps);
+    }
+
+    /// The note follows the landing: a panel opened without it gains it when the poll sees the
+    /// flag ([`SubSig`] carries it), and loses it when the flag clears.
+    #[test]
+    fn the_poll_adds_and_drops_the_remembered_note_with_the_landing() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, _ps_before) = subtitles_tab(EnhTestFixture { remux: Some(true), ..Default::default() });
+        assert!(notes(&menu).is_empty());
+        let store = super::tests::store_with(vec![super::tests::stream(999, 0, "English", "eng", "")]);
+
+        let (with, _sid) =
+            enhancement_test_session(EnhTestFixture { remux: Some(true), memory_note: true, ..Default::default() });
+        menu.update(0.016, &plx_ui::fixture::FixtureMeasure, &with, store.view());
+        assert_eq!(notes(&menu), vec![plx_os::i18n::msg::widgets_tracks_sub_remembered_note()]);
+
+        let (without, _sid) = enhancement_test_session(EnhTestFixture { remux: Some(true), ..Default::default() });
+        menu.update(0.016, &plx_ui::fixture::FixtureMeasure, &without, store.view());
+        assert!(notes(&menu).is_empty(), "{:?}", notes(&menu));
+        teardown(&without);
+    }
+
+    /// What OK on `row` of the Subtitles tab commits: the picked stream and the descriptor to
+    /// remember.
+    fn sub_commit_of(
+        menu: &mut TrackMenuState,
+        store: &plx_data::stores::metadata::MetadataStore,
+        row: TrackRow,
+    ) -> (i64, Option<plx_plex::plex::session::prefs::SubtitleMemo>) {
+        let at = menu.form.index_of(&row).expect("the row is on the page");
+        menu.focus_row(at as c_int);
+        match menu.on_ok(store.view()) {
+            TrackOk::Commit { commit: TrackCommit::Subtitle { stream_id, memo, .. }, .. } => (stream_id, memo),
+            other => panic!("{row:?} did not commit a subtitle: {other:?}"),
+        }
+    }
+
+    /// **Closing the menu with OK is not a choice (track memory, an automatic pick is not written).**
+    /// The panel opens on the checked row, so on a show whose ladder landed on Off (the note case:
+    /// the route can show none of the remembered subtitle) one OK on Off would write an absolute Off
+    /// over the very track the note is about. An OK on what is already shown commits, so the route
+    /// republishes, and carries no memo; the control is a change, which does.
+    #[test]
+    fn an_ok_on_what_the_route_already_shows_remembers_nothing() {
+        use plx_plex::plex::session::prefs::SubtitleMemo;
+        let _g = plx_base::testlock::serial();
+        let store = super::tests::store_with(vec![super::tests::stream(999, 0, "English", "eng", "")]);
+
+        // the note state: Off is on screen because the route could show nothing
+        let (mut menu, ps) =
+            subtitles_tab(EnhTestFixture { remux: Some(true), memory_note: true, ..Default::default() });
+        assert_eq!(sub_commit_of(&mut menu, &store, TrackRow::SubOff), (0, None), "OK on the checked Off under the note");
+        assert!(
+            sub_commit_of(&mut menu, &store, TrackRow::Sub(0)).1.is_some(),
+            "control: a different row is a change and carries its descriptor"
+        );
+        assert_eq!(
+            sub_commit_of(&mut menu, &store, TrackRow::SubOff),
+            (0, Some(SubtitleMemo::Off)),
+            "control: Off after a track is a change, remembered as Off"
+        );
+        teardown(&ps);
+
+        // a track the ladder chose: OK on it is not a choice either
+        let (mut menu, ps) = subtitles_tab(EnhTestFixture {
+            remux: Some(true),
+            subtitle_effect: plx_media::route::SubtitleEffect::Embedded,
+            ..Default::default()
+        });
+        assert_eq!(sub_commit_of(&mut menu, &store, TrackRow::Sub(0)), (999, None), "OK on the checked track");
+        teardown(&ps);
+    }
+
+    /// **The note goes when a pick the app draws in place replaces what it explained.** On the copy
+    /// remux the viewer's sidecar is drawn over the stream, so no landing ever runs to clear the
+    /// flag; the note would go on saying the chosen subtitle cannot be shown under a visible
+    /// subtitle. The next poll drops it. The control is the press that changes nothing: Off under
+    /// the note, which the route already shows and which writes nothing, leaves the note true.
+    #[test]
+    fn an_in_place_pick_drops_the_remembered_note_on_the_next_poll() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, mut ps) =
+            subtitles_tab(EnhTestFixture { remux: Some(true), memory_note: true, ..Default::default() });
+        let store = super::tests::store_with(vec![super::tests::stream(999, 0, "English", "eng", "")]);
+        let note = vec![plx_os::i18n::msg::widgets_tracks_sub_remembered_note()];
+        assert_eq!(notes(&menu), note, "setup: the note is up");
+
+        plx_media::route::commit_subtitle_pick(&mut ps, -1, 0, false, None);
+        menu.update(0.016, &plx_ui::fixture::FixtureMeasure, &ps, store.view());
+        assert_eq!(notes(&menu), note, "control: Off under the note changes nothing on screen, so the note is still true");
+
+        plx_media::route::commit_subtitle_pick(&mut ps, -1, 78, true, None);
+        assert!(!plx_media::route::cur_memory_note(&ps), "a sidecar is on screen now");
+        menu.update(0.016, &plx_ui::fixture::FixtureMeasure, &ps, store.view());
+        assert!(notes(&menu).is_empty(), "{:?}", notes(&menu));
+        teardown(&ps);
+    }
+
+    /// **The remembered-subtitle note fits the Subtitles panel in every shipped language**
+    /// (`i18n::SHIPPED`, so a language added later is graded without touching this test), at the
+    /// shared menu cap and at the hugged width, with the real font measure.
+    #[test]
+    fn the_remembered_note_fits_the_subtitles_panel_in_every_shipped_language() {
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
+        let mut out = Vec::new();
+        for language in SHIPPED {
+            let _g = plx_base::testlock::serial();
+            let _guard = language_on_this_thread_for_test(language);
+            let (menu, ps) =
+                subtitles_tab(EnhTestFixture { remux: Some(true), memory_note: true, ..Default::default() });
+            assert_eq!(notes(&menu), vec![plx_os::i18n::msg::widgets_tracks_sub_remembered_note()], "{language:?}");
+            out.extend(menu.form.table.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, language.tag()));
+            out.extend(menu.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, language.tag()));
+            out.extend(menu.form.table.app_fit_failures_hugged(language.tag()));
+            teardown(&ps);
+        }
+        plx_ui::table::assert_no_fit_failures(&out);
+    }
+
+    /// The note says what is true in plain words in every shipped language: no engineering term a
+    /// viewer should not have to learn.
+    #[test]
+    fn the_remembered_note_never_uses_jargon() {
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            let note = plx_os::i18n::msg::widgets_tracks_sub_remembered_note().to_lowercase();
+            for word in ["remux", "transcode", "burn", "re-encode", "reencode", "sidecar"] {
+                assert!(!note.contains(word), "{language:?}: {note:?} uses the banned engineering term {word:?}");
+            }
+        }
+    }
+
     /// **The Spanish locked-style note WRAPS instead of running off the panel**: the fit gate now
     /// judges the note row, and its row is as tall as its wrapped lines.
     #[test]
@@ -4240,7 +5116,7 @@ mod enhancement_menu_tests {
         use plx_machine::machine::Measure;
         use plx_base::fontcov::advances::ShippedMeasure;
         use plx_ui::fit::HEADROOM;
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_os::i18n::{language_on_this_thread_for_test, Preference};
         let _g = plx_base::testlock::serial();
         let _guard = language_on_this_thread_for_test(Preference::Es);
         let (menu, ps) = subtitles_tab(EnhTestFixture {
@@ -4249,7 +5125,7 @@ mod enhancement_menu_tests {
             applied_burn: true,
             ..Default::default()
         });
-        let note = plx_platform::i18n::msg::widgets_tracks_sub_burn_audio();
+        let note = plx_os::i18n::msg::widgets_tracks_sub_burn_audio();
         let line = ShippedMeasure.width_str(&note, plx_ui::theme::size::CAPTION, false);
         let before = menu.form.table.measured_height();
         let pw = menu.form.table.menu_panel_width(&ShippedMeasure);
@@ -4261,10 +5137,473 @@ mod enhancement_menu_tests {
     }
 }
 
+/// **Forced only (FO)**: the row after Off, the one checkmark, what OK
+/// on it commits and remembers, and the read-out that tells the audio's language from the
+/// account setting's.
+#[cfg(test)]
+mod forced_only_tests {
+    use super::tests::stream;
+    use super::*;
+    use plx_media::route::{
+        enhancement_test_session, reset_player_control_for_test, set_forced_only_lang_for_test, set_sub_mode_for_test,
+        EnhTestFixture, SubMode, SubtitleEffect,
+    };
+    use plx_plex::plex::session::prefs::SubtitleMemo;
+
+    fn audio(id: i64, lang: &str, code: &str) -> metadata::Stream {
+        metadata::Stream {
+            id,
+            index: 0,
+            lang: lang.into(),
+            lang_code: code.into(),
+            codec: "eac3".into(),
+            channels: 6,
+            default: true,
+            ..Default::default()
+        }
+    }
+
+    fn forced(id: i64, index: i64, lang: &str, code: &str) -> metadata::Stream {
+        metadata::Stream { forced: true, ..stream(id, index, lang, code, "") }
+    }
+
+    fn store_of(audio: Vec<metadata::Stream>, subs: Vec<metadata::Stream>) -> plx_data::stores::metadata::MetadataStore {
+        let mut store = plx_data::stores::metadata::MetadataStore::default();
+        let mut item = metadata::PlayingItem::with_subs(subs);
+        item.audio = audio;
+        assert!(store.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(item))));
+        store
+    }
+
+    /// The Subtitles tab on a direct play in `mode`. `drawn` is `Embedded` when the route shows a
+    /// track (`enhancement_test_session` names it stream 999) or `None` when it shows nothing.
+    /// Caller holds `testlock::serial()` and tears the session down.
+    fn open(
+        mode: SubMode,
+        drawn: SubtitleEffect,
+        audio: Vec<metadata::Stream>,
+        subs: Vec<metadata::Stream>,
+    ) -> (TrackMenuState, plx_media::route::PlaybackSession, plx_data::stores::metadata::MetadataStore) {
+        open_with_fallback(mode, drawn, audio, subs, "")
+    }
+
+    /// [`open`] on a session whose Forced only falls back to `fallback` for audio that names no
+    /// language (what a landing under a Forced only memo recorded).
+    fn open_with_fallback(
+        mode: SubMode,
+        drawn: SubtitleEffect,
+        audio: Vec<metadata::Stream>,
+        subs: Vec<metadata::Stream>,
+        fallback: &str,
+    ) -> (TrackMenuState, plx_media::route::PlaybackSession, plx_data::stores::metadata::MetadataStore) {
+        let (mut ps, _sid) = enhancement_test_session(EnhTestFixture {
+            remux: None,
+            subtitle_effect: drawn,
+            ..Default::default()
+        });
+        set_sub_mode_for_test(&mut ps, mode);
+        if !fallback.is_empty() {
+            set_forced_only_lang_for_test(&mut ps, fallback);
+        }
+        let store = store_of(audio, subs);
+        let menu = TrackMenuState::new(&ps, store.view(), 1, vec!["eng".into()]);
+        (menu, ps, store)
+    }
+
+    fn teardown(ps: &plx_media::route::PlaybackSession) {
+        reset_player_control_for_test(ps);
+        plx_plex::plex::reset_servers_for_test();
+    }
+
+    fn rows(menu: &TrackMenuState) -> Vec<&Row> {
+        menu.form.table.sections.iter().flat_map(|s| &s.rows).collect()
+    }
+
+    fn row_of(menu: &TrackMenuState, id: TrackRow) -> &Row {
+        rows(menu)[menu.form.index_of(&id).unwrap_or_else(|| panic!("{id:?} is not on this page"))]
+    }
+
+    /// The rows carrying a checkmark, by identity.
+    fn checked(menu: &TrackMenuState) -> Vec<TrackRow> {
+        let flags: Vec<bool> = rows(menu).iter().map(|r| r.checked).collect();
+        let ids = menu.ids();
+        // notes carry no id, so line the ids up with the focusable rows only
+        let focusable: Vec<bool> = (0..flags.len()).filter(|&i| menu.form.id_at(i).is_some()).map(|i| flags[i]).collect();
+        ids.into_iter().zip(focusable).filter(|(_, c)| *c).map(|(id, _)| id).collect()
+    }
+
+    fn ok_on(menu: &mut TrackMenuState, store: &plx_data::stores::metadata::MetadataStore, id: TrackRow) -> TrackOk {
+        let i = menu.form.index_of(&id).unwrap_or_else(|| panic!("{id:?} is not on this page"));
+        menu.focus_row(i as c_int);
+        menu.on_ok(store.view())
+    }
+
+    fn english_with_a_forced_track() -> Vec<metadata::Stream> {
+        vec![stream(1, 0, "English", "eng", ""), forced(999, 1, "English", "eng")]
+    }
+
+    /// **One checkmark.** While Forced only is the mode the check sits on its row and nowhere
+    /// else: not on Off, and not on the forced track it drew (whose own row stays unchecked). The
+    /// row reads out the drawn track's language. Outside the mode the drawn track is the checked
+    /// one and the Forced only row is plain.
+    #[test]
+    fn the_check_is_on_forced_only_and_not_on_the_track_it_drew() {
+        let _g = plx_base::testlock::serial();
+        let (menu, ps, _store) = open(
+            SubMode::ForcedOnly,
+            SubtitleEffect::Embedded,
+            vec![audio(10, "English", "eng")],
+            english_with_a_forced_track(),
+        );
+        assert_eq!(menu.ids()[..2], [TrackRow::SubOff, TrackRow::SubForcedOnly], "directly after Off");
+        assert_eq!(checked(&menu), [TrackRow::SubForcedOnly], "exactly one checkmark, on Forced only");
+        assert_eq!(row_of(&menu, TrackRow::SubForcedOnly).value.as_deref(), Some("English"), "it reads out the language");
+        assert_eq!(menu.selected_id(), Some(TrackRow::SubForcedOnly), "the cursor lands on the checked row");
+        assert!(menu.forced_only() && menu.active_sub() == 1, "the mode, and the track it drew");
+        teardown(&ps);
+
+        let (menu, ps, _store) = open(
+            SubMode::Track,
+            SubtitleEffect::Embedded,
+            vec![audio(10, "English", "eng")],
+            english_with_a_forced_track(),
+        );
+        assert_eq!(checked(&menu), [TrackRow::Sub(1)], "control: a picked track carries the check");
+        assert_eq!(row_of(&menu, TrackRow::SubForcedOnly).value, None, "and the plain row reads out nothing");
+        teardown(&ps);
+    }
+
+    /// The one checkmark holds behind Other languages too: a forced track whose language is not
+    /// "yours" is reached through that row and its page, and neither shows a check while Forced
+    /// only is the mode.
+    #[test]
+    fn the_check_is_not_on_other_languages_or_its_pages_under_forced_only() {
+        let _g = plx_base::testlock::serial();
+        let subs = vec![stream(1, 0, "English", "eng", ""), forced(999, 1, "German", "deu")];
+        let (mut menu, ps, _store) =
+            open(SubMode::ForcedOnly, SubtitleEffect::Embedded, vec![audio(10, "German", "deu")], subs.clone());
+        assert_eq!(checked(&menu), [TrackRow::SubForcedOnly]);
+        assert!(!row_of(&menu, TrackRow::OpenOther).checked, "the drawn track sits behind Other languages, unchecked");
+        assert_eq!(row_of(&menu, TrackRow::OpenOther).value.as_deref(), Some("1"), "it counts languages, it does not name one");
+        menu.push(TrackPage::OtherLanguages);
+        assert_eq!(checked(&menu), Vec::<TrackRow>::new(), "no checkmark on the page either");
+        teardown(&ps);
+
+        let (mut menu, ps, _store) = open(SubMode::Track, SubtitleEffect::Embedded, vec![audio(10, "German", "deu")], subs);
+        assert_eq!(checked(&menu), [TrackRow::OpenOther], "control: a picked track behind it checks the row");
+        menu.push(TrackPage::OtherLanguages);
+        assert_eq!(checked(&menu), [TrackRow::Sub(1)]);
+        teardown(&ps);
+    }
+
+    /// Timing follows whether a track is DRAWN, not which row holds the check: dim and inert while
+    /// Forced only shows nothing, live once it draws a track. The read-out names the language it
+    /// looked for when nothing matched.
+    #[test]
+    fn timing_is_dim_while_forced_only_draws_nothing_and_live_once_it_draws() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, ps, store) = open(
+            SubMode::ForcedOnly,
+            SubtitleEffect::None,
+            vec![audio(10, "Japanese", "jpn")],
+            english_with_a_forced_track(),
+        );
+        assert_eq!(checked(&menu), [TrackRow::SubForcedOnly]);
+        assert_eq!(
+            row_of(&menu, TrackRow::SubForcedOnly).value.as_deref(),
+            Some("Japanese"),
+            "nothing matched: the language it looked for, the audio's"
+        );
+        assert!(row_of(&menu, TrackRow::Timing).dim, "nothing is drawn");
+        assert_eq!(ok_on(&mut menu, &store, TrackRow::Timing), TrackOk::Inert);
+        teardown(&ps);
+
+        let (mut menu, ps, store) = open(
+            SubMode::ForcedOnly,
+            SubtitleEffect::Embedded,
+            vec![audio(10, "English", "eng")],
+            english_with_a_forced_track(),
+        );
+        assert!(!row_of(&menu, TrackRow::Timing).dim, "a forced track is drawn");
+        assert_eq!(ok_on(&mut menu, &store, TrackRow::Timing), TrackOk::OpenTiming);
+        teardown(&ps);
+    }
+
+    fn forced_commit(ok: TrackOk) -> (c_int, i64, String, bool) {
+        match ok {
+            TrackOk::Commit {
+                commit: TrackCommit::SubtitleForcedOnly { render_ordinal, stream_id, lang, changed },
+                keep_open: false,
+            } => (render_ordinal, stream_id, lang, changed),
+            other => panic!("not a Forced only commit: {other:?}"),
+        }
+    }
+
+    /// **OK on Forced only commits the forced track for the AUDIO that plays**, or nothing, and
+    /// says which language to remember: the drawn track's, else the audio's. A second OK on the row
+    /// that is already the mode closes the menu and changes nothing.
+    #[test]
+    fn ok_on_forced_only_commits_the_forced_track_in_the_playing_audios_language() {
+        let _g = plx_base::testlock::serial();
+        let subs = vec![stream(1, 0, "English", "eng", ""), forced(2, 1, "English", "eng"), forced(3, 2, "Spanish", "spa")];
+        let (mut menu, ps, store) = open(SubMode::Track, SubtitleEffect::None, vec![audio(10, "English", "eng")], subs.clone());
+        assert_eq!(
+            forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)),
+            (1, 2, "eng".to_string(), true),
+            "English audio: the English forced track, by its demuxer ordinal"
+        );
+        assert!(menu.forced_only() && menu.active_sub() == 1);
+        assert_eq!(
+            forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)),
+            (1, 2, "eng".to_string(), false),
+            "OK on the row that is the mode again changes nothing"
+        );
+        teardown(&ps);
+
+        let (mut menu, ps, store) = open(SubMode::Track, SubtitleEffect::None, vec![audio(10, "Spanish", "spa")], subs);
+        assert_eq!(
+            forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)),
+            (2, 3, "spa".to_string(), true),
+            "Spanish audio: the Spanish one"
+        );
+        teardown(&ps);
+    }
+
+    /// Forced only is offered and chosen where there is no forced track at all: it commits
+    /// nothing-on-screen, is still the mode, and is remembered with the audio's language.
+    #[test]
+    fn forced_only_with_no_forced_track_commits_nothing_and_is_still_the_mode() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, ps, store) = open(
+            SubMode::Off,
+            SubtitleEffect::None,
+            vec![audio(10, "English", "eng")],
+            vec![stream(1, 0, "English", "eng", "")],
+        );
+        assert_eq!(forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)), (-1, 0, "eng".to_string(), true));
+        assert!(menu.forced_only() && menu.active_sub() == -1);
+        teardown(&ps);
+
+        // untagged audio and no language to name: nothing to match, nothing to say
+        let (mut menu, ps, store) =
+            open(SubMode::Track, SubtitleEffect::None, vec![audio(10, "", "")], english_with_a_forced_track());
+        assert_eq!(forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)), (-1, 0, String::new(), true));
+        teardown(&ps);
+    }
+
+    /// **Untagged audio: the language the mode fell back to is what the row and the next episode
+    /// choose by.** An episode whose audio names no language drew its forced track through the
+    /// memo's language (`forced_only_lang`). OK on the CHECKED row, the natural way to dismiss the
+    /// menu it opened on, must recommit that track unchanged, not turn the subtitle off; "und" is
+    /// as untagged as nothing.
+    #[test]
+    fn ok_on_the_checked_forced_only_row_keeps_what_untagged_audio_drew() {
+        let _g = plx_base::testlock::serial();
+        for code in ["", "und"] {
+            let (mut menu, ps, store) = open_with_fallback(
+                SubMode::ForcedOnly,
+                SubtitleEffect::Embedded,
+                vec![audio(10, "", code)],
+                english_with_a_forced_track(),
+                "eng",
+            );
+            assert_eq!(menu.active_sub(), 1, "setup: the forced track is drawn ({code:?})");
+            assert_eq!(
+                forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)),
+                (1, 999, "eng".to_string(), false),
+                "{code:?}: the same track, the same stream, nothing changed"
+            );
+            assert!(menu.forced_only() && menu.active_sub() == 1, "{code:?}: and the mode is held");
+            teardown(&ps);
+        }
+
+        // Nothing drawn (no forced track in this item): the press commits nothing-on-screen and
+        // still names the fallback, never a blank language that would erase it.
+        let (mut menu, ps, store) = open_with_fallback(
+            SubMode::ForcedOnly,
+            SubtitleEffect::None,
+            vec![audio(10, "", "")],
+            vec![stream(1, 0, "English", "eng", "")],
+            "eng",
+        );
+        assert_eq!(forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)), (-1, 0, "eng".to_string(), false));
+        teardown(&ps);
+    }
+
+    /// Entering Forced only on untagged audio matches in the same language the resolve did: Off,
+    /// then Forced only, draws the memo-language forced track, and remembers that language. With no
+    /// fallback to name (a first press on an episode nothing remembered), it still finds nothing.
+    #[test]
+    fn entering_forced_only_on_untagged_audio_draws_the_fallback_languages_track() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, ps, store) = open_with_fallback(
+            SubMode::Off,
+            SubtitleEffect::None,
+            vec![audio(10, "", "")],
+            english_with_a_forced_track(),
+            "eng",
+        );
+        assert_eq!(
+            forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)),
+            (1, 999, "eng".to_string(), true),
+            "the route's own rule: the fallback language stands in for audio that names none"
+        );
+        assert!(menu.forced_only() && menu.active_sub() == 1);
+        teardown(&ps);
+
+        let (mut menu, ps, store) = open(SubMode::Off, SubtitleEffect::None, vec![audio(10, "", "")], english_with_a_forced_track());
+        assert_eq!(
+            forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)),
+            (-1, 0, String::new(), true),
+            "control: no fallback, no language to match in"
+        );
+        teardown(&ps);
+
+        // tagged audio wins over the fallback, as in the resolve
+        let (mut menu, ps, store) = open_with_fallback(
+            SubMode::Off,
+            SubtitleEffect::None,
+            vec![audio(10, "Spanish", "spa")],
+            vec![stream(1, 0, "English", "eng", ""), forced(2, 1, "English", "eng"), forced(3, 2, "Spanish", "spa")],
+            "eng",
+        );
+        assert_eq!(forced_commit(ok_on(&mut menu, &store, TrackRow::SubForcedOnly)), (2, 3, "spa".to_string(), true));
+        teardown(&ps);
+    }
+
+    /// The read-out names the language the mode looked in. Untagged audio with nothing drawn used to
+    /// read "Unknown" although the mode was looking in the fallback language; it names that one now,
+    /// by a track of the item that carries it. Without a fallback it is still "Unknown".
+    #[test]
+    fn the_readout_names_the_fallback_language_for_untagged_audio() {
+        let _g = plx_base::testlock::serial();
+        let subs = vec![stream(1, 0, "English", "eng", ""), forced(2, 1, "Spanish", "spa")];
+        let (menu, ps, _store) = open_with_fallback(
+            SubMode::ForcedOnly,
+            SubtitleEffect::None,
+            vec![audio(10, "", "")],
+            subs.clone(),
+            "eng",
+        );
+        assert_eq!(row_of(&menu, TrackRow::SubForcedOnly).value.as_deref(), Some("English"));
+        teardown(&ps);
+
+        let (menu, ps, _store) =
+            open(SubMode::ForcedOnly, SubtitleEffect::None, vec![audio(10, "", "")], subs);
+        assert_eq!(
+            row_of(&menu, TrackRow::SubForcedOnly).value.as_deref(),
+            Some(plx_os::i18n::msg::widgets_tracks_unknown()),
+            "control: no fallback, nothing to name"
+        );
+        teardown(&ps);
+    }
+
+    /// **Leaving Forced only is a change** even onto the very stream it drew, or onto Off while it
+    /// drew nothing: the stream id is the same, the state is not, so the pick carries its memo.
+    /// The control is the ordinary rule, an OK on the checked track remembering nothing.
+    #[test]
+    fn leaving_forced_only_is_remembered_even_onto_the_same_stream_or_onto_nothing() {
+        let _g = plx_base::testlock::serial();
+        let commit_memo = |ok: TrackOk| match ok {
+            TrackOk::Commit { commit: TrackCommit::Subtitle { stream_id, memo, .. }, .. } => (stream_id, memo),
+            other => panic!("not a subtitle commit: {other:?}"),
+        };
+        let (mut menu, ps, store) = open(
+            SubMode::ForcedOnly,
+            SubtitleEffect::Embedded,
+            vec![audio(10, "English", "eng")],
+            english_with_a_forced_track(),
+        );
+        let (stream_id, memo) = commit_memo(ok_on(&mut menu, &store, TrackRow::Sub(1)));
+        assert_eq!(stream_id, 999);
+        assert!(matches!(memo, Some(SubtitleMemo::Track(_))), "the forced track's own row is a track pick now: {memo:?}");
+        assert!(!menu.forced_only(), "and the mode is left");
+        let (_, memo) = commit_memo(ok_on(&mut menu, &store, TrackRow::Sub(1)));
+        assert_eq!(memo, None, "control: OK on the checked track again remembers nothing");
+        teardown(&ps);
+
+        let (mut menu, ps, store) = open(
+            SubMode::ForcedOnly,
+            SubtitleEffect::None,
+            vec![audio(10, "English", "eng")],
+            english_with_a_forced_track(),
+        );
+        assert_eq!(commit_memo(ok_on(&mut menu, &store, TrackRow::SubOff)), (0, Some(SubtitleMemo::Off)), "Off after Forced only");
+        assert!(!menu.forced_only());
+        assert_eq!(commit_memo(ok_on(&mut menu, &store, TrackRow::SubOff)), (0, None), "control: Off again is not a change");
+        teardown(&ps);
+    }
+
+    /// The panel follows the route's mode on the live poll: a Forced only pick the loop has
+    /// performed (or a landing's) moves the check onto its row, and leaving it moves it back.
+    #[test]
+    fn the_live_poll_moves_the_check_with_the_routes_mode() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, mut ps, store) = open(
+            SubMode::Track,
+            SubtitleEffect::Embedded,
+            vec![audio(10, "English", "eng")],
+            english_with_a_forced_track(),
+        );
+        assert_eq!(checked(&menu), [TrackRow::Sub(1)]);
+        set_sub_mode_for_test(&mut ps, SubMode::ForcedOnly);
+        menu.poll_subtitle_state(&ps, store.view());
+        assert_eq!(checked(&menu), [TrackRow::SubForcedOnly]);
+        assert_eq!(row_of(&menu, TrackRow::SubForcedOnly).value.as_deref(), Some("English"));
+        set_sub_mode_for_test(&mut ps, SubMode::Track);
+        menu.poll_subtitle_state(&ps, store.view());
+        assert_eq!(checked(&menu), [TrackRow::Sub(1)]);
+        teardown(&ps);
+    }
+
+    /// **The row fits the panel in every shipped language WITH its read-out**, the longest case: the
+    /// catalog words beside the longest language names a stream can carry (the read-out is bounded,
+    /// so a long name or a region qualifier never clips the row's own words), at the shared menu cap
+    /// and hugged.
+    #[test]
+    fn the_forced_only_row_with_its_readout_fits_the_panel_in_every_shipped_language() {
+        use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
+        let mut out = Vec::new();
+        for language in SHIPPED {
+            for name in ["Portuguese (Brazil)", "Norwegian Bokm\u{e5}l", "Serbo-Croatian", "Scottish Gaelic", "Tagalog"] {
+                let _g = plx_base::testlock::serial();
+                let _guard = language_on_this_thread_for_test(language);
+                let subs = vec![stream(1, 0, name, "xxx", ""), forced(999, 1, name, "xxx")];
+                let (menu, ps, _store) =
+                    open(SubMode::ForcedOnly, SubtitleEffect::Embedded, vec![audio(10, name, "xxx")], subs);
+                let row = row_of(&menu, TrackRow::SubForcedOnly);
+                assert_eq!(row.label, plx_os::i18n::msg::widgets_tracks_forced_only(), "{language:?}");
+                assert!(row.value.as_deref().is_some_and(|v| !v.is_empty() && v.chars().count() <= 11), "{language:?} {name}");
+                out.extend(menu.form.table.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, language.tag()));
+                out.extend(menu.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, language.tag()));
+                out.extend(menu.form.table.app_fit_failures_hugged(language.tag()));
+                teardown(&ps);
+            }
+        }
+        plx_ui::table::assert_no_fit_failures(&out);
+    }
+
+    /// The key-level gate: the row's words exist in every shipped catalogue and are the SAME words
+    /// the account-wide Forced Subtitles setting already ships (`settings.audio.only_forced.short`),
+    /// which the Belarusian review (skarnik.by, verbum.by) covered once.
+    #[test]
+    fn the_forced_only_words_are_in_every_catalogue_and_match_the_settings_value() {
+        use plx_os::i18n::{language_on_this_thread_for_test, msg, SHIPPED};
+        for language in SHIPPED {
+            let _g = plx_base::testlock::serial();
+            let _guard = language_on_this_thread_for_test(language);
+            let words = msg::widgets_tracks_forced_only();
+            assert!(!words.trim().is_empty(), "{language:?}");
+            assert_eq!(words, msg::settings_audio_only_forced_short(), "{language:?}: one vocabulary for one concept");
+        }
+    }
+}
+
 #[cfg(test)]
 mod focus_tests {
     use super::*;
     use plx_machine::machine::{FocusRead, InputOwner, PressRead, Tick};
+    use plx_ui::a11y::Role;
 
     /// The focus element of the `i`-th Audio row, named by identity.
     fn audio_key(i: usize) -> u32 {
@@ -4291,6 +5630,7 @@ mod focus_tests {
             focus: FocusRead::default(),
             press: PressRead::default(),
             owner: InputOwner::Entry(entry),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
         })
     }
 
@@ -4303,10 +5643,17 @@ mod focus_tests {
         }
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.set(TrackForm::new().section(sec), None);
+        menu_of(form)
+    }
+
+    /// A menu showing `form`, with nothing else about it asked of a playback or a playing item.
+    fn menu_of(form: TrackTable) -> TrackMenuState {
         TrackMenuState {
             tab: 0,
             active_audio: 0,
             active_sub: -1,
+            forced_only: false,
+            forced_lang: String::new(),
             form,
             offset_ms: 0,
             tone: SubtitleTone::White,
@@ -4314,6 +5661,7 @@ mod focus_tests {
             position: SubtitlePosition::Low,
             pages: PageStack::new(),
             renderer: SubRenderer::Text,
+            takes_colour: true,
             sub_sig: None,
             other: Vec::new(),
             root_tracks: Vec::new(),
@@ -4328,7 +5676,81 @@ mod focus_tests {
             search: None,
             search_watching: false,
             item_sidecars: Vec::new(),
+            anchor: crate::player_hud::classic::ctrl_row_hit_rect(),
+            side: std::cell::Cell::new(plx_ui::popover::Side::Above),
         }
+    }
+
+    /// **The rows of the Audio tab are `audio.<i>`** and the menu conforms (every row projects,
+    /// ids are unique, the inverse finds each row, the group lists no more rows than it declares, and
+    /// some when it declares any); the title band's pointer-only key and a key of no row project nothing.
+    #[test]
+    fn audio_rows_are_named_by_their_track_index_and_conform() {
+        let e = EntryId(5);
+        let st = three_row_menu();
+        let part = TrackMenuPart { state: &st, entry: e, group: GroupId(0) };
+        with_cx(e, |cx| {
+            plx_ui::a11y::conformance(&part, cx);
+            let at = |key: u32| {
+                <TrackMenuPart as Focusable<HostFixture>>::a11y(&part, &key, cx).map(|a| (a.path.to_string(), a.role))
+            };
+            assert_eq!(at(audio_key(0)), Some(("audio.0".to_string(), Role::Row)));
+            assert_eq!(at(audio_key(2)), Some(("audio.2".to_string(), Role::Row)));
+            assert_eq!(at(plx_ui::page_stack::TITLE_KEY), None);
+            assert_eq!(at(9999), None);
+            let path = A11yPath::parse_relative("audio.1").expect("a relative path");
+            assert_eq!(<TrackMenuPart as Focusable<HostFixture>>::a11y_find(&part, &path, cx), Some(audio_key(1)));
+        });
+    }
+
+    /// **Every kind of row has a name of its own**: the root's Off, Forced only and tracks, the
+    /// DSP switches, the Style page's drill-ins and a picker's rungs, the language pages and the
+    /// search rows. One page holding one of each conforms, so no two share an id.
+    #[test]
+    fn every_kind_of_row_has_a_unique_name() {
+        use plx_data::metadata::sub_layout::LangId;
+        let nav = || RowKind::Nav(TrackPage::Style);
+        let rows: Vec<(TrackRow, RowKind<TrackPage>, &str, Role)> = vec![
+            (TrackRow::Audio(0), RowKind::Choice, "audio.0", Role::Row),
+            (TrackRow::Audio(1), RowKind::Choice, "audio.1", Role::Row),
+            (TrackRow::Boost, RowKind::Toggle, "boost", Role::Toggle),
+            (TrackRow::Loudness, RowKind::Toggle, "loudness", Role::Toggle),
+            (TrackRow::SubOff, RowKind::Choice, "off", Role::Row),
+            (TrackRow::SubForcedOnly, RowKind::Choice, "forced", Role::Row),
+            (TrackRow::Sub(0), RowKind::Choice, "sub.0", Role::Row),
+            (TrackRow::Sub(2), RowKind::Choice, "sub.2", Role::Row),
+            (TrackRow::Timing, nav(), "timing", Role::Row),
+            (TrackRow::Style, nav(), "style", Role::Row),
+            (TrackRow::OpenOther, nav(), "other", Role::Row),
+            (TrackRow::OpenLang(LangId { stream: 7, slot: 1 }), nav(), "lang.1", Role::Row),
+            (TrackRow::OpenField(StyleField::Size), nav(), "field.size", Role::Row),
+            (TrackRow::OpenField(StyleField::Position), nav(), "field.position", Role::Row),
+            (TrackRow::OpenField(StyleField::Color), nav(), "field.color", Role::Row),
+            (TrackRow::Choice(StyleField::Size, 0), RowKind::Choice, "size.0", Role::Row),
+            (TrackRow::Choice(StyleField::Position, 1), RowKind::Choice, "position.1", Role::Row),
+            (TrackRow::Choice(StyleField::Color, 3), RowKind::Choice, "color.3", Role::Row),
+            (TrackRow::OpenSearch, nav(), "search", Role::Row),
+            (TrackRow::SearchLang, nav(), "search_language", Role::Row),
+            (TrackRow::SearchRetry, RowKind::Button, "retry", Role::Button),
+            (TrackRow::SearchHit(4), RowKind::Button, "hit.4", Role::Button),
+            (TrackRow::LangChoice(2), RowKind::Choice, "language.2", Role::Row),
+        ];
+        let sec = rows
+            .iter()
+            .fold(FormSection::new("All"), |sec, (id, kind, _, _)| sec.item(*id, kind.clone(), (), Row::new("row")));
+        let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
+        form.set(TrackForm::new().section(sec), None);
+        let st = menu_of(form);
+        let e = EntryId(5);
+        let part = TrackMenuPart { state: &st, entry: e, group: GroupId(0) };
+        with_cx(e, |cx| {
+            plx_ui::a11y::conformance(&part, cx);
+            for (id, _, name, role) in &rows {
+                let got = <TrackMenuPart as Focusable<HostFixture>>::a11y(&part, &id.key().0, cx)
+                    .map(|a| (a.path.to_string(), a.role));
+                assert_eq!(got, Some((name.to_string(), *role)), "{id:?}");
+            }
+        });
     }
 
     /// **UP/DOWN step by one row and clamp at both ends**, matching
@@ -4477,11 +5899,15 @@ mod focus_tests {
 mod localized_offset_tests {
     #[test]
     fn subtitle_timing_uses_locale_decimal_and_unit_without_changing_offset_sign() {
-        use plx_platform::i18n::{LocaleContext, Preference};
+        use plx_os::i18n::{LocaleContext, Preference};
         for (preference, region, negative, positive) in [
             (Preference::En, "en-US", "-0.1 s", "+1.3 s"),
             (Preference::Es, "es-ES", "-0,1 s", "+1,3 s"),
             (Preference::Be, "be-BY", "-0,1 с", "+1,3 с"),
+            (Preference::Fr, "fr-FR", "-0,1 s", "+1,3 s"),
+            (Preference::De, "de-DE", "-0,1 s", "+1,3 s"),
+            (Preference::Hu, "hu-HU", "-0,1 mp", "+1,3 mp"),
+            (Preference::Ru, "ru-RU", "-0,1 с", "+1,3 с"),
         ] {
             let locale = LocaleContext::resolve(preference, None, Some(region), None, None);
             assert_eq!(crate::timing_capsule::offset_seconds_in(-100, true, &locale), negative);
@@ -4646,11 +6072,22 @@ mod style_page_tests {
         codec: &str,
         effect: SubtitleEffect,
     ) -> (TrackMenuState, plx_media::route::PlaybackSession, plx_data::stores::metadata::MetadataStore) {
-        let (ps, _sid) = enhancement_test_session(EnhTestFixture {
+        open_with_ink(codec, effect, None)
+    }
+
+    /// [`open_with`] on a session whose readout already carries the media side's colour fact `ink`
+    /// (`player::deliver_subtitle_ink`'s value: `None` = the ASS header is not known yet).
+    fn open_with_ink(
+        codec: &str,
+        effect: SubtitleEffect,
+        ink: Option<bool>,
+    ) -> (TrackMenuState, plx_media::route::PlaybackSession, plx_data::stores::metadata::MetadataStore) {
+        let (mut ps, _sid) = enhancement_test_session(EnhTestFixture {
             remux: None,
             subtitle_effect: effect,
             ..Default::default()
         });
+        ps.step_readout(plx_media::player::readout::ReadoutEvent::SubtitleInk(ink));
         let mut s = stream(999, 0, "English", "eng", "");
         s.codec = codec.into();
         let store = store_with(vec![s]);
@@ -4796,8 +6233,8 @@ mod style_page_tests {
         let _g = plx_base::testlock::serial();
         for (codec, renderer, note) in [
             ("srt", SubRenderer::Text, None),
-            ("pgs", SubRenderer::Image, Some(plx_platform::i18n::msg::widgets_tracks_style_image_note())),
-            ("ass", SubRenderer::Styled, Some(plx_platform::i18n::msg::widgets_tracks_style_styled_note())),
+            ("pgs", SubRenderer::Image, Some(plx_os::i18n::msg::widgets_tracks_style_image_note())),
+            ("ass", SubRenderer::Styled, Some(plx_os::i18n::msg::widgets_tracks_style_styled_note())),
         ] {
             let (mut menu, ps, store) = open_with(codec, SubtitleEffect::Sidecar);
             assert_eq!(menu.renderer, renderer, "{codec}");
@@ -4805,9 +6242,9 @@ mod style_page_tests {
             assert_eq!(menu.on_ok(store.view()), TrackOk::Navigated, "{codec}: Style itself is live");
             let locked = renderer != SubRenderer::Text;
             for field in [StyleField::Size, StyleField::Position] {
-                assert_eq!(row_of(&menu, TrackRow::OpenField(field)).dim, locked, "{codec} {field:?}");
+                assert_eq!(row_of(&menu, TrackRow::OpenField(field)).disabled, locked, "{codec} {field:?}");
             }
-            assert!(!row_of(&menu, TrackRow::OpenField(StyleField::Color)).dim, "{codec}: Color stays live");
+            assert!(!row_of(&menu, TrackRow::OpenField(StyleField::Color)).disabled, "{codec}: Color stays live");
             let notes: Vec<_> = menu
                 .form
                 .table
@@ -4845,7 +6282,83 @@ mod style_page_tests {
         // direct play: both, live
         let (menu, ps, _store) = open_text();
         assert!(has(&menu, TrackRow::Timing) && has(&menu, TrackRow::Style));
-        assert!(!row_of(&menu, TrackRow::Style).dim);
+        assert!(!row_of(&menu, TrackRow::Style).disabled);
+        teardown(&ps);
+    }
+
+    /// **A Color rung the active subtitle cannot take is dimmed with its reason, never unchecked.**
+    /// The one media fact (`player::subtitle_takes_colour`, which reads the session: the readout holds the
+    /// header's half) decides: plain text and an ASS/SSA track with a
+    /// pure-white-primary style take Yellow; an ASS track with none and a picture subtitle do not. Then
+    /// the Yellow rung is a disabled row (focusable, inert), the grays stay live (they tint any
+    /// renderer), the Style page's note and the picker's own note say why, and a stored Yellow pick stays
+    /// the checked rung and the saved preference. No subtitle registry is touched: the fact is a value
+    /// of the session.
+    #[test]
+    fn a_color_the_active_subtitle_cannot_take_is_dimmed_with_its_reason_and_the_stored_pick_stays() {
+        use plx_os::i18n::msg;
+        let _g = plx_base::testlock::serial();
+        let cases: [(&str, Option<bool>, bool, Option<&str>); 4] = [
+            ("srt", None, true, None),
+            ("ass", Some(true), true, Some(msg::widgets_tracks_style_styled_note())),
+            ("ass", Some(false), false, Some(msg::widgets_tracks_style_fixed_note())),
+            ("pgs", None, false, Some(msg::widgets_tracks_style_image_note())),
+        ];
+        for (codec, white_style, takes, note) in cases {
+            plx_media::player::restore_subtitle_tone(SubtitleTone::Yellow);
+            let (mut menu, ps, store) = open_with_ink(codec, SubtitleEffect::Sidecar, white_style);
+            let at = format!("{codec} white_style={white_style:?}");
+            assert_eq!(menu.takes_colour, takes, "{at}: the menu reads the media fact");
+            let notes = |menu: &TrackMenuState| -> Vec<String> {
+                menu.form.table.sections.iter().flat_map(|s| &s.rows).filter(|r| r.is_note()).map(|r| r.label.to_string()).collect()
+            };
+            focus_id(&mut menu, TrackRow::Style);
+            menu.on_ok(store.view());
+            assert_eq!(notes(&menu), note.map(str::to_string).into_iter().collect::<Vec<_>>(), "{at}: the Style page's note");
+            focus_id(&mut menu, TrackRow::OpenField(StyleField::Color));
+            menu.on_ok(store.view());
+            assert_eq!(menu.page_path(), [TrackPage::Style, TrackPage::Picker(StyleField::Color)], "{at}");
+            assert_eq!(notes(&menu), if takes { vec![] } else { note.map(str::to_string).into_iter().collect() }, "{at}: the picker says why");
+            for rung in 0..SubtitleTone::LADDER.len() {
+                let tone = SubtitleTone::from_index(rung as u8);
+                let row = row_of(&menu, TrackRow::Choice(StyleField::Color, rung));
+                let reaches = takes || tone.text_rgb8().is_none();
+                assert_eq!(row.disabled, !reaches, "{at}: {tone:?}");
+                assert_eq!(row.checked, tone == SubtitleTone::Yellow, "{at}: {tone:?} stays the checked rung when it is the pick");
+            }
+            if !takes {
+                focus_id(&mut menu, TrackRow::Choice(StyleField::Color, SubtitleTone::Yellow.index() as usize));
+                assert_eq!(menu.on_ok(store.view()), TrackOk::Inert, "{at}: the dimmed rung opens nothing");
+                assert_eq!(plx_media::player::subtitle_tone(), SubtitleTone::Yellow, "{at}: the saved pick is untouched");
+            }
+            focus_id(&mut menu, TrackRow::Choice(StyleField::Color, SubtitleTone::Silver.index() as usize));
+            assert_ne!(menu.on_ok(store.view()), TrackOk::Inert, "{at}: a gray tints every renderer and stays pickable");
+            plx_media::player::restore_subtitle_tone(SubtitleTone::White);
+            teardown(&ps);
+        }
+    }
+
+    /// **The dimmed rungs follow the fact live**: an ASS track's header is known only once the demuxer (or
+    /// the sidecar fetch) has delivered it, so the Color picker opened before that refreshes IN PLACE
+    /// (same page, same focused rung) when the fact arrives in the session's readout, rather than staying
+    /// optimistic.
+    #[test]
+    fn the_color_picker_dims_its_rungs_when_the_headers_fact_arrives_after_it_opened() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, mut ps, store) = open_with("ass", SubtitleEffect::Sidecar);
+        focus_id(&mut menu, TrackRow::Style);
+        menu.on_ok(store.view());
+        focus_id(&mut menu, TrackRow::OpenField(StyleField::Color));
+        menu.on_ok(store.view());
+        let yellow = TrackRow::Choice(StyleField::Color, SubtitleTone::Yellow.index() as usize);
+        assert!(!row_of(&menu, yellow).disabled, "no header yet: nothing is dimmed");
+        focus_id(&mut menu, yellow);
+        ps.step_readout(plx_media::player::readout::ReadoutEvent::SubtitleInk(Some(false)));
+        menu.update(0.016, &plx_ui::fixture::FixtureMeasure, &ps, store.view());
+        assert_eq!(menu.page_path(), [TrackPage::Style, TrackPage::Picker(StyleField::Color)], "refreshed in place");
+        assert!(!menu.takes_colour);
+        assert!(row_of(&menu, yellow).disabled, "the header has no white style: Yellow is dimmed");
+        assert_eq!(menu.selected_id(), Some(yellow), "on the row the viewer was on");
         teardown(&ps);
     }
 
@@ -4925,9 +6438,9 @@ mod style_page_tests {
     /// notes), and each picker page, judged by the same gates as the rest of the menu.
     #[test]
     fn every_style_page_fits_the_panel_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_os::i18n::{language_on_this_thread_for_test};
         let mut out = Vec::new();
-        for language in [Preference::En, Preference::Es, Preference::Be] {
+        for language in plx_os::i18n::SHIPPED {
             let _g = plx_base::testlock::serial();
             let _guard = language_on_this_thread_for_test(language);
             for codec in ["srt", "pgs", "ass"] {
@@ -4956,24 +6469,34 @@ mod style_page_tests {
     /// note wrapped to three lines in a sliver.
     #[test]
     fn the_style_note_fits_two_lines_at_the_player_menu_floor() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_os::i18n::{language_on_this_thread_for_test, Preference};
         let measure = plx_base::fontcov::advances::ShippedMeasure;
-        for language in [Preference::En, Preference::Es, Preference::Be] {
+        for language in plx_os::i18n::SHIPPED {
             let _g = plx_base::testlock::serial();
             let _guard = language_on_this_thread_for_test(language);
-            for codec in ["pgs", "ass"] {
-                let (mut menu, ps, _store) = open_with(codec, SubtitleEffect::Sidecar);
-                menu.push(TrackPage::Style);
-                let w = menu.form.table.menu_panel_width(&measure);
-                assert!(w >= theme::layout::PLAYER_MENU_MIN_W, "{language:?}: the page is not a sliver ({w})");
-                menu.form.table.fit_notes(w, &measure);
-                let lines = menu.form.table.sections.iter().flat_map(|s| &s.rows)
-                    .filter(|r| r.is_note()).map(|r| r.note_lines.get()).max().expect("a note row");
-                // Spanish's longer wording needs ~520px for two lines; at the 440 floor it takes three
-                // (measured), English and Belarusian take two
-                let allowed = if language == Preference::Es { 3 } else { 2 };
-                assert!(lines <= allowed, "{language:?} {codec}: the note takes {lines} lines at {w}px");
-                teardown(&ps);
+            // the picture note, the styled note (white follows the pick) and the styled-with-no-white note,
+            // each on the Style page and (the dimmed Yellow rung's reason) on the Color picker
+            for (codec, white_style) in [("pgs", None), ("ass", None), ("ass", Some(false))] {
+                for picker in [false, true] {
+                    let (mut menu, ps, _store) = open_with_ink(codec, SubtitleEffect::Sidecar, white_style);
+                    menu.push(TrackPage::Style);
+                    if picker {
+                        menu.push(TrackPage::Picker(StyleField::Color));
+                    }
+                    let w = menu.form.table.menu_panel_width(&measure);
+                    assert!(w >= theme::layout::PLAYER_MENU_MIN_W, "{language:?}: the page is not a sliver ({w})");
+                    menu.form.table.fit_notes(w, &measure);
+                    let lines = menu.form.table.sections.iter().flat_map(|s| &s.rows)
+                        .filter(|r| r.is_note()).map(|r| r.note_lines.get()).max();
+                    // the picker carries a note only when its rungs are dimmed
+                    assert_eq!(lines.is_some(), !picker || !menu.takes_colour, "{language:?} {codec} picker={picker}");
+                    let lines = lines.unwrap_or(0);
+                    // Spanish's longer wording needs ~520px for two lines; at the 440 floor it takes three
+                    // (measured), English and Belarusian take two
+                    let allowed = if language == Preference::Es { 3 } else { 2 };
+                    assert!(lines <= allowed, "{language:?} {codec} {white_style:?} picker={picker}: the note takes {lines} lines at {w}px");
+                    teardown(&ps);
+                }
             }
         }
     }
@@ -5089,7 +6612,7 @@ mod language_page_tests {
     fn push_and_pop_walk_root_other_languages_and_a_language() {
         let _g = plx_base::testlock::serial();
         let (mut menu, ps, store) = open(subs());
-        assert_eq!(menu.ids()[..3], [TrackRow::SubOff, TrackRow::Sub(0), TrackRow::OpenOther]);
+        assert_eq!(menu.ids()[..4], [TrackRow::SubOff, TrackRow::SubForcedOnly, TrackRow::Sub(0), TrackRow::OpenOther]);
         assert_eq!(row_of(&menu, TrackRow::OpenOther).value.as_deref(), Some("3"), "Dutch, French, German");
 
         focus_id(&mut menu, TrackRow::OpenOther);
@@ -5502,9 +7025,9 @@ mod language_page_tests {
     /// judged by the same gates as the rest of the menu.
     #[test]
     fn the_language_pages_fit_the_panel_in_every_language() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_os::i18n::{language_on_this_thread_for_test};
         let mut out = Vec::new();
-        for language in [Preference::En, Preference::Es, Preference::Be] {
+        for language in plx_os::i18n::SHIPPED {
             let _g = plx_base::testlock::serial();
             let _guard = language_on_this_thread_for_test(language);
             let (mut menu, ps, store) = open(subs_with_vobsub());
@@ -5572,9 +7095,9 @@ mod motion_tests {
     /// One loop frame, as the dispatcher runs it: forget last frame's motion, then update. Returns
     /// whether a spring moved (what keeps the present gate awake).
     fn frame(menu: &mut TrackMenuState, ps: &plx_media::route::PlaybackSession, store: &plx_data::stores::metadata::MetadataStore) -> bool {
-        plx_machine::idle::frame_begin(DT);
+        plx_machine::motion::report::frame_begin(DT);
         menu.update(DT, &ShippedMeasure, ps, store.view());
-        plx_machine::idle::present_moving()
+        plx_machine::motion::report::present_moving()
     }
 
     fn run(menu: &mut TrackMenuState, ps: &plx_media::route::PlaybackSession, store: &plx_data::stores::metadata::MetadataStore, n: usize) {
@@ -5969,7 +7492,14 @@ mod motion_tests {
         menu.set_search(snap(SearchStatus::Ready, None, vec![hit("rel")], installed));
         let (stream, commit) = menu.take_search_commit().expect("the install is handed over");
         assert_eq!(commit, TrackCommit::Subtitle { render_ordinal: -1, stream_id: 1929519,
-            sidecar_key: Some("/library/streams/1929519".into()), sidecar_codec: "srt".into() });
+            sidecar_key: Some("/library/streams/1929519".into()), sidecar_codec: "srt".into(),
+            // remembered by what it IS: the dutch sidecar's language, kind and title, as the hit
+            // read it (the `hit("rel")` helper's own badges are not forced and not SDH)
+            memo: Some(plx_plex::plex::session::prefs::SubtitleMemo::Track(
+                plx_plex::plex::session::prefs::SubtitleTrackMemo {
+                    lang: "nld".into(), kind: "text".into(), external: true, title: "rel".into(),
+                    ..Default::default()
+                })) });
         assert!(stream.external && stream.sidecar_renderable(), "listed as a drawable sidecar");
         assert_eq!((stream.lang.as_str(), stream.title.as_str()), ("Nederlands", "rel"));
         assert!(menu.take_search_commit().is_none(), "never twice for one stream");
@@ -6034,7 +7564,7 @@ mod motion_tests {
             let row = menu.form.table.sections.iter().flat_map(|s| &s.rows).nth(i).unwrap();
             row.value.clone().unwrap_or_default()
         };
-        assert_eq!(value_of(&menu, row_a), plx_platform::i18n::msg::widgets_tracks_search_added());
+        assert_eq!(value_of(&menu, row_a), plx_os::i18n::msg::widgets_tracks_search_added());
         assert_eq!(value_of(&menu, row_b), "", "a hit the item lacks is not marked");
         menu.focus_key(row_a.key().0);
         assert_eq!(menu.on_ok(store.view()), TrackOk::Inert);
@@ -6107,5 +7637,180 @@ mod motion_tests {
         assert!(store.run(append(sidecar(11, "", "nld"))), "an empty title names nothing, so matches nothing");
         let ids: Vec<i64> = store.view().playing().unwrap().subs.iter().map(|s| s.id).collect();
         assert_eq!(ids, [5, 6, 9, 10, 11]);
+    }
+}
+
+/// **Classic's settled Tracks panel does not move** when its placement comes from an anchor: the
+/// right edge is the control row's (`CTRL_RIGHT`), the bottom edge 764, the width the hug, and the
+/// height the measured one up to the room above the row.
+#[cfg(test)]
+mod classic_placement_tests {
+    use super::tests::stream;
+    use super::*;
+    use plx_base::fontcov::advances::ShippedMeasure;
+
+    fn item(audio: usize) -> plx_data::stores::metadata::MetadataStore {
+        let mut store = plx_data::stores::metadata::MetadataStore::default();
+        let mut item = metadata::PlayingItem::with_subs(vec![stream(10, 0, "English", "eng", ""), stream(11, 1, "French", "fra", "SDH")]);
+        item.audio = (0..audio).map(|i| stream(100 + i as i64, i as i64, &format!("Dub {i}"), "eng", "")).collect();
+        assert!(store.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(item))));
+        store
+    }
+
+    /// (name, right edge, bottom edge, width, height) of each settled page.
+    fn settled(audio: usize) -> Vec<(String, [f32; 4])> {
+        let _g = plx_base::testlock::serial();
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let store = item(audio);
+        let mut out = Vec::new();
+        for (tab, name) in [(0, "audio root"), (1, "subtitles root")] {
+            let mut menu = TrackMenuState::new(&ps, store.view(), tab, vec!["eng".into()]);
+            let r = menu.panel_rect(&ShippedMeasure);
+            out.push((format!("{name} ({audio} dubs)"), [r.x + r.w, r.y + r.h, r.w, r.h]));
+            if let Some(i) = menu.form.index_of(&TrackRow::Style) {
+                menu.focus_row(i as c_int);
+                assert_eq!(menu.on_ok(store.view()), TrackOk::Navigated);
+                let r = menu.panel_rect(&ShippedMeasure);
+                out.push((format!("style page ({audio} dubs)"), [r.x + r.w, r.y + r.h, r.w, r.h]));
+            }
+        }
+        plx_plex::plex::reset_servers_for_test();
+        out
+    }
+
+    /// Captured from the constants-placed panels (`CTRL_RIGHT - pw`, bottom 764) before the
+    /// placement came from an anchor: (right, bottom, width, height).
+    #[test]
+    fn classic_tracks_panels_settle_where_they_always_did() {
+        let got = settled(3);
+        assert_eq!(
+            got.iter().map(|(n, r)| (n.as_str(), *r)).collect::<Vec<_>>(),
+            [
+                ("audio root (3 dubs)", [1824.0, 764.0, 468.0, 356.0]),
+                ("subtitles root (3 dubs)", [1824.0, 764.0, 447.0, 488.0]),
+                ("style page (3 dubs)", [1824.0, 764.0, 440.0, 296.0]),
+            ],
+        );
+    }
+
+    /// A list taller than the room scrolls inside a panel that stops at the cap. The cap was 704
+    /// (`bottom - 60`) and is now the room above the row, 710: the one settled frame that differs,
+    /// and only for a list taller than the old cap.
+    #[test]
+    fn a_long_dub_list_stops_at_the_room_above_the_row() {
+        let got = settled(40);
+        let (name, [right, bottom, w, h]) = &got[0];
+        assert!(name.starts_with("audio root"));
+        assert_eq!((*right, *bottom, *w, *h), (1824.0, 764.0, 468.0, 710.0));
+        assert_eq!(*bottom - *h, plx_ui::consts::SAFE.y, "the room is what is left under SAFE's top");
+    }
+
+    /// Every opener of classic gets the same anchor from the player screen, and it is the control
+    /// row's, ending at the segment's edge: that is why the Audio, Subtitles and `…` discs all open
+    /// a panel at `CTRL_RIGHT - pw`, bottom 764.
+    #[test]
+    fn the_classic_anchor_is_the_row_ending_at_the_segment_edge_above_the_gap() {
+        let a = crate::player_hud::classic::ctrl_row_hit_rect();
+        assert_eq!(a.x + a.w, crate::player_hud::classic::CTRL_RIGHT, "the segment's outer edge");
+        assert_eq!(a.y - theme::layout::PLAYER_MENU_GAP, 764.0, "PLAYER_MENU_GAP above the row is classic's bottom edge");
+        assert_eq!((a.y, a.h), (crate::player_hud::classic::CTRL_Y, crate::player_hud::classic::CTRL_H), "the discs' own band");
+    }
+
+    fn menu_at(anchor: Rect, tab: c_int) -> (TrackMenuState, plx_data::stores::metadata::MetadataStore) {
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let store = item(3);
+        (TrackMenuState::new(&ps, store.view(), tab, vec!["eng".into()]).with_anchor(anchor), store)
+    }
+
+    /// The panel opens beside the anchor it was handed, whichever side that is.
+    #[test]
+    fn the_panel_opens_beside_the_anchor_it_was_handed() {
+        let _g = plx_base::testlock::serial();
+        use plx_ui::popover::Side;
+        let gap = theme::layout::PLAYER_MENU_GAP;
+        // an opener high on the screen: the panel hangs BELOW it, from its right edge
+        let high = Rect::new(1500.0, 120.0, 324.0, 64.0);
+        let (menu, _store) = menu_at(high, 1);
+        let r = menu.panel_rect(&ShippedMeasure);
+        assert_eq!(menu.side.get(), Side::Below);
+        assert_eq!((r.y, r.x + r.w), (high.y + high.h + gap, high.x + high.w));
+        // an opener in the middle of the right edge with no room above or below for NEED_H: to its left
+        let mid = Rect::new(1700.0, 560.0, 64.0, 64.0);
+        let (menu, _store) = menu_at(mid, 1);
+        let r = menu.panel_rect(&ShippedMeasure);
+        assert_eq!(menu.side.get(), Side::Start);
+        assert_eq!(r.x + r.w, mid.x - gap);
+        assert!(plx_ui::consts::SAFE.contains(r.x, r.y) && r.y + r.h <= plx_ui::consts::SAFE.y + plx_ui::consts::SAFE.h);
+        plx_plex::plex::reset_servers_for_test();
+    }
+
+    /// **The anchor is latched**: the panel's side and its edge by the opener stay put as the page
+    /// changes under it (a push, the other tab: both change the width and height), because nothing
+    /// re-reads where the opener is.
+    #[test]
+    fn the_panel_does_not_move_off_its_anchor_while_it_is_open() {
+        let _g = plx_base::testlock::serial();
+        let (mut menu, store) = menu_at(Rect::new(1500.0, 300.0, 324.0, 64.0), 1);
+        let first = menu.panel_rect(&ShippedMeasure);
+        let side = menu.side.get();
+        assert_eq!(side, plx_ui::popover::Side::Below, "the opener is high: the panel hangs under it");
+        let i = menu.form.index_of(&TrackRow::Style).expect("Style row");
+        menu.focus_row(i as c_int);
+        assert_eq!(menu.on_ok(store.view()), TrackOk::Navigated);
+        let pushed = menu.panel_rect(&ShippedMeasure);
+        assert_ne!((pushed.w, pushed.h), (first.w, first.h), "the page changed the panel's size");
+        assert_eq!(menu.side.get(), side);
+        assert_eq!(pushed.x + pushed.w, first.x + first.w, "the edge by the opener");
+        assert_eq!(pushed.y, first.y, "and the panel's start (below the opener: its top)");
+        plx_plex::plex::reset_servers_for_test();
+    }
+
+    /// `NEED_H` is what the side is decided on, so it has to cover the tallest page the menu shows
+    /// with app-owned rows, and has to fit classic's room above the row (710) or classic would flip.
+    #[test]
+    fn need_h_covers_the_app_owned_pages_and_fits_classics_room() {
+        let _g = plx_base::testlock::serial();
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let store = item(0);
+        let mut tallest = 0.0f32;
+        for tab in [0, 1] {
+            let mut menu = TrackMenuState::new_with(&ps, store.view(), tab, vec!["eng".into()], true);
+            tallest = tallest.max(menu.form.table.measured_height());
+            if let Some(i) = menu.form.index_of(&TrackRow::Style) {
+                menu.focus_row(i as c_int);
+                assert_eq!(menu.on_ok(store.view()), TrackOk::Navigated);
+                tallest = tallest.max(menu.form.table.measured_height());
+            }
+        }
+        assert!(tallest > 200.0, "something was measured: {tallest}");
+        assert!(tallest <= NEED_H, "a page of {tallest} px is taller than NEED_H {NEED_H}");
+        assert!(NEED_H <= 764.0 - plx_ui::consts::SAFE.y, "classic's room above the row holds NEED_H");
+        plx_plex::plex::reset_servers_for_test();
+    }
+
+    /// The overscan audit's rect is the placer's, and sits inside SAFE.
+    #[test]
+    fn captured_preference_tracks_keep_the_opening_size_and_position() {
+        use plx_plex::plex::session::{SubtitleSize, SubtitlePosition};
+        let _serial = plx_base::testlock::serial();
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let mut a = TrackMenuState::new_with_preferences(&ps, meta.view(), 0, Vec::new(), false,
+            SubtitleSize::Large, SubtitlePosition::Low);
+        let b = TrackMenuState::new_with_preferences(&ps, meta.view(), 0, Vec::new(), false,
+            SubtitleSize::Small, SubtitlePosition::Low);
+        a.update(0.016, &plx_ui::fixture::FixtureMeasure, &ps, meta.view());
+        assert_eq!(a.size, SubtitleSize::Large);
+        assert_eq!(b.size, SubtitleSize::Small);
+        assert_eq!(a.position, SubtitlePosition::Low);
+    }
+
+    #[test]
+    fn the_overscan_rect_comes_from_the_placer() {
+        let mut out = Vec::new();
+        overscan_rects(&mut out);
+        let r = out[0].1;
+        assert_eq!((r.x + r.w, r.y + r.h, r.w), (1824.0, 764.0, plx_ui::table::MENU_MAX_W));
+        assert_eq!(r.y, plx_ui::consts::SAFE.y, "the whole room");
     }
 }

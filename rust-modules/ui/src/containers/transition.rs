@@ -5,7 +5,10 @@
 //!   host runs under, and what every `ModalStack` present/dismiss is; the application's PAGE stack
 //!   runs [`PageDip`] instead, since phase 12 (D1) made this the only route transition there is.
 //! - [`PageDip`] — `ui::nav`'s dip lifted off its statics: Out 70 ms → one-frame Hold at the
-//!   FLOOR, where the op applies → In 140 ms. Same schedule, same smoothstep, same
+//!   FLOOR, where the op applies → In 140 ms. The floor is one frame unless a caller armed
+//!   `hold_floor`: then the dip waits dark there, the op not yet applied, until `release_floor` or
+//!   the bound (ms of `Tick::ms`). `cancel` reverses the ramp only before the floor is reached; a
+//!   dip waiting dark at a held floor refuses to be withdrawn. Same schedule, same smoothstep, same
 //!   continuous-chrome rule (`chrome_alpha` is 1 while the shared top bar exists on both sides,
 //!   sticky-false for the duration of a retargeted fade), same reversal on cancel. It reports
 //!   `Motion` from inside `tick`. The dispatcher uses [`PageImage`] to capture the outgoing page
@@ -25,9 +28,13 @@
 //!   image, then switches to identical live output on the following frame. No VISIBLE frame draws a live
 //!   page under a full-screen image. [`PAGE_QUIESCENCE_HOLD_MAX_MS`] bounds a page that never
 //!   settles. Screen/input/lifecycle state continues ticking behind the held image.
-//! - [`RoutePush`] — the Settings family's push: commit is immediate, BOTH levels are drawn, and a
-//!   k=200 spring carries the incoming level in from −0.35 and the outgoing one out to +0.22 (in
-//!   fractions of the width).
+//! - [`RoutePush`] — a `NavStack` push as a transition: commit is immediate, BOTH levels are drawn,
+//!   and a k=200 spring carries the incoming level in from −0.35 and the outgoing one out to +0.22
+//!   (in fractions of the width). Only the test bundle's `FixtureModal` runs it as a stack
+//!   transition. The Settings family's own push is `route_screen::RoutePush`, a spring the surface
+//!   drives itself (it must keep drawing a popped page); that one waits at its start while the
+//!   destination's text is made resident (`route_screen::RoutePush::begin_warm`), and this one
+//!   does not.
 //!
 //! Motion and image policy are pure: no static, no clock but the frame tick, no GL. The one fact they
 //! read besides the tick is the frame dump's: `PageDip::tick` and `PageImage::plan` read
@@ -80,6 +87,20 @@ pub trait Transition {
     /// A single image can serve this transition (a dip never displays both levels).
     fn freezes_page(&self) -> bool { false }
     fn phase_word(&self) -> &'static str { "live" }
+    /// Wait at the FLOOR before applying the pending op, for at most `max_ms` of frame time past
+    /// the floor, so a destination can finish a landing under the dip and be captured already
+    /// correct. Returns whether the wait was armed: only a floor transition that has not reached
+    /// its floor, and has not already waited in this dip, can. A second request, a withdrawal or
+    /// [`Self::release_floor`] ends the wait early; nothing extends it.
+    fn hold_floor(&mut self, _max_ms: u32) -> bool {
+        false
+    }
+    /// End an armed wait: the floor is crossed on the next tick.
+    fn release_floor(&mut self) {}
+    /// A wait is armed and has neither been released nor spent.
+    fn floor_held(&self) -> bool {
+        false
+    }
     /// Capture fences pause presentation time without changing input or commit ownership.
     fn tick_presented(&mut self, t: Tick, present: &mut PresentHandle<'_>, waiting: bool) -> bool {
         if waiting && self.freezes_page() { return false; }
@@ -121,6 +142,13 @@ pub const DIP_IN_MS: f32 = 140.0;
 /// Maximum rasterise+upload time borrowed from one cheap dip-out frame.
 pub const TEXT_PREWARM_BUDGET_US: u64 = 6_000;
 
+/// **The dip's curve**: smoothstep of a linear `0..=1` ramp (clamped). The route dip's alpha and a
+/// surface's entry dip ([`super::modal::EntryMotion::Dip`]) both read it, so they cannot disagree.
+pub fn dip_eased(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DipPhase {
     Idle,
@@ -135,6 +163,15 @@ pub struct PageDip {
     /// Linear 0..1 — 0 = at the floor, 1 = fully present.
     t: f32,
     continuous: bool,
+    /// A wait at the floor, armed by [`Transition::hold_floor`]: the most frame time (`Tick::ms`)
+    /// the dip may stay at its floor once it gets there.
+    floor_hold_ms: Option<u32>,
+    /// The frame (`Tick::ms`) the dip reached its floor on while a wait was armed; `Some` is "dark,
+    /// waiting, and no longer withdrawable".
+    floor_since: Option<u32>,
+    /// A wait was armed in this dip (spent or not): a dip waits once, whatever asks again. Cleared
+    /// when the dip is back at rest.
+    floor_spent: bool,
 }
 
 impl Default for PageDip {
@@ -149,12 +186,14 @@ impl PageDip {
             phase: DipPhase::Idle,
             t: 1.0,
             continuous: false,
+            floor_hold_ms: None,
+            floor_since: None,
+            floor_spent: false,
         }
     }
 
     fn eased(&self) -> f32 {
-        let t = self.t.clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
+        dip_eased(self.t)
     }
 }
 
@@ -179,10 +218,31 @@ impl Transition for PageDip {
         self.continuous = if running { self.continuous && continuous } else { continuous };
         // fade out FROM WHEREVER the alpha is; a request parked at the floor commits next frame
         self.phase = DipPhase::Out;
+        // a new ask supersedes a wait that was armed for the old one
+        self.floor_hold_ms = None;
+    }
+
+    fn hold_floor(&mut self, max_ms: u32) -> bool {
+        if self.phase != DipPhase::Out || self.floor_spent || self.floor_since.is_some() {
+            return false;
+        }
+        self.floor_hold_ms = Some(max_ms);
+        self.floor_spent = true;
+        true
+    }
+
+    fn release_floor(&mut self) {
+        self.floor_hold_ms = None;
+    }
+
+    fn floor_held(&self) -> bool {
+        self.floor_hold_ms.is_some()
     }
 
     fn cancel(&mut self) -> bool {
-        if self.phase == DipPhase::Out {
+        // dark at the floor, waiting: the op is as good as applied
+        if self.phase == DipPhase::Out && self.floor_since.is_none() {
+            self.floor_hold_ms = None;
             self.phase = DipPhase::In; // `t` kept: the ramp reverses
             true
         } else {
@@ -198,6 +258,7 @@ impl Transition for PageDip {
         match self.phase {
             DipPhase::Idle => {
                 self.t = 1.0;
+                self.floor_spent = false;
                 false
             }
             DipPhase::Out => {
@@ -209,6 +270,17 @@ impl Transition for PageDip {
                 self.t = self.t - dt * 1000.0 / DIP_OUT_MS;
                 if self.t <= 0.0 {
                     self.t = 0.0;
+                    // A wait at the floor: dark, the op not applied, until released or until the
+                    // bound past the frame it arrived on. The bound is on the frame clock, so a
+                    // frame that is late ends it late by exactly that frame, and nothing extends it.
+                    if let Some(max) = self.floor_hold_ms {
+                        let since = *self.floor_since.get_or_insert(t.ms);
+                        if t.ms.wrapping_sub(since) < max {
+                            return false;
+                        }
+                        self.floor_hold_ms = None;
+                    }
+                    self.floor_since = None;
                     self.phase = DipPhase::Hold;
                     true
                 } else {
@@ -216,7 +288,9 @@ impl Transition for PageDip {
                 }
             }
             DipPhase::Hold => {
-                // exactly one frame: a route gates no fetch (every screen owns its own data wait).
+                // exactly one frame, AFTER any floor wait (the `Out` arm above, which a caller may arm
+                // to let a fetch land under the dip): once the op is applied this arm waits for
+                // nothing, since a route gates no fetch (every screen owns its own data wait).
                 // One FRAME, not one tick call: a frame dump repeats an iteration at the same
                 // virtual time while debt clears (`plx_gfx::dump::held_repeat`), and a repeat must
                 // not spend the floor frame.
@@ -261,7 +335,8 @@ impl Transition for PageDip {
     }
 }
 
-/// The Settings family's push (`RouteLayout`'s numbers): immediate commit, both levels drawn.
+/// A push as a stack transition (`RouteLayout`'s numbers): immediate commit, both levels drawn.
+/// The Settings family's own push is `route_screen::RoutePush`.
 pub struct RoutePush {
     pos: f32,
     vel: f32,
@@ -335,6 +410,8 @@ impl Transition for RoutePush {
 #[derive(Clone, Copy, Default)]
 pub struct PageImage {
     entry: Option<plx_machine::machine::EntryId>,
+    /// The body whose pixels were captured. A remount of the same entry cannot inherit them.
+    instance: Option<plx_machine::machine::InstanceId>,
     settle_since: Option<u32>,
     replacement_ready: bool,
     /// The paint the last [`PageImage::plan`] step returned: what a frame dump's held repeat of
@@ -363,11 +440,13 @@ impl PagePaint {
 impl PageImage {
     pub fn captured(&mut self, entry: plx_machine::machine::EntryId) {
         self.entry = Some(entry);
+        self.instance = None;
         self.settle_since = None;
         self.replacement_ready = false;
     }
     pub fn replacement_captured(&mut self, entry: plx_machine::machine::EntryId) {
         self.entry = Some(entry);
+        self.instance = None;
         self.replacement_ready = true;
     }
     /// One planning step per FRAME. In a frame dump ([`plx_gfx::dump::held_repeat`]) an iteration
@@ -460,6 +539,30 @@ impl PageImage {
         }
         *self = Self::default();
         PagePaint::Live
+    }
+
+    /// Bind only after a successful visible capture (or the owned headless snapshot port).
+    pub fn bind_instance(&mut self, instance: plx_machine::machine::InstanceId) {
+        self.instance = Some(instance);
+    }
+
+    /// Derive policy from this owner's captured image and the CURRENT mounted body, not GPU TLS.
+    pub fn read(&self, entry: plx_machine::machine::EntryId, instance: plx_machine::machine::InstanceId)
+        -> plx_machine::machine::PageImageRead {
+        if self.entry == Some(entry) && self.instance == Some(instance) {
+            plx_machine::machine::PageImageRead::held(entry, instance)
+        } else { Default::default() }
+    }
+
+    /// At the dip floor the incoming page hears Enter/Tick BEFORE its capture draw. The same
+    /// owner's outgoing image still hides it during that interval, so project the live destination
+    /// identity from navigation. This does NOT validate outgoing pixels for drawing the new page.
+    /// A remount at the SAME entry is different: its old body's image is rejected until recaptured.
+    pub fn transition_read(&self, entry: plx_machine::machine::EntryId,
+        instance: plx_machine::machine::InstanceId, active: bool) -> plx_machine::machine::PageImageRead {
+        if active && self.instance.is_some() && self.entry.is_some_and(|old| old != entry) {
+            plx_machine::machine::PageImageRead::held(entry, instance)
+        } else { self.read(entry, instance) }
     }
 
     pub fn held_entry(&self) -> Option<plx_machine::machine::EntryId> {
@@ -565,6 +668,108 @@ mod tests {
         d.request(false);
         let (_, pa, ca) = frames(&mut d, 40);
         assert_eq!(pa, ca);
+    }
+
+    /// Tick `d` at 16 ms frames from `*at` until it answers the floor or `limit` frames pass; the
+    /// frame clock (`Tick::ms`) is the only clock. Returns the ms of the floor frame.
+    fn until_floor(d: &mut PageDip, at: &mut u32, limit: u32) -> Option<u32> {
+        let mut present = Present::new();
+        for _ in 0..limit {
+            let ms = *at;
+            *at += 16;
+            let mut ph = PresentHandle::of(&mut present);
+            if d.tick(Tick { ms, dt_us: 16_667 }, &mut ph) {
+                return Some(ms);
+            }
+        }
+        None
+    }
+
+    /// The dip waits at its floor, dark, and crosses it no later than the bound past the frame it
+    /// arrived there.
+    #[test]
+    fn a_held_floor_waits_dark_and_crosses_within_its_bound() {
+        let mut plain = PageDip::new();
+        plain.request(true);
+        let mut at = 0;
+        let free = until_floor(&mut plain, &mut at, 40).expect("the floor");
+        let mut d = PageDip::new();
+        d.request(true);
+        assert!(d.hold_floor(300), "armed before the floor");
+        assert!(d.floor_held());
+        let mut at = 0;
+        let crossed = until_floor(&mut d, &mut at, 100).expect("the floor is crossed, held or not");
+        assert!(crossed >= free + 300 - 16 && crossed <= free + 300 + 16,
+            "waited the bound past the floor, no more and no less: free {free}, held {crossed}");
+        assert!(!d.floor_held(), "a spent hold is gone");
+        assert_eq!(d.page_alpha(), 0.0, "and it crossed from the dark floor");
+    }
+
+    #[test]
+    fn a_released_floor_is_crossed_on_the_next_tick() {
+        let mut d = PageDip::new();
+        d.request(true);
+        assert!(d.hold_floor(300));
+        let mut at = 0;
+        assert_eq!(until_floor(&mut d, &mut at, 12), None, "held at the floor, no commit");
+        assert_eq!(d.page_alpha(), 0.0, "dark while it waits");
+        d.release_floor();
+        assert!(!d.floor_held());
+        assert_eq!(until_floor(&mut d, &mut at, 1), Some(at - 16), "the very next tick crosses it");
+    }
+
+    #[test]
+    fn a_release_before_the_floor_leaves_an_ordinary_dip() {
+        let mut plain = PageDip::new();
+        plain.request(true);
+        let mut at = 0;
+        let free = until_floor(&mut plain, &mut at, 40);
+        let mut d = PageDip::new();
+        d.request(true);
+        assert!(d.hold_floor(300));
+        d.release_floor();
+        let mut at = 0;
+        assert_eq!(until_floor(&mut d, &mut at, 40), free);
+    }
+
+    /// Nothing re-arms or extends a wait: not a second ask in the same dip, not a request that
+    /// retargets it, not a withdrawal.
+    #[test]
+    fn nothing_extends_or_resurrects_a_floor_hold() {
+        let mut d = PageDip::new();
+        assert!(!d.hold_floor(300), "no dip, nothing to hold");
+        d.request(true);
+        assert!(d.hold_floor(300));
+        assert!(!d.hold_floor(300), "one wait per dip");
+        d.request(true);
+        assert!(!d.floor_held(), "a new request supersedes the wait");
+        assert!(!d.hold_floor(300), "and cannot be re-armed in the same dip");
+        let mut at = 0;
+        assert!(until_floor(&mut d, &mut at, 40).is_some(), "it crosses at the ordinary floor");
+        let mut at = 1000;
+        for _ in 0..40 { until_floor(&mut d, &mut at, 1); }
+        d.request(true);
+        assert!(d.hold_floor(300), "the next dip may wait again");
+        // a withdrawal before the floor clears it
+        let mut d = PageDip::new();
+        d.request(true);
+        assert!(d.hold_floor(300));
+        let mut at = 0;
+        until_floor(&mut d, &mut at, 2);
+        assert!(d.cancel());
+        assert!(!d.floor_held());
+    }
+
+    /// At the floor the op is as good as applied (the page is gone dark): it cannot be withdrawn.
+    #[test]
+    fn a_dip_waiting_at_its_floor_cannot_be_withdrawn() {
+        let mut d = PageDip::new();
+        d.request(true);
+        assert!(d.hold_floor(300));
+        let mut at = 0;
+        assert_eq!(until_floor(&mut d, &mut at, 12), None);
+        assert!(!d.cancel(), "the page that asked is already dark");
+        assert!(d.floor_held());
     }
 
     #[test]

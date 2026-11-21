@@ -43,7 +43,7 @@ SCENES = ROOT / "tests" / "screenshots" / "scenes.json"
 CATALOG = ROOT / "tests" / "demo_library" / "catalog.json"
 RUST = ROOT / "rust-modules" / "src"
 # Armed by tools/screenshots.py on every scene, not by the manifest.
-DRIVER_TRIGGERS = {"token", "plextv", "stillclock"}
+DRIVER_TRIGGERS = {"token", "plextv", "discover", "stillclock"}
 
 HAVE_CACHE = (mock_pms.demo_cache_dir() / "derived").is_dir() and shutil.which("ffmpeg") and shutil.which("ffprobe")
 
@@ -528,14 +528,15 @@ class HeroGeometry(unittest.TestCase):
         self.assertIn("overlap:home shelf row", v["reasons"])
 
     def test_a_subject_in_the_starring_column_fails(self):
-        v = self.verdict(3840, 2160, [3000, 1420, 3400, 1540])  # frame (1500,710)-(1700,770)
-        self.assertEqual(v["reasons"], ["overlap:detail starring column"])  # y 770 is above the shelf row
+        v = self.verdict(3840, 2160, [3000, 1406, 3400, 1414])  # frame (1500,703)-(1700,707)
+        self.assertEqual(v["reasons"], ["overlap:detail starring column"])  # y 707 is above the shelf row (708)
 
     def test_a_subject_over_the_detail_synopsis_or_facts_fails(self):
         v = self.verdict(3840, 2160, [1800, 700, 2000, 900])  # frame (900,350)-(1000,450)
         self.assertIn("overlap:detail text column", v["reasons"])
         v = self.verdict(3840, 2160, [2100, 1420, 2500, 1500])  # frame (1050,710)-(1250,750)
-        self.assertEqual(v["reasons"], ["centre-left", "overlap:detail facts row"])
+        # the facts row stands inside the Home shelf row's band (from y 708), so both are named
+        self.assertEqual(v["reasons"], ["centre-left", "overlap:home shelf row", "overlap:detail facts row"])
 
     def test_touching_a_zone_is_not_overlapping_it(self):
         # frame (1039,350)-(1400,500): its left edge is the detail text column's right edge
@@ -552,8 +553,6 @@ class HeroGeometry(unittest.TestCase):
     def test_a_right_weighted_subject_clear_of_every_zone_passes(self):
         v = self.verdict(2048, 872, [1500, 100, 1900, 500], anchor="right")
         self.assertEqual((v["verdict"], v["reasons"]), ("pass", []), v)
-        # the scrim is advisory: the share of the box under it is reported, never gated
-        self.assertGreater(v["scrim_share"], 0)
 
     # ---- eligibility and the gate ------------------------------------------------------------
 
@@ -658,18 +657,17 @@ class HeroGeometry(unittest.TestCase):
                          ["home text column", "home shelf row", "detail text column",
                           "detail facts row", "detail starring column"])
         by = {z["name"]: z["rect"] for z in zones}
-        self.assertEqual(by["home text column"], [96, 260, 756, 776])
-        self.assertEqual(by["home shelf row"], [0, 777, 1920, 1080])
-        self.assertEqual(by["detail text column"], [96, 298, 1039, 1080])
-        self.assertEqual(by["detail facts row"], [1039, 702, 1264, 830])
+        self.assertEqual(by["home text column"], [96, 206, 1039, 728])
+        self.assertEqual(by["home shelf row"], [0, 708, 1920, 1080])
+        self.assertEqual(by["detail text column"], [96, 326, 1039, 1080])
+        self.assertEqual(by["detail facts row"], [1039, 714, 1264, 842])
         self.assertEqual(by["detail starring column"], [1264, 702, 1824, 1080])
-        self.assertEqual(by["hero scrim"], [0, 162, 1536, 1080])
         used = {n for z in zones for n in z["uses"]}
         self.assertEqual(used, set(tool.HERO_PINS) - {n for n, p in tool.HERO_PINS.items() if p[1] == "text"})
 
     def test_a_drifted_python_copy_fails_naming_the_constant_and_its_file(self):
         for name, wrong in (("MARGIN_X", 90.0), ("COL_W", 600.0), ("PEEK_Y", 828.0), ("HERO_TEXT_W", 990.0),
-                            ("HERO_LOGO_TOP_HOME", 300.0), ("HERO_SCRIM_W", 1500.0)):
+                            ("HERO_LOGO_TOP_HOME", 300.0), ("DETAIL_TITLE_BOTTOM", 500.0)):
             with self.subTest(name=name):
                 pins = {k: list(v) for k, v in tool.HERO_PINS.items()}
                 pins[name][-1] = wrong
@@ -688,7 +686,7 @@ class HeroGeometry(unittest.TestCase):
                     shutil.copy(ROOT / pin[0], dst)
             tool.check_hero_pins(root=root)  # the copy is faithful
             f = root / "rust-modules" / "ui" / "src" / "landing_hero.rs"
-            f.write_text(f.read_text().replace("pub const COL_W: f32 = 660.0;", "pub const COL_W: f32 = 700.0;"))
+            f.write_text(f.read_text().replace("pub const COL_W: f32 = theme::hero::TEXT_W;", "pub const COL_W: f32 = 700.0;"))
             with self.assertRaises(AssertionError) as e:
                 tool.check_hero_pins(root=root)
             self.assertIn("COL_W", str(e.exception))
@@ -755,6 +753,77 @@ class HeroGeometry(unittest.TestCase):
         with unittest.mock.patch.object(tool, "check_hero_pins", side_effect=AssertionError("drift")):
             with self.assertRaises(AssertionError):
                 tool.check_complete(self.assets, self.catalog)
+
+
+class People(unittest.TestCase):
+    """The catalog's `people`: a credited name, a `headshot` asset and the box of it that is the face."""
+
+    def setUp(self):
+        self.assets, self.catalog = tool.load()
+
+    def refused(self, edit, assets=None):
+        cat = copy.deepcopy(self.catalog)
+        edit(cat["people"])
+        with self.assertRaises(AssertionError):
+            tool.check(assets or self.assets, cat)
+
+    def test_every_portrait_is_an_open_photograph_or_film_frame_of_a_credited_person(self):
+        names = tool.credited_names(self.catalog)
+        self.assertTrue(self.catalog["people"])
+        kinds = set()
+        for _, name, rec in tool.people(self.catalog):
+            with self.subTest(person=name):
+                a = self.assets[rec["photo"]["asset"]]
+                self.assertIn(name, names)
+                self.assertIn(a["kind"], tool.PORTRAIT_KINDS)
+                self.assertIn(a["licence"], tool.LICENCES)
+                self.assertIn(name.split()[0], a["notes"] if a["kind"] != "headshot" else name,
+                              "a frame's notes say whose portrait it is the source of")
+                kinds.add(a["kind"])
+        self.assertEqual(kinds, {"headshot", "still"})
+        tool.check_assets_complete(self.assets)
+
+    def test_the_site_videos_title_has_a_portrait_for_its_whole_cast(self):
+        film = next(m for m in self.catalog["movies"] if m["id"] == self.catalog["continue_watching"][2]["item"])
+        self.assertEqual(film["id"], "tears-of-steel", "the third Continue Watching card, the one the film opens")
+        self.assertEqual([c["name"] for c in film["cast"]], list(self.catalog["people"]))
+        self.assertEqual({c["name"]: c["role"] for c in film["cast"] if "role" in c},
+                         {"Derek de Lint": "Old Thom", "Sergio Hasselbaink": "Barley", "Rogier Schippers": "Captain",
+                          "Vanja Rukavina": "Thom", "Denise Rebergen": "Celia"})
+
+    def test_a_name_nobody_credits_is_refused(self):
+        self.refused(lambda people: people.update({"Nobody Atall": people["Derek de Lint"]}))
+
+    def test_a_portrait_cut_from_a_poster_or_a_missing_asset_is_refused(self):
+        self.refused(lambda people: people["Derek de Lint"]["photo"].update(asset="sintel-poster"))
+        self.refused(lambda people: people["Derek de Lint"]["photo"].update(asset="no-such-asset"))
+
+    def test_a_box_outside_the_source_or_off_the_portrait_shape_is_refused(self):
+        a = self.assets[self.catalog["people"]["Derek de Lint"]["photo"]["asset"]]
+        for box in ([0, 0, a["width"] + 2, (a["width"] + 2) * 3 // 2], [0, 0, 600, 600], [0, 0, 600], [-1, 0, 600, 900]):
+            with self.subTest(box=box):
+                self.refused(lambda people: people["Derek de Lint"]["photo"].update(box=box))
+
+    def test_a_headshot_fills_no_title_role(self):
+        cat = copy.deepcopy(self.catalog)
+        cat["movies"][0]["poster"] = {"asset": self.catalog["people"]["Derek de Lint"]["photo"]["asset"]}
+        with self.assertRaises(AssertionError):
+            tool.check(self.assets, cat)
+
+    def test_a_photograph_derives_to_its_own_file_named_for_the_person(self):
+        rec = self.catalog["people"]["Derek de Lint"]
+        path = tool.derived_file(self.assets, "/cache", tool.person_key("Derek de Lint"), rec, "photo")
+        self.assertEqual(path.parent.name, "person-derek-de-lint")
+        self.assertRegex(path.name, r"^photo-[0-9a-f]{12}\.jpg$")
+        moved = {"photo": dict(rec["photo"], box=[0, 0, 200, 300])}
+        self.assertNotEqual(path, tool.derived_file(self.assets, "/cache", "person-derek-de-lint", moved, "photo"),
+                            "the box is part of the recipe")
+
+    def test_the_credits_list_every_portrait(self):
+        works = {w["title"]: w for w in tool.site_works(self.assets, self.catalog) if w["kind"] == "person"}
+        self.assertEqual(list(works), list(self.catalog["people"]))
+        self.assertIn("face", works["Jody Bhe"]["entries"][0]["changes"][0])
+        self.assertEqual(works["Derek de Lint"]["entries"][0]["licence"], "CC BY 3.0")
 
 
 class TitleFlags(unittest.TestCase):
@@ -1419,7 +1488,8 @@ class SceneManifest(unittest.TestCase):
         site = {o["file"]: s for s in self.scenes for o in s["outputs"]
                 if o.get("dest") == "site" and "card" not in o}
         self.assertEqual(set(site), {"closeup-glass.jpg", "closeup-glass-narrow.jpg",
-                                     "closeup-tiles.jpg", "closeup-player.jpg"})
+                                     "closeup-tiles.jpg", "closeup-player.jpg", "closeup-fan-caligari.jpg",
+                                     "closeup-fan-cosmos.jpg", "closeup-fan-elephants.jpg"})
         for file, s in site.items():
             with self.subTest(file=file):
                 self.assertGreaterEqual(s.get("render_scale", 1), 3)

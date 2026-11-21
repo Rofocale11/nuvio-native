@@ -27,6 +27,17 @@ impl ScreenArg for TestArg {
 
 struct TestHost;
 
+impl crate::registry::ScreenInputsLike for TestHost {
+    fn screen_inputs<'a>(_: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs { crate::registry::empty_fixture() }
+}
+
+impl crate::registry::PlayerLike for TestHost {
+    fn session<'a>(_cx: &Cx<'a, Self>) -> &'a plx_media::route::PlaybackSession {
+        plx_media::route::idle_session_for_test()
+    }
+    fn transport_paused(_cx: &Cx<'_, Self>) -> bool { false }
+}
+
 impl Host for TestHost {
     type Arg = TestArg;
     type Fx = AppFx;
@@ -64,6 +75,7 @@ fn cx<'a>(measure: &'a dyn plx_machine::machine::Measure, elem: Option<u32>) -> 
         tick: Default::default(),
         measure,
         press: PressRead::default(),
+        modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
         focus: plx_machine::machine::FocusRead {
             current: elem.map(|elem| FocusKey { entry: EntryId(8), elem }),
         ..Default::default() },
@@ -73,17 +85,22 @@ fn cx<'a>(measure: &'a dyn plx_machine::machine::Measure, elem: Option<u32>) -> 
 
 fn bare(sid: ServerId, rk: &str) -> DetailScreen {
     let mut screen = DetailScreen {
+        // Fork Rofocale11: My List state is owned by the Nuvio account backend, so this fixture
+        // must initialise the fork's list_state/list_pending/list_error/list_mailbox fields;
+        // upstream's caption_policy is a separate under-posters presentation field and both must
+        // be present in the integrated DetailScreen.
         list_state: None,
         list_pending: false,
         list_error: false,
         list_mailbox: Default::default(),
+        caption_policy: crate::registry::captions::policy(),
         entry: EntryId(8),
         sid,
         rk: rk.into(),
         keys: Vec::new(),
         next_elem: FIRST_ITEM_ELEM,
         key_by_local: Default::default(),
-        local_by_key: Default::default(),
+        local_by_key: Default::default(), prev_by_key: Default::default(),
         gone: Default::default(),
         return_pending: false,
         pending_season: None,
@@ -102,26 +119,31 @@ fn bare(sid: ServerId, rk: &str) -> DetailScreen {
         preview_had_picture: false,
         trailer_ctl: super::trailer::Transport::IDLE,
         restore_intent: None,
+        provisional: false,
         teardown_cleared: false,
         withdrawn: false,
         refresh: DetailRefreshPhase::None,
         refresh_gen: 0,
         scroll: Spring::at(0.0),
         scroll_target: 0.0,
+        free: false,
+        episode_free: false,
         episode_scroll: Spring::at(0.0),
         tab_scroll: Spring::at(0.0),
-        episode_scale: [Spring::at(1.0); EP_SCALE_MAX],
-        episode_text_lift: [plx_ui::text_lift::TextLift::new(); EP_SCALE_MAX],
+        episode_cells: episodes::Cells::new(),
+            ep_want: Default::default(),
+            strip_seat: Default::default(),
         about_card_lift: plx_ui::text_lift::TextLift::new(),
         about_lang_lift: plx_ui::text_lift::TextLift::new(),
-        related: plx_ui::cards::Shelf::new(EntryId(8), &plx_ui::cards::RowStyle::HOME),
-        collection: plx_ui::cards::Shelf::new(EntryId(8), &plx_ui::cards::RowStyle::HOME),
-        extras: plx_ui::cards::Shelf::new(EntryId(8), &plx_ui::cards::RowStyle::EPISODE),
-        cast: plx_ui::cards::Shelf::new(EntryId(8), &plx_ui::cards::RowStyle::CAST),
+        related: plx_ui::cards::Shelf::new(EntryId(8), plx_ui::cards::RowStyle::HOME),
+        collection: plx_ui::cards::Shelf::new(EntryId(8), plx_ui::cards::RowStyle::HOME),
+        extras: plx_ui::cards::Shelf::new(EntryId(8), plx_ui::cards::RowStyle::EPISODE),
+        cast: plx_ui::cards::Shelf::new(EntryId(8), plx_ui::cards::RowStyle::CAST),
         tabs: TabStrip::new(),
         season_pop: CtlPop::new(),
         ctl_pop: CtlPop::new(),
-        disc_unfurl: [Spring::at(0.0); 3],
+        disc_unfurl: [Spring::at(0.0); hero::DISCS],
+        watchlist: plx_appkit::watchlist_disc::Disc::new(plx_data::catalog::Membership::Unknown), watchlist_hex: None,
         season_metrics: season::Metrics::new(),
         about_rows: about::Rows::new(),
         ground: AmbientWash::flat(theme::SURFACE_APP),
@@ -140,7 +162,7 @@ fn bare(sid: ServerId, rk: &str) -> DetailScreen {
         layout: std::cell::Cell::new(None),
         layout_pinned: std::cell::Cell::new(false),
         spot_facts: SpotFacts::default(),
-        hold_hint: plx_ui::hold_hint::HoldHint::once_per_run(plx_ui::hold_hint::Kind::Detail),
+        hold_hint: plx_ui::hold_hint::HoldHint::new(),
     };
     screen.sync_keys(test_store().view());
     screen
@@ -209,10 +231,11 @@ fn populated_detail_geometry_uses_recorded_metrics() {
         ..Default::default()
     }];
     d.summary = "A synopsis with enough separate words to wrap into several measured lines. ".repeat(30);
-    for ep in &mut d.episodes {
-        ep.title = "A measured episode with a longer title".into();
-        ep.summary = "Episode prose must also use the supplied metrics. ".repeat(8);
-    }
+    d.episodes = d.episodes.iter_loaded().map(|(_, ep)| plx_data::metadata::Episode {
+        title: "A measured episode with a longer title".into(),
+        summary: "Episode prose must also use the supplied metrics. ".repeat(8),
+        ..ep.clone()
+    }).collect();
     let _serial = install(d);
     plx_ui::rec::assert_measured_geometry(|measure| {
         let mut s = bare(sid, "show");

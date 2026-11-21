@@ -16,7 +16,9 @@ pub mod about_panel;
 pub mod account_menu;
 pub mod alt_sources;
 pub mod tracks_panel;
+pub mod versions_panel; // the Detail hero's Play Version list
 pub mod consent;
+pub mod catalog; // the catalog page's view-model (plan W6)
 pub mod collection;
 #[cfg(test)]
 mod cards_conformance_tests; // shared-card-sections Tier 2: every card screen through one black-box suite
@@ -33,9 +35,12 @@ pub mod legal;
 pub mod login;
 pub mod onboard;
 pub mod clock_readout;
+pub mod inputs;
 pub mod plaintext_question;
 pub mod player;
 pub mod profiles;
 pub mod registry;
 pub mod settings;
 pub mod preferences;
+pub mod hud_settings; // the Player HUD page: installed packages, the drop folder, the chosen HUD
+pub mod watchlist;

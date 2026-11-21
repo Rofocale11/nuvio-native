@@ -1,6 +1,11 @@
 //! Profile-scoped recent Search terms, independent of text measurement and rendering.
-//! Session reads are cached by profile and visible-session generation; writes use the session's atomic worker door.
+//! Session reads are cached by profile and visible-session generation. A write is a store job
+//! ([`SaveRecentsReq`], `StoreJob::SaveRecents`): an edit queues the new history in memory and the
+//! Search step that made it emits the job, which the application's runner runs on a worker
+//! ([`finish_save_recents_job`]) through the session's atomic update door.
 //! Query/server resets do not erase history. Snapshots retain their original profile's terms.
+use plx_machine::job::Port;
+use plx_machine::machine::Addr;
 use std::sync::{Arc, Mutex};
 
 /// Current Search layout admits four terms above the raised keyboard; the UI derives its cap.
@@ -23,8 +28,21 @@ impl RecentsSnapshot {
     }
 }
 
+/// A complete host observation; unsettled is an explicit transient session, not a missing input.
+#[derive(Clone, Copy)]
+pub struct Input<'a> {
+    pub session: &'a plx_plex::plex::session::Session,
+    pub settled: bool,
+    pub profile_generation: u32,
+    pub session_generation: u64,
+    pub tenure: u64,
+    pub profile_key: &'a str,
+}
+
 struct Store {
     session_generation: u64,
+    session_id: usize,
+    tenure: u64,
     generation: u32,
     who: String,
     account: Account,
@@ -32,39 +50,58 @@ struct Store {
 }
 static STORE: Mutex<Option<Store>> = Mutex::new(None);
 
-fn with_store<R>(f: impl FnOnce(&mut Store) -> R) -> R {
+fn with_store<R>(input: &Input<'_>, f: impl FnOnce(&mut Store) -> R) -> R {
     let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    let generation = plx_plex::plex::session::current_gen();
-    let session_generation = plx_plex::plex::session::visible_generation();
-    let settled = plx_plex::plex::session::peek_settled();
-    if settled.is_none() && guard.as_ref().is_some_and(|s| s.generation == generation) {
+    let generation = input.profile_generation;
+    let session_generation = input.session_generation;
+    let who = input.profile_key;
+    let session_id = std::ptr::from_ref(input.session) as usize;
+    if !input.settled && guard.as_ref().is_some_and(|s| s.generation == generation && s.tenure == input.tenure
+        && s.who == who && (input.session.client_id.is_empty() || s.account.matches(input.session))) {
         return f(guard.as_mut().unwrap());
     }
-    if guard.as_ref().map(|s| (s.generation, s.session_generation)) != Some((generation, session_generation)) {
-        let who = plx_plex::plex::session::current_profile_key();
-        // Copy before taking the session snapshot: a worker may drain this entry concurrently.
-        // Keep the pending-store lock separate from the session snapshot lock.
+    if !guard.as_ref().is_some_and(|s| s.generation == generation && s.tenure == input.tenure
+        && s.session_generation == session_generation && s.who == who
+        && s.account.matches(input.session) && s.session_id == session_id) {
         let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner())
-            .iter().find(|p| p.who == who).cloned();
-        let session = settled.unwrap_or_default();
-        let account = Account::of(&session);
-        let terms = pending.filter(|p| p.account == account).map(|p| p.terms)
-            .unwrap_or_else(|| sanitize(session.recents_for(&who).to_vec()));
-        *guard = Some(Store { session_generation, generation, who, account, terms: Arc::new(terms) });
+            .iter().find(|p| p.who == who && p.account.matches(input.session)).cloned();
+        let terms = pending.map(|p| p.terms)
+            .unwrap_or_else(|| sanitize(input.session.recents_for(who).to_vec()));
+        *guard = Some(Store { session_generation, generation, session_id, tenure: input.tenure, who: who.to_owned(),
+            account: Account::of(input.session), terms: Arc::new(terms) });
     }
     f(guard.as_mut().expect("profile cache is populated"))
 }
 
 /// Capture before screen processing. Borrowed terms thereafter perform no file or global read.
-pub fn snapshot() -> RecentsSnapshot {
-    with_store(|s| RecentsSnapshot { generation: s.generation, terms: s.terms.clone() })
+pub fn snapshot_with_input(input: &Input<'_>) -> RecentsSnapshot {
+    with_store(input, |s| RecentsSnapshot { generation: s.generation, terms: s.terms.clone() })
 }
 
 /// Update data and capture the persistence payload under the same profile-cache lock.
-/// Unchanged edits keep the same Arc and neither spawn a worker nor invalidate the frame.
-fn edit(profile_generation: u32, change: impl FnOnce(&[String]) -> Option<Vec<String>>, submit: impl FnOnce()) -> bool {
+/// Unchanged edits keep the same Arc and neither owe a write nor invalidate the frame. `submit`
+/// is called once when a write is owed: the edit changed the history, or its queue was full and a
+/// drain must be retried.
+#[cfg(any(test, feature = "test-support"))]
+pub fn snapshot() -> RecentsSnapshot { snapshot_with_input(&super::fixture_input().input().recents) }
+#[cfg(any(test, feature = "test-support"))]
+pub fn remember(generation: u32, term: &str) -> Edit {
+    remember_with_input(&super::fixture_input().input().recents, generation, term)
+}
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear(generation: u32) -> Edit { clear_with_input(&super::fixture_input().input().recents, generation) }
+#[cfg(test)]
+fn remember_with(generation: u32, term: &str, submit: impl FnOnce()) -> bool {
+    remember_with_input_and_submit(&super::fixture_input().input().recents, generation, term, submit)
+}
+#[cfg(test)]
+fn clear_with(generation: u32, submit: impl FnOnce()) -> bool {
+    clear_with_input_and_submit(&super::fixture_input().input().recents, generation, submit)
+}
+
+fn edit(input: &Input<'_>, profile_generation: u32, change: impl FnOnce(&[String]) -> Option<Vec<String>>, submit: impl FnOnce()) -> bool {
     let mut retry_drain = false;
-    let changed = with_store(|s| {
+    let changed = with_store(input, |s| {
         if s.generation != profile_generation { return false; }
         let Some(terms) = change(&s.terms) else { return false };
         let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -81,20 +118,30 @@ fn edit(profile_generation: u32, change: impl FnOnce(&[String]) -> Option<Vec<St
         true
     });
     if changed || retry_drain { submit(); }
-    if changed { plx_machine::idle::invalidate(); }
+    if changed {  }
     changed
 }
 
-pub fn remember(profile_generation: u32, term: &str) -> bool {
-    remember_with(profile_generation, term, submit)
+/// What an edit did to the history and whether it owes a write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edit {
+    /// The history the next snapshot shows is different.
+    pub changed: bool,
+    /// The queued history is waiting for a write: the edit changed it, or the queue was full and a
+    /// drain has to be asked for again. The caller emits the [`SaveRecentsReq`] job for it.
+    pub save: bool,
 }
 
-fn submit() { let _ = plx_base::task::spawn_small("recents-save", flush); }
+pub fn remember_with_input(input: &Input<'_>, profile_generation: u32, term: &str) -> Edit {
+    let mut save = false;
+    let changed = remember_with_input_and_submit(input, profile_generation, term, || save = true);
+    Edit { changed, save }
+}
 
-fn remember_with(profile_generation: u32, term: &str, submit: impl FnOnce()) -> bool {
+fn remember_with_input_and_submit(input: &Input<'_>, profile_generation: u32, term: &str, submit: impl FnOnce()) -> bool {
     let term = term.trim();
     if !usable(term) { return false; }
-    edit(profile_generation, |old| {
+    edit(input, profile_generation, |old| {
         if old.first().is_some_and(|first| first == term) { return None; }
         let mut next = old.to_vec();
         promote(&mut next, term);
@@ -102,12 +149,14 @@ fn remember_with(profile_generation: u32, term: &str, submit: impl FnOnce()) -> 
     }, submit)
 }
 
-pub fn clear(profile_generation: u32) -> bool {
-    clear_with(profile_generation, submit)
+pub fn clear_with_input(input: &Input<'_>, profile_generation: u32) -> Edit {
+    let mut save = false;
+    let changed = clear_with_input_and_submit(input, profile_generation, || save = true);
+    Edit { changed, save }
 }
 
-fn clear_with(profile_generation: u32, submit: impl FnOnce()) -> bool {
-    edit(profile_generation, |old| if old.is_empty() { None } else { Some(Vec::new()) }, submit)
+fn clear_with_input_and_submit(input: &Input<'_>, profile_generation: u32, submit: impl FnOnce()) -> bool {
+    edit(input, profile_generation, |old| if old.is_empty() { None } else { Some(Vec::new()) }, submit)
 }
 
 /// What the store will hold, whatever the file said. `de_soft_vec` guarantees each entry is a
@@ -180,6 +229,10 @@ impl Account {
     fn of(s: &plx_plex::plex::session::Session) -> Self {
         Self { client_id: s.client_id.clone(), token: s.account_token.clone() }
     }
+
+    fn matches(&self, session: &plx_plex::plex::session::Session) -> bool {
+        self.client_id == session.client_id && self.token == session.account_token
+    }
 }
 #[derive(Clone)]
 struct Pending { account: Account, who: String, terms: Vec<String> }
@@ -216,6 +269,54 @@ fn merged(
 }
 
 
+/// The one request a recents write is: drain [`PENDING`] into the session file. It carries nothing
+/// because the queue is what is written, and a profile's newest queued history replaces its older
+/// one, so a request that finds the queue already drained by an earlier one writes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveRecentsReq;
+
+/// Where a recents write's answer goes: the adapter it was made from. The write answers with
+/// nothing (the history it writes was published when the edit was made); a REFUSED write is
+/// remembered on the adapter, so the next edit asks for a drain again instead of leaving the queue
+/// to wait for a change that may never come ([`SearchAdapter::take_recents_refused`]). An adapter a
+/// `SearchCmd::Reset` replaced forgets it; the queue is a process static, so the next edit that
+/// changes the history still drains it.
+#[derive(Clone)]
+pub struct SaveRecentsPort {
+    adapter: Arc<crate::search::SearchAdapter>,
+}
+
+impl SaveRecentsPort {
+    pub(crate) fn to(adapter: &Arc<crate::search::SearchAdapter>) -> Self {
+        Self { adapter: Arc::clone(adapter) }
+    }
+}
+
+impl PartialEq for SaveRecentsPort {
+    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.adapter, &other.adapter) }
+}
+
+impl std::fmt::Debug for SaveRecentsPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SaveRecentsPort({:p})", Arc::as_ptr(&self.adapter))
+    }
+}
+
+impl Port<()> for SaveRecentsPort {
+    fn done(&self, _addr: Addr, (): ()) {}
+
+    fn refused(&self, _addr: Addr) {
+        self.adapter.recents_refused.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Run a recents write: the body of the worker the runner starts for a
+/// [`StoreJob::SaveRecents`](crate::stores::StoreJob::SaveRecents). IO only, and it answers once.
+pub fn finish_save_recents_job(port: &SaveRecentsPort, addr: Addr, _req: SaveRecentsReq) {
+    flush();
+    port.done(addr, ());
+}
+
 fn flush() {
     plx_plex::plex::session::update(|s| {
         let pending = std::mem::take(&mut *PENDING.lock().unwrap_or_else(|e| e.into_inner()));
@@ -233,6 +334,94 @@ fn flush() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_recents_are_profile_and_account_scoped_even_when_all_generations_repeat() {
+        let _serial = plx_base::testlock::serial();
+        let _clear = ClearCaches;
+        let mut session = plx_plex::plex::session::Session { client_id: "captured-client".into(),
+            account_token: "captured-account".into(), ..Default::default() };
+        session.set_recents_for("alpha", vec!["alpha history".into()]);
+        session.set_recents_for("beta", vec!["beta history".into()]);
+        let alpha = Input { session: &session, settled: true, profile_generation: 7,
+            session_generation: 11, tenure: 99, profile_key: "alpha" };
+        let first = snapshot_with_input(&alpha);
+        assert_eq!(first.terms(), &["alpha history"]);
+        assert!(remember_with_input(&alpha, 7, "pending alpha").changed);
+        let beta = Input { profile_key: "beta", ..alpha };
+        assert_eq!(snapshot_with_input(&beta).terms(), &["beta history"], "same-generation profile replacement never exposes another profile's terms");
+        assert_eq!(first.terms(), &["alpha history"], "retained snapshots keep their original profile");
+        assert!(!remember_with_input(&beta, 6, "stale draft").changed);
+        let mut replacement = plx_plex::plex::session::Session { client_id: "captured-client".into(),
+            account_token: "replacement-account".into(), ..Default::default() };
+        replacement.set_recents_for("alpha", vec!["replacement history".into()]);
+        let replaced = Input { session: &replacement, ..alpha };
+        assert_eq!(snapshot_with_input(&replaced).terms(), &["replacement history"], "queued old-account writes do not overlay the replacement account at equal generations");
+        let transient_session = Default::default();
+        let transient = Input { session: &transient_session, settled: false, ..replaced };
+        assert_eq!(snapshot_with_input(&transient).terms(), &["replacement history"], "an explicit unsettled same-profile observation retains the readable publication");
+        let reset = Input { tenure: 100, ..transient };
+        assert!(snapshot_with_input(&reset).terms().is_empty(), "an unreadable replacement tenure must not retain the previous account's history");
+    }
+
+
+    mod allocation_probe {
+        use super::*;
+        use plx_plex::plex::session::Session;
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        struct CountAlloc;
+        thread_local! { static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) }; }
+        fn allocated() {
+            ALLOCATIONS.with(|n| { if let Some(count) = n.get() { n.set(Some(count + 1)); } });
+        }
+        unsafe impl GlobalAlloc for CountAlloc {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                allocated();
+                unsafe { System.alloc(layout) }
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                allocated();
+                unsafe { System.alloc_zeroed(layout) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+                allocated();
+                unsafe { System.realloc(ptr, layout, size) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+        #[global_allocator]
+        static ALLOCATOR: CountAlloc = CountAlloc;
+
+        #[test]
+        fn stable_captured_recents_100_snapshots_allocate_nothing() {
+            let _serial = plx_base::testlock::serial();
+            let _clear = ClearCaches;
+            let mut session = Session { client_id: "populated-client".into(), account_token: "populated-token".into(), ..Default::default() };
+            session.set_recents_for("alpha", vec!["retained history".into()]);
+            let input = Input { session: &session, settled: true, profile_generation: 7,
+                session_generation: 11, tenure: 99, profile_key: "alpha" };
+            let retained = snapshot_with_input(&input);
+            for settled in [true, false] {
+                let input = Input { settled, ..input };
+                ALLOCATIONS.with(|n| n.set(Some(0)));
+                for _ in 0..100 { std::hint::black_box(snapshot_with_input(&input)); }
+                let allocations = ALLOCATIONS.with(|n| n.replace(None).unwrap());
+                println!("100 stable snapshots, settled={settled}: {allocations} allocations");
+                assert_eq!(allocations, 0, "stable snapshots must borrow credential/cache keys");
+            }
+            assert_eq!(retained.terms(), &["retained history"]);
+            session.account_token = "replacement-token".into();
+            session.set_recents_for("alpha", vec!["replacement history".into()]);
+            let replacement = snapshot_with_input(&Input { session: &session, settled: true, profile_generation: 7,
+                session_generation: 11, tenure: 99, profile_key: "alpha" });
+            assert_eq!(replacement.terms(), &["replacement history"]);
+            assert_eq!(retained.terms(), &["retained history"]);
+        }
+    }
 
     struct ClearCaches;
     impl Drop for ClearCaches {
@@ -583,6 +772,103 @@ mod tests {
             "a blank is not a term"
         );
         assert_eq!(sanitize(Vec::new()), Vec::<String>::new());
+    }
+
+
+    // ---- the write is a store job: the Search step that edited the history emits it ----
+
+    use crate::search::test_support::Owner;
+    use crate::stores::search::SearchCmd;
+    use crate::stores::{StoreId, StoreJob};
+    use plx_machine::job::Job;
+    use plx_machine::machine::{MachineId, RequestId};
+
+    fn save_addr(seq: u32) -> Addr {
+        Addr { to: MachineId::Store(StoreId::Search.ord()), req: RequestId(seq) }
+    }
+
+    fn remember_cmd(generation: u32, term: &str) -> SearchCmd {
+        SearchCmd::RememberRecent { profile_generation: generation, term: term.into() }
+    }
+
+    /// The write each edit that changed the history owes is ONE job on the outbox, addressed by a
+    /// sequence of its own; an edit that changed nothing owes none, and neither does one aimed at a
+    /// profile that is no longer the active one.
+    #[test]
+    fn an_edit_owes_one_save_job_and_a_noop_owes_none() {
+        let _guard = plx_base::testlock::serial();
+        let session = plx_plex::plex::session::TempSession::new("recents-save-job");
+        let _caches = ClearCaches;
+        session.watching("job-a");
+        let mut owner = Owner::default();
+        let generation = snapshot().generation();
+        let save = |n: u32, owner: &Owner| StoreJob::SaveRecents(
+            Job { addr: save_addr(n), req: SaveRecentsReq }, SaveRecentsPort::to(&owner.adapter));
+
+        assert!(owner.state.run(&owner.adapter, remember_cmd(generation, "alpha")));
+        plx_machine::assert_fx!(std::mem::take(&mut owner.state.jobs), [save(1, &owner)]);
+
+        assert!(!owner.state.run(&owner.adapter, remember_cmd(generation, " alpha ")), "the term is already first");
+        assert!(!owner.state.run(&owner.adapter, remember_cmd(generation, "bad\0term")));
+        assert!(!owner.state.run(&owner.adapter, remember_cmd(generation.wrapping_add(1), "stale")));
+        assert!(owner.state.jobs.is_empty(), "a no-op edit owes no write");
+
+        assert!(owner.state.run(&owner.adapter, SearchCmd::ClearRecents { profile_generation: generation }));
+        plx_machine::assert_fx!(std::mem::take(&mut owner.state.jobs), [save(2, &owner)]);
+        assert!(!owner.state.run(&owner.adapter, SearchCmd::ClearRecents { profile_generation: generation }));
+        assert!(owner.state.jobs.is_empty(), "clearing an empty history owes no write");
+    }
+
+    /// The job's worker writes what the edits queued, and answers once: the history is in the
+    /// session file and the queue is empty.
+    #[test]
+    fn the_save_job_drains_the_queued_history_into_the_session() {
+        let _guard = plx_base::testlock::serial();
+        let session = plx_plex::plex::session::TempSession::new("recents-save-run");
+        let _caches = ClearCaches;
+        session.watching("job-b");
+        let mut owner = Owner::default();
+        let generation = snapshot().generation();
+        assert!(owner.state.run(&owner.adapter, remember_cmd(generation, "alpha")));
+        assert!(owner.state.run(&owner.adapter, remember_cmd(generation, "beta")));
+        let mut jobs = std::mem::take(&mut owner.state.jobs);
+        assert_eq!(jobs.len(), 2, "one write per edit");
+        assert!(plx_plex::plex::session::peek().recents_for("job-b").is_empty(), "nothing is written until the job runs");
+
+        let StoreJob::SaveRecents(job, port) = jobs.remove(0) else { panic!("not a save job") };
+        finish_save_recents_job(&port, job.addr, job.req);
+        assert_eq!(plx_plex::plex::session::peek().recents_for("job-b"), &["beta", "alpha"]);
+        assert!(PENDING.lock().unwrap().is_empty(), "the queue was drained");
+
+        // the second write finds nothing queued and writes nothing
+        let StoreJob::SaveRecents(job, port) = jobs.remove(0) else { panic!("not a save job") };
+        finish_save_recents_job(&port, job.addr, job.req);
+        assert_eq!(plx_plex::plex::session::peek().recents_for("job-b"), &["beta", "alpha"]);
+    }
+
+    /// A refused write leaves its queue waiting, and the store asks again at the next edit, even one
+    /// that changes nothing; that retry is asked ONCE, not at every edit after it.
+    #[test]
+    fn a_refused_save_is_asked_again_at_the_next_edit_once() {
+        let _guard = plx_base::testlock::serial();
+        let session = plx_plex::plex::session::TempSession::new("recents-save-refused");
+        let _caches = ClearCaches;
+        session.watching("job-c");
+        let mut owner = Owner::default();
+        let generation = snapshot().generation();
+        assert!(owner.state.run(&owner.adapter, remember_cmd(generation, "alpha")));
+        let mut jobs = std::mem::take(&mut owner.state.jobs);
+        let StoreJob::SaveRecents(job, port) = jobs.remove(0) else { panic!("not a save job") };
+
+        port.refused(job.addr);
+        assert!(owner.state.jobs.is_empty(), "a refusal emits nothing by itself: the store is not stepped");
+        assert!(!owner.state.run(&owner.adapter, remember_cmd(generation, "alpha")), "the edit changed nothing");
+        let StoreJob::SaveRecents(retry, _) = owner.state.jobs.remove(0) else { panic!("not a save job") };
+        assert_eq!(retry.addr, save_addr(2), "the retry is a new write");
+        assert!(owner.state.jobs.is_empty());
+
+        assert!(!owner.state.run(&owner.adapter, remember_cmd(generation, "alpha")));
+        assert!(owner.state.jobs.is_empty(), "and it is asked once, not at every edit after it");
     }
 
 }

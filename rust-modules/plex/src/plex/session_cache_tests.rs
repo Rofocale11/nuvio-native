@@ -1,10 +1,13 @@
-//! [`peek`]'s live [`CACHE`]: the detail page's per-frame preview tick calls it every frame
-//! (`player::preview::enabled`), and repeated calls with no intervening write must not re-read the
+//! [`peek`]'s live [`CACHE`]: the cache exists for readers that call it every frame (the detail
+//! page's preview tick through `player::preview::enabled` was the motivating one, until P1c moved
+//! that decision onto a cell), and repeated calls with no intervening write must not re-read the
 //! session file — that re-read is a `recv(2)` round trip to the storage helper on the television,
 //! measured at ~27 ms/frame and the whole gap between 60 fps and the 26 fps the detail page
 //! actually drew (2026-09-18). A write must still be observed on the very next call, a refused or
 //! non-durable write must never be mistaken for a fact about the file, and a Locked/Blocked read
-//! must be retried rather than latched forever. Replaces `session_write_rev_tests.rs`.
+//! must be retried (by the session owner's `RefreshCache`, which `refresh_blocking_for_test` and
+//! `refresh_cache_job` stand in for here) rather than latched forever: `peek` itself never reads.
+//! Replaces `session_write_rev_tests.rs`.
 
 use super::*;
 #[allow(unused_imports)]
@@ -38,7 +41,7 @@ fn update_reads_the_authority_and_peek_reads_the_result() {
     reset_reads_for_test();
     assert!(update(|s| {
         let mut next = s.clone();
-        next.trailer_autoplay = true;
+        next.prefs.trailer_autoplay = true;
         Some(next)
     }));
     assert_eq!(
@@ -59,9 +62,10 @@ fn update_reads_the_authority_and_peek_reads_the_result() {
 /// Blocked | Cleared`) to a cached `false` with no way to un-latch it short of an unrelated write
 /// — so a single storage-helper glitch could disable trailer autoplay indefinitely. The current
 /// behaviour still caches a `Locked`/`Blocked` answer (re-reading it every frame would reintroduce
-/// the ~27 ms/frame cost the cache exists to remove) but only for [`LOCKED_RETRY`], so a real
-/// recovery is still felt quickly. Uses `peek_at` rather than `peek`, so it can simulate the retry
-/// window elapsing without an actual one-second sleep.
+/// the ~27 ms/frame cost the cache exists to remove) but as a `Transient` entry that
+/// [`refresh_need`] keeps asking to be re-read; WHEN is the session owner's backoff
+/// ([`LOCKED_RETRY_MS`] on the frame tick, graded in `owner`'s tests), so a real recovery is still
+/// felt quickly. `peek` itself never reads, so the test drives the refill explicitly.
 #[test]
 fn a_locked_record_is_retried_not_latched() {
     let _serial = plx_base::testlock::serial();
@@ -74,21 +78,22 @@ fn a_locked_record_is_retried_not_latched() {
     invalidate_for_test();
 
     reset_reads_for_test();
-    let t0 = std::time::Instant::now();
+    assert!(peek().client_id.is_empty(), "an unloaded cache answers the empty session");
+    assert_eq!(reads_for_test(), 0, "peek never reads");
     assert!(
-        peek_at(t0).client_id.is_empty(),
+        refresh_blocking_for_test().client_id.is_empty(),
         "a Locked read must fall back to the default session"
     );
-    assert_eq!(reads_for_test(), 1, "the first call must actually read the session");
+    assert_eq!(reads_for_test(), 1, "the refill must actually read the session");
+    assert!(refresh_need().is_some_and(|need| need.transient), "Locked stays a standing request to retry");
 
-    assert!(
-        peek_at(t0 + std::time::Duration::from_millis(500)).client_id.is_empty(),
-        "still the default within the retry window"
-    );
+    for _ in 0..30 {
+        assert!(peek().client_id.is_empty(), "still the default while the record stays locked");
+    }
     assert_eq!(
         reads_for_test(),
         1,
-        "a Locked answer within LOCKED_RETRY must be served from cache, not re-read every call \
+        "a Locked answer must be served from cache, not re-read every call \
          — that is exactly the per-frame cost the cache exists to remove"
     );
 
@@ -98,16 +103,16 @@ fn a_locked_record_is_retried_not_latched() {
     std::fs::write(t.file(), serde_json::to_vec(&signed_in()).unwrap()).unwrap();
 
     assert_eq!(
-        peek_at(t0 + LOCKED_RETRY).client_id,
+        refresh_blocking_for_test().client_id,
         "cid-1",
-        "past the retry deadline, a real recovery must be observed within about a second rather \
-         than staying latched at the earlier Locked answer"
+        "the retry must observe a real recovery rather than staying latched at the earlier Locked answer"
     );
     assert_eq!(
         reads_for_test(),
         2,
         "the retry must cost exactly one more read, settling into a fresh cache entry"
     );
+    assert_eq!(refresh_need(), None);
 }
 
 /// Point the canonical persistence root at a directory of this test's own, and take it back on
@@ -153,11 +158,11 @@ fn a_non_durable_write_drops_the_cache() {
     // Force the canonical commit under test to come back `Uncertain` at `ParentSync` — after the
     // record has actually been renamed into place (the real production seam; see
     // `storage::JsonStore::commit`), so `save_locked_with_authority` takes the `!durable` branch.
-    plx_platform::storage::inject_next_commit_failure_for_test(plx_platform::storage::CommitStage::ParentSync);
+    plx_os::storage::inject_next_commit_failure_for_test(plx_os::storage::CommitStage::ParentSync);
     let mut next = signed_in();
-    next.trailer_autoplay = true;
+    next.prefs.trailer_autoplay = true;
     save(&next);
-    plx_platform::storage::clear_injected_commit_failure_for_test();
+    plx_os::storage::clear_injected_commit_failure_for_test();
 
     assert!(
         cache_is_empty_for_test(),
@@ -279,23 +284,23 @@ fn peek_from_another_thread_does_not_take_io() {
         .expect("the other thread must not panic");
 }
 
-/// Two synchronous `peek_at` callers can find `CACHE` empty and take turns on `IO`; the one there
-/// second must not blindly re-read storage once it finally has the lock — the caller ahead of it
-/// may have already installed the answer. Modelled with the same `update(...)`-holds-`IO` trick
+/// A queued refresh and a writer can both find `CACHE` empty and take turns on `IO`; the refresh
+/// there second must not blindly re-read storage once it finally has the lock — the writer ahead of it
+/// has already installed the answer (and moved the cache generation). Modelled with the same `update(...)`-holds-`IO` trick
 /// as the test above: the worker's own miss check runs (and is confirmed a real miss) BEFORE this
 /// closure — which already holds `IO` — returns and installs the write's outcome, so the worker's
 /// later `io()` call is guaranteed to block until after that install lands. `READS_FOR_TEST` is
 /// thread-local (see its own doc), so it is reset and read on the worker's thread, the one that
 /// actually matters here.
 #[test]
-fn a_peek_that_waited_for_io_sees_the_fill_and_does_not_reread() {
+fn a_refresh_that_waited_for_io_sees_the_fill_and_does_not_reread() {
     let _serial = plx_base::testlock::serial();
     let _t = TempSession::new("cache-double-check-no-reread");
     save(&signed_in());
-    invalidate_for_test(); // back to Unloaded: the next peek() must be a genuine miss
+    invalidate_for_test(); // back to Unloaded: the refresh must be a genuine need
 
     let (checkpoint_tx, checkpoint_rx) = std::sync::mpsc::channel::<()>();
-    let (reads_tx, reads_rx) = std::sync::mpsc::channel::<u32>();
+    let (reads_tx, reads_rx) = std::sync::mpsc::channel::<(u32, CacheRefreshOutcome)>();
     let mut worker: Option<std::thread::JoinHandle<()>> = None;
 
     assert!(update(|s| {
@@ -304,15 +309,13 @@ fn a_peek_that_waited_for_io_sees_the_fill_and_does_not_reread() {
         // it must NOT be joined in here, which would deadlock against that same lock.
         worker = Some(std::thread::spawn(move || {
             reset_reads_for_test();
-            let now = std::time::Instant::now();
-            assert!(
-                cached_at(now).is_none(),
-                "the cache must still read empty here — the behaviour under test is the SECOND \
-                 check, taken once IO is finally held, not this first one"
+            let need = refresh_need().expect(
+                "the cache must still read empty here — the behaviour under test is the generation \
+                 check taken once IO is finally held, not this first look",
             );
             checkpoint_tx.send(()).unwrap();
-            let _ = peek_at(now);
-            let _ = reads_tx.send(reads_for_test());
+            let outcome = refresh_cache_job(need.generation)();
+            let _ = reads_tx.send((reads_for_test(), outcome));
         }));
         checkpoint_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -326,8 +329,8 @@ fn a_peek_that_waited_for_io_sees_the_fill_and_does_not_reread() {
         .expect("the worker must not panic");
     assert_eq!(
         reads_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
-        0,
-        "a miss that only reached the front of the IO queue after another caller already filled \
+        (0, CacheRefreshOutcome::Superseded),
+        "a refresh that only reached the front of the IO queue after a writer already filled \
          CACHE must be served from that fill, not pay for a second, needless read of storage"
     );
 }
@@ -430,9 +433,9 @@ fn an_uncertain_clear_cannot_be_undone_by_a_queued_preference_or_load() {
     save(&signed_in());
     let record = _root.dir.join("session.json");
     let previous = std::fs::read(&record).unwrap();
-    plx_platform::storage::inject_next_commit_failure_for_test(plx_platform::storage::CommitStage::ParentSync);
+    plx_os::storage::inject_next_commit_failure_for_test(plx_os::storage::CommitStage::ParentSync);
     assert_eq!(clear(), ClearOutcome::NotDurable);
-    plx_platform::storage::clear_injected_commit_failure_for_test();
+    plx_os::storage::clear_injected_commit_failure_for_test();
     // An uncertain parent sync cannot prove which rename survives. Exercise the permitted
     // old-record outcome rather than assuming that this process's current rename is durable.
     std::fs::write(&record, previous).unwrap();

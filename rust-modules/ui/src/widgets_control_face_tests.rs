@@ -1,5 +1,19 @@
 //! Control face treatment: ambient-keyed vs. unkeyed grounds, focus pop (`CtlPop`) motion, the danger face, and the blended pill/capsule outline + focus cast shadow.
 
+// An independently owned input supplies identity even when two presses overlap a spring-back.
+struct TestPress { machine: crate::dispatch::press::Press, identity: u32 }
+impl TestPress {
+    fn new() -> Self { Self { machine: crate::dispatch::press::Press::new(), identity: 0 } }
+    fn begin(&mut self, now: u32) { self.identity += 1; self.machine.begin(now); }
+    fn begin_ctl(&mut self, now: u32) { self.identity += 1; self.machine.begin_ctl(now); }
+    fn read(&self) -> plx_machine::machine::PressRead {
+        plx_machine::machine::PressRead { identity: self.identity, live: self.machine.is_live(), active: self.machine.is_active(), scale: self.machine.scale(), ..Default::default() }
+    }
+}
+impl std::ops::Deref for TestPress { type Target = crate::dispatch::press::Press; fn deref(&self) -> &Self::Target { &self.machine } }
+impl std::ops::DerefMut for TestPress { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.machine } }
+fn dip(scale: f32) -> plx_machine::machine::PressRead { plx_machine::machine::PressRead { scale, live: scale != 1.0, active: scale != 1.0, ..Default::default() } }
+
 use super::*;
 #[allow(unused_imports)]
 use super::test_support::*;
@@ -67,16 +81,16 @@ fn a_control_leaving_focus_shrinks_while_its_neighbour_grows() {
     for _ in 0..40 {
         pop.step(Some(0), 1.0 / 60.0);
     }
-    let settled = pop.scale(0);
+    let settled = pop.scale(0, dip(1.0));
     assert!(
         (settled - CTRL_FOCUS_SCALE).abs() < 0.005,
         "a held focus settles ON the pop, not near it: {settled}"
     );
-    assert_eq!(pop.scale(1), 1.0, "and its neighbour is at rest");
+    assert_eq!(pop.scale(1, dip(1.0)), 1.0, "and its neighbour is at rest");
 
     // focus moves — one frame later BOTH are in flight, neither at an endpoint
     pop.step(Some(1), 1.0 / 60.0);
-    let (leaving, arriving) = (pop.scale(0), pop.scale(1));
+    let (leaving, arriving) = (pop.scale(0, dip(1.0)), pop.scale(1, dip(1.0)));
     assert!(
         leaving < settled && leaving > 1.0,
         "the leaving face is still shrinking: {leaving}"
@@ -101,13 +115,13 @@ fn a_control_leaving_focus_shrinks_while_its_neighbour_grows() {
 /// Takes `testlock::serial()` for the pop's own statics; the press is the test's own `Press`.
 #[test]
 fn the_season_strips_pop_takes_the_press_dip_only_while_the_row_holds_focus() {
-    let mut p = crate::press::Press::new();
+    let mut p = TestPress::new();
     let _g = plx_base::testlock::serial();
     let mut pop: CtlPop<1> = CtlPop::new();
     for _ in 0..60 {
         pop.step(Some(0), 1.0 / 60.0);
     }
-    let focused = pop.scale(0);
+    let focused = pop.scale(0, p.read());
     assert!(
         (focused - CTRL_FOCUS_SCALE).abs() < 0.005,
         "a focused season pill settles on the control pop: {focused}"
@@ -122,7 +136,7 @@ fn the_season_strips_pop_takes_the_press_dip_only_while_the_row_holds_focus() {
         p.tick(now, 1.0 / 60.0);
         pop.step(Some(0), 1.0 / 60.0);
     }
-    let pressed = pop.scale(0);
+    let pressed = pop.scale(0, p.read());
     assert!(
         pressed < focused - 0.02,
         "the press must dip the focused pill inward: {pressed} vs {focused}"
@@ -134,7 +148,7 @@ fn the_season_strips_pop_takes_the_press_dip_only_while_the_row_holds_focus() {
         away.step(None, 1.0 / 60.0);
     }
     assert_eq!(
-        away.scale(0),
+        away.scale(0, p.read()),
         1.0,
         "a row without focus is at rest, press or no press"
     );
@@ -166,7 +180,7 @@ fn the_pop_grows_to_focus_without_ringing() {
     let mut peak = 1.0f32;
     for _ in 0..40 {
         pop.step(Some(0), 1.0 / 60.0);
-        peak = peak.max(pop.scale(0));
+        peak = peak.max(pop.scale(0, dip(1.0)));
     }
     assert!(
         peak <= CTRL_FOCUS_SCALE + 0.0005,
@@ -183,6 +197,7 @@ fn the_pop_grows_to_focus_without_ringing() {
 /// with a control standing proud of its row.
 #[test]
 fn a_row_with_no_focus_settles_flat() {
+    let _serial = plx_base::testlock::serial(); // reset reports frame damage through Spring::jump
     let mut pop: CtlPop<3> = CtlPop::new();
     for _ in 0..40 {
         pop.step(Some(2), 1.0 / 60.0);
@@ -192,14 +207,14 @@ fn a_row_with_no_focus_settles_flat() {
     }
     for i in 0..3 {
         assert!(
-            (pop.scale(i) - 1.0).abs() < 0.005,
+            (pop.scale(i, dip(1.0)) - 1.0).abs() < 0.005,
             "control {i} eased back to rest"
         );
     }
     pop.step(Some(1), 1.0 / 60.0);
     pop.reset();
     for i in 0..3 {
-        assert_eq!(pop.scale(i), 1.0, "…and reset is exact, not nearly");
+        assert_eq!(pop.scale(i, dip(1.0)), 1.0, "…and reset is exact, not nearly");
     }
 }
 
@@ -211,9 +226,9 @@ fn a_row_with_no_focus_settles_flat() {
 fn an_index_past_the_row_is_a_resting_control() {
     let mut pop: CtlPop<2> = CtlPop::new();
     pop.step(Some(7), 1.0 / 60.0);
-    assert_eq!(pop.scale(7), 1.0);
+    assert_eq!(pop.scale(7, dip(1.0)), 1.0);
     assert_eq!(
-        pop.scale(0),
+        pop.scale(0, dip(1.0)),
         1.0,
         "and an out-of-range FOCUS pops nothing in range either"
     );
@@ -463,6 +478,20 @@ fn an_idle_control_over_video_keeps_a_visible_edge_below_focus() {
     assert_eq!(control_rim_spec(false, ControlGround::Keyed), constant);
 }
 
+#[test]
+fn preview_controls_keep_the_video_fill_and_content_rim() {
+    let palette = ControlPalette::ambient([0.04, 0.39, 0.71]);
+    for focused in [false, true] {
+        let preview = ControlStyle::Accent.face(focused, ControlGround::VideoPreview, palette);
+        let hud = ControlStyle::Accent.face(focused, ControlGround::Unkeyed, palette);
+        assert_eq!((preview.top, preview.body, preview.ink), (hud.top, hud.body, hud.ink));
+        assert_eq!(
+            control_rim_spec(focused, ControlGround::VideoPreview),
+            control_rim_spec(focused, ControlGround::Keyed)
+        );
+    }
+}
+
 /// **Every control face is KEYED until its caller says otherwise** — including
 /// [`TransportButton`], whose only caller today is the player HUD. A widget that defaulted to
 /// its one caller's ground would be the one control in the app whose look came from where it
@@ -628,12 +657,12 @@ fn a_selected_player_tab_keeps_a_quiet_face_until_it_owns_focus() {
 #[test]
 fn an_abandoned_press_springs_back_on_the_control_that_was_pressed() {
     let mut pop: CtlPop<2> = CtlPop::new();
-    let mut press = crate::press::Press::new();
+    let mut press = TestPress::new();
     let mut focus = Some(0);
     for _ in 0..60 { pop.step(focus, 0.016); }
     let mut ms = 0;
     press.begin(ms);
-    let mut prev = [pop.scale_with(0, press.scale()), pop.scale_with(1, press.scale())];
+    let mut prev = [pop.scale_with(0, press.read()), pop.scale_with(1, press.read())];
     let mut worst = 0.0f32;
     let mut dipped_after_move = 0.0f32;
     for n in 1..=60 {
@@ -644,7 +673,7 @@ fn an_abandoned_press_springs_back_on_the_control_that_was_pressed() {
         ms += 16;
         press.tick(ms, 0.016);
         pop.step(focus, 0.016);
-        let now = [pop.scale_with(0, press.scale()), pop.scale_with(1, press.scale())];
+        let now = [pop.scale_with(0, press.read()), pop.scale_with(1, press.read())];
         for c in 0..2 {
             worst = worst.max((now[c] / prev[c] - 1.0).abs());
         }
@@ -661,24 +690,57 @@ fn an_abandoned_press_springs_back_on_the_control_that_was_pressed() {
 #[test]
 fn the_dip_latch_follows_the_pressed_index_not_focus() {
     let l = DipLatch::default();
-    assert_eq!(l.factor(0, Some(0), 1.0), 1.0, "at rest nothing dips");
-    assert_eq!(l.factor(1, None, 0.9), 1.0, "an unfocused avatar painted first does not latch");
-    assert_eq!(l.factor(0, Some(0), 0.9), 0.9, "the focused avatar latches");
-    assert_eq!(l.factor(0, None, 0.92), 0.92, "focus moved on: the pressed avatar keeps the dip");
-    assert_eq!(l.factor(1, Some(1), 0.92), 1.0, "and the new focus does not take it");
-    assert_eq!(l.factor(0, None, 1.0), 1.0, "back at rest releases");
-    assert_eq!(l.factor(1, Some(1), 0.95), 0.95, "the next press latches afresh");
+    assert_eq!(l.factor(0, Some(0), dip(1.0)), 1.0, "at rest nothing dips");
+    assert_eq!(l.factor(1, None, dip(0.9)), 1.0, "an unfocused avatar painted first does not latch");
+    assert_eq!(l.factor(0, Some(0), dip(0.9)), 0.9, "the focused avatar latches");
+    assert_eq!(l.factor(0, None, dip(0.92)), 0.92, "focus moved on: the pressed avatar keeps the dip");
+    assert_eq!(l.factor(1, Some(1), dip(0.92)), 1.0, "and the new focus does not take it");
+    assert_eq!(l.factor(0, None, dip(1.0)), 1.0, "back at rest releases");
+    assert_eq!(l.factor(1, Some(1), dip(0.95)), 0.95, "the next press latches afresh");
+}
+
+#[test]
+fn a_cancelled_press_never_latches_a_newly_focused_row() {
+    use plx_machine::machine::{EntryId, FocusKey, PressRead};
+    let _serial = plx_base::testlock::serial();
+    let mut hero = CtlPop::<1>::new();
+    let mut seasons = CtlPop::<1>::new();
+    for _ in 0..60 { hero.step(Some(0), 1.0 / 60.0); }
+    let held = PressRead { identity: 7, live: true, active: true, scale: 0.93,
+        owner: Some(FocusKey { entry: EntryId(1), elem: 1u32 }), ..Default::default() };
+    assert!(hero.scale(0, held) < CTRL_FOCUS_SCALE - 0.02);
+    let cancelled = PressRead { live: false, ..held };
+    hero.step(None, 1.0 / 60.0);
+    seasons.step(Some(0), 1.0 / 60.0);
+    let unpressed = seasons.scale(0, PressRead::<u32>::default());
+    assert_eq!(seasons.scale(0, cancelled), unpressed, "the new row cannot steal the old row's spring-back");
+    assert!(hero.scale(0, cancelled) < hero.scale(0, PressRead::<u32>::default()),
+        "the original row retains its own cancelled press");
+}
+
+#[test]
+fn a_cancelled_press_keeps_its_owner_when_the_spring_crosses_rest() {
+    use plx_machine::machine::PressRead;
+    let latch = DipLatch::default();
+    let held = PressRead::<()> { identity: 4, scale: 0.93, live: true, active: true, ..Default::default() };
+    assert_eq!(latch.factor(0, Some(0), held), 0.93);
+    let crossing = PressRead { scale: 1.0, live: false, ..held };
+    assert_eq!(latch.factor(0, None, crossing), 1.0);
+    let overshoot = PressRead { scale: 1.02, ..crossing };
+    assert_eq!(latch.factor(0, None, overshoot), 1.02, "crossing rest does not end a live spring-back");
+    assert_eq!(latch.factor(1, Some(1), overshoot), 1.0);
+    assert_eq!(latch.factor(0, None, PressRead { active: false, ..overshoot }), 1.0);
 }
 
 /// Frames of a control row under a real press: `reads` says whether the row is drawn (scale read)
 /// on a given frame. Returns the final scales.
-fn row_frames(pop: &mut CtlPop<2>, press: &mut crate::press::Press, ms: &mut u32, focus: Option<usize>, n: usize, draws: bool) -> [f32; 2] {
+fn row_frames(pop: &mut CtlPop<2>, press: &mut TestPress, ms: &mut u32, focus: Option<usize>, n: usize, draws: bool) -> [f32; 2] {
     let mut out = [1.0; 2];
     for _ in 0..n {
         *ms += 16;
         press.tick(*ms, 0.016);
         pop.step(focus, 0.016);
-        if draws { out = [pop.scale_with(0, press.scale()), pop.scale_with(1, press.scale())]; }
+        if draws { out = [pop.scale_with(0, press.read()), pop.scale_with(1, press.read())]; }
     }
     out
 }
@@ -688,7 +750,7 @@ fn row_frames(pop: &mut CtlPop<2>, press: &mut crate::press::Press, ms: &mut u32
 #[test]
 fn a_press_after_an_undrawn_spring_dips_the_control_pressed_now() {
     let mut pop: CtlPop<2> = CtlPop::new();
-    let mut press = crate::press::Press::new();
+    let mut press = TestPress::new();
     let mut ms = 0;
     for _ in 0..60 { pop.step(Some(0), 0.016); }
     press.begin_ctl(ms);
@@ -709,7 +771,7 @@ fn a_press_after_an_undrawn_spring_dips_the_control_pressed_now() {
 #[test]
 fn a_press_armed_inside_the_previous_springback_dips_the_new_control() {
     let mut pop: CtlPop<2> = CtlPop::new();
-    let mut press = crate::press::Press::new();
+    let mut press = TestPress::new();
     let mut ms = 0;
     for _ in 0..60 { pop.step(Some(0), 0.016); }
     press.begin_ctl(ms);
@@ -730,5 +792,169 @@ fn a_press_armed_inside_the_previous_springback_dips_the_new_control() {
             assert!(now[0] > 0.995, "frame {n}: control 0 only unpops, it no longer dips: {now:?}");
         }
         prev = now;
+    }
+}
+
+/// **The focus fill is a cross-fade on the lift spring, not a step beside it.** Frame by frame, as
+/// the hero row does it (`CtlPop::step`, then each control drawn at `CtlPop::focus`): focus moves
+/// from control 0 to control 1 and the plate of BOTH changes by no more than the lift spring itself
+/// moved, out = 1 - in, and the two land exactly on the rest faces (the INK is a choice between the
+/// rest inks, not a cross-fade: `the_ink_over_a_focus_ramp_is_one_of_the_two_rest_inks_and_flips_once`).
+/// Before the rule the
+/// plate flipped in the first frame (18,738 px on Home, 14,151 on Detail) while the lift took
+/// twenty.
+#[test]
+fn the_focus_fill_crossfades_on_the_lift_spring_out_equals_one_minus_in() {
+    let palette = ControlPalette::ambient([0.7, 0.3, 0.2]);
+    let idle = ControlStyle::Accent.face(false, ControlGround::Keyed, palette);
+    let lit = ControlStyle::Accent.face(true, ControlGround::Keyed, palette);
+    let mut pop = CtlPop::<2>::new();
+    for _ in 0..200 {
+        pop.step(Some(0), 1.0 / 60.0);
+    }
+    let draw = |pop: &CtlPop<2>, i: usize| {
+        let b = Button::new(c"Resume".as_ptr(), theme::size::BODY, Rect::new(0.0, 0.0, 200.0, 60.0)).palette(palette).focus_mix(pop.focus(i));
+        let c = CircleButton::new(c"".as_ptr()).palette(palette).focus_mix(pop.focus(i));
+        (b.face_now(), c.face_now())
+    };
+    let step = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    let span = step(idle.top, lit.top);
+    assert!(span > 0.2 && step(idle.ink, lit.ink) > 0.2, "the two faces must differ for the test to see a step");
+    let (mut prev0, mut prev1) = (pop.focus(0), pop.focus(1));
+    let (mut f0, mut f1) = (draw(&pop, 0).0, draw(&pop, 1).0);
+    let near = |a: [f32; 4], b: [f32; 4]| step(a, b) < 1e-3;
+    assert!(near(f0.top, lit.top) && near(f0.ink, lit.ink) && near(f1.top, idle.top) && near(f1.ink, idle.ink));
+    let mut frames_between = 0;
+    for _ in 0..60 {
+        pop.step(Some(1), 1.0 / 60.0);
+        let (t0, t1) = (pop.focus(0), pop.focus(1));
+        let (n0, n1) = (draw(&pop, 0), draw(&pop, 1));
+        // the plate moves by exactly the spring's step, never more
+        assert!(step(n0.0.top, f0.top) <= span * (prev0 - t0).abs() + 1e-4, "control 0's plate stepped past its spring");
+        assert!(step(n1.0.top, f1.top) <= span * (t1 - prev1).abs() + 1e-4, "control 1's plate stepped past its spring");
+        // out = 1 - in: the two controls' progress shares one spring and the disc agrees with the pill
+        assert!((t0 + t1 - 1.0).abs() < 1e-3, "out and in must sum to one: {t0} + {t1}");
+        assert_eq!(n0.0.top, n0.1.top);
+        if t0 > 0.05 && t0 < 0.95 {
+            frames_between += 1;
+        }
+        (prev0, prev1, f0, f1) = (t0, t1, n0.0, n1.0);
+    }
+    assert!(frames_between >= 4, "the fade must take several frames, took {frames_between}");
+    let (end0, end1) = (draw(&pop, 0).0, draw(&pop, 1).0);
+    assert!(near(end0.top, idle.top) && near(end0.ink, idle.ink) && near(end1.top, lit.top) && near(end1.ink, lit.ink));
+}
+
+/// The worst contrast a face's ink gets against its own plate: the label is read over the gradient,
+/// so the lower of the two stops, each laid over `INK_GROUND` by its alpha, the ink over each by its.
+fn worst_ink_contrast(face: &ControlFace) -> f32 {
+    [face.top, face.body]
+        .map(|c| over(INK_GROUND, c, c[3]))
+        .into_iter()
+        .map(|fill| contrast(over(fill, face.ink, face.ink[3]), fill))
+        .fold(f32::MAX, f32::min)
+}
+
+/// **A control's label is readable on EVERY tick of its focus ramp.** The hero's Resume pill went
+/// from a dark idle plate with white ink to a near-white plate with dark ink on the lift spring, and
+/// the ink was cross-faded on that same spring: half way, a mid-grey ink on a mid-grey plate (1.10:1
+/// to 2.92:1 in the Detail frames, 1.34:1 on Home). The ink is ONE choice per frame now: whichever of
+/// the two endpoint inks reads best against the plate composited at that tick (the flip sits where
+/// white and the dark ink have equal contrast, plate luma ~0.18), the same max-contrast rule the nav
+/// strip's pills wear, never a mix of the two.
+#[test]
+fn a_controls_ink_reads_at_three_to_one_on_every_tick_of_its_focus_ramp() {
+    let ambient: [[f32; 3]; 4] = [[0.7, 0.3, 0.2], [0.16, 0.22, 0.30], [0.95, 0.9, 0.8], [0.1, 0.5, 0.2]];
+    let mut worst = (f32::MAX, 0.0);
+    for ground in [ControlGround::Keyed, ControlGround::Unkeyed] {
+        let palettes = ambient.map(ControlPalette::ambient).into_iter().chain([ControlPalette::default()]);
+        for palette in palettes {
+            for (name, style) in [("Accent", ControlStyle::Accent), ("Keyline", ControlStyle::Keyline)] {
+                for tick in 0..=240 {
+                    let t = tick as f32 / 240.0;
+                    let c = worst_ink_contrast(&style.face_at(t, ground, palette));
+                    if c < worst.0 {
+                        worst = (c, t);
+                    }
+                    assert!(c >= 3.0, "{name} on {ground:?} at focus {t:.3}: the ink reads at {c:.2}:1");
+                }
+            }
+        }
+    }
+    // 3.92:1 at t=0.554 measured: the flip is where white and the dark ink are equally readable.
+    assert!(worst.0 >= 3.5, "worst ink contrast over the ramp: {:.2}:1 at t={:.3}", worst.0, worst.1);
+}
+
+/// The ink is a CHOICE between the two endpoint inks, so what a frame draws is always one of the
+/// two inks the face already owns (never a mix), it flips exactly once on the way in, and both rests
+/// are exactly the two faces `face` already drew.
+#[test]
+fn the_ink_over_a_focus_ramp_is_one_of_the_two_rest_inks_and_flips_once() {
+    let palette = ControlPalette::ambient([0.7, 0.3, 0.2]);
+    for ground in [ControlGround::Keyed, ControlGround::Unkeyed] {
+        let (idle, lit) = (ControlStyle::Accent.face(false, ground, palette), ControlStyle::Accent.face(true, ground, palette));
+        assert_ne!(idle.ink, lit.ink);
+        let mut flips = 0;
+        let mut prev = idle.ink;
+        for tick in 0..=480 {
+            let ink = ControlStyle::Accent.face_at(tick as f32 / 480.0, ground, palette).ink;
+            assert!(ink == idle.ink || ink == lit.ink, "{ground:?}: a mixed ink {ink:?} at tick {tick}");
+            flips += usize::from(ink != prev);
+            prev = ink;
+        }
+        assert_eq!(flips, 1, "{ground:?}: the ink flips once");
+        assert_eq!(ControlStyle::Accent.face_at(0.0, ground, palette).ink, idle.ink);
+        assert_eq!(ControlStyle::Accent.face_at(1.0, ground, palette).ink, lit.ink);
+    }
+}
+
+/// **A disc's glyph is drawn from ONE mask for the whole of its pop.** The glyph's raster size used
+/// to be rounded off the POPPED height, so `icons::draw` (which keys its cache on the box it is
+/// handed) swapped masks each time the lift spring crossed a whole pixel, and the last swap landed on
+/// the frame the spring settled: the filled hero bookmark re-rastered (122-225 px) with nothing
+/// moving. `icons::draw` returns early for a recording painter, so the choice is graded where it is
+/// made: `CircleButton::glyph_size`.
+#[test]
+fn a_discs_glyph_keeps_one_raster_across_its_whole_pop() {
+    let base_h = StatusOverlay::CTRL_H;
+    // The old arithmetic, to show the swap the new one removes: the mask the popped box asked for.
+    let old = |scale: f32| crate::icons::icon_raster_px((base_h * scale * DISC_ICON_RATIO).round() as i32);
+    assert_ne!(old(1.0), old(CTRL_FOCUS_SCALE), "the pop crossed a whole pixel of the old raster");
+    let (rest_side, rest_raster) = CircleButton::glyph_size(base_h, 1.0);
+    assert_eq!(rest_side, rest_raster as f32, "at rest the mask is drawn 1:1");
+    assert_eq!(rest_raster, crate::icons::icon_raster_px(rest_raster));
+    // Sampled finely across the dip (0.9x) through the pop (1.07x) and the settle exactly on it.
+    for tick in 0..=170 {
+        let scale = 0.9 + tick as f32 * 0.001;
+        let (side, raster) = CircleButton::glyph_size(base_h, scale);
+        assert_eq!(raster, rest_raster, "scale {scale}: the glyph changed mask");
+        assert!((side - rest_side * scale).abs() < 1e-3, "scale {scale}: the box follows the spring continuously");
+    }
+}
+
+/// **A disabled disc is drawn at rest, whichever way focus reaches it and in whatever order the
+/// builder ran** ([`TransportButton::enabled`]'s and [`Button::enabled`]'s own rule): the idle face,
+/// in the disabled ink. The Detail hero row's bookmark and watched toggle are discs, and a platform
+/// that cannot act on one must never show it lit. `face_now` is the one place the focus (the binary
+/// flag or a spring's progress) and the disabled rule meet.
+#[test]
+fn a_disabled_disc_wears_the_idle_face_in_the_disabled_ink_however_focus_reaches_it() {
+    let make = || CircleButton::new(c"".as_ptr());
+    let face = |b: CircleButton| {
+        let f = b.face_now();
+        (f.top, f.body, f.ink)
+    };
+    let (rest, lit) = (face(make()), face(make().focused(true)));
+    assert_ne!((rest.0, rest.1), (lit.0, lit.1), "the focused face is distinguishable from the idle one");
+    let disabled = face(make().enabled(false));
+    assert_eq!((disabled.0, disabled.1), (rest.0, rest.1), "a disabled disc keeps the idle plate");
+    assert_eq!(disabled.2, theme::INK_DISABLED, "and wears the disabled ink");
+    for (how, b) in [
+        ("flag, then disabled", make().focused(true).enabled(false)),
+        ("disabled, then flag", make().enabled(false).focused(true)),
+        ("spring, then disabled", make().focus_mix(1.0).enabled(false)),
+        ("disabled, then spring", make().enabled(false).focus_mix(1.0)),
+    ] {
+        assert_eq!(face(b), disabled, "{how}: still the idle face in the disabled ink");
     }
 }

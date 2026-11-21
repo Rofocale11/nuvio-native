@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from rust_toolchain import pinned
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("budgets", ROOT / "ci" / "check-build-budgets.py")
@@ -154,7 +155,7 @@ class FeatureResolution(unittest.TestCase):
 
     def packages(self, root):
         # Path packages outside the manifest directory are third-party to it: `lib` and `opt` count.
-        trees = b.cargo_trees(root, os.environ.get("RUST_NIGHTLY", "nightly"), False)
+        trees = b.cargo_trees(root, pinned())
         return {n for n, _ in b.tree_packages(trees["all"], root)}
 
     def test_optional_dependency_behind_a_feature_only_a_dev_dependency_enables_is_not_counted(self):
@@ -162,6 +163,36 @@ class FeatureResolution(unittest.TestCase):
 
     def test_optional_dependency_behind_a_feature_the_build_enables_is_counted(self):
         self.assertEqual(self.packages(self.workspace(("test-support",))), {"lib", "opt"})
+
+
+class ShippingGraph(unittest.TestCase):
+    """The "no_default_features" graph is the shipping build's, so its flags come from the Makefile."""
+
+    def trees_for(self, shipping, featflags):
+        seen, self.packages = [], []
+        packages = self.packages
+        originals = b.cargo_trees, b.shipping_featflags
+        b.cargo_trees = lambda manifest_dir, toolchain, flags=(), package=None: seen.append(list(flags)) or packages.append(package) or {}
+        b.shipping_featflags = lambda root: featflags
+        try:
+            b.run_cargo_tree(shipping)
+        finally:
+            b.cargo_trees, b.shipping_featflags = originals
+        return seen
+
+    def test_the_shipping_graph_is_resolved_with_the_makefiles_feature_flags(self):
+        flags = ["--no-default-features", "--features", "backend-a,backend-b"]
+        self.assertEqual(self.trees_for(True, flags), [flags])
+
+    def test_both_graphs_are_the_shipping_crates_not_the_applications(self):
+        # The ARM staticlib is built from the platform crate; a tree rooted at the application would not
+        # see a third-party dependency that crate adds.
+        for shipping in (True, False):
+            self.trees_for(shipping, ["--no-default-features"])
+            self.assertEqual(self.packages, ["plx_platform_webos"])
+
+    def test_the_default_graph_passes_no_feature_flags(self):
+        self.assertEqual(self.trees_for(False, ["--no-default-features"]), [[]])
 
 
 class Verdicts(unittest.TestCase):

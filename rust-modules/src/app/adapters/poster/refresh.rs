@@ -1,9 +1,9 @@
 //! Bounded stale-while-revalidate lane. Cached pixels reach the render queue immediately;
-//! slow or offline servers cannot occupy either demand decoder or the main-thread store lock.
+//! slow or offline servers cannot occupy a demand decoder or the main-thread store lock.
 //! Only idle source periods start refreshes. A key gets at most one attempt per account epoch
 //! within the bounded recent-attempt set, so revisiting stale art cannot hammer an offline PMS.
 
-use plx_platform::imgcache::DiskKey;
+use plx_os::imgcache::DiskKey;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -53,7 +53,7 @@ static READY: Condvar = Condvar::new();
 static WORKER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 pub(super) fn enqueue(client: &'static plx_plex::plex::Client, path: String, key: DiskKey, epoch: u64, token_gen: u32) {
-    if epoch != plx_platform::imgcache::generation() { return; }
+    if epoch != plx_os::imgcache::generation() { return; }
     let mut q = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     if q.as_mut().is_some_and(|q| q.push(Job { client, path, key, epoch, token_gen })) {
         READY.notify_one();
@@ -94,14 +94,19 @@ fn run() {
                     .map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0);
             }
         };
-        if job.epoch != plx_platform::imgcache::generation() || !grant_is_current(&job) { continue; }
+        if job.epoch != plx_os::imgcache::generation() || !grant_is_current(&job) { continue; }
+        // A deck card's cover or composite is not a transcode: it is re-BAKED, which fetches its
+        // sources from the server again (a re-bake never reads the cached logo, so a replaced one
+        // reaches the card) and writes only what came back whole. Anything else is refreshed as the
+        // one transcode it is.
+        if super::workers::rebake(job.client, &job.path, job.epoch, job.token_gen) { continue; }
         // Failed refresh leaves both the cached file and already-published texture untouched.
         if let Some(bytes) = super::fetch_image(job.client, &job.path) {
             let (mut w, mut h) = (0, 0);
             let px = plx_gfx::img::img_decode_rgba(bytes.as_ptr(), bytes.len() as i32, &mut w, &mut h);
             if !px.is_null() {
                 plx_gfx::img::img_free(px);
-                plx_platform::imgcache::write_at(job.epoch, &job.key, &bytes);
+                plx_os::imgcache::write_at(job.epoch, &job.key, &bytes);
             }
         }
     }
@@ -114,12 +119,25 @@ fn grant_is_current(job: &Job) -> bool {
         std::ptr::eq(live, job.client) && live.token_gen() == job.token_gen)
 }
 
+/// Arm the lane without its worker: `enqueue` queues, nothing runs. Callers hold
+/// `plx_base::testlock::serial()` (the queue is a process global).
+#[cfg(test)]
+pub(super) fn arm_for_test() {
+    *QUEUE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Queue { running: true, ..Default::default() });
+}
+
+/// Take down what `enqueue` queued since `arm_for_test`, as the request paths, and disarm.
+#[cfg(test)]
+pub(super) fn take_queued_for_test() -> Vec<String> {
+    QUEUE.lock().unwrap_or_else(|e| e.into_inner()).take().map_or_else(Vec::new, |q| q.jobs.into_iter().map(|j| j.path).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn job(client: &'static plx_plex::plex::Client, i: usize, epoch: u64) -> Job {
         let path = format!("/photo/:/transcode?url=%2Fthumb%2F{i}&width=250&height=375");
-        Job { client, key: plx_platform::imgcache::classify("fixture", &path).unwrap(), path, epoch, token_gen: client.token_gen() }
+        Job { client, key: plx_os::imgcache::classify("fixture", &path).unwrap(), path, epoch, token_gen: client.token_gen() }
     }
     #[test]
     fn refreshes_are_bounded_deduplicated_and_retired_with_the_account() {

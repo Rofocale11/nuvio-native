@@ -3,6 +3,7 @@
 use super::*;
 #[allow(unused_imports)]
 use super::test_support::*;
+use plx_base::testnet::{accept_client, CLIENT_WAIT};
 
 #[test]
 fn drain_available_returns_immediately_when_the_body_is_already_done() {
@@ -85,7 +86,8 @@ fn incomplete_chunked_trailers_do_not_reuse_the_fd() {
     std::thread::scope(|sc| {
         sc.spawn(|| {
             for _ in 0..2 {
-                let Ok((mut s, _)) = srv.accept() else { return };
+                let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+                let _ = s.set_read_timeout(Some(CLIENT_WAIT));
                 accepts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 let mut buf = [0u8; 1024];
                 let _ = s.read(&mut buf);
@@ -141,7 +143,8 @@ fn chunked_drain_completes_trailers_split_across_two_writes() {
     let first_drain = std::sync::Barrier::new(2);
     std::thread::scope(|sc| {
         sc.spawn(|| {
-            let Ok((mut s, _)) = srv.accept() else { return };
+            let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+            let _ = s.set_read_timeout(Some(CLIENT_WAIT));
             accepts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);
@@ -226,7 +229,8 @@ fn chunked_drain_completes_trailers_split_after_field_before_blank_line() {
     let first_drain = std::sync::Barrier::new(2);
     std::thread::scope(|sc| {
         sc.spawn(|| {
-            let Ok((mut s, _)) = srv.accept() else { return };
+            let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+            let _ = s.set_read_timeout(Some(CLIENT_WAIT));
             accepts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);
@@ -310,7 +314,8 @@ fn chunked_drain_returns_immediately_when_the_peer_stalls_after_a_partial_chunk(
     let ready = std::sync::Barrier::new(2);
     std::thread::scope(|sc| {
         sc.spawn(|| {
-            let Ok((mut s, _)) = srv.accept() else { return };
+            let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+            let _ = s.set_read_timeout(Some(CLIENT_WAIT));
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);
             let _ =
@@ -352,7 +357,8 @@ fn chunked_drain_does_not_block_waiting_for_the_next_size_line() {
     let port = srv.local_addr().unwrap().port();
     std::thread::scope(|sc| {
         sc.spawn(|| {
-            let Ok((mut s, _)) = srv.accept() else { return };
+            let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+            let _ = s.set_read_timeout(Some(CLIENT_WAIT));
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);
             let _ = s.write_all(
@@ -396,7 +402,8 @@ fn mid_body_eof_is_a_transport_error() {
     let port = srv.local_addr().unwrap().port();
     std::thread::scope(|sc| {
         sc.spawn(|| {
-            let Ok((mut s, _)) = srv.accept() else { return };
+            let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+            let _ = s.set_read_timeout(Some(CLIENT_WAIT));
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);
             let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nABCDEFGH");
@@ -432,7 +439,8 @@ fn drain_mid_body_eof_is_a_transport_error() {
     let port = srv.local_addr().unwrap().port();
     std::thread::scope(|sc| {
         sc.spawn(|| {
-            let Ok((mut s, _)) = srv.accept() else { return };
+            let (mut s, _) = accept_client(&srv, CLIENT_WAIT);
+            let _ = s.set_read_timeout(Some(CLIENT_WAIT));
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);
             let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nABCDEFGH");
@@ -466,4 +474,33 @@ fn drain_mid_body_eof_is_a_transport_error() {
         }
         panic!("park-time mid-body FIN must surface as a drain error, not idle-done");
     });
+}
+
+/// A keep-alive chunked response whose last chunk the drain has already consumed is finished: a
+/// blocking read after it is the clean end of the body, answered at once. It used to parse chunk
+/// framing off the finished response, wait out the socket's idle bound on the connection the server
+/// keeps open, and fail as a transport error (`EAGAIN`) at the very end of a live stream.
+#[test]
+fn a_read_after_the_drain_consumed_the_last_chunk_is_a_clean_end() {
+    with_keepalive_listener(
+        |port, _, _| {
+            let host = std::ffi::CString::new("127.0.0.1").unwrap();
+            let path = std::ffi::CString::new("/live").unwrap();
+            let mut hs = http_stream_boxed();
+            assert_eq!(
+                http_open(&mut *hs, host.as_ptr(), port as c_int, path.as_ptr(), std::ptr::null(), "GET"),
+                0
+            );
+            drain_body(&mut *hs);
+            assert!(http_body_done(&*hs), "the drain consumed the terminating chunk");
+            let started = std::time::Instant::now();
+            let mut dst = [0u8; 32];
+            let wake = Some(started + std::time::Duration::from_millis(300));
+            let n = http_read_until(&mut *hs, dst.as_mut_ptr(), dst.len() as c_int, wake, &mut NoCheckpoint);
+            assert_eq!(n, 0, "a finished body reads as end of stream");
+            assert!(started.elapsed() < std::time::Duration::from_millis(200), "and does not wait on the open socket");
+            http_close(&mut *hs);
+        },
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nABCDEFGH\r\n0\r\n\r\n",
+    );
 }

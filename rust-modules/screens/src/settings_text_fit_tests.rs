@@ -11,7 +11,7 @@
 
 use super::*;
 use plx_base::fontcov::advances::ShippedMeasure;
-use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
 use plx_ui::route_screen::RouteLayout;
 use plx_ui::table::TableView;
 
@@ -21,20 +21,27 @@ fn overflowing(page: &str, table: &TableView, out: &mut Vec<String>) {
     out.extend(table.app_fit_failures(frame_w, page));
 }
 
+/// Every status the playback trace can be in; the Diagnostics Export row's value is `trace_label` of it.
+const ALL_TRACE_STATUSES: [plx_os::playback_trace::Status; 7] = {
+    use plx_os::playback_trace::Status::*;
+    [Off, Recording, Saved, Exported, Saving, Unavailable, Failed]
+};
+
 /// The baseline `RootInputs` each variant below changes one field of (a sum over fields, not a
 /// product).
 fn base_root_inputs() -> RootInputs {
     RootInputs {
+        trace: plx_os::playback_trace::Status::Off,
         signed_in: true, multi_user: false, library_count: 0,
-        auto_sign_in: false, trailer_autoplay: true,
-        language: plx_platform::i18n::Preference::System, plaintext: Vec::new(),
+        auto_sign_in: false, trailer_autoplay: true, resolution: UiResolution::Auto, resolution_offered: true,
+        language: plx_os::i18n::Preference::System,
+        under_posters: plx_plex::plex::session::UnderPosters::DEFAULT, plaintext: Vec::new(),
     }
 }
 
 /// Build `inputs` through the real [`root_form`] and collect the app-owned findings.
 fn overflowing_root(tag: &str, inputs: &RootInputs, out: &mut Vec<String>) {
-    let mut form = FormTable::<RootId, Action, SettingsPage>::new(super::super::registry::BAND);
-    form.table.compact = false;
+    let mut form = FormTable::<RootId, Action, SettingsPage>::page(super::super::registry::BAND);
     form.set(root_form(inputs), None);
     overflowing(tag, &form.table, out);
 }
@@ -46,10 +53,23 @@ fn every_settings_row_fits_its_column_in_every_language() {
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let tag = language.tag();
-        overflowing(&format!("{tag} root (signed out)"), &RootPage::new(EntryId(0), test_support::cx(None).views).form.table, &mut out);
-        overflowing(&format!("{tag} language"), &LanguagePage::new(EntryId(0)).form.table, &mut out);
+        overflowing(&format!("{tag} root (signed out)"), &RootPage::new(EntryId(0), test_support::cx(None).views.directory, &crate::registry::capture_fixture()).form.table, &mut out);
+        overflowing(&format!("{tag} language"), &LanguagePage::new(EntryId(0), &crate::registry::capture_fixture()).form.table, &mut out);
+        // The Diagnostics page's Export row reads `trace_label(status)`: every status, through the
+        // page's own constructor (the table it draws), not a table of the test's own.
+        for status in ALL_TRACE_STATUSES {
+            let page = diagnostics::DiagnosticsPage::at(EntryId(0), status);
+            overflowing(&format!("{tag} diagnostics page {status:?}"), &page.form.table, &mut out);
+        }
 
         overflowing_root(&format!("{tag} root (signed in)"), &base_root_inputs(), &mut out);
+        for trace in [plx_os::playback_trace::Status::Off, plx_os::playback_trace::Status::Recording,
+            plx_os::playback_trace::Status::Saved, plx_os::playback_trace::Status::Saving,
+            plx_os::playback_trace::Status::Exported, plx_os::playback_trace::Status::Unavailable,
+            plx_os::playback_trace::Status::Failed] {
+            overflowing_root(&format!("{tag} diagnostics={trace:?}"),
+                &RootInputs { trace, ..base_root_inputs() }, &mut out);
+        }
         for signed_in in [true, false] {
             overflowing_root(&format!("{tag} signed_in={signed_in}"),
                 &RootInputs { signed_in, ..base_root_inputs() }, &mut out);
@@ -65,6 +85,12 @@ fn every_settings_row_fits_its_column_in_every_language() {
         for trailer_autoplay in [true, false] {
             overflowing_root(&format!("{tag} trailer_autoplay={trailer_autoplay}"),
                 &RootInputs { trailer_autoplay, ..base_root_inputs() }, &mut out);
+        }
+        overflowing_root(&format!("{tag} resolution row hidden"),
+            &RootInputs { resolution_offered: false, ..base_root_inputs() }, &mut out);
+        for resolution in UiResolution::LADDER {
+            overflowing_root(&format!("{tag} resolution={resolution:?}"),
+                &RootInputs { resolution, ..base_root_inputs() }, &mut out);
         }
         for &library_count in &[0i64, 1, 88] {
             overflowing_root(&format!("{tag} library_count={library_count}"),
@@ -83,7 +109,7 @@ fn every_settings_row_fits_its_column_in_every_language() {
                         &RootInputs { plaintext: vec![PlaintextRowInput {
                             machine: ServerMachineId("machine".into()),
                             name: if named { "some-server-machine-name-that-is-very-long".into() }
-                                  else { plx_platform::i18n::msg::settings_plaintext_server().into() },
+                                  else { plx_os::i18n::msg::settings_plaintext_server().into() },
                             named, on, connected,
                         }], ..base_root_inputs() }, &mut out);
                 }
@@ -121,7 +147,7 @@ fn the_restart_hint_fits_the_language_narrative_in_every_language() {
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let tag = language.tag();
-        let message = plx_platform::i18n::msg::settings_language_restart_hint("\u{fffc}");
+        let message = plx_os::i18n::msg::settings_language_restart_hint("\u{fffc}");
         if message.matches('\u{fffc}').count() != 1 {
             out.push(format!("{tag}: needs exactly one key placeholder: {message:?}"));
         }
@@ -129,13 +155,13 @@ fn the_restart_hint_fits_the_language_narrative_in_every_language() {
         if w > layout.narrative.w {
             out.push(format!("{tag}: {w:.0}px wider than the {:.0}px narrative column", layout.narrative.w));
         }
-        let title = plx_platform::i18n::msg::settings_language_title();
+        let title = plx_os::i18n::msg::settings_language_title();
         let frame = layout.narrative_copy_frame(true, title, layout.action.y, &ShippedMeasure);
         for copy in [
-            plx_platform::i18n::msg::settings_language_copy(),
-            plx_platform::i18n::msg::settings_language_pending(),
-            plx_platform::i18n::msg::settings_language_saving(),
-            plx_platform::i18n::msg::settings_language_save_failed(),
+            plx_os::i18n::msg::settings_language_copy(),
+            plx_os::i18n::msg::settings_language_pending(),
+            plx_os::i18n::msg::settings_language_saving(),
+            plx_os::i18n::msg::settings_language_save_failed(),
         ] {
             let copy_h = TextView::new(copy, theme::size::LABEL, theme::TEXT_READING)
                 .leading(theme::size::LABEL as f32 + theme::space::XS)

@@ -22,19 +22,20 @@
 //!
 //! **Details is a card, never an expansion** (owner, 2026-09-19: "3 buttons and labels. Looks like
 //! a mess."). The read-out itself never grows: *Details* opens the same [`DecisionAlert`] the
-//! question uses, titled plx_platform::i18n::msg::settings_login_details(), whose body is the Report ID (once there is one) and the
+//! question uses, titled plx_os::i18n::msg::settings_login_details(), whose body is the Report ID (once there is one) and the
 //! support line, and whose answers are *Close* and — only while a report can still be sent —
 //! *Send report*, which starts focused when it is there on open. While the card stays open its
 //! content follows the incident, retaining valid focus as receipts and answers change. BACK or *Close* puts focus back on
 //! *Details*; *Send report* closes the card too. Ordinary failure read-outs then show
-//! plx_platform::i18n::msg::settings_login_report_sending() beside its spinner; helper save warnings keep their storage stage visible. The QR screen's *Details* opens the same card.
+//! plx_os::i18n::msg::settings_login_report_sending() beside its spinner; helper save warnings keep their storage stage visible. The QR screen's *Details* opens the same card.
 //!
 //! **The calm default.** Until somebody acts (or a standing Yes sends one), the failure is the
 //! design system's `StatusOverlay` failed and nothing else: verdict, reason, *Try again* /
-//! *Details*. A report adds at most ONE short status line under the row ([`report_status`]); a
+//! *Details* — except the no-server verdict, whose primary is *Use another account* (a fresh QR
+//! sign-in, since another discovery with the same token cannot end differently). A report adds at most ONE short status line under the row ([`report_status`]); a
 //! helper save warning uses that line for its photographable storage stage. The
 //! Report ID lives only inside the Details card. A report still on its way carries the shared inline
-//! spinner beside plx_platform::i18n::msg::settings_login_report_sending() wherever that line is drawn — the QR screen's stall line keeps
+//! spinner beside plx_os::i18n::msg::settings_login_report_sending() wherever that line is drawn — the QR screen's stall line keeps
 //! its own spinner too.
 //!
 //! The constructor and each `Tick` consume one immutable [`auth::SessionRead`] publication through
@@ -50,6 +51,7 @@ use std::os::raw::c_int;
 use std::sync::Arc;
 
 use plx_session::auth::{self, Phase};
+use plx_ui::a11y::{A11y, A11yPath, Role, Seg};
 use plx_ui::frame::Budget;
 use plx_ui::label::HAlign;
 use plx_machine::machine::{
@@ -62,8 +64,10 @@ use plx_ui::screen::{
     Focusable, GroupKind, GroupSpec, HitSource, Hover, Placed, RenderStrategy, Screen, ScreenEvent,
     Seat, Step, Stop,
 };
+use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::text_view::TextView;
-use plx_ui::decision_alert::{Choice, DecisionAlert, Tone};
+use plx_ui::vstack::{Anchor, VStack};
+use plx_ui::decision_alert::{AlertAnswers, Choice, DecisionAlert, Tone};
 use plx_ui::widgets::{Button, CtlPop, Spinner, StatusKind, StatusOverlay};
 use plx_ui::{theme, Env, Painter, Rect, View};
 
@@ -246,13 +250,13 @@ fn qr_cache_stale(cached: u64, live: u64, phase: Phase) -> bool {
 fn deleted_readout(leftovers: usize) -> (&'static CStr, &'static CStr) {
     if leftovers == 0 {
         (
-            plx_platform::i18n::msg::browse_login_deleted_c(),
-            plx_platform::i18n::msg::browse_login_deleted_detail_c(),
+            plx_os::i18n::msg::browse_login_deleted_c(),
+            plx_os::i18n::msg::browse_login_deleted_detail_c(),
         )
     } else {
         (
-            plx_platform::i18n::msg::browse_login_partial_c(),
-            plx_platform::i18n::msg::browse_login_partial_detail_c(),
+            plx_os::i18n::msg::browse_login_partial_c(),
+            plx_os::i18n::msg::browse_login_partial_detail_c(),
         )
     }
 }
@@ -272,13 +276,13 @@ fn deleted_readout(leftovers: usize) -> (&'static CStr, &'static CStr) {
 /// thing to say is where the fault most likely is.
 fn waiting_status(code_replaced: bool, stalled: bool, unreachable: bool) -> &'static CStr {
     if unreachable {
-        plx_platform::i18n::msg::settings_login_unreachable_c()
+        plx_os::i18n::msg::settings_login_unreachable_c()
     } else if stalled {
-        plx_platform::i18n::msg::browse_login_stalled_c()
+        plx_os::i18n::msg::browse_login_stalled_c()
     } else if code_replaced {
-        plx_platform::i18n::msg::browse_login_expired_c()
+        plx_os::i18n::msg::browse_login_expired_c()
     } else {
-        plx_platform::i18n::msg::browse_login_waiting_c()
+        plx_os::i18n::msg::browse_login_waiting_c()
     }
 }
 
@@ -329,7 +333,7 @@ fn signed_in_reason(account: &str, measure: &dyn Measure) -> Option<String> {
         return None;
     }
     let sz = theme::size::BODY;
-    let message = |name: &str| plx_platform::i18n::msg::browse_auth_no_servers_signed_in_as(name);
+    let message = |name: &str| plx_os::i18n::msg::browse_auth_no_servers_signed_in_as(name);
     let first_line_w = |text: &str| measure.width_str(text.lines().next().unwrap_or(""), sz, false);
     let column = StatusOverlay::REASON_W * plx_ui::fit::HEADROOM;
     let full = message(&account);
@@ -374,19 +378,33 @@ fn qr_layout(layout: RouteLayout, status: &CStr, measure: &dyn Measure) -> QrLay
     let url_h = theme::size::TITLE as f32 + theme::space::XS;
     let code_h = theme::size::DISPLAY as f32 + theme::space::XS;
     let status_h = theme::size::BODY as f32 + theme::space::SM;
-    let status_top = card.y + card.h + theme::space::LG + code_h + theme::space::MD;
+    // The code hangs one LG under the card and the status one MD under the code: one run.
+    let items = [Item::new(code_h), Item::new(status_h)];
+    let below = VStack::new(
+        &items,
+        theme::space::MD,
+        Anchor::Top(card.y + card.h + theme::space::LG),
+    );
+    let at = |i| below.span(i).map_or(0.0, |(y, _)| y);
+    let code_y = at(0);
+    let status_top = at(1);
     let spinner_extent = STATUS_SPINNER_R + Spinner::dot_r(STATUS_SPINNER_R);
+    // The gutter is the room the text may NOT use (the clamp below); the run itself is placed once.
     let gutter = spinner_extent * 2.0 + theme::space::SM;
     let text_w = measure.width(status, theme::size::BODY, false)
         .min((layout.content.w - gutter).max(1.0));
-    let row_w = text_w + gutter;
-    let row_x = layout.content.cx() - row_w * 0.5;
+    // The status row: the spinner's box, one SM, the text — centred on the content column.
+    let run = Spinner::pair_items(spinner_extent * 2.0, text_w);
+    let run = HStack::new(&run, theme::space::SM, Align::Centre(layout.content.cx()));
+    let row_w = run.width();
+    let row_x = run.span(0).map_or(0.0, |(x, _)| x);
+    let text_x = run.span(1).map_or(0.0, |(x, _)| x);
     // The first line retains the old cap-band anchor. Further lines flow below it, and their
     // complete measured extent also owns the retry hit/focus rectangle.
     let cap_h = measure.cap_h(theme::size::BODY);
     let text_top = status_top + (status_h - cap_h).max(0.0) * 0.5;
     let text_h = waiting_view(status, measure).measure_h(text_w);
-    let status_text = Rect::new(row_x + gutter, text_top, text_w, text_h);
+    let status_text = Rect::new(text_x, text_top, text_w, text_h);
     let status_spinner = Rect::new(row_x, text_top + cap_h * 0.5 - spinner_extent,
         spinner_extent * 2.0, spinner_extent * 2.0);
     let status_frame = Rect::new(row_x, status_top, row_w,
@@ -401,7 +419,7 @@ fn qr_layout(layout: RouteLayout, status: &CStr, measure: &dyn Measure) -> QrLay
         card,
         code: Rect::new(
             layout.content.x,
-            card.y + card.h + theme::space::LG,
+            code_y,
             layout.content.w,
             code_h,
         ),
@@ -479,6 +497,17 @@ fn status_row_rects(
         .action_frames_measured(measure)
 }
 
+/// Where a report note's text column stands in the narrative column `[x, x + w)`: the whole
+/// column, or — with the busy spinner — what is left of it after the shared inline ring and its
+/// `space::XS` gap (the stack `StatusOverlay::busy_note_split` stands, leading-anchored here).
+fn note_column(x: f32, w: f32, busy: bool) -> (f32, f32) {
+    if !busy {
+        return (x, w);
+    }
+    let pair = Spinner::inline_pair_items(w - Spinner::inline_gutter());
+    HStack::new(&pair, theme::space::XS, Align::Leading(x)).span(1).unwrap_or((x, w))
+}
+
 /// The lone action's rect — [`status_row_rects`] for a read-out with one control.
 #[cfg(test)]
 fn status_action_rect(
@@ -510,14 +539,20 @@ enum ControlKind {
     /// the read-out keeps one primary, never a third button. Once answered the primary is *Try
     /// again* ([`ControlKind::Retry`]), and the reason says what it does.
     ConnectPlaintext,
+    /// `Phase::Error`'s no-server verdict (`DiscoveryClass::NoServers`) in place of `Try again`:
+    /// the token that signed in is the account with nothing on it, and every retry would re-run
+    /// discovery with that same token and land on this same read-out. Starts a whole fresh sign-in
+    /// (the same command as [`ControlKind::StartLogin`]) so a different account can be used.
+    UseAnotherAccount,
 }
 
 fn label_for(kind: ControlKind) -> &'static CStr {
     match kind {
-        ControlKind::RestartWait | ControlKind::Retry => plx_platform::i18n::msg::browse_action_retry_c(),
-        ControlKind::StartLogin => plx_platform::i18n::msg::browse_action_sign_in_c(),
-        ControlKind::ContinueUnsaved => plx_platform::i18n::msg::settings_login_continue_unsaved_c(),
+        ControlKind::RestartWait | ControlKind::Retry => plx_os::i18n::msg::browse_action_retry_c(),
+        ControlKind::StartLogin => plx_os::i18n::msg::browse_action_sign_in_c(),
+        ControlKind::ContinueUnsaved => plx_os::i18n::msg::settings_login_continue_unsaved_c(),
         ControlKind::ConnectPlaintext => connect(),
+        ControlKind::UseAnotherAccount => plx_os::i18n::msg::browse_action_use_another_account_c(),
     }
 }
 
@@ -678,7 +713,7 @@ struct Report {
 enum Sheet {
     Question,
     Details,
-    /// plx_platform::i18n::msg::settings_plaintext_question() — *Not now* / *Connect*, asked from the read-out's primary.
+    /// plx_os::i18n::msg::settings_plaintext_question() — *Not now* / *Connect*, asked from the read-out's primary.
     Plaintext,
 }
 
@@ -750,10 +785,10 @@ impl Report {
 fn report_status(state: &auth::owner::IncidentState) -> Option<(&'static CStr, bool)> {
     use auth::owner::IncidentState as S;
     Some(match state {
-        S::Sending | S::AutoSending | S::Queued { .. } => (plx_platform::i18n::msg::settings_login_report_sending_c(), true),
-        S::Delivered { .. } => (plx_platform::i18n::msg::settings_login_report_sent_c(), false),
-        S::Saved { .. } => (plx_platform::i18n::msg::settings_login_report_saved_c(), false),
-        S::Failed => (plx_platform::i18n::msg::settings_login_report_failed_c(), false),
+        S::Sending | S::AutoSending | S::Queued { .. } => (plx_os::i18n::msg::settings_login_report_sending_c(), true),
+        S::Delivered { .. } => (plx_os::i18n::msg::settings_login_report_sent_c(), false),
+        S::Saved { .. } => (plx_os::i18n::msg::settings_login_report_saved_c(), false),
+        S::Failed => (plx_os::i18n::msg::settings_login_report_failed_c(), false),
         S::Pending | S::Offered { .. } | S::OnRequest { .. } | S::NotNow | S::Dropped => return None,
     })
 }
@@ -776,7 +811,7 @@ fn group_report_id(receipt: &str) -> String {
 
 /// The Details card's line that carries the Report ID — labelled, its own paragraph.
 fn report_id_line(receipt: &str) -> String {
-    plx_platform::i18n::msg::settings_login_report_id(&group_report_id(receipt))
+    plx_os::i18n::msg::settings_login_report_id(&group_report_id(receipt))
 }
 
 /// The report's one status line, and whether a spinner turns beside it.
@@ -793,8 +828,8 @@ struct Note {
 /// on a deduplicated retry even when the report's already-resolved context and receipt stay put.
 fn support_line(offer: &auth::owner::IncidentOffer) -> String {
     use plx_telemetry::telemetry::incident::LinkClass;
-    let set = plx_platform::tv::device::device().set_line();
-    let set = if set.is_empty() { plx_platform::i18n::msg::settings_login_unknown_device().to_string() } else { set };
+    let set = plx_os::tv::device::device().set_line();
+    let set = if set.is_empty() { plx_os::i18n::msg::settings_login_unknown_device().to_string() } else { set };
     let code = match offer.key.link {
         LinkClass::Unknown => offer.key.kind.code().to_string(),
         link => format!("{}.{}", offer.key.kind.code(), link.code()),
@@ -803,7 +838,7 @@ fn support_line(offer: &auth::owner::IncidentOffer) -> String {
     let discovery = offer.readout_context().and_then(|ctx| ctx.discovery.map(|e| {
         let target = e.target.map_or("discovery", |target| match target {
             plx_telemetry::telemetry::incident::DiscoveryTarget::PlexTv => "plex.tv",
-            plx_telemetry::telemetry::incident::DiscoveryTarget::Servers => plx_platform::i18n::msg::settings_login_your_servers(),
+            plx_telemetry::telemetry::incident::DiscoveryTarget::Servers => plx_os::i18n::msg::settings_login_your_servers(),
         });
         let attempts = ctx.discovery_attempts
             .map_or(String::new(), |n| format!(" attempts:{n}"));
@@ -814,7 +849,7 @@ fn support_line(offer: &auth::owner::IncidentOffer) -> String {
         "{} {} \u{b7} {} \u{b7} {} \u{b7} {}{} \u{b7} {}",
         plx_plex::plex::identity::PRODUCT,
         plx_plex::plex::identity::version(),
-        plx_platform::i18n::webos_release_line(plx_platform::tv::device::info()),
+        plx_os::i18n::webos_release_line(plx_os::tv::device::info()),
         set,
         code,
         discovery,
@@ -1113,6 +1148,7 @@ impl LoginScreen {
     /// the alert down when the offer it asks about has gone, and step the motion.
     fn tick_report<H: AuthLike>(&mut self, t: Tick, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         use auth::owner::IncidentState as S;
+        let alert_was_visible = self.report.alert.visible();
         let offer = self.report.offer.clone();
         let id = offer.as_ref().map(|o| o.id);
         if self.report.support_for != id {
@@ -1139,7 +1175,7 @@ impl LoginScreen {
                 _ => false,
             };
             if stale
-                && !harness_driven()
+                && !H::screen_inputs(cx).runtime_policy.harness_driven
                 && self.report.last_resolve != Some((o.id, revision))
             {
                 self.report.last_resolve = Some((o.id, revision));
@@ -1161,7 +1197,7 @@ impl LoginScreen {
             {
                 self.report.alert_for = Some(o.id);
                 self.report.sheet = Sheet::Question;
-                self.report.alert.open_with_body(plx_platform::i18n::msg::settings_login_report_question_c(), plx_platform::i18n::msg::settings_login_report_body());
+                self.report.alert.open_with_body(plx_os::i18n::msg::settings_login_report_question_c(), plx_os::i18n::msg::settings_login_report_body());
                 Self::enter_group(fx, ALERT_GROUP);
             }
         }
@@ -1181,7 +1217,12 @@ impl LoginScreen {
             use plx_ui::decision_alert::Answers;
             let body = self.report.details_body();
             let answers = if self.report.sendable() { Answers::Two } else { Answers::One };
-            self.report.alert.reconcile_card(plx_platform::i18n::msg::settings_login_details_c(), body, answers);
+            if self.report.alert.reconcile_card(plx_os::i18n::msg::settings_login_details_c(), body, answers) {
+                fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+            }
+        }
+        if alert_was_visible != self.report.alert.visible() {
+            fx.invalidate(plx_machine::present::Provenance::Lifecycle);
         }
         self.report.alert.update(t.dt());
         let focused = cx
@@ -1200,6 +1241,7 @@ impl LoginScreen {
         match self.phase {
             Phase::Deleted => Some(ControlKind::StartLogin),
             Phase::Error if self.plaintext_asks() => Some(ControlKind::ConnectPlaintext),
+            Phase::Error if self.no_servers() => Some(ControlKind::UseAnotherAccount),
             Phase::Error => Some(ControlKind::Retry),
             Phase::Waiting if qr_escape_offered(self.phase_ms) => Some(ControlKind::RestartWait),
             p if working_phase(p) && escape_offered(p, self.phase_ms) => {
@@ -1207,6 +1249,14 @@ impl LoginScreen {
             }
             _ => None,
         }
+    }
+
+    /// Whether the failure on screen is the no-server verdict: the account signed in and has
+    /// nothing on it, so a retry with the same token cannot end differently.
+    fn no_servers(&self) -> bool {
+        self.phase == Phase::Error && self.report.offer.as_ref().is_some_and(|o| o.key.kind ==
+            plx_telemetry::telemetry::incident::IncidentKind::Discovery(
+                plx_telemetry::telemetry::incident::DiscoveryClass::NoServers))
     }
 
     /// Whether the failure on screen is an eligible plaintext-only server — answered or not. Such
@@ -1221,7 +1271,7 @@ impl LoginScreen {
         self.phase == Phase::Error && plaintext_question::asks(self.plaintext.as_ref())
     }
 
-    /// Ask plx_platform::i18n::msg::settings_plaintext_question() — the shared question on this screen's alert.
+    /// Ask plx_os::i18n::msg::settings_plaintext_question() — the shared question on this screen's alert.
     fn open_plaintext<H: AppLike>(&mut self, fx: &mut Effects<'_, H>) {
         let Some(v) = self.plaintext.as_ref().filter(|_| self.plaintext_asks()) else {
             return;
@@ -1305,11 +1355,22 @@ impl LoginScreen {
         self.report.sheet = Sheet::Details;
         self.report
             .alert
-            .open_card(plx_platform::i18n::msg::settings_login_details_c(), body, if sendable { Answers::Two } else { Answers::One });
+            .open_card(plx_os::i18n::msg::settings_login_details_c(), body, if sendable { Answers::Two } else { Answers::One });
         if sendable {
             self.report.alert.set_choice(Choice::Destructive);
         }
         Self::enter_group(fx, ALERT_GROUP);
+    }
+
+    /// The words on the control, for the state file: the QR screen's escape sentence while the
+    /// code is up, the read-out's primary otherwise (`None` when there is no control).
+    fn control_label(&self) -> Option<&'static str> {
+        let text = if self.phase == Phase::Waiting && self.persistence_warning.is_none() {
+            self.waiting_label()
+        } else {
+            label_for(self.control_kind()?)
+        };
+        text.to_str().ok()
     }
 
     /// The QR screen's *Details* pill, at the head of the route's bottom action band.
@@ -1317,7 +1378,7 @@ impl LoginScreen {
         if !self.details_offered() {
             return None;
         }
-        let w = Button::pill_w_measured(plx_platform::i18n::msg::settings_login_details_c(), theme::size::BODY, false, false, measure);
+        let w = Button::pill_w_measured(plx_os::i18n::msg::settings_login_details_c(), theme::size::BODY, false, None, measure);
         Some(RouteLayout::screen().action_pair(w, 0.0).0)
     }
 
@@ -1334,8 +1395,9 @@ impl LoginScreen {
             ControlKind::StartLogin => true, // `deleted_readout` always states one
             ControlKind::ContinueUnsaved => true, // the warning sentence is unconditional
             ControlKind::ConnectPlaintext => true, // `auth::insecure_only_copy` always states one
+            ControlKind::UseAnotherAccount => true, // the no-server reason is always stated
         };
-        let details = self.details_offered().then_some(plx_platform::i18n::msg::settings_login_details_c());
+        let details = self.details_offered().then_some(plx_os::i18n::msg::settings_login_details_c());
         ([Some(label_for(kind)), details], has_reason)
     }
 
@@ -1497,7 +1559,7 @@ impl LoginScreen {
                     )));
                 }
             }
-            Some(ControlKind::StartLogin) => {
+            Some(ControlKind::StartLogin | ControlKind::UseAnotherAccount) => {
                 fx.push(Fx::App(AppFx::Session(auth::SessionCmd::StartLogin)));
             }
             Some(ControlKind::Retry) => {
@@ -1580,7 +1642,7 @@ impl LoginScreen {
     /// The failed sign-in's read-out: the verdict, the phase's reason and its controls.
     fn failed_readout<'a>(&self, reason: &'a CStr, note: Option<&'a Note>) -> StatusOverlay<'a> {
         self.readout(
-            plx_platform::i18n::msg::browse_login_failed_c(),
+            plx_os::i18n::msg::browse_login_failed_c(),
             StatusKind::Failed,
             (!reason.is_empty()).then_some(reason),
             note,
@@ -1595,7 +1657,7 @@ impl LoginScreen {
         mut o: StatusOverlay<'_>,
         focus: Option<u32>,
     ) {
-        let press = f.press.scale;
+        let press = f.press;
         let pop = &self.report.pop;
         if o.action.is_some() {
             o = o
@@ -1654,7 +1716,7 @@ impl LoginScreen {
             StatusKind::Working,
             // The reason arrives WITH the control, and only then: it exists to explain why a
             // button just appeared under a spinner that was doing fine a moment ago.
-            discovery_trouble.as_deref().or_else(|| stuck.then_some(plx_platform::i18n::msg::browse_login_slow_c())),
+            discovery_trouble.as_deref().or_else(|| stuck.then_some(plx_os::i18n::msg::browse_login_slow_c())),
             focus,
         );
     }
@@ -1672,9 +1734,9 @@ impl LoginScreen {
             f,
             p,
             env,
-            plx_platform::i18n::msg::settings_login_save_failed_title_c(),
+            plx_os::i18n::msg::settings_login_save_failed_title_c(),
             StatusKind::Failed,
-            Some(plx_platform::i18n::msg::settings_login_save_failed_body_c()),
+            Some(plx_os::i18n::msg::settings_login_save_failed_body_c()),
             focus,
         );
     }
@@ -1734,9 +1796,8 @@ impl LoginScreen {
         layout.draw_narrative(
             p,
             None,
-            plx_platform::i18n::msg::browse_login_title(),
-            plx_platform::i18n::msg::browse_login_instructions(),
-            theme::size::LABEL,
+            plx_os::i18n::msg::browse_login_title(),
+            plx_os::i18n::msg::browse_login_instructions(),
             f.measure,
         );
         let status = self.waiting_label();
@@ -1796,9 +1857,9 @@ impl LoginScreen {
 
         let details = self.waiting_details(f.measure);
         if let Some(rect) = details {
-            Button::new(plx_platform::i18n::msg::settings_login_details_c().as_ptr(), theme::size::BODY, rect)
+            Button::new(plx_os::i18n::msg::settings_login_details_c().as_ptr(), theme::size::BODY, rect)
                 .focused(focus == Some(DETAILS))
-                .scale(self.report.pop.scale_with(1, f.press.scale))
+                .scale(self.report.pop.scale_with(1, f.press))
                 .draw(&Env::inert(), p);
         }
         self.draw_disclosure(p, layout, f.measure);
@@ -1821,8 +1882,8 @@ impl LoginScreen {
         if let Some(note) = self.report_note() {
             // A report on its way: the shared inline spinner in a leading gutter, on the first
             // line's cap band (TextView sets each line cap-top), the text one gutter over.
-            let gutter = if note.busy { Spinner::inline_gutter() } else { 0.0 };
-            let col = Rect::new(layout.narrative.x + gutter, 0.0, layout.narrative.w - gutter, 0.0);
+            let (col_x, col_w) = note_column(layout.narrative.x, layout.narrative.w, note.busy);
+            let col = Rect::new(col_x, 0.0, col_w, 0.0);
             let line = note.text.to_string_lossy();
             let view = TextView::new(&line, theme::size::CAPTION, theme::TEXT_TERTIARY).max_lines(2);
             let h = view.measure_h(col.w);
@@ -1845,13 +1906,13 @@ impl LoginScreen {
         if !self.report.alert.visible() {
             return;
         }
-        self.report.alert.draw_scrim();
+        self.report.alert.draw_scrim(f);
         let (cancel, affirm) = match self.report.sheet {
-            Sheet::Question => (plx_platform::i18n::msg::settings_plaintext_not_now_c(), plx_platform::i18n::msg::settings_login_send_report_c()),
-            Sheet::Details => (plx_platform::i18n::msg::settings_login_close_c(), plx_platform::i18n::msg::settings_login_send_report_c()),
+            Sheet::Question => (plx_os::i18n::msg::settings_plaintext_not_now_c(), plx_os::i18n::msg::settings_login_send_report_c()),
+            Sheet::Details => (plx_os::i18n::msg::settings_login_close_c(), plx_os::i18n::msg::settings_login_send_report_c()),
             Sheet::Plaintext => PlaintextQuestion::verbs(),
         };
-        self.report.alert.draw(cancel, affirm, f.measure);
+        self.report.alert.draw(cancel, affirm, f.measure, f.route_navigation(), f.press);
         let frames = self.report.alert.frames(f.measure);
         if self.report.alert.is_open() && self.report.alert.settled() {
             for &elem in self.alert_elems() {
@@ -1910,39 +1971,6 @@ impl LoginScreen {
     }
 }
 
-/// Is a harness driving this boot? The onboarding offer is a modal question, and a scripted run
-/// (a test identity, a forced profile pick, a recording) must not stop on one. **Narrow on
-/// purpose**, where `dev::any_trigger_present` is broad: every other trigger — `plxnative-login`,
-/// `-nowan`, `-signinfail`, the consent state — is how the offer is PUT on screen for a capture,
-/// and a gate that saw them would hide the thing being captured. Read once.
-///
-/// It only reads trigger files, so it lives with its one caller rather than in `dev::scenarios`,
-/// which a screen may not name.
-fn harness_driven() -> bool {
-    // A test never has a harness behind it. The application's own tests build this crate without
-    // `cfg(test)`, so the feature that marks them is the second half of the condition.
-    if cfg!(any(test, feature = "test-support")) { return false; }
-    static DRIVEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DRIVEN.get_or_init(|| {
-        plx_base::devtrig::read("token").is_some_and(|t| !t.is_empty())
-            || plx_base::devtrig::read("pickuser").is_some()
-            || recorder_armed()
-    })
-}
-
-/// Is `plxnative-rec` armed (the recorder's mode value present and valid)? The same raw read
-/// `dev::scenarios::rec_trigger` makes for the controlled-boot preflight. Compiled out, not merely
-/// guarded, in a release build: a runtime check would leave the trigger name in the binary's bytes,
-/// where `ci/check-package.py` grades them.
-#[cfg(feature = "devtriggers")]
-fn recorder_armed() -> bool {
-    matches!(plx_ui::rec::mode_value(&plx_base::devtrig::path("rec")), Ok(Some(_)))
-}
-#[cfg(not(feature = "devtriggers"))]
-fn recorder_armed() -> bool {
-    false
-}
-
 impl LoginScreen {
     /// The same measured geometry serves pre-paint focus, controlled replay and drawing.
     fn alert_rect(&self, elem: u32, measure: &dyn Measure) -> Rect {
@@ -1952,6 +1980,21 @@ impl LoginScreen {
 
     fn key(&self, elem: u32) -> plx_machine::machine::FocusKey<u32> {
         plx_machine::machine::FocusKey { entry: self.entry, elem }
+    }
+
+    /// **The open alert's answers as an accessibility id names them**, which is the SHEET's own
+    /// vocabulary: on the plaintext question they are the question's (`alert.not_now`,
+    /// `alert.connect`, through the shared [`PlaintextQuestion::answer_ids`]), because *Connect*
+    /// there allows an insecure server and is persisted, and `alert.send` must never stand for it;
+    /// `alert.cancel` / `alert.send` are the report question's and the Details card's only.
+    fn alert_answers(&self) -> AlertAnswers {
+        match self.report.sheet {
+            Sheet::Plaintext => PlaintextQuestion::answer_ids(ALERT_GROUP, ALERT_CANCEL, ALERT_SEND),
+            Sheet::Question | Sheet::Details => {
+                AlertAnswers::new(ALERT_GROUP, ALERT_CANCEL, ALERT_SEND, "cancel", "send")
+            }
+        }
+        .counted(self.report.alert.answers())
     }
 
     /// The open alert's answers: both, or — a Details card with nothing left to send — *Close*
@@ -2103,6 +2146,50 @@ impl<H: AppLike> Focusable<H> for LoginScreen {
         }
         let row = self.row();
         self.key(if row.n > 0 { row.elems[0] } else { CONTROL })
+    }
+    /// **The ids** (relative; the host qualifies them with `login`): `control` (the read-out's
+    /// primary, or the QR screen's escape sentence), `details`, and the open alert's answers,
+    /// which are the SHEET's own ([`Self::alert_answers`]): `alert.not_now` / `alert.connect` on
+    /// the plaintext question, `alert.cancel` / `alert.send` on the report's. An element that is
+    /// not in the current group has no id.
+    fn a11y(&self, key: &u32, cx: &Cx<'_, H>) -> Option<A11y<'_>> {
+        if self.report.alert.is_open() {
+            return self.alert_answers().a11y(*key);
+        }
+        self.group_of(key, cx)?;
+        let path = A11yPath::new();
+        let (path, label) = match *key {
+            CONTROL => (path.name("control"), self.control_label()),
+            DETAILS => (
+                path.name("details"),
+                plx_os::i18n::msg::settings_login_details_c().to_str().ok(),
+            ),
+            _ => return None,
+        };
+        let a = A11y::new(path, Role::Button);
+        Some(match label {
+            Some(text) => a.with_label(text),
+            None => a,
+        })
+    }
+    fn a11y_elems(&self, g: GroupId, _cx: &Cx<'_, H>, out: &mut Vec<u32>) {
+        if self.report.alert.is_open() {
+            self.alert_answers().elems(g, out);
+        } else if g == CONTROL_GROUP {
+            out.extend_from_slice(self.row().as_slice());
+        }
+    }
+    fn a11y_find(&self, path: &A11yPath, cx: &Cx<'_, H>) -> Option<u32> {
+        if self.report.alert.is_open() {
+            return self.alert_answers().find(path);
+        }
+        let mut segs = path.segs();
+        let elem = match (segs.next(), segs.next(), segs.next()) {
+            (Some(Seg::Name("control")), None, _) => CONTROL,
+            (Some(Seg::Name("details")), None, _) => DETAILS,
+            _ => return None,
+        };
+        self.group_of(&elem, cx).map(|_| elem)
     }
 }
 
@@ -2265,9 +2352,9 @@ impl<H: AuthLike> Screen<H> for LoginScreen {
                 Phase::Error => self.draw_failed(f, p, &env, focus),
                 Phase::Deleted => self.draw_deleted(f, p, &env, focus),
                 Phase::Discovering => {
-                    self.draw_working(f, p, &env, plx_platform::i18n::msg::browse_login_finding(), focus)
+                    self.draw_working(f, p, &env, plx_os::i18n::msg::browse_login_finding(), focus)
                 }
-                _ => self.draw_working(f, p, &env, plx_platform::i18n::msg::browse_login_connecting(), focus),
+                _ => self.draw_working(f, p, &env, plx_os::i18n::msg::browse_login_connecting(), focus),
             }
         }
         self.draw_alert(f);
@@ -2327,8 +2414,18 @@ mod incident_icon_tests {
 mod text_fit_tests;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn busy_note_column_is_the_gutter_off_the_narrative_as_before() {
+        for (x, w) in [(0.0f32, 600.0f32), (128.0, 733.5), (96.0, 1024.0)] {
+            let gutter = Spinner::inline_gutter();
+            let (cx, cw) = note_column(x, w, true);
+            assert!((cx - (x + gutter)).abs() < 0.001 && (cw - (w - gutter)).abs() < 0.001, "{cx} {cw}");
+            assert_eq!(note_column(x, w, false), (x, w));
+        }
+    }
     use std::sync::{Arc, LazyLock};
 
     use plx_ui::consts::inside_safe;
@@ -2344,14 +2441,20 @@ mod tests {
         type Fx = AppFx;
         type Msg = AppMsg;
         type Elem = u32;
-        type Views<'a> = auth::SessionRead<'a>;
+        type Views<'a> = (auth::SessionRead<'a>, &'a crate::registry::ScreenInputs);
         type Init = super::super::family::NoInit;
         type Memory = ();
     }
 
-    impl AuthLike for SessionHost {
+    impl crate::registry::ScreenInputsLike for SessionHost {
+    fn screen_inputs<'a>(cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        cx.views.1
+    }
+}
+
+impl AuthLike for SessionHost {
         fn auth<'a>(cx: &Cx<'a, Self>) -> auth::SessionRead<'a> {
-            cx.views
+            cx.views.0
         }
     }
 
@@ -2364,6 +2467,7 @@ mod tests {
             png: Arc::from(Vec::<u8>::new()),
             code_replaced: false,
             users: Arc::from(Vec::<auth::UserTile>::new()),
+            seated: Arc::from(""),
             error: Arc::from(""),
             account: None,
             pin_denied: false,
@@ -2403,7 +2507,7 @@ mod tests {
 
     #[test]
     fn helper_failure_warning_line_is_only_for_helper_failures() {
-        use plx_platform::storage::wire::failure::{HelperFailure, Stage};
+        use plx_os::storage::wire::failure::{HelperFailure, Stage};
         let mut screen = bare_screen(Phase::Ready, 0.0);
         assert!(screen.report_note().is_none());
         screen.persistence_warning = Some(auth::owner::PersistenceWarning {
@@ -2631,6 +2735,19 @@ mod tests {
         );
     }
 
+    /// The code hangs one LG under the card and the status one MD under the code: the painted gaps
+    /// are the stack's tokens, not whatever the hand-written sums used to leave.
+    #[test]
+    fn the_code_and_status_hang_one_lg_and_one_md_below_the_card() {
+        let route = RouteLayout::screen();
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let q = qr_layout(route, waiting_status(false, false, false), &measure);
+        let code_h = theme::size::DISPLAY as f32 + theme::space::XS;
+        assert_eq!(q.code.y - (q.card.y + q.card.h), theme::space::LG);
+        assert_eq!(q.code.h, code_h);
+        assert_eq!(q.status.y - (q.code.y + q.code.h), theme::space::MD);
+    }
+
     /// Ported verbatim.
     #[test]
     fn qr_is_vertically_centred_and_the_whole_link_stack_stays_in_the_right_column() {
@@ -2650,7 +2767,7 @@ mod tests {
     /// the 1920px canvas. The old 44px hit box also could not contain two BODY lines.
     #[test]
     fn translated_waiting_status_wraps_completely_inside_the_qr_column() {
-        use plx_platform::i18n::{LocaleContext, Preference};
+        use plx_os::i18n::{LocaleContext, Preference};
         struct UnicodeMeasure;
         impl Measure for UnicodeMeasure {
             fn width(&self, text: &CStr, size: i32, _bold: bool) -> f32 {
@@ -2664,21 +2781,20 @@ mod tests {
         let measure = UnicodeMeasure;
         let route = RouteLayout::screen();
         let belarusian = LocaleContext::resolve(Preference::Be, None, None, None, None);
-        let old_text_w = measure.width(plx_platform::i18n::msg::settings_login_unreachable_c_in(&belarusian), theme::size::BODY, false);
+        let old_text_w = measure.width(plx_os::i18n::msg::settings_login_unreachable_c_in(&belarusian), theme::size::BODY, false);
         let old_row_w = old_text_w + 30.0 + theme::space::SM;
         assert!(route.content.cx() + old_row_w * 0.5 > Rect::FULL.w,
             "the actual translated sentence reproduces the former off-canvas row");
-        for locale in [
-            LocaleContext::resolve(Preference::En, None, None, None, None),
-            LocaleContext::resolve(Preference::Es, None, None, None, None),
-            belarusian,
-            LocaleContext::pseudo_for_test(),
-        ] {
+        for locale in plx_os::i18n::SHIPPED
+            .into_iter()
+            .map(|p| LocaleContext::resolve(p, None, None, None, None))
+            .chain([LocaleContext::pseudo_for_test()])
+        {
             for message in [
-                plx_platform::i18n::msg::settings_login_unreachable_c_in(&locale),
-                plx_platform::i18n::msg::browse_login_stalled_c_in(&locale),
-                plx_platform::i18n::msg::browse_login_expired_c_in(&locale),
-                plx_platform::i18n::msg::browse_login_waiting_c_in(&locale),
+                plx_os::i18n::msg::settings_login_unreachable_c_in(&locale),
+                plx_os::i18n::msg::browse_login_stalled_c_in(&locale),
+                plx_os::i18n::msg::browse_login_expired_c_in(&locale),
+                plx_os::i18n::msg::browse_login_waiting_c_in(&locale),
             ] {
                 let q = qr_layout(route, message, &measure);
                 assert_eq!(q.card.cy(), Rect::FULL.cy(), "the QR anchor must not move");
@@ -2815,10 +2931,11 @@ mod tests {
         snapshot: &'a auth::owner::SessionSnapshot,
     ) -> Cx<'a, SessionHost> {
         Cx {
-            views: snapshot.read(),
+            views: (snapshot.read(), crate::registry::empty_fixture()),
             tick: plx_machine::machine::Tick::default(),
             measure: m,
             press: PressRead::default(),
+            modal: Default::default(), page_image: Default::default(), hold_hint: Default::default(),
             focus: FocusRead {
                 current: None,
                 ..Default::default()
@@ -2881,8 +2998,8 @@ mod tests {
     #[test]
     fn a_stalled_working_readout_sits_its_action_pill_lower_than_a_settled_one() {
         let m = plx_ui::fixture::FixtureMeasure;
-        let working = status_action_rect(&m, plx_platform::i18n::msg::browse_action_retry_c(), StatusKind::Working, true);
-        let settled = status_action_rect(&m, plx_platform::i18n::msg::browse_action_retry_c(), StatusKind::Empty, true);
+        let working = status_action_rect(&m, plx_os::i18n::msg::browse_action_retry_c(), StatusKind::Working, true);
+        let settled = status_action_rect(&m, plx_os::i18n::msg::browse_action_retry_c(), StatusKind::Empty, true);
         assert!(
             working.y > settled.y,
             "Working straddles the centre with the spinner above it; a settled read-out centres \
@@ -2897,15 +3014,15 @@ mod tests {
     fn a_reason_line_pushes_the_action_pill_down_further() {
         let m = plx_ui::fixture::FixtureMeasure;
         for kind in [StatusKind::Working, StatusKind::Empty, StatusKind::Failed] {
-            let with_reason = status_action_rect(&m, plx_platform::i18n::msg::browse_action_retry_c(), kind, true);
-            let without = status_action_rect(&m, plx_platform::i18n::msg::browse_action_retry_c(), kind, false);
+            let with_reason = status_action_rect(&m, plx_os::i18n::msg::browse_action_retry_c(), kind, true);
+            let without = status_action_rect(&m, plx_os::i18n::msg::browse_action_retry_c(), kind, false);
             assert!(with_reason.y > without.y, "{kind:?}");
         }
     }
 
     /// **The failed read-out stands on the page read-out's anchor and never grows.** Its verdict
-    /// hangs from `StatusOverlay::FULL_ANCHOR_TOP` and its row — *Try again* / *Details*, nothing
-    /// else — stacks `space::LG` plus the fixed drop under the reserved two-line reason slot; a report's status line, a sendable offer and a
+    /// hangs from `StatusOverlay::FULL_ANCHOR_TOP` and its row — the primary (*Try again*, or
+    /// *Use another account* on the no-server verdict) / *Details*, nothing else — stacks `space::LG` plus the fixed drop under the reserved two-line reason slot; a report's status line, a sendable offer and a
     /// delivered report all leave the row exactly where it was.
     #[test]
     fn the_failed_readout_stands_on_the_page_lines_and_never_grows() {
@@ -2978,12 +3095,12 @@ mod tests {
             for has_reason in [false, true] {
                 // Geometry only — the glyph never moves the action row, so any `Icon` measures identically.
                 let mut o = StatusOverlay::new(Rect::FULL, c"caption", kind)
-                    .page(plx_ui::icons::Icon::ClockBadgeAlert).action(plx_platform::i18n::msg::browse_action_retry_c());
+                    .page(plx_ui::icons::Icon::ClockBadgeAlert).action(plx_os::i18n::msg::browse_action_retry_c());
                 if has_reason {
-                    o = o.reason(plx_platform::i18n::msg::browse_login_slow_c());
+                    o = o.reason(plx_os::i18n::msg::browse_login_slow_c());
                 }
                 let want = o.action_frame().expect("an action was set above");
-                let got = status_action_rect(&RawTextMeasure, plx_platform::i18n::msg::browse_action_retry_c(), kind, has_reason);
+                let got = status_action_rect(&RawTextMeasure, plx_os::i18n::msg::browse_action_retry_c(), kind, has_reason);
                 assert_eq!(
                     (got.x, got.y, got.w, got.h),
                     (want.x, want.y, want.w, want.h),
@@ -3106,6 +3223,25 @@ mod tests {
             (first.phase, first.qr_gen, first.qr_code.as_ref()),
             (Phase::Waiting, 41, "AAAA")
         );
+    }
+
+    /// #694: an account with no server cannot be helped by re-running discovery with the same
+    /// token, so that read-out's one primary starts a whole fresh sign-in instead of `Try again`.
+    /// Every other discovery verdict keeps `Try again`.
+    #[test]
+    fn no_servers_readout_offers_a_fresh_sign_in_and_other_discovery_errors_keep_retry() {
+        use plx_telemetry::telemetry::incident::{DiscoveryClass, IncidentKind};
+        let state = auth::owner::IncidentState::NotNow;
+        let mut none = screen_with(Phase::Error, state.clone(), IncidentKind::Discovery(DiscoveryClass::NoServers));
+        assert_eq!(none.control_kind(), Some(ControlKind::UseAnotherAccount));
+        let (_, fx) = step_ev(&mut none, &ScreenEvent::Activate(CONTROL));
+        assert!(fx.iter().any(|st| matches!(st.fx, Fx::App(AppFx::Session(auth::SessionCmd::StartLogin)))));
+        assert!(!fx.iter().any(|st| matches!(st.fx, Fx::App(AppFx::Session(auth::SessionCmd::Retry)))));
+
+        let mut silent = screen_with(Phase::Error, state, IncidentKind::Discovery(DiscoveryClass::Silent));
+        assert_eq!(silent.control_kind(), Some(ControlKind::Retry));
+        let (_, fx) = step_ev(&mut silent, &ScreenEvent::Activate(CONTROL));
+        assert!(fx.iter().any(|st| matches!(st.fx, Fx::App(AppFx::Session(auth::SessionCmd::Retry)))));
     }
 
     #[test]
@@ -3473,6 +3609,27 @@ mod tests {
     /// (b) A sign-in failure whose incident has not been resolved yet is resolved by the screen
     /// that shows it, against the permission and revision it reads now — once, not every frame.
     #[test]
+    fn explicit_harness_policy_controls_pending_incident_resolution() {
+        let _serial = plx_base::testlock::serial();
+        let mut failed = snapshot(Phase::Error, 0, "");
+        failed.incident = Some(incident(auth::owner::IncidentState::Pending,
+            plx_telemetry::telemetry::incident::IncidentKind::PinCreate));
+        let measure = plx_ui::fixture::FixtureMeasure;
+        for harness_driven in [true, false] {
+            let mut screen = LoginScreen::new(EntryId(0), failed.read());
+            let mut inputs = crate::registry::ScreenInputs::default();
+            inputs.runtime_policy.harness_driven = harness_driven;
+            let mut cx = cx_with(&measure, &failed);
+            cx.views.1 = &inputs;
+            let mut present = Present::new();
+            let mut buf: Vec<Stamped<SessionHost>> = Vec::new();
+            let mut fx = Effects::new(&mut buf, MachineId::Instance(InstanceId(0)), &mut present);
+            Machine::<SessionHost>::step(&mut screen, &tick_ev(16), &cx, &mut fx);
+            assert_eq!(screen.report.last_resolve.is_some(), !harness_driven);
+        }
+    }
+
+    #[test]
     fn a_pending_incident_is_resolved_once_by_the_screen_that_shows_it() {
         let _serial = plx_base::testlock::serial();
         let mut failed = snapshot(Phase::Error, 0, "");
@@ -3550,6 +3707,63 @@ mod tests {
         assert!(s.state.report.details_open);
         assert!(enters_group(&fx, ALERT_GROUP), "focus goes to the card's answers");
         assert_eq!(s.row().as_slice(), [CONTROL, DETAILS]);
+    }
+
+    /// **Every element the screen has answers an id, in each state it has one**: nothing while the
+    /// QR code is fresh, `control` on the stalled wait and the failed read-out, `details` beside it,
+    /// and `alert.cancel` / `alert.send` alone while the Details card traps the screen. Each
+    /// conforms (listed, unique, inverted by `a11y_find`), and an element the state hides has no id.
+    #[test]
+    fn the_login_screen_answers_ids_for_the_elements_of_each_state() {
+        assert!(!login_conforms().is_empty());
+    }
+
+    /// The sign-in screen in each state, run through the id conformance with the id asserts above
+    /// (`AppArg::Login`; the coverage table calls this, and so does the test above).
+    pub(crate) fn login_conforms() -> plx_ui::a11y::Namespaces {
+        use plx_ui::a11y::conform;
+        let mut namespaces = Vec::new();
+        let _serial = plx_base::testlock::serial();
+        let m = plx_ui::fixture::FixtureMeasure;
+        fn id(text: &str) -> A11yPath {
+            A11yPath::parse_relative(text).unwrap()
+        }
+        fn find(s: &LoginScreen, text: &str, cx: &Cx<'_, SessionHost>) -> Option<u32> {
+            Focusable::<SessionHost>::a11y_find(s, &id(text), cx)
+        }
+
+        let cx = test_cx(&m);
+        let quiet = bare_screen(Phase::Waiting, 0.0);
+        namespaces.push(conform::<SessionHost, _>(&quiet, &cx));
+        assert_eq!(find(&quiet, "control", &cx), None, "nothing to press while the code is fresh");
+
+        let stuck = bare_screen(Phase::Waiting, QR_ESCAPE_AFTER_MS);
+        namespaces.push(conform::<SessionHost, _>(&stuck, &cx));
+        assert_eq!(find(&stuck, "control", &cx), Some(CONTROL));
+        assert_eq!(find(&stuck, "details", &cx), None);
+        let control = Focusable::<SessionHost>::a11y(&stuck, &CONTROL, &cx).unwrap();
+        assert_eq!((control.path, control.role), (id("control"), Role::Button));
+        assert_eq!(control.label.as_deref(), stuck.waiting_label().to_str().ok());
+
+        let failed = failed_with(auth::owner::IncidentState::NotNow);
+        let mut s = LoginScreen::new(EntryId(0), failed.read());
+        step_ev_with(&mut s, &tick_ev(16), &failed, InstanceId(0), &m);
+        let cx = cx_with(&m, &failed);
+        namespaces.push(conform::<SessionHost, _>(&s, &cx));
+        assert_eq!(find(&s, "control", &cx), Some(CONTROL));
+        assert_eq!(find(&s, "details", &cx), Some(DETAILS));
+        assert_eq!(find(&s, "alert.send", &cx), None, "the alert is closed");
+        let control = Focusable::<SessionHost>::a11y(&s, &CONTROL, &cx).unwrap();
+        assert_eq!(control.label.as_deref(), plx_os::i18n::msg::browse_action_retry_c().to_str().ok());
+
+        step_ev_with(&mut s, &ScreenEvent::Activate(DETAILS), &failed, InstanceId(0), &m);
+        let cx = cx_with(&m, &failed);
+        namespaces.push(conform::<SessionHost, _>(&s, &cx));
+        assert_eq!(find(&s, "alert.cancel", &cx), Some(ALERT_CANCEL));
+        assert_eq!(find(&s, "alert.send", &cx), Some(ALERT_SEND));
+        assert_eq!(find(&s, "control", &cx), None, "the card traps everything under it");
+        assert_eq!(find(&s, "details", &cx), None);
+        namespaces
     }
 
     #[test]
@@ -3749,7 +3963,7 @@ mod tests {
         assert!(!enters_group(&fx, ALERT_GROUP), "the report question is not raised");
         assert!(!s.report.alert.is_open());
         assert_eq!(s.control_kind(), Some(ControlKind::ConnectPlaintext));
-        assert_eq!(s.readout_labels().0, [Some(connect()), Some(plx_platform::i18n::msg::settings_login_details_c())]);
+        assert_eq!(s.readout_labels().0, [Some(connect()), Some(plx_os::i18n::msg::settings_login_details_c())]);
         assert_eq!(s.row().as_slice(), [CONTROL, DETAILS]);
         assert_eq!(s.state.plaintext, Some(false));
         assert!(answers(&fx).is_empty(), "nothing is answered for the person");
@@ -3766,8 +3980,8 @@ mod tests {
         let _serial = plx_base::testlock::serial();
         let m = plx_ui::fixture::FixtureMeasure;
         let mut failed = insecure_failure(plx_plex::plex::probe::PlaintextEligibility::Eligible);
-        for (choice, want) in [(PlaintextChoice::Undecided, connect()), (PlaintextChoice::Declined, plx_platform::i18n::msg::browse_action_retry_c()),
-            (PlaintextChoice::Revoked, plx_platform::i18n::msg::browse_action_retry_c()), (PlaintextChoice::Allowed, plx_platform::i18n::msg::browse_action_retry_c())] {
+        for (choice, want) in [(PlaintextChoice::Undecided, connect()), (PlaintextChoice::Declined, plx_os::i18n::msg::browse_action_retry_c()),
+            (PlaintextChoice::Revoked, plx_os::i18n::msg::browse_action_retry_c()), (PlaintextChoice::Allowed, plx_os::i18n::msg::browse_action_retry_c())] {
             if let Some(v) = failed.plaintext.as_mut() {
                 v.choice = choice;
             }
@@ -3813,6 +4027,45 @@ mod tests {
         }
     }
 
+    /// **The plaintext question names its own answers.** `alert_answer` makes the sheet's send slot
+    /// *Connect*, which allows an insecure server and is persisted, so `alert.send` must not stand
+    /// for it: while the question is up the ids are `alert.not_now` / `alert.connect`, and
+    /// `alert.cancel` / `alert.send` resolve only on the report's own sheets.
+    #[test]
+    fn the_plaintext_question_names_not_now_and_connect_and_never_send() {
+        use plx_ui::a11y::conform;
+        let _serial = plx_base::testlock::serial();
+        let m = plx_ui::fixture::FixtureMeasure;
+        fn find(s: &LoginScreen, text: &str, cx: &Cx<'_, SessionHost>) -> Option<u32> {
+            Focusable::<SessionHost>::a11y_find(s, &A11yPath::parse_relative(text).unwrap(), cx)
+        }
+        let failed = insecure_failure(plx_plex::plex::probe::PlaintextEligibility::Eligible);
+        let mut s = LoginScreen::new(EntryId(0), failed.read());
+        step_ev_with(&mut s, &tick_ev(16), &failed, InstanceId(0), &m);
+        step_ev_with(&mut s, &ScreenEvent::Activate(CONTROL), &failed, InstanceId(0), &m);
+        assert!(s.report.alert.is_open() && s.report.sheet == Sheet::Plaintext);
+        let cx = cx_with(&m, &failed);
+        conform::<SessionHost, _>(&s, &cx);
+        assert_eq!(find(&s, "alert.not_now", &cx), Some(ALERT_CANCEL));
+        assert_eq!(find(&s, "alert.connect", &cx), Some(ALERT_SEND), "Connect is the question's affirm slot");
+        assert_eq!(find(&s, "alert.send", &cx), None, "the report's Send is not on this sheet");
+        assert_eq!(find(&s, "alert.cancel", &cx), None);
+        let words = |elem: u32| Focusable::<SessionHost>::a11y(&s, &elem, &cx).map(|a| a.path);
+        assert_eq!(words(ALERT_SEND), Some(A11yPath::parse_relative("alert.connect").unwrap()));
+        assert_eq!(words(ALERT_CANCEL), Some(A11yPath::parse_relative("alert.not_now").unwrap()));
+
+        // the report question that an ineligible failure raises keeps `cancel` / `send`
+        let failed = insecure_failure(plx_plex::plex::probe::PlaintextEligibility::NotLocal);
+        let mut s = LoginScreen::new(EntryId(0), failed.read());
+        step_ev_with(&mut s, &tick_ev(16), &failed, InstanceId(0), &m);
+        assert_eq!(s.report.sheet, Sheet::Question);
+        let cx = cx_with(&m, &failed);
+        conform::<SessionHost, _>(&s, &cx);
+        assert_eq!(find(&s, "alert.send", &cx), Some(ALERT_SEND));
+        assert_eq!(find(&s, "alert.cancel", &cx), Some(ALERT_CANCEL));
+        assert_eq!(find(&s, "alert.connect", &cx), None);
+    }
+
     /// A verdict that cannot be offered (remote-only here) keeps today's read-out: *Try again*, and
     /// the report question raised as for any failure.
     #[test]
@@ -3851,12 +4104,12 @@ mod tests {
         let r = || "0123abcd".to_string();
         let line = |state: S| report_status(&state).map(|(t, busy)| (t.to_str().unwrap().to_string(), busy));
         let expect = |text: &str, busy: bool| Some((text.to_string(), busy));
-        assert_eq!(line(S::Sending), expect(plx_platform::i18n::msg::settings_login_report_sending(), true));
-        assert_eq!(line(S::AutoSending), expect(plx_platform::i18n::msg::settings_login_report_sending(), true));
-        assert_eq!(line(S::Queued { receipt: r() }), expect(plx_platform::i18n::msg::settings_login_report_sending(), true));
-        assert_eq!(line(S::Saved { receipt: r() }), expect(plx_platform::i18n::msg::settings_login_report_saved(), false));
-        assert_eq!(line(S::Delivered { receipt: r() }), expect(plx_platform::i18n::msg::settings_login_report_sent(), false));
-        assert_eq!(line(S::Failed), expect(plx_platform::i18n::msg::settings_login_report_failed(), false));
+        assert_eq!(line(S::Sending), expect(plx_os::i18n::msg::settings_login_report_sending(), true));
+        assert_eq!(line(S::AutoSending), expect(plx_os::i18n::msg::settings_login_report_sending(), true));
+        assert_eq!(line(S::Queued { receipt: r() }), expect(plx_os::i18n::msg::settings_login_report_sending(), true));
+        assert_eq!(line(S::Saved { receipt: r() }), expect(plx_os::i18n::msg::settings_login_report_saved(), false));
+        assert_eq!(line(S::Delivered { receipt: r() }), expect(plx_os::i18n::msg::settings_login_report_sent(), false));
+        assert_eq!(line(S::Failed), expect(plx_os::i18n::msg::settings_login_report_failed(), false));
         for quiet in [S::Pending, S::NotNow, S::Dropped, S::Offered { revision: 0 }, S::OnRequest { revision: 0 }] {
             assert_eq!(line(quiet.clone()), None, "{quiet:?}");
         }
@@ -3896,7 +4149,7 @@ mod tests {
         let mut ctx = plx_session::auth::synthetic_incident();
         ctx.kind = plx_telemetry::telemetry::incident::IncidentKind::SaveFailed;
         ctx.persistence = Some(plx_telemetry::telemetry::incident::PersistenceFailure::WriteFailed);
-        ctx.keymanager_stage = Some(plx_platform::storage::wire::KeymanagerStage::Begin);
+        ctx.keymanager_stage = Some(plx_os::storage::wire::KeymanagerStage::Begin);
         ctx.service_error_code = Some(-17);
         with_evidence.key.kind = ctx.kind;
         with_evidence.context = Some(ctx);
@@ -3970,7 +4223,7 @@ mod tests {
         }
         let delivered = S::Delivered { receipt: "41de4cd388e4041654de38f2787c3922".into() };
         let s = screen_with(Phase::Error, delivered, pin);
-        assert_eq!(text(s.report_note()).as_deref(), Some(plx_platform::i18n::msg::settings_login_report_sent()));
+        assert_eq!(text(s.report_note()).as_deref(), Some(plx_os::i18n::msg::settings_login_report_sent()));
     }
 
     /// **(e) A report on its way keeps the inline spinner turning over a settled read-out** — the
@@ -3993,4 +4246,24 @@ mod tests {
         assert_eq!(spin_after_ticks(auth::owner::IncidentState::Delivered { receipt: "r".into() }), 0.0, "delivered: still");
     }
 
+}
+
+#[cfg(test)]
+mod status_row_tests {
+    use super::*;
+
+    /// The QR status row stands where the hand sums put it (centred spinner box, one SM, text),
+    /// to well under a hundredth of a pixel (the stack adds the same terms in another order).
+    #[test]
+    fn the_status_row_stands_the_spinner_one_sm_before_the_text() {
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let route = RouteLayout::screen();
+        let q = qr_layout(route, waiting_status(false, false, false), &measure);
+        let ext = STATUS_SPINNER_R + Spinner::dot_r(STATUS_SPINNER_R);
+        let gutter = ext * 2.0 + theme::space::SM;
+        let row_x = route.content.cx() - (q.status_text.w + gutter) * 0.5;
+        assert!((q.status_spinner.x - row_x).abs() < 0.01);
+        assert!((q.status_text.x - (row_x + gutter)).abs() < 0.01);
+        assert!((q.status.x - row_x).abs() < 0.01 && (q.status.w - (q.status_text.w + gutter)).abs() < 0.01);
+    }
 }

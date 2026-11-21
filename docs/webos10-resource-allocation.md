@@ -6,7 +6,7 @@ found the bug and then deliberately reverted, because it was not the ABR defect 
 booked for. What landed afterwards is exactly the measured shape and no more —
 `engine::sink_envelope`: H.264 declares `1920x1080@60` when the session's widest raster fits FHD
 (the transcode case, i.e. most of a library), keeps `3840x2160@60` otherwise, HEVC is unchanged,
-AV1 (only on a set whose codec table lists an AV1 decoder) follows the HEVC envelope (unmeasured),
+AV1 (only on a set whose codec table lists an AV1 decoder) follows the HEVC envelope (no measurement; one owner reports AV1 playing on a webOS 10.3.1 set),
 and the device's own per-codec row (now read WITH `maxFrameRate`) clamps only when the table was
 actually measured. The asynchronous `type=18` is also a verdict now (§3.5's second defect). NOT
 re-measured on 10.3.1. **The frame-rate leg was run on the dev set (webOS 4.10) on 2026-09-03
@@ -17,7 +17,7 @@ stream presented on a 30 fps lattice; declared `@24` or `@30` it is announced as
 4K HEVC under `@60` and 1080p H.264 under `@60` hold 24. The sink's own displayed-frame counter
 (payload `streamQualityInfoNonFlushable`, callback type 47) measured the consequence: **13.0 fps
 presented under `@60`, 24.1 fps under `@24`, zero counted drops either way.** H.264 therefore
-declares the stream's rate class now (`engine::fps_class`). Whether declaring 24 at 4K also loads on 10.3.1 is the one leg
+declares the stream's rate class now (`engine::fps_class`, tolerant of the 1 ms Matroska timebase: 30.303 declares 30, issue #665). Whether declaring 24 at 4K also loads on 10.3.1 is the one leg
 still unrun. **Field evidence, 2026-09:** opt-in PostHog events from v0.6.6 show `playback.started`
 with `mode=transcode` on four different chips reporting release 10.3.1 (K24_DVB, O22A3_DVB,
 LM21A_DVB, O24_ATSC), so the fix holds on that firmware in the field; nobody here has watched it.

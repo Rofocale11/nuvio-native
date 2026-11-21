@@ -7,18 +7,13 @@
 //! clamp. Under a height clamp the drawn area is linear in aspect, so a 5:1 wordmark covered five
 //! times the ink of a 1:1 emblem and square logos read as an afterthought.
 //!
-//! The rule is now CONSTANT AREA, bounded (see [`theme::logo`]): solve `h` from `w·h = AREA`, clamp
-//! `h` into the rung's floor/ceiling, then contain into the caller's column. A square grows tall, a
-//! wordmark grows wide, both carry the same weight.
+//! The rule targets a bounding-box AREA, then uniformly contains it within the rung's width and
+//! height limits and the caller's column. There is no painted-height floor: one would inflate the
+//! area of wide wordmarks. Tall emblems get more height while wide wordmarks get more width.
 //!
-//! **Layout ≠ paint** (`label.rs`'s rule, applied to art): the band a caller reserves in its flow is
-//! [`band_h`] — a CONSTANT, the rung's floor — never the drawn height. A taller logo spills UPWARD
-//! out of the band as pure paint. That is what keeps a bottom-anchored hero column from lurching the
-//! moment a texture lands, and what keeps two items with different logo aspects level through a hero
-//! flip. It also means a hero logo now paints ABOVE the hero scrim's knee
-//! (`widgets::HERO_SCRIM_KNEE`) — up to y≈260 on home — where the wedge is still feathering in; the
-//! clearance that matters there is the top chrome's (`widgets::TOP_BAR_BOTTOM`), asserted in
-//! `home.rs`'s `the_home_hero_logo_never_reaches_the_top_bar`.
+//! **Layout ≠ paint**: the flow reserves a CONSTANT [`band_h`]. A taller logo spills upward;
+//! a shorter logo sits at the band's foot. The bottom anchor keeps metadata and actions stable
+//! across shapes, texture arrivals and the hero-to-compact transition.
 //!
 //! There is deliberately no fade-in behind the text→logo swap: `ui::tex::logo_src` answers `None`
 //! both while the fetch is pending AND when the item simply has no clearLogo. The store can now
@@ -27,7 +22,8 @@
 //! is only made while that accounting can be seen (`placeholder::accounting_visible`) — but no
 //! cross-fade has been built on it. The swap is a cut, but nothing around it MOVES, which is the
 //! part that used to read as a glitch.
-use crate::label::{HAlign, Label, VAlign};
+use crate::label::HAlign;
+use crate::text_view::TextView;
 use plx_machine::machine::Measure;
 use crate::{theme, Painter, Rect};
 use std::os::raw::c_int;
@@ -41,6 +37,9 @@ pub enum LogoRung {
     Hero,
     /// The detail page's pinned compact title, the strip the hero scrolls up into.
     Compact,
+    /// A Continue Watching deck card's logo (420x236): baked into the card's composite
+    /// (`card_art::compose`) and, when there is no logo, its title in type (`title_text`).
+    Card,
     /// A continuous point between two named rungs, at `t` (0 = the first, 1 = the second) — never
     /// authored as a constant, always the live output of [`LogoRung::lerp`] driven by a spring or
     /// other per-frame progress value (the detail hero's trailer-preview logo, shrinking from
@@ -49,54 +48,92 @@ pub enum LogoRung {
     /// as before, never on this variant's fields.
     Custom {
         area: f32,
-        h_min: f32,
+        band_h: f32,
+        w_max: f32,
         h_max: f32,
         fallback_sz: c_int,
+        /// [`LogoRung::descent_share`] at this point.
+        descent_share: f32,
     },
 }
 
 impl LogoRung {
-    /// `(target area px², height floor, height ceiling, the text fallback's size rung)`.
-    /// One match so the four numbers of a rung can never be read from four different places.
-    fn bounds(self) -> (f32, f32, f32, c_int) {
+    /// `(target area px², layout band height, height ceiling, width ceiling, fallback size)`.
+    /// One match keeps every rung's sizing and layout policy together.
+    fn bounds(self) -> (f32, f32, f32, f32, c_int) {
         match self {
             LogoRung::Hero => (
                 theme::logo::HERO_AREA,
-                theme::logo::HERO_H_MIN,
+                theme::logo::HERO_BAND_H,
                 theme::logo::HERO_H_MAX,
-                theme::size::HERO,
+                theme::logo::HERO_W_MAX,
+                theme::size::DISPLAY,
             ),
             LogoRung::Compact => (
                 theme::logo::COMPACT_AREA,
-                theme::logo::COMPACT_H_MIN,
+                theme::logo::COMPACT_BAND_H,
                 theme::logo::COMPACT_H_MAX,
+                theme::logo::COMPACT_W_MAX,
                 theme::size::TITLE,
             ),
-            LogoRung::Custom { area, h_min, h_max, fallback_sz } => (area, h_min, h_max, fallback_sz),
+            LogoRung::Card => (
+                theme::logo::CARD_AREA,
+                theme::logo::CARD_BAND_H,
+                theme::logo::CARD_H_MAX,
+                theme::logo::CARD_W_MAX,
+                theme::size::HEADLINE,
+            ),
+            LogoRung::Custom { area, band_h, h_max, w_max, fallback_sz, .. } => (area, band_h, h_max, w_max, fallback_sz),
         }
     }
 
     /// A continuous point between rungs `a` and `b` at `t` (clamped to `[0, 1]`) — every one of
-    /// the area/floor/ceiling/fallback-size numbers interpolated independently, so [`fit`]'s
+    /// the area/band/axis-limit/fallback-size numbers interpolated independently, so [`fit`]'s
     /// constant-area solve produces a continuously changing size across a live transform instead
     /// of snapping between two fixed rungs partway through it. `t = 0.0`/`1.0` reproduce `a`/`b`'s
     /// own `bounds()` exactly (pinned by a host test), so this is safe to call every frame of a
     /// spring/ease that starts or ends at either endpoint.
     pub fn lerp(a: LogoRung, b: LogoRung, t: f32) -> LogoRung {
-        let (a_area, a_min, a_max, a_sz) = a.bounds();
-        let (b_area, b_min, b_max, b_sz) = b.bounds();
+        let (a_area, a_band, a_max, a_wmax, a_sz) = a.bounds();
+        let (b_area, b_band, b_max, b_wmax, b_sz) = b.bounds();
         let t = t.clamp(0.0, 1.0);
         let lerp = |x: f32, y: f32| x + (y - x) * t;
         LogoRung::Custom {
             area: lerp(a_area, b_area),
-            h_min: lerp(a_min, b_min),
+            band_h: lerp(a_band, b_band),
+            w_max: lerp(a_wmax, b_wmax),
             h_max: lerp(a_max, b_max),
             fallback_sz: lerp(a_sz as f32, b_sz as f32).round() as c_int,
+            descent_share: lerp(a.descent_share(), b.descent_share()),
+        }
+    }
+
+    /// How much of the face's descent a TYPED title at this rung stands above the band's foot, 0..=1.
+    /// A logo's painted box ends on the foot; type's last BASELINE used to, so its descenders hung
+    /// below the foot into the gap to the metadata, and the same ladder read tight under a title in
+    /// type and loose under a logo. The full-bleed hero rung (Home's, Detail's and the catalog's
+    /// share it) stands type's DESCENDERS on the foot (1.0): one rule, one gap
+    /// (`theme::hero::HOME_TITLE_GAP`). The compact strip and the deck card are tuned boxes of their
+    /// own (a baked composite, a pinned one-line header) and keep the baseline there (0.0).
+    fn descent_share(self) -> f32 {
+        match self {
+            LogoRung::Hero => 1.0,
+            LogoRung::Compact | LogoRung::Card => 0.0,
+            LogoRung::Custom { descent_share, .. } => descent_share,
         }
     }
 }
 
-/// The LAYOUT height of a logo's title band — the rung's floor, constant, independent of the source
+/// How far a title in type at `rung` stands above the band's foot, in px: the face's descent
+/// ([`plx_gfx::text::FONT_DESCENT_EM`], whole px as the line box rounds it) times the rung's
+/// [`LogoRung::descent_share`]. The one number [`HeroLogo::draw`], [`HeroLogo::painted`] and
+/// [`draw_title`] anchor their run with.
+fn type_lift(rung: LogoRung) -> f32 {
+    let (_, _, _, _, sz) = rung.bounds();
+    (plx_gfx::text::FONT_DESCENT_EM * sz as f32).round() * rung.descent_share()
+}
+
+/// The LAYOUT height of a logo's title band — constant, independent of the source
 /// (which is why it takes no source argument). A caller's flow reserves exactly this; a taller logo
 /// overflows upward as paint. See the module docs for why that split is the whole point.
 pub fn band_h(rung: LogoRung) -> f32 {
@@ -106,49 +143,79 @@ pub fn band_h(rung: LogoRung) -> f32 {
 /// The DRAWN size of a `src_w`×`src_h` logo at `rung` inside a `col_w`-wide column.
 /// Pure — no GL, no font, no globals; this is the host-testable core of the sizing rule.
 ///
-/// The three clamps apply in a fixed ORDER and it is load-bearing: constant area first (that is the
-/// rule), then the rung's floor/ceiling (a very wide mark must not thin to a pinstripe, a square must
-/// not swallow the hero), then the caller's column LAST — the column is the one bound allowed to
-/// break the floor, because drawing past the column is never acceptable and drawing short is.
+/// Solve `w*h = area` at the source aspect, then uniformly shrink to both axis limits and the
+/// caller's column. A narrow column may reduce area further; it never distorts the mark.
 pub fn fit(rung: LogoRung, src_w: f32, src_h: f32, col_w: f32) -> (f32, f32) {
-    let (area, h_min, h_max, _) = rung.bounds();
-    // A degenerate source has no aspect to solve for. `ui::tex::logo_src` already rejects one, but
-    // `fit` is public and a 0.0/0.0 would propagate a NaN into a `Rect` — which blanks the band
-    // silently rather than crashing, i.e. is invisible until someone looks at a television.
-    if !(src_w > 0.0) || !(src_h > 0.0) {
-        return (h_min.min(col_w.max(0.0)), h_min);
+    let (area, _, h_max, w_max, _) = rung.bounds();
+    if !src_w.is_finite() || !src_h.is_finite() || !col_w.is_finite()
+        || src_w <= 0.0 || src_h <= 0.0 || col_w <= 0.0 {
+        return (0.0, 0.0);
     }
-    let a = src_w / src_h;
-    let mut h = (area / a).sqrt().clamp(h_min, h_max);
-    let mut w = a * h;
-    if col_w > 0.0 && w > col_w {
-        h *= col_w / w;
-        w = col_w;
-    }
-    (w, h)
+    let aspect = src_w / src_h;
+    if !aspect.is_finite() || aspect <= 0.0 { return (0.0, 0.0); }
+    let h = (area / aspect).sqrt().min(h_max);
+    let w = aspect * h;
+    let scale = (w_max.min(col_w) / w).min(1.0);
+    (w * scale, h * scale)
 }
 
-/// Bottom-anchor a `w`×`h` logo in `band`: its BOTTOM EDGE lands on the band's bottom edge — the
-/// same line the text fallback puts its BASELINE on, because a logo's bottom edge and a baseline are
-/// the same optical line. Overflow is upward and is paint, never layout.
+/// Bottom-anchor a `w`×`h` logo in `band`: its BOTTOM EDGE lands on the band's bottom edge. The text
+/// fallback's painted box (descenders included) ends on the same line on the Hero rung, with its
+/// baseline `type_lift` above it; on Compact and Card the baseline itself is on the foot, because a
+/// logo's bottom edge and a baseline are the same optical line. Overflow is upward and is paint, never layout.
 pub fn place(band: Rect, w: f32, h: f32, align: HAlign) -> Rect {
     let x = match align {
-        HAlign::Left => band.x,
+        HAlign::Left | HAlign::Start => band.x,
         HAlign::Center => band.x + (band.w - w) * 0.5,
         HAlign::Right => band.x + band.w - w,
     };
     Rect::new(x, band.y + band.h - h, w, h)
 }
 
+/// The title in type at `rung`: the run a band draws when its logo is absent, ink
+/// [`theme::TEXT_PRIMARY`]. THE one place the text fallback's size, weight, leading and line count
+/// are decided, so [`HeroLogo::draw`] and a deck card that never draws a live logo (`Card`'s Type
+/// rung, `card_art::needs_type_title`) cannot set the same title two ways. The caller adds the
+/// alignment and the measure (`.h(..)`, `.with_measure(..)`) and places it, bottom-anchored.
+pub fn title_text(rung: LogoRung, title: &str) -> TextView<'_> {
+    title_text_inked(rung, title, theme::TEXT_PRIMARY)
+}
+
+/// [`title_text`] in another ink — the placeholder accounting's sentinel ink in [`HeroLogo::draw`].
+fn title_text_inked(rung: LogoRung, title: &str, ink: [f32; 4]) -> TextView<'_> {
+    let (_, _, _, _, sz) = rung.bounds();
+    let lines = if sz > theme::size::TITLE { theme::hero::TITLE_LINES } else { 1 };
+    TextView::new(title, sz, ink)
+        .bold().leading(sz as f32 * theme::hero::TITLE_LEAD / theme::size::DISPLAY as f32).max_lines(lines)
+}
+
+/// The height the title run `tv` paints at in a column `band_w` wide: its measured height less the
+/// leading under its last line, plus the cap band, so the run's LAST BASELINE is what a bottom
+/// anchor lands on (before [`type_lift`] raises it on the Hero rung). Shared by [`HeroLogo::draw`]'s fallback and [`draw_title`].
+fn title_paint_h(tv: &TextView<'_>, rung: LogoRung, band_w: f32, measure: &dyn Measure) -> f32 {
+    let (_, _, _, _, sz) = rung.bounds();
+    tv.measure_h(band_w) - (sz as f32 * theme::hero::TITLE_LEAD / theme::size::DISPLAY as f32) + measure.cap_h(sz)
+}
+
+/// **Draw a title in type in the slot a logo of `rung` would stand in** (`band`: its column, with
+/// `band.y + band.h` the anchor line: the run's painted box ends there on the Hero rung (its last baseline
+/// `type_lift` above), and its last baseline lands there on Compact and Card), at `align`. It is the
+/// fallback of [`HeroLogo::draw`] and NOTHING else: no logo texture is looked up, so it is what a
+/// Continue Watching card draws when neither Plex's cover nor our composite exists (`Card`'s Type
+/// rung, `card_art::needs_type_title`), where a live logo must never go up.
+pub fn draw_title(p: Painter, rung: LogoRung, title: &str, band: Rect, align: HAlign, measure: &dyn Measure) {
+    let tv = title_text(rung, title).h(align.resolve(title)).with_measure(measure);
+    let h = title_paint_h(&tv, rung, band.w, measure);
+    tv.draw(p, Rect::new(band.x, band.y + band.h - type_lift(rung) - h, band.w, h));
+}
+
 /// The title band itself: the item's clearLogo if it has resolved, else its title as text. Owning
 /// both halves here is what makes the swap consistent across the three sites — and is why the two
 /// fallbacks that used to paint an unbounded run now elide like home's always did.
 pub struct HeroLogo<'a> {
-    rk: &'a str,
-    /// The raw id of the server `rk` is a key on. A clearLogo is fetched through the image
-    /// transcoder of the server that holds the item, and `rk` names an item on that machine alone —
-    /// resolving it against whichever server is current drew no logo at all for a borrowed hero,
-    /// which is how this was reported ("detail page does not show logo image").
+    logo: &'a str,
+    /// The raw id of the server that holds the logo. The same source path can name different
+    /// images on different servers.
     sid: u16,
     title: &'a str,
     rung: LogoRung,
@@ -156,12 +223,11 @@ pub struct HeroLogo<'a> {
 }
 
 impl<'a> HeroLogo<'a> {
-    /// `rk` is the ratingKey whose clearLogo to draw — for an episode hero that is the SHOW's
-    /// (episodes have no clearLogo asset; keying to the episode 404s straight into a text fallback
-    /// of the wrong title). `title` is the run drawn when there is no logo.
-    pub fn new(sid: u16, rk: &'a str, title: &'a str, rung: LogoRung) -> Self {
+    /// `logo` is a stamped clearLogo path or a legacy rating key on `sid`. An empty source
+    /// draws `title` directly. An episode hero can name its show's logo.
+    pub fn new(sid: u16, logo: &'a str, title: &'a str, rung: LogoRung) -> Self {
         Self {
-            rk,
+            logo,
             sid,
             title,
             rung,
@@ -175,6 +241,25 @@ impl<'a> HeroLogo<'a> {
         self
     }
 
+    /// **The rect [`draw`](Self::draw) paints in `band`**: the logo art's own box where it has
+    /// resolved, else the title's text run bottom-anchored on the band and as wide as its widest
+    /// line ([`TextView::ink_span`]), not the column the run was wrapped into. The hero shade stands
+    /// behind exactly this ([`crate::hero_shade`]), so a screen asks the logo what it is painting
+    /// rather than guessing from the band, and it moves with the logo.
+    pub fn painted(&self, band: Rect, measure: &dyn Measure) -> Rect {
+        let align = self.align.resolve(self.title);
+        if let Some((_, sw, sh)) = crate::tex::logo_src(self.sid, self.logo) {
+            let (w, h) = fit(self.rung, sw, sh, band.w);
+            return place(band, w, h, align);
+        }
+        let fallback = title_text(self.rung, self.title).h(align).with_measure(measure);
+        let h = title_paint_h(&fallback, self.rung, band.w, measure);
+        let (left, right) = fallback.ink_span(band);
+        // the box includes the descenders, so it ends on the foot exactly as a logo's does
+        let lift = type_lift(self.rung);
+        Rect::new(left, band.y + band.h - lift - h, right - left, h + lift)
+    }
+
     /// Draw into `band` — `band.w` is the column the logo is contained to, `band.y + band.h` the
     /// anchor line, and `band.h` should be [`band_h`] of the same rung. Ink is [`theme::TEXT_PRIMARY`]
     /// for both the logo tint and the fallback text (the value all three sites passed already).
@@ -183,25 +268,17 @@ impl<'a> HeroLogo<'a> {
         // Resolve the fallback before consulting the asynchronous texture cache. A recording and
         // its replay need the same measurement census even when the logo happened to be resident
         // in only one run; texture residency is paint state, not logical replay state.
-        let (_, _, _, sz) = self.rung.bounds();
-        let line = plx_gfx::text::elide_by(self.title, band.w, false, |t| {
-            measure.width_str(t, sz, true)
-        });
-        // The hero draws the item the shelf under it has focused, and that shelf is the server
-        // being browsed — so its clearLogo is asked of the current server. An item that came from
-        // somewhere else (a merged Continue Watching row) names its own, once items carry one.
-        if let Some((tex, sw, sh)) = crate::tex::logo_src(self.sid, self.rk) {
+        let align = self.align.resolve(self.title);
+        let fallback = title_text(self.rung, self.title).h(align).with_measure(measure);
+        let fallback_h = title_paint_h(&fallback, self.rung, band.w, measure);
+        if let Some((tex, sw, sh)) = crate::tex::logo_src(self.sid, self.logo) {
             let (w, h) = fit(self.rung, sw, sh, band.w);
             // NOT pixel-snapped: a logo is SCALED content, and the crispness contract snaps
             // 1:1-texel content only (see the note above `theme.rs`'s size ladder).
-            p.tex(tex, place(band, w, h, self.align), 0.0, theme::TEXT_PRIMARY);
+            p.tex(tex, place(band, w, h, align), 0.0, theme::TEXT_PRIMARY);
             return;
         }
-        // `cs` must outlive the draw — `Label` holds a non-owning pointer (ui/CLAUDE.md's first gotcha)
-        let Ok(cs) = std::ffi::CString::new(line) else {
-            return;
-        };
-        // An item with a ratingKey whose logo has not resolved draws its title as text, and that is
+        // An item with a logo source that has not resolved draws its title as text, and that is
         // a WAIT only while the logo can still arrive: counted (and sentinel-inked) then. A logo the
         // store has settled as a miss (the 404 of an item with no clearLogo) will never come, so
         // the text is the answer: not counted, but reported as an absence so a driver whose
@@ -212,26 +289,31 @@ impl<'a> HeroLogo<'a> {
         // a real library most items have no clearLogo, so this branch runs every frame. Its answer
         // only picks between the two accounting calls below (and, in the sentinel build, the ink):
         // when nothing can see them, neither call records and both draw TEXT_PRIMARY, so skip it.
-        let (p, ink) = if self.rk.is_empty() || !crate::placeholder::accounting_visible() {
+        let (p, ink) = if self.logo.is_empty() || !crate::placeholder::accounting_visible() {
             (p, theme::TEXT_PRIMARY)
-        } else if crate::tex::logo_failed(self.sid, self.rk) {
-            crate::placeholder::note_absent(p, crate::placeholder::Reason::HeroLogoAbsent, self.rk);
+        } else if crate::tex::logo_failed(self.sid, self.logo) {
+            crate::placeholder::note_absent(p, crate::placeholder::Reason::HeroLogoAbsent, self.logo);
             (p, theme::TEXT_PRIMARY)
         } else {
-            crate::placeholder::ink(p, crate::placeholder::Reason::HeroLogoText, self.rk, theme::TEXT_PRIMARY)
+            crate::placeholder::ink(p, crate::placeholder::Reason::HeroLogoText, self.logo, theme::TEXT_PRIMARY)
         };
-        Label::new(cs.as_ptr(), sz, ink)
-            .bold()
-            .h(self.align)
-            .v(VAlign::Baseline)
-            .draw(p, band);
+        title_text_inked(self.rung, self.title, ink).h(align).with_measure(measure)
+            .draw(p, Rect::new(band.x, band.y + band.h - type_lift(self.rung) - fallback_h, band.w, fallback_h));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use LogoRung::{Compact, Hero};
+
+    #[test]
+    fn wide_logos_do_not_grow_to_the_old_height_floor() {
+        let (w, h) = fit(LogoRung::Hero, 640.0, 100.0, 943.0);
+        assert!(w <= 640.0, "wide wordmark is oversized: {w} x {h}");
+        assert!(h < band_h(LogoRung::Hero), "paint must be free to be shorter than the title band");
+        assert!(w * h <= 60_000.0 + 0.01, "the height floor must not inflate the area");
+    }
+    use LogoRung::{Card, Compact, Hero};
 
     // `fit`/`place`/`band_h` are pure f32 arithmetic over their arguments — no GL, no SDL_ttf, no
     // crate globals — so unlike the catalog-backed Home tests these are ordinary parallel ones, needing
@@ -240,30 +322,19 @@ mod tests {
     // under `placeholder::capture_declared` (text only declares itself there and never reaches the
     // font): `the_text_fallback_*` below pin what the placeholder counter says about it.
 
-    /// The whole low-risk claim in one assertion: the commonest logo shape does not move. If someone
-    /// retunes [`theme::logo::HERO_AREA`] without meaning to shift wordmarks, this fires.
     #[test]
-    fn a_wide_wordmark_is_the_anchor_and_does_not_move() {
-        let (w, h) = fit(Hero, 1500.0, 300.0, 900.0); // detail's column
-        assert!(
-            (w - 600.0).abs() < 1e-3 && (h - 120.0).abs() < 1e-3,
-            "detail hero wordmark: {w}×{h}"
-        );
-        let (w, h) = fit(Hero, 1500.0, 300.0, 660.0); // home's, narrower — and still not binding
-        assert!(
-            (w - 600.0).abs() < 1e-3 && (h - 120.0).abs() < 1e-3,
-            "home hero wordmark: {w}×{h}"
-        );
-        let (w, h) = fit(Compact, 1500.0, 300.0, 1740.0);
-        assert!(
-            (w - 270.0).abs() < 1e-3 && (h - 54.0).abs() < 1e-3,
-            "compact wordmark: {w}×{h}"
-        );
+    fn ordinary_wordmarks_share_one_area_across_columns() {
+        for col in [660.0, 900.0, 1740.0] {
+            let (w, h) = fit(Hero, 1500.0, 300.0, col);
+            assert!((w * h - theme::logo::HERO_AREA).abs() < 0.02);
+            assert!((w / h - 5.0).abs() < 1e-3);
+            assert!(h < band_h(Hero));
+        }
     }
 
-    /// The nit itself, pinned: a square emblem and a wordmark are the same amount of brand.
+    /// Comparable bounding-box area, with a small reduction where the square hits its height cap.
     #[test]
-    fn a_square_logo_carries_the_same_ink_as_a_wordmark() {
+    fn a_square_logo_and_a_wordmark_have_comparable_bounded_area() {
         let (w1, h1) = fit(Hero, 800.0, 800.0, 900.0);
         let (w5, h5) = fit(Hero, 1500.0, 300.0, 900.0);
         assert!(
@@ -272,8 +343,8 @@ mod tests {
         );
         let (a1, a5) = (w1 * h1, w5 * h5);
         assert!(
-            (a1 - a5).abs() / a5 < 0.02,
-            "the two carry different ink: {a1} vs {a5} px²"
+            (a1 - a5).abs() / a5 < 0.05,
+            "the two occupy very different areas: {a1} vs {a5} px²"
         );
         // …and the regression guard against the height clamp coming back: the detail hero used to
         // draw a 1:1 emblem at 120×120.
@@ -283,37 +354,29 @@ mod tests {
         );
     }
 
-    /// The ORDER of the three clamps — the one part of `fit` that is easy to get wrong, and whose
-    /// failure (a logo wider than its column) is a painted-over layout, not a panic.
     #[test]
-    fn the_floor_holds_until_the_column_binds() {
-        // 6:1: the area rule wants h=109.5, the floor raises it to 120 and the column has room
-        let (w, h) = fit(Hero, 600.0, 100.0, 900.0);
-        assert!(
-            (w - 720.0).abs() < 1e-3 && (h - 120.0).abs() < 1e-3,
-            "{w}×{h}"
-        );
-        // the same source in home's narrower column: the column is allowed to break the floor
-        let (w, h) = fit(Hero, 600.0, 100.0, 660.0);
-        assert!(
-            (w - 660.0).abs() < 1e-3 && (h - 110.0).abs() < 1e-3,
-            "{w}×{h}"
-        );
+    fn either_axis_can_limit_area_without_distorting_the_logo() {
+        let (w, h) = fit(Hero, 800.0, 100.0, 943.0);
+        assert_eq!((w, h), (640.0, 80.0));
+        let (w, h) = fit(Hero, 800.0, 100.0, 500.0);
+        assert_eq!((w, h), (500.0, 62.5));
+        let (w, h) = fit(Hero, 100.0, 200.0, 943.0);
+        assert_eq!((w, h), (120.0, 240.0));
     }
 
     /// The property sweep: whatever the source, the fit stays inside its bounds and never distorts
     /// the mark — which no visual review would reliably catch on an unfamiliar logo.
     #[test]
     fn nothing_overflows_its_column_or_its_ceiling_and_aspect_is_preserved() {
-        for rung in [Hero, Compact] {
-            let (_, _, h_max, _) = rung.bounds();
+        for rung in [Hero, Compact, Card] {
+            let (_, _, h_max, w_max, _) = rung.bounds();
             for a in [
-                0.5f32, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0,
+                0.25f32, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 20.0,
             ] {
                 for col_w in [660.0f32, 900.0, 1740.0] {
                     let (w, h) = fit(rung, a * 300.0, 300.0, col_w);
                     assert!(
-                        w <= col_w + 1e-3,
+                        w <= col_w.min(w_max) + 1e-3,
                         "{rung:?} a={a} overflowed its {col_w} column at {w}"
                     );
                     assert!(
@@ -337,7 +400,7 @@ mod tests {
     /// The two rungs are one derivation, so they cannot silently desync into per-site tuning again.
     #[test]
     fn the_compact_rung_is_the_hero_rung_scaled() {
-        let k = theme::logo::COMPACT_H_MIN / theme::logo::HERO_H_MIN;
+        let k = theme::logo::COMPACT_BAND_H / theme::logo::HERO_BAND_H;
         assert!(
             (theme::logo::COMPACT_AREA / theme::logo::HERO_AREA - k * k).abs() < 1e-3,
             "the compact area is no longer the hero area scaled by (54/120)²"
@@ -346,7 +409,7 @@ mod tests {
         let compact_h = fit(Compact, 1500.0, 300.0, 1740.0).1;
         assert!(
             (compact_h / hero_h - k).abs() < 1e-3,
-            "a 5:1 mark must land on the floor at BOTH rungs"
+            "an unconstrained wordmark must retain the shared compact scale"
         );
     }
 
@@ -359,6 +422,9 @@ mod tests {
             (10.0, 0.0, 900.0),
             (-5.0, 20.0, 900.0),
             (1500.0, 300.0, 0.0),
+            (f32::NAN, 300.0, 943.0),
+            (1500.0, f32::INFINITY, 943.0),
+            (1500.0, 300.0, f32::NAN),
         ] {
             let (w, h) = fit(Hero, sw, sh, col);
             assert!(
@@ -380,13 +446,15 @@ mod tests {
     /// hero: the band's BOTTOM is the anchor and a taller logo grows out of its top.
     #[test]
     fn a_taller_logo_spills_upward_only() {
-        let band = Rect::new(90.0, 408.0, 660.0, band_h(Hero)); // home's worst-case stack
-        let floor = place(band, 600.0, 120.0, HAlign::Left);
-        let tall = place(band, 268.0, 268.0, HAlign::Left);
+        let band = Rect::new(96.0, 326.0, theme::hero::TEXT_W, band_h(Hero)); // home's three-line synopsis
+        let (w, h) = fit(Hero, 1500.0, 300.0, band.w);
+        let wide = place(band, w, h, HAlign::Left);
+        let (w, h) = fit(Hero, 800.0, 800.0, band.w);
+        let tall = place(band, w, h, HAlign::Left);
         assert_eq!(
-            floor.y + floor.h,
+            wide.y + wide.h,
             band.y + band.h,
-            "the floor-height logo left the anchor line"
+            "the wide logo left the anchor line"
         );
         assert_eq!(
             tall.y + tall.h,
@@ -394,11 +462,11 @@ mod tests {
             "the tall logo left the anchor line"
         );
         assert_eq!(
-            tall.y, 260.0,
+            tall.y, 206.0,
             "the overflow must go UP out of the band, not down"
         );
         assert_eq!(
-            floor.x, tall.x,
+            wide.x, tall.x,
             "…and the left edge does not move with the height"
         );
     }
@@ -416,9 +484,9 @@ mod tests {
     /// signature already enforces it, and this is the assertion that fires if someone "helpfully"
     /// makes the band track the drawn height again.
     #[test]
-    fn band_h_is_the_floor_not_the_drawn_height() {
-        assert_eq!(band_h(Hero), theme::logo::HERO_H_MIN);
-        assert_eq!(band_h(Compact), theme::logo::COMPACT_H_MIN);
+    fn band_h_is_independent_of_the_drawn_height() {
+        assert_eq!(band_h(Hero), theme::logo::HERO_BAND_H);
+        assert_eq!(band_h(Compact), theme::logo::COMPACT_BAND_H);
         assert!(
             band_h(Hero) < fit(Hero, 800.0, 800.0, 900.0).1,
             "a square draws taller than its band"
@@ -478,6 +546,59 @@ mod tests {
         let above = fit(LogoRung::lerp(Hero, Compact, 1.5), src_w, src_h, col_w);
         let at_1 = fit(LogoRung::lerp(Hero, Compact, 1.0), src_w, src_h, col_w);
         assert_eq!(above, at_1, "t>1 must clamp to t=1");
+    }
+
+    /// The card rung's slot is its own height ceiling, and its logo is the constant-area rule's.
+    #[test]
+    fn the_card_rung_is_a_constant_area_inside_its_slot() {
+        assert_eq!(band_h(Card), theme::logo::CARD_H_MAX);
+        let (w, h) = fit(Card, 1500.0, 300.0, 420.0);
+        assert!((w * h - theme::logo::CARD_AREA).abs() < 0.02, "{w}x{h}");
+        assert!(h <= band_h(Card), "an ordinary wordmark sits inside the slot");
+        assert_eq!(fit(Card, 100.0, 100.0, 420.0), (theme::logo::CARD_H_MAX, theme::logo::CARD_H_MAX), "a square clamps at the ceiling");
+    }
+
+    /// The deck card's Type rung sets its title with `title_text`; it must be, run for run, what
+    /// `HeroLogo::draw` falls back to, at every rung that has a fallback.
+    #[test]
+    fn title_text_is_what_the_hero_logo_falls_back_to() {
+        install_store(true);
+        let measure = crate::fixture::FixtureMeasure;
+        for rung in [Hero, Compact, Card] {
+            for title in ["A Title", "The Unbearably Long Name of the Last House at the Edge of the World"] {
+                let band = Rect::new(96.0, 446.0, 400.0, band_h(rung));
+                let drawn = crate::draw_census::capture_runs(|| {
+                    HeroLogo::new(0, "", title, rung).draw(Painter::recording(), band, &measure);
+                });
+                let tv = title_text(rung, title).h(HAlign::Left.resolve(title)).with_measure(&measure);
+                let (_, _, _, _, sz) = rung.bounds();
+                let h = tv.measure_h(band.w) - tv.line_h() + measure.cap_h(sz);
+                let direct = crate::draw_census::capture_runs(|| {
+                    tv.draw(Painter::recording(), Rect::new(band.x, band.y + band.h - type_lift(rung) - h, band.w, h));
+                });
+                assert!(!drawn.is_empty(), "{rung:?}: nothing drawn");
+                assert_eq!(drawn, direct, "{rung:?} {title}");
+            }
+        }
+    }
+
+    /// `draw_title` is the hero logo's text fallback, run for run, and it looks no logo up.
+    #[test]
+    fn draw_title_is_the_fallback_and_never_a_logo() {
+        install_store(false);
+        let measure = crate::fixture::FixtureMeasure;
+        for rung in [Hero, Compact, Card] {
+            let band = Rect::new(96.0, 446.0, 400.0, band_h(rung));
+            let drawn = |f: &dyn Fn()| crate::draw_census::capture_runs(f);
+            let fallback = drawn(&|| HeroLogo::new(0, "", "A Title", rung).draw(Painter::recording(), band, &measure));
+            let title = drawn(&|| draw_title(Painter::recording(), rung, "A Title", band, HAlign::Left, &measure));
+            assert!(!title.is_empty(), "{rung:?}: nothing drawn");
+            assert_eq!(title, fallback, "{rung:?}");
+        }
+        let band = Rect::new(0.0, 0.0, 400.0, band_h(Card));
+        let runs = crate::draw_census::capture_runs(|| draw_title(Painter::recording(), Card, "A Title", band, HAlign::Center, &measure));
+        assert_eq!(runs.len(), 1, "one title");
+        assert_eq!(runs[0].text, "A Title");
     }
 
     // ---- the placeholder count of the text fallback -------------------------------------------
@@ -550,6 +671,84 @@ mod tests {
                 HeroLogo::new(0, "42", "A Title", Hero).draw(Painter::root(), band, &crate::fixture::FixtureMeasure)
             });
             assert_eq!(peeks.get(), 1, "armed, failed={failed}");
+        }
+    }
+
+    #[test]
+    fn pdf_proposal_long_title_wraps_to_two_display_lines_within_the_column() {
+        install_store(true);
+        let title = "The Unbearably Long Name of the Last House at the Edge of the World";
+        let band = Rect::new(96.0, 446.0, theme::hero::TEXT_W, band_h(Hero));
+        let measure = crate::fixture::FixtureMeasure;
+        let runs = crate::draw_census::capture_runs(|| {
+            HeroLogo::new(0, "", title, Hero).draw(Painter::recording(), band, &measure);
+        });
+        assert_eq!(runs.len(), 2, "the complete fallback has two lines: {runs:?}");
+        for run in &runs {
+            assert_eq!(run.size, theme::size::DISPLAY);
+            assert!(run.at.x + run.at.w <= band.x + band.w + 0.01);
+        }
+        assert!(runs[1].at.y > runs[0].at.y);
+    }
+
+    /// **A typed title is painted as wide as its widest line**, not as wide as the column it wraps
+    /// into: the shade stands behind this rect, and a column-wide one would be a slab. It starts where
+    /// the title's alignment starts it, and a title that wraps still fits its column.
+    #[test]
+    fn a_typed_title_is_painted_as_wide_as_its_widest_line() {
+        use plx_machine::machine::Measure;
+        install_store(true);
+        let m = crate::fixture::FixtureMeasure;
+        let band = Rect::new(96.0, 446.0, theme::hero::TEXT_W, band_h(Hero));
+        let (_, _, _, _, sz) = Hero.bounds();
+        let width = m.width_str("Hollow Coast", sz, true);
+        assert!(width < band.w * 0.8, "the premise: this title is well inside its column ({width})");
+        let left = HeroLogo::new(0, "", "Hollow Coast", Hero).painted(band, &m);
+        assert_eq!((left.x, left.w), (band.x, width), "left-aligned: from the column edge, its own width");
+        let right = HeroLogo::new(0, "", "Hollow Coast", Hero).align(HAlign::Right).painted(band, &m);
+        assert_eq!((right.w, right.x + right.w), (width, band.x + band.w), "right-aligned: ending at the column's edge");
+        assert_eq!((left.y, left.h), (right.y, right.h), "the alignment moves it sideways only");
+        let long = HeroLogo::new(0, "", "The Unbearably Long Name of the Last House at the Edge of the World", Hero)
+            .painted(band, &m);
+        assert!(long.x >= band.x && long.x + long.w <= band.x + band.w + 0.01, "a wrapped title stays in its column: {long:?}");
+        assert!(long.h > left.h, "…and is taller than the one-line title");
+    }
+
+    /// **A hero title in type stands where a logo's box does**: its painted box, descenders
+    /// included, ends on the band's foot, so the gap to the metadata under it is the ladder's one
+    /// `HOME_TITLE_GAP` whether the title is art or type. A logo's box already ends on the foot
+    /// ([`place`]); type used to stand its BASELINE there, so its descenders (and, on a title with
+    /// none, the glyph feet) hung into the gap and read as sitting on the line below.
+    #[test]
+    fn a_hero_title_in_type_ends_its_painted_box_on_the_foot_like_a_logo() {
+        use plx_machine::machine::Measure;
+        install_store(true);
+        let m = crate::fixture::FixtureMeasure;
+        let band = Rect::new(96.0, 446.0, theme::hero::TEXT_W, band_h(Hero));
+        let foot = band.y + band.h;
+        let (_, _, _, _, sz) = Hero.bounds();
+        // the logo case: its box ends on the foot
+        let logo = place(band, 400.0, 90.0, HAlign::Left);
+        assert_eq!(logo.y + logo.h, foot);
+        for title in ["Backrooms", "Hollow Coast"] {
+            let painted = HeroLogo::new(0, "", title, Hero).painted(band, &m);
+            assert_eq!(painted.y + painted.h, foot, "{title}: the painted box ends on the foot");
+            let drawn = crate::draw_census::capture_runs(|| {
+                HeroLogo::new(0, "", title, Hero).draw(Painter::recording(), band, &m);
+            });
+            // the run's anchor, were its baseline (not its descenders) on the foot
+            let tv = title_text(Hero, title).h(HAlign::Left.resolve(title)).with_measure(&m);
+            let h = tv.measure_h(band.w) - tv.line_h() + m.cap_h(sz);
+            let on_baseline = crate::draw_census::capture_runs(|| {
+                tv.draw(Painter::recording(), Rect::new(band.x, foot - h, band.w, h));
+            });
+            let descent = (plx_gfx::text::FONT_DESCENT_EM * sz as f32).round();
+            assert!(descent > 0.0);
+            assert_eq!(
+                drawn.last().expect("one run").at.y + descent,
+                on_baseline.last().expect("one run").at.y,
+                "{title}: the run stands a descent above where its baseline would be on the foot"
+            );
         }
     }
 
