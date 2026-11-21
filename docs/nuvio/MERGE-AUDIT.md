@@ -131,12 +131,15 @@ All adaptations carry `// Fork Rofocale11:` comments.
 - `sim-linux` deliberately needs no host FFmpeg; the ARM `.so`s staged in `pkg/`
   are not loadable by the host simulator, so `ff: ... MISSING` in a plain
   `PLXNATIVE_APP_DIR=pkg` run is expected. For verification here,
-  `HOST=1 ./ci/build-ffmpeg.sh` was rebuilt in this checkout and its x86-64
-  libraries were staged under their loader names (`libavutil-plx.so.61`, etc.)
-  into a separate `PLXNATIVE_APP_DIR`; the sim then logged
-  `ff: bound avutil/avcodec/avformat/swscale` and landed 48 items / 4 shelves.
+  `HOST=1 ./ci/build-ffmpeg.sh` was rebuilt in this checkout. The four x86-64
+  libraries were staged into `pkg/` under distinct loader names
+  (`libavutil-plx-host.so.61`, etc.) added to `media-codecs/src/ffi.rs`'s candidate
+  lists, so the ARM `.so`s used by `make`/the ipk stay untouched. With the normal
+  `PLXNATIVE_APP_DIR=$(pwd)/pkg PLXNATIVE_RUNTIME_DIR=/tmp/plxnative-sim` launch,
+  the sim logs `ff: bound avutil/avcodec/avformat/swscale -> ...-host.so.*` and
+  lands 336 items / 28 shelves from 11 addons, with no redirect refusals.
   `ci/stage-host-ffmpeg.sh` remains macOS-only (`.dylib` + `install_name_tool`),
-  so this Linux staging was done manually and did not touch `pkg/`.
+  so this Linux staging is manual and the staged binaries are untracked.
 
 ## Still to verify
 
