@@ -85,12 +85,14 @@ use std::convert::Infallible;
 
 use plx_data::metadata::AltCopy;
 use plx_plex::plex::ServerId;
-use crate::registry::{AppLike, AppMsg, ContentArg, PageMemory};
+// Fork Rofocale11: `AppFx`/`NuvioResult` carry the shim effect and its addressed answer; `RequestId`
+// fences that answer to the one request this panel has in flight.
+use crate::registry::{AppFx, AppLike, AppMsg, ContentArg, NuvioResult, PageMemory};
 use plx_ui::a11y::{A11y, A11yPath};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{
     Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputKind,
-    InstanceId, Key, LogicalState, Machine, MachineId, NavOp,
+    InstanceId, Key, LogicalState, Machine, MachineId, NavOp, RequestId,
 };
 use plx_ui::screen::{
     Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, FocusSource, Focusable, GroupKind,
@@ -105,7 +107,9 @@ use plx_ui::{theme, Rect};
 /// selected ROW is in it deliberately: this panel's UP/DOWN changes nothing else in the app, so
 /// without it a replay grades the panel opening and closing and nothing between.
 pub const SHAPE: [&str; 2] = [
-    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4]},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,rows:[{index:u32,label:str,detail:str}]}",
+    // Fork Rofocale11: the arg carries the captured `nuvio` capability; `streams.req` is the
+    // correlation of the one in-flight shim effect (0 = none), replacing the old worker mailbox.
+    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4],nuvio:bool},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,req:u32,rows:[{index:u32,label:str,detail:str}]}",
     TableView::MOTION_SHAPE,
 ];
 
@@ -123,11 +127,14 @@ pub struct AltSourcesArg {
     /// Bit-preserving rest rectangle of the pill that opened it; valid in canonical arguments
     /// without float equality.
     pub anchor: [u32; 4],
+    // Fork Rofocale11: whether this item's server is a Nuvio backend, captured by the application
+    // when the surface was presented (see `ContentPanel::surface`). A plain input; no registry read.
+    pub nuvio: bool,
 }
 
 impl LogicalState for AltSourcesArg {
     fn write(&self, c: &mut Canon) {
-        c.u32(self.host.0).u32(u32::from(self.sid.raw())).str(&self.rk);
+        c.u32(self.host.0).u32(u32::from(self.sid.raw())).str(&self.rk).bool(self.nuvio);
         for value in self.anchor {
             c.u32(value);
         }
@@ -345,52 +352,57 @@ pub struct AltSourcesScreen {
     /// The table and what each row does, replaced together ([`form_for`]).
     pub form: FormTable<AltId, Action, Infallible>,
     stream_choices: Vec<plx_plex::plex::nuvio::StreamChoice>,
-    stream_mailbox: std::sync::Arc<std::sync::Mutex<Option<StreamReply>>>,
+    // Fork Rofocale11: correlation of the one outstanding Nuvio shim effect (0 = none). The answer
+    // comes back as an addressed `AppMsg::Nuvio`; this fence drops a reply the panel no longer owns.
+    stream_req: u32,
     stream_mode: bool,
     stream_pending: bool,
     stream_error: bool,
     stream_attempts: u32,
 }
 
-enum StreamReply {
-    List(Option<plx_plex::plex::nuvio::StreamList>),
-    Selected(bool),
-}
-
 impl AltSourcesScreen {
     pub fn new(entry: EntryId, arg: AltSourcesArg, meta: plx_data::metadata::MetadataView<'_>) -> Self {
-        let stream_mode = plx_plex::plex::client_for(arg.sid).is_some_and(|c| c.is_nuvio());
-        let mut screen = Self {
+        // Fork Rofocale11: the capability is an input captured by the application at presentation
+        // (see `ContentPanel::surface`), not a registry read in this machine. The first stream
+        // request is emitted on `Mount`, where the screen has an `Effects` to push it onto.
+        let stream_mode = arg.nuvio;
+        let screen = Self {
             entry,
             arg,
             rows: Vec::new(),
             form: FormTable::new(plx_ui::table_screen::BAND_BASE),
             stream_choices: Vec::new(),
-            stream_mailbox: Default::default(),
+            stream_req: 0,
             stream_mode,
             stream_pending: false,
             stream_error: false,
             stream_attempts: 0,
         };
-        if screen.stream_mode { screen.request_streams(); }
+        let mut screen = screen;
         screen.rebuild(Sel::OnTheCopyYouAreOn, meta);
         screen
     }
 
-    fn request_streams(&mut self) {
+    fn next_req(&mut self) -> u32 {
+        self.stream_req = self.stream_req.wrapping_add(1).max(1);
+        self.stream_req
+    }
+
+    /// Fork Rofocale11: ask the application to fetch the stream list on a worker. No spawn, no
+    /// registry read here — the correlation and every captured fact leave in a typed effect, and
+    /// the answer returns as an addressed `AppMsg::Nuvio` (`Streams`) event.
+    fn request_streams<H: AppLike>(&mut self, fx: &mut Effects<'_, H>) {
         self.stream_attempts += 1;
         self.stream_pending = true;
-        let (sid, rk, mailbox) = (self.arg.sid, self.arg.rk.clone(), self.stream_mailbox.clone());
-        let delay = self.stream_attempts > 1;
-        let job = plx_base::task::spawn("nuvio-stream-list", move || {
-            if delay { std::thread::sleep(std::time::Duration::from_millis(500)); }
-            let list = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_streams(&rk));
-            *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::List(list));
-            // Fork Rofocale11: the Nuvio stream picker is fork code in this upstream-owned file;
-            // upstream replaced plx_machine::idle::invalidate() with the owned present gate.
-            plx_machine::present::wake_from_worker();
-        });
-        if job.is_none() { self.stream_pending = false; self.stream_error = true; }
+        let req = self.next_req();
+        let delay_ms = if self.stream_attempts > 1 { 500 } else { 0 };
+        fx.push(Fx::App(AppFx::Nuvio(crate::registry::NuvioReq::Streams {
+            sid: self.arg.sid,
+            rk: self.arg.rk.clone(),
+            delay_ms,
+            reply: crate::registry::NuvioReply { to: fx.from(), request: req },
+        })));
     }
 
     fn stream_form(&self) -> Form<AltId, Action, Infallible> {
@@ -477,13 +489,17 @@ impl AltSourcesScreen {
     fn commit<H: AppLike>(&mut self, elem: u32, fx: &mut Effects<'_, H>) {
         if self.stream_mode {
             if self.stream_pending || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
+            // Fork Rofocale11: the `/nuvio/select` write runs on an application worker as a typed
+            // effect; its boolean answer returns as an addressed `AppMsg::Nuvio` (`Selected`) event.
+            // The screen here still gates on a known, pending-free row exactly as before.
             self.stream_pending = true;
-            let (sid, rk, mailbox) = (self.arg.sid, self.arg.rk.clone(), self.stream_mailbox.clone());
-            if plx_base::task::spawn("nuvio-stream-select", move || {
-                let ok = plx_plex::plex::client_for(sid).is_some_and(|c| c.nuvio_select(&rk, elem as usize));
-                *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(StreamReply::Selected(ok));
-                plx_machine::present::wake_from_worker();
-            }).is_none() { self.stream_pending = false; self.stream_error = true; }
+            let req = self.next_req();
+            fx.push(Fx::App(AppFx::Nuvio(crate::registry::NuvioReq::Select {
+                sid: self.arg.sid,
+                rk: self.arg.rk.clone(),
+                index: elem as usize,
+                reply: crate::registry::NuvioReply { to: fx.from(), request: req },
+            })));
             return;
         }
         let action = match self.form.index_of_key(RowKey(elem)).and_then(|i| self.form.activate(i)) {
@@ -509,7 +525,14 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
     type Ev = ScreenEvent<H>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         match ev {
-            ScreenEvent::Mount | ScreenEvent::Enter(_) => {
+            ScreenEvent::Mount => {
+                // Fork Rofocale11: the first stream fetch is an effect emitted here, where the
+                // machine has an `Effects` to push it onto. `new()` cannot start work.
+                if self.stream_mode && !self.stream_pending { self.request_streams(fx); }
+                self.refresh(H::metadata(cx));
+                Handled::Yes
+            }
+            ScreenEvent::Enter(_) => {
                 self.refresh(H::metadata(cx));
                 Handled::Yes
             }
@@ -519,31 +542,40 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                 }
                 Handled::Yes
             }
-            ScreenEvent::Tick(tick) => {
-                let reply = self.stream_mailbox.lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some(reply) = reply {
-                    self.stream_pending = false;
-                    match reply {
-                        StreamReply::List(list) => {
-                            self.stream_error = list.is_none();
-                            if let Some(list) = list {
-                                self.stream_choices = list.streams;
-                                if !list.complete && self.stream_attempts < 60 { self.request_streams(); }
-                            }
-                            self.rebuild(Sel::Keep, H::metadata(cx));
-                        }
-                        StreamReply::Selected(true) => {
-                            self.dismiss(fx);
-                            fx.push(Fx::Deliver(MachineId::Instance(self.arg.host),
-                                Delivery::Screen(ScreenEvent::App(AppMsg::NuvioStreamSelected))));
-                        }
-                        StreamReply::Selected(false) => {
-                            self.stream_error = true;
-                            self.rebuild(Sel::Keep, H::metadata(cx));
-                        }
-                    }
-                    fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
+            // Fork Rofocale11: the addressed answers from the application's Nuvio shim worker.
+            // The `RequestId` is the fence: a late reply to a request this panel no longer owns is
+            // dropped, exactly as a stale mailbox write would have been superseded.
+            ScreenEvent::Async(RequestId(req), AppMsg::Nuvio(NuvioResult::Streams(list)))
+                if *req == self.stream_req =>
+            {
+                self.stream_pending = false;
+                self.stream_req = 0;
+                self.stream_error = list.is_none();
+                if let Some(list) = list {
+                    self.stream_choices = list.streams.clone();
+                    if !list.complete && self.stream_attempts < 60 { self.request_streams(fx); }
                 }
+                self.rebuild(Sel::Keep, H::metadata(cx));
+                fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
+                Handled::Yes
+            }
+            ScreenEvent::Async(RequestId(req), AppMsg::Nuvio(NuvioResult::Selected(ok)))
+                if *req == self.stream_req =>
+            {
+                self.stream_pending = false;
+                self.stream_req = 0;
+                if *ok {
+                    self.dismiss(fx);
+                    fx.push(Fx::Deliver(MachineId::Instance(self.arg.host),
+                        Delivery::Screen(ScreenEvent::App(AppMsg::NuvioStreamSelected))));
+                } else {
+                    self.stream_error = true;
+                    self.rebuild(Sel::Keep, H::metadata(cx));
+                }
+                fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
+                Handled::Yes
+            }
+            ScreenEvent::Tick(tick) => {
                 // Re-derive the drawn selection from the engine's own tracked focus every tick,
                 // exactly as `AccountMenuScreen::step` does — `FocusMoved` already keeps the two
                 // in step, this is the belt to its suspenders for a focus change this screen was
@@ -705,7 +737,9 @@ impl LogicalState for AltSourcesScreen {
         }
         c.u32(self.form.table.sel as u32);
         self.form.table.write_motion(c);
-        c.bool(self.stream_mode).bool(self.stream_pending).bool(self.stream_error).u32(self.stream_attempts);
+        // Fork Rofocale11: `stream_req` is the in-flight shim-effect correlation, part of the
+        // recorded state so a replay grades the same outstanding request.
+        c.bool(self.stream_mode).bool(self.stream_pending).bool(self.stream_error).u32(self.stream_attempts).u32(self.stream_req);
         c.seq(self.stream_choices.len());
         for choice in &self.stream_choices {
             let row = plx_appkit::source_list::stream_row(choice);

@@ -101,6 +101,7 @@ fn panel(host_sid: ServerId, rk: &str) -> AltSourcesScreen {
             sid: host_sid,
             rk: rk.to_string(),
             anchor: [0.0f32, 0.0, 100.0, 40.0].map(f32::to_bits),
+            nuvio: false,
         },
         test_store().view(),
     )
@@ -755,6 +756,7 @@ fn the_panel_hangs_off_its_button_and_stays_on_screen() {
             sid: ServerId::UNSET,
             rk: String::new(),
             anchor: [low.x, low.y, low.w, low.h].map(f32::to_bits),
+            nuvio: false,
         },
         plx_data::stores::metadata::MetadataStore::default().view(),
     );

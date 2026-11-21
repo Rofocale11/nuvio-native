@@ -264,6 +264,8 @@ pub(crate) fn external(effect: &plx_screens::registry::ExternalAppFx) -> Result<
         ExternalAppFx::Loop(_) | ExternalAppFx::Player(_) | ExternalAppFx::Catalog(_)
         | ExternalAppFx::Home(_) | ExternalAppFx::Library(_) | ExternalAppFx::Search(_)
         | ExternalAppFx::Watchlist(_) | ExternalAppFx::ItemMenu(_) => Err("unsupported Home application effect"),
+        // Fork Rofocale11: the shim call is a live HTTP worker; it has no controlled codec.
+        ExternalAppFx::Nuvio(_) => Err("unsupported Nuvio shim effect"),
     }
 }
 

@@ -82,6 +82,47 @@ pub enum AppFx {
     ItemMenu(ItemMenuReq),
     /// The player-HUD page's commands on the package store, executed by the Bridge (PR10).
     Huds(HudCmd),
+    // Fork Rofocale11: Nuvio's stream picker, stream selection and account My List call the
+    // in-process shim over HTTP. A screen is a machine and starts no worker and reads no registry,
+    // so it emits this effect; the application runs the call on a worker and returns the answer as
+    // an addressed `AppMsg::Nuvio` event (docs/sans-io-guide.md, "The moves", (c)).
+    Nuvio(NuvioReq),
+}
+
+/// Fork Rofocale11: the addressed destination of a [`NuvioReq`]. The application turns this into
+/// `Addr { to, req: RequestId(request) }`, which the dispatcher delivers back as
+/// `ScreenEvent::Async(request, AppMsg::Nuvio(result))` to exactly the machine that asked. A screen
+/// always sends `MachineId::Instance(self)`; the request number is never zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NuvioReply {
+    pub to: plx_machine::machine::MachineId,
+    pub request: u32,
+}
+
+/// Fork Rofocale11: one Nuvio shim call a screen asks the application to perform. Everything the
+/// worker needs is captured here — the server id, the rating key and (for a selection/write) the
+/// argument — so the worker never reads process-global "current" state. `reply` names the one
+/// screen instance and request the result is addressed to.
+pub enum NuvioReq {
+    /// `GET /nuvio/streams`: the (possibly paginated) ranked stream list for an item. `delay_ms`
+    /// is the retry backoff the shim asks for; it is applied on the worker, never on a frame.
+    Streams { sid: plx_plex::plex::ServerId, rk: String, delay_ms: u32, reply: NuvioReply },
+    /// `GET /nuvio/select`: commit a ranked stream. This is the ONLY reply a screen turns into a
+    /// navigation, and it keeps the same "not signed in / failed" refusal the old worker had.
+    Select { sid: plx_plex::plex::ServerId, rk: String, index: usize, reply: NuvioReply },
+    /// `GET`/`POST /nuvio/library`: read (or set) the seated profile's My List state for a
+    /// `nuvio://` item. `Some(saved)` is a write to the account and is only ever sent after the
+    /// screen has confirmed the viewer's press and a signed-in state, as the old worker was.
+    MyList { sid: plx_plex::plex::ServerId, rk: String, saved: Option<bool>, reply: NuvioReply },
+}
+
+/// Fork Rofocale11: the typed answer to a [`NuvioReq`], delivered as `AppMsg::Nuvio`. `None` means
+/// the shim refused, was unreachable, or the server is not a Nuvio backend — the screen treats it
+/// exactly as the old `client_for(..).and_then(..)` failure path did.
+pub enum NuvioResult {
+    Streams(Option<plx_plex::plex::nuvio::StreamList>),
+    Selected(bool),
+    MyList(Option<plx_plex::plex::nuvio::LibraryState>),
 }
 
 /// Operations executed while the dispatcher holds only logical owner borrows.
@@ -127,6 +168,8 @@ pub enum ExternalAppFx {
     Catalog(crate::catalog::CatalogOut),
     Player(PlayerReq),
     ItemMenu(ItemMenuReq),
+    // Fork Rofocale11: see the `AppFx::Nuvio` arm — the shim call runs on an application worker.
+    Nuvio(NuvioReq),
 }
 
 impl plx_machine::machine::AppEffect for AppFx {
@@ -152,6 +195,8 @@ impl plx_machine::machine::AppEffect for AppFx {
             Self::Catalog(v) => External(ExternalAppFx::Catalog(v)),
             Self::Player(v) => External(ExternalAppFx::Player(v)),
             Self::ItemMenu(v) => External(ExternalAppFx::ItemMenu(v)),
+            // Fork Rofocale11: the Nuvio shim call leaves the machine as an external effect.
+            Self::Nuvio(v) => External(ExternalAppFx::Nuvio(v)),
         }
     }
 }
@@ -1352,6 +1397,10 @@ impl ContentPanel {
         self,
         host: plx_machine::machine::InstanceId,
         subject: Option<(plx_plex::plex::ServerId, &str)>,
+        // Fork Rofocale11: the Nuvio capability of the item's server, captured by the application
+        // at this presentation boundary (where `client_for` is allowed) and carried on the arg. The
+        // screen then reads a plain value, never the registry from inside its machine step.
+        nuvio: bool,
     ) -> Option<(plx_ui::containers::modal::Style, AppArg)> {
         use plx_ui::containers::modal::Style;
         Some(match self {
@@ -1364,6 +1413,7 @@ impl ContentPanel {
                         sid,
                         rk: rk.to_string(),
                         anchor,
+                        nuvio,
                     }),
                 )
             }
@@ -1621,6 +1671,9 @@ pub enum AppMsg {
     // `/nuvio/select`; the Detail page must re-read its reconciliation when that selection lands.
     // Upstream's new Play Version and player messages are independent and are kept.
     NuvioStreamSelected,
+    // Fork Rofocale11: an addressed answer from the application's Nuvio shim worker. Carried on
+    // `ScreenEvent::Async` so it reaches only the screen instance named in the [`NuvioReply`].
+    Nuvio(NuvioResult),
     /// The *Play Version* surface committed a row: play that version of the page's item, as its
     /// Play pill would (resuming). The surface names the version and the page plays it.
     PlayVersion(plx_plex::plex::MediaId),
@@ -2685,6 +2738,7 @@ pub fn every_surface_arg() -> Vec<AppArg> {
             sid: plx_plex::plex::ServerId::UNSET,
             rk: "1".into(),
             anchor: [0; 4],
+            nuvio: false,
         }),
         AppArg::VersionsPanel(crate::versions_panel::VersionsArg {
             host: plx_machine::machine::InstanceId(1),
@@ -3000,7 +3054,10 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // through its closing morph. Previous pin: 0x7e36_4373_746a_c3dc.
 // NOTE: this merged tree combines the fork's Nuvio shapes with upstream's; replay anchors must be
 // re-recorded and this pin recomputed against the combined inventory before the test is trusted.
-const SCREEN_SHAPES_PIN: u64 = 0x1427_1d82_bf6b_e04c;
+// Fork Rofocale11: the Also-available arg now carries the captured `nuvio` capability and the
+// panel's shim-effect correlation is in its canonical shape; recomputed pin after those two
+// documented shape changes (previous pin 0x1427_1d82_bf6b_e04c). Replay anchors need re-recording.
+const SCREEN_SHAPES_PIN: u64 = 0x0352_35c6_6aaa_9324;
 
 #[cfg(test)]
 mod arg_tests {
@@ -3129,7 +3186,7 @@ mod arg_tests {
     #[test]
     fn the_collection_more_sheet_is_its_own_alert_surface() {
         let (style, arg) = ContentPanel::CollectionAbout
-            .surface(plx_machine::machine::InstanceId(1), None)
+            .surface(plx_machine::machine::InstanceId(1), None, false)
             .expect("a page with no item subject can still offer its summary");
         assert!(matches!(style, plx_ui::containers::modal::Style::Alert));
         assert!(matches!(arg, AppArg::CollectionAbout));

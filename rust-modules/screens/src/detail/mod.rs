@@ -42,8 +42,9 @@ use plx_ui::frame::Budget;
 use plx_ui::hero_logo::{HeroLogo, LogoRung};
 use plx_ui::label::HAlign;
 use plx_machine::machine::{
+    // Fork Rofocale11: `RequestId` addresses the My List effect's reply to this page instance.
     Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputKind, Key,
-    Leave, LogicalState, Machine, Tick,
+    Leave, LogicalState, Machine, RequestId, Tick,
 };
 use plx_machine::present::{PresentEvent, Provenance};
 use plx_ui::text_lift::{lifted, TextLift, TEXT_LIFT_SCALE, TOP_CENTRE};
@@ -59,7 +60,7 @@ use plx_ui::{hero_alpha, theme, Env, Painter, Rect, Spring, View};
 use std::borrow::Cow;
 use std::cell::Cell;
 
-use super::registry::{AppFx, AppMsg, ContentArg, ContentLike, ContentReq, PageMemory, DetailIdentity, DetailKey, DetailMemory, ContentPanel, DetailRefreshPhase, PlayerLike};
+use super::registry::{AppFx, AppMsg, ContentArg, ContentLike, ContentReq, NuvioResult, PageMemory, DetailIdentity, DetailKey, DetailMemory, ContentPanel, DetailRefreshPhase, PlayerLike};
 
 /// Each section's local element ids are a block of its own, 2^24 wide, so a list can grow to any
 /// length the server sends without running into the next section's ids. Episodes sit alone at the
@@ -182,7 +183,9 @@ pub struct DetailScreen {
     list_state: Option<plx_plex::plex::nuvio::LibraryState>,
     list_pending: bool,
     list_error: bool,
-    list_mailbox: std::sync::Arc<std::sync::Mutex<Option<Option<plx_plex::plex::nuvio::LibraryState>>>>,
+    // Fork Rofocale11: correlation of the one outstanding My List shim effect (0 = none). The
+    // answer arrives as an addressed `AppMsg::Nuvio` and is matched against this fence.
+    list_req: u32,
     sid: ServerId,
     rk: String,
     keys: Vec<DetailKey>,
@@ -573,7 +576,7 @@ impl DetailScreen {
             list_state: None,
             list_pending: false,
             list_error: false,
-            list_mailbox: Default::default(),
+            list_req: 0,
             sid,
             rk,
             keys: Vec::new(),
@@ -2312,17 +2315,23 @@ impl<H: ContentLike + crate::registry::MetadataLike + PlayerLike> Machine<H> for
                 self.restore_memory(memory, meta);
                 Handled::Yes
             }
-            ScreenEvent::Tick(t) => {
-                let reply = self.list_mailbox.lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some(state) = reply {
-                    self.list_pending = false;
-                    self.list_error = state.is_none();
-                    self.list_state = state;
-                    if state.is_some() {
-                        fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))));
-                    }
-                    fx.invalidate(Provenance::Landing(fx.from()));
+            // Fork Rofocale11: the addressed answer from the application's My List shim worker.
+            // The `RequestId` fences a reply to a request this page no longer owns; the state,
+            // error bit and Hubs refetch on a successful read are exactly the old mailbox effects.
+            ScreenEvent::Async(RequestId(req), AppMsg::Nuvio(NuvioResult::MyList(state)))
+                if *req == self.list_req =>
+            {
+                self.list_pending = false;
+                self.list_req = 0;
+                self.list_error = state.is_none();
+                self.list_state = *state;
+                if state.is_some() {
+                    fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))));
                 }
+                fx.invalidate(Provenance::Landing(fx.from()));
+                Handled::Yes
+            }
+            ScreenEvent::Tick(t) => {
                 self.tick(*t, cx, fx);
                 Handled::Yes
             }
@@ -2351,7 +2360,8 @@ impl<H: ContentLike + crate::registry::MetadataLike + PlayerLike> Machine<H> for
                 // Nuvio account backend for the active profile's list state; upstream's provisional
                 // focus seat is independent and is kept below.
                 if fresh_open || self.list_state.is_none() && !self.list_pending && !self.list_error {
-                    self.request_list(None);
+                    // Fork Rofocale11: the My List read is now a typed effect carrying an `Effects`.
+                    self.request_list(None, fx);
                 }
                 // The page is seated before its item lands (the item is requested right here). With
                 // no playback driver that first seat is the watched toggle, the row's only stop
@@ -4643,16 +4653,20 @@ impl DetailScreen {
         else { msg::browse_list_add_c() }
     }
 
-    fn request_list(&mut self, saved: Option<bool>) {
-        if self.list_pending || !plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio()) { return; }
+    fn request_list<H: ContentLike>(&mut self, saved: Option<bool>, fx: &mut Effects<'_, H>) {
+        // Fork Rofocale11: the capability check and the HTTP call both move to the application's
+        // Nuvio worker (which reads the registry on a non-frame thread). The machine only gates on
+        // its own pending bit and emits a typed effect; the answer returns as an addressed event.
+        if self.list_pending { return; }
         self.list_pending = true;
         self.list_error = false;
-        let (sid, rk, mailbox) = (self.sid, self.rk.clone(), self.list_mailbox.clone());
-        if plx_base::task::spawn("nuvio-my-list", move || {
-            let state = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_library(&rk, saved));
-            *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
-            plx_machine::present::wake_from_worker();
-        }).is_none() { self.list_pending = false; self.list_error = true; }
+        self.list_req = self.list_req.wrapping_add(1).max(1);
+        fx.push(Fx::App(AppFx::Nuvio(crate::registry::NuvioReq::MyList {
+            sid: self.sid,
+            rk: self.rk.clone(),
+            saved,
+            reply: crate::registry::NuvioReply { to: fx.from(), request: self.list_req },
+        })));
     }
 
     fn hero_set(&self, meta: plx_data::metadata::MetadataView<'_>) -> hero::HeroSet {
@@ -4696,8 +4710,12 @@ impl DetailScreen {
     /// four controls' worth of geometry and three drawn) is exactly the class of bug this
     /// publication exists to remove.
     pub fn alt_available(&self, meta: plx_data::metadata::MetadataView<'_>) -> bool {
-        plx_plex::plex::client_for(self.sid).is_some_and(|c| c.is_nuvio())
-            && self.detail(meta).is_some_and(|d| !d.is_show)
+        // Fork Rofocale11: the old capability read was `client_for(self.sid).is_nuvio()` here. A
+        // `nuvio://` guid is only ever served by that server's Nuvio shim client (it is how the item
+        // was loaded), so the guid is the same fact captured as data — a pure read, no registry. The
+        // rest of the predicate (a movie, or a real cross-source copy) is unchanged.
+        self.detail(meta).is_some_and(|d| !d.is_show
+            && (d.guid.starts_with("nuvio://movie/") || d.guid.starts_with("nuvio://series/")))
             || meta.alt_available(self.sid, &self.rk)
     }
 
@@ -4836,7 +4854,10 @@ impl DetailScreen {
                     fx.push(Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)));
                 } else if !self.list_pending {
                     let saved = self.list_state.filter(|s| s.signed_in).map(|s| !s.saved);
-                    self.request_list(if self.list_error { None } else { saved });
+                    // Fork Rofocale11: a My List write goes through the same addressed effect; the
+                    // signed-in/known-row guards above are unchanged, so no real account is written
+                    // without the viewer's press and a signed-in state.
+                    self.request_list(if self.list_error { None } else { saved }, fx);
                 }
             }
             hero::HeroCtl::Play => {

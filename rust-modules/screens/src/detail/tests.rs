@@ -162,7 +162,7 @@ pub(super) fn bare_held(sid: ServerId, rk: &str) -> DetailScreen {
         list_state: None,
         list_pending: false,
         list_error: false,
-        list_mailbox: Default::default(),
+        list_req: 0,
         caption_policy: crate::registry::captions::policy(),
         entry: EntryId(7),
         sid,
@@ -4412,13 +4412,14 @@ fn my_list_is_nuvio_only_and_failed_sync_does_not_claim_success() {
     assert!(screen.hero_set(test_store().view()).list);
     screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:false });
     screen.list_pending = true;
-    *screen.list_mailbox.lock().unwrap() = Some(None);
-    step(&mut screen,&ScreenEvent::Tick(Tick { ms:16, dt_us:16_000 }),None);
+    screen.list_req = 1;
+    step(&mut screen,&ScreenEvent::Async(RequestId(1), AppMsg::Nuvio(NuvioResult::MyList(None))),None);
     assert!(screen.list_error);
     assert!(!screen.list_pending);
     assert_eq!(screen.list_label(),plx_os::i18n::msg::browse_list_retry_c());
-    *screen.list_mailbox.lock().unwrap() = Some(Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:true }));
-    let (_,effects) = step(&mut screen,&ScreenEvent::Tick(Tick { ms:32, dt_us:16_000 }),None);
+    screen.list_req = 2;
+    let (_,effects) = step(&mut screen,&ScreenEvent::Async(RequestId(2),
+        AppMsg::Nuvio(NuvioResult::MyList(Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:true })))),None);
     assert_eq!(screen.list_label(),plx_os::i18n::msg::browse_list_remove_c());
     assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Store(StoreId::Hubs,StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))))));
     screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:false,saved:false });

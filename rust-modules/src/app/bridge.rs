@@ -622,6 +622,10 @@ pub(crate) struct BridgeRetained {
     /// What the last install or removal said, for the page, until it is opened again.
     huds_notice: Option<plx_data::hudpacks::Notice>,
     trace_save: Option<(MachineId, u64, plx_base::storage_worker::TypedTicket<plx_os::playback_trace::Status>)>,
+    // Fork Rofocale11: addressed results from Nuvio shim workers. A worker pushes `(addr, result)`
+    // here and wakes the frame gate; `take_live_results` drains them into `AppResults`, and the
+    // dispatcher delivers each as `ScreenEvent::Async` to the exact screen instance that asked.
+    nuvio_results: std::sync::Arc<std::sync::Mutex<Vec<(plx_machine::machine::Addr, plx_screens::registry::NuvioResult)>>>,
 
     /// Host IO chosen at boot: production trigger reader, or an explicit neutral/scripted reader.
     metadata_alt_host: fn(plx_data::metadata::AltStandInReq, Option<&str>) -> plx_data::metadata::AltStandInAnswer,
@@ -990,6 +994,7 @@ impl BridgeRetained {
             huds_profile_seated: false,
             huds_notice: None,
             trace_save: None,
+            nuvio_results: Default::default(),
 
             metadata_alt_host: crate::dev::scenarios::metadata_alt_stand_in,
             late_store_jobs: 0,
@@ -3135,6 +3140,13 @@ impl Bridge<'_> {
                         if self.controlled_failure().is_some() { AppCommandOutcome::Refused }
                         else { AppCommandOutcome::Completed }
                     }
+                    // Fork Rofocale11: a controlled/replay effect is refused by the `external()`
+                    // codec check above; here the shim call runs on a worker in the app layer.
+                    Ok(ExternalAppFx::Nuvio(request)) => {
+                        self.execute_nuvio(request);
+                        if self.controlled_failure().is_some() { AppCommandOutcome::Refused }
+                        else { AppCommandOutcome::Completed }
+                    }
             Err(outcome) => outcome,
             Ok(ExternalAppFx::Loop(request)) => {
 
@@ -3489,6 +3501,54 @@ impl Bridge<'_> {
         }
     }
 
+    /// Fork Rofocale11: run one Nuvio shim call on a worker and post its addressed result back.
+    /// Both the `client_for` registry read and the thread start live here in the APPLICATION layer;
+    /// the screen that asked is a machine and does neither. A refused worker still owes its owner
+    /// exactly one terminal answer, matching the screen's old `spawn.is_none()` path so no panel is
+    /// left pending forever.
+    fn execute_nuvio(&mut self, request: plx_screens::registry::NuvioReq) {
+        use plx_machine::machine::{Addr, RequestId};
+        use plx_screens::registry::{NuvioReply, NuvioReq, NuvioResult};
+        let NuvioReply { to, request: correlation } = match &request {
+            NuvioReq::Streams { reply, .. } | NuvioReq::Select { reply, .. } | NuvioReq::MyList { reply, .. } => *reply,
+        };
+        let terminal = match &request {
+            NuvioReq::Streams { .. } => NuvioResult::Streams(None),
+            NuvioReq::Select { .. } => NuvioResult::Selected(false),
+            NuvioReq::MyList { .. } => NuvioResult::MyList(None),
+        };
+        let addr = Addr { to, req: RequestId(correlation) };
+        let mailbox = std::sync::Arc::clone(&self.retained.nuvio_results);
+        let emit = move |result: NuvioResult| {
+            if let Ok(mut results) = mailbox.lock() {
+                results.push((addr, result));
+            }
+            // The one documented atomic door a worker has to the frame gate.
+            plx_machine::present::wake_from_worker();
+        };
+        let spawned = match request {
+            NuvioReq::Streams { sid, rk, delay_ms, .. } => plx_base::task::spawn("nuvio-stream-list", move || {
+                if delay_ms > 0 { std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64)); }
+                let list = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_streams(&rk));
+                emit(NuvioResult::Streams(list));
+            }),
+            NuvioReq::Select { sid, rk, index, .. } => plx_base::task::spawn("nuvio-stream-select", move || {
+                let ok = plx_plex::plex::client_for(sid).is_some_and(|c| c.nuvio_select(&rk, index));
+                emit(NuvioResult::Selected(ok));
+            }),
+            NuvioReq::MyList { sid, rk, saved, .. } => plx_base::task::spawn("nuvio-my-list", move || {
+                let state = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_library(&rk, saved));
+                emit(NuvioResult::MyList(state));
+            }),
+        };
+        if spawned.is_none() {
+            if let Ok(mut results) = self.retained.nuvio_results.lock() {
+                results.push((addr, terminal));
+            }
+            plx_machine::present::wake_from_worker();
+        }
+    }
+
     fn preference_effect(&mut self, command: plx_screens::registry::PreferenceCmd, out: &mut Effects<'_, AppHost>) {
         let profile = Self::seated_profile();
         if self.publish_marker_preferences(self.retained.marker_now) {
@@ -3780,6 +3840,14 @@ impl Bridge<'_> {
                 AppMsg::Session(plx_session::auth::owner::SessionEvent::IncidentReported { id, delivery })));
         }
         results.extend(self.take_hubs_results());
+        // Fork Rofocale11: addressed Nuvio shim answers land here, on the frame thread, and join the
+        // same `AppResults` batch as Session/Hubs. The dispatcher turns each `Addr` into a
+        // `ScreenEvent::Async(req, AppMsg::Nuvio(..))` for exactly the requesting screen instance.
+        if let Ok(mut nuvio) = self.retained.nuvio_results.lock() {
+            for (addr, result) in nuvio.drain(..) {
+                results.push((addr, AppMsg::Nuvio(result)));
+            }
+        }
         if self.retained.home_io.is_some() {
             if let Some(result) = self.stores.landgate.take_owed(StoreId::Browse.ord(), StoreId::Browse.name(),
                 || self.stores.browse.borrow().discovery_owed(),
@@ -4453,7 +4521,11 @@ pub(crate) fn open_content_panel(
     // (`ContentPanel::surface`), so a new page-owned panel is declared where the screen is. What is
     // this function's is the PRESENTING: refuse a second copy of one already up, hand the
     // container the style through its one-shot handshake, and request the op.
-    let Some((style, arg)) = panel.surface(host, subject) else { return };
+    // Fork Rofocale11: capture the Nuvio capability at this host boundary, where reading the
+    // client registry is allowed. The Also-available screen needs it to know whether it is a
+    // stream picker; it must not read `client_for` from its own machine step.
+    let nuvio = subject.is_some_and(|(sid, _)| plx_plex::plex::client_for(sid).is_some_and(|c| c.is_nuvio()));
+    let Some((style, arg)) = panel.surface(host, subject, nuvio) else { return };
     let id = plx_ui::screen::ScreenArg::id(&arg);
     if surface_up(d, move |up| plx_ui::screen::ScreenArg::id(up) == id) {
         return;

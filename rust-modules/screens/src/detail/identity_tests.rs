@@ -71,7 +71,7 @@ fn body(entry: EntryId, rk: &str) -> DetailScreen {
         list_state: None,
         list_pending: false,
         list_error: false,
-        list_mailbox: Default::default(),
+        list_req: 0,
         caption_policy: crate::registry::captions::policy(),
         entry, sid: ServerId::UNSET, rk: rk.into(), pending_season: None,
         keys: vec![], next_elem: FIRST_ITEM_ELEM, key_by_local: Default::default(),

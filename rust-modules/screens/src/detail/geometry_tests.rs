@@ -92,7 +92,7 @@ fn bare(sid: ServerId, rk: &str) -> DetailScreen {
         list_state: None,
         list_pending: false,
         list_error: false,
-        list_mailbox: Default::default(),
+        list_req: 0,
         caption_policy: crate::registry::captions::policy(),
         entry: EntryId(8),
         sid,

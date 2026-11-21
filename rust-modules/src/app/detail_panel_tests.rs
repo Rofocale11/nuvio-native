@@ -179,6 +179,9 @@ fn an_alt_sources_anchor_travels_on_its_arg() {
         sid: plx_plex::plex::ServerId::UNSET,
         rk: "m1".into(),
         anchor: [x, y, 300.0, 60.0].map(f32::to_bits),
+        // Fork Rofocale11: the test surface carries the captured Nuvio capability (false here);
+        // this fixture only grades the anchor, so no shim is involved.
+        nuvio: false,
     };
     let high = AltSourcesScreen::new(
         EntryId(1),
