@@ -221,12 +221,14 @@ pub(crate) fn boot() {
     });
 }
 
-/// The shim's view of `plx_media::ff::probe::probe_url`, with this TV's decode verdicts.
+/// The shim's view of `plx_nuvio_probe::probe_url`, with this TV's decode verdicts.
+/// Fork Rofocale11: the probe used to live in upstream's `media::ff::probe`; it is now the
+/// fork-owned plx_nuvio_probe crate so a merge cannot reintroduce the conflict or a second ABI table.
 fn prober() -> plx_pmsshim::shim_probe::Prober {
     use plx_pmsshim::shim_probe as p;
     Arc::new(|url: &str, deadline: std::time::Duration| {
         log("nuvio: probing selected stream");
-        let m = plx_media::ff::probe::probe_url(url, deadline)?;
+        let m = plx_nuvio_probe::probe_url(url, deadline)?;
         if let Some(v) = &m.video {
             log(&format!("nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={}",
                 v.codec, v.width, v.height, v.fps, v.dovi.is_some(), m.audio.len(), m.subtitles.len()));

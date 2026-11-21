@@ -190,6 +190,41 @@ provider host, `marker-grants: seat=owner unavailable (Refused)` in the automate
 boot, and brief `main-thread hang` lines during heavy concurrent probing.
 Playback itself advanced continuously for the whole observed interval.
 
+## Follow-up: the probe is now `plx_nuvio_probe`
+
+The merge left the 383-line fork probe (`ff_probe.rs`) declared from upstream's
+`media/src/ff.rs` with `#[path = "ff_probe.rs"] pub mod probe;` and `use super::*`.
+That is the single largest source of repeated merge pain: any upstream rewrite of
+`ff.rs` changes the names the probe borrows, and the probe carried a **second** FFmpeg
+`dynlib!` table. The two tables disagreed in the Linux simulator — `media-codecs`
+reported FFmpeg bound while the probe refused every addon stream — which is why the
+host-candidate names had to be fixed in both places.
+
+The probe now lives in the fork-owned crate `rust-modules/nuvio-probe`
+(`plx_nuvio_probe`), using `plx_media_codecs::ffi` as its only ABI table. The app's
+adapter (`src/app/nuvio.rs`) calls `plx_nuvio_probe::probe_url` directly; `ff.rs`
+only loses its fork-added module declaration, so a future merge has no fork code to
+re-resolve there. The three local items that are not in the shared table
+(`OFF_STREAM_DISPOSITION`, `OFF_STREAM_AVG_FRAME_RATE` — both pinned by
+`ci/ffabi-assert.c` — and the AVIO seek constants) live in the new crate with a
+comment explaining why they were not added to the upstream file. The transport is
+the same `plx_net` byte-range source with the same `credential_transport_allowed`
+policy as `media::curlio::PlexAuthorization`, bound locally to avoid a dependency
+from the probe back up into the media layer.
+
+**Not in this change:** the older duplicate ABI table still in `ff.rs` is also used
+by the retained `Venc` capture path and by the media FFmpeg tests. Removing it means
+migrating those callers to `plx_media_codecs::ffi` and is a separate, larger change.
+
+Gates: `cargo check --workspace --all-features` clean; `plx_nuvio_probe` unit tests
+3/3; `ci/check-module-layers.py` green (new `[nuvio_probe]` layer, mounted via
+`[package.metadata.plx]`); `make check-nodef` clean; ARM `make` links. Two unrelated
+pre-existing failures were observed and reproduced on the untouched baseline:
+`plx_media::player::tests::the_feed_counts_a_gap_only_between_two_stamped_callbacks`
+and `ci/check-deps.sh`'s `forks` ledger gap at `plex/servers.rs::register_with_client_id`.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.
+- Re-run the sim probe and one TV playback after the `plx_nuvio_probe` extraction.
+

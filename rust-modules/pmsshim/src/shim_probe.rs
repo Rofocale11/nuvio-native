@@ -1,6 +1,6 @@
-//! What a stream really holds, from the app's bundled FFmpeg (`plx_media::ff::probe::probe_url`),
+//! What a stream really holds, from the app's bundled FFmpeg (`plx_nuvio_probe::probe_url`),
 //! injected at boot as a [`Prober`] so this crate does not depend on the media layer. Field names
-//! mirror `plx_media::ff_probe::MediaProbe` one for one; the app's adapter is a copy plus the two
+//! mirror `plx_nuvio_probe::MediaProbe` one for one; the app's adapter is a copy plus the two
 //! `*_decodable` verdicts it takes from the TV's codec table (`devcaps`).
 //!
 //! `docs/nuvio/PLAYBACK.md` is the contract: probe at decision time, cache per URL, emit the real

@@ -1,0 +1,27 @@
+[package]
+name = "plx_nuvio_probe"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Fork Rofocale11: NuvioNative's addon/debrid stream prober, using the one FFmpeg ABI table in plx_media_codecs."
+publish = false
+
+# Fork Rofocale11: this crate's lib.rs is ONE module of the application tree, not its root, so
+# `ci/module_graph.py` resolves `plx_nuvio_probe::probe_url` and the `crate::` paths written inside
+# it to the `nuvio_probe` member of ci/module-layers.ini. Without the mount both claim `crate`.
+[package.metadata.plx]
+mount = "nuvio_probe"
+
+[lib]
+name = "plx_nuvio_probe"
+crate-type = ["rlib"]
+
+[dependencies]
+plx_base = { path = "../base" }
+plx_net = { path = "../net" }
+plx_plex = { path = "../plex" }
+plx_media_codecs = { path = "../media-codecs" }
+libc = "0.2"
+
+[lints]
+workspace = true

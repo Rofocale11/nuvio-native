@@ -872,6 +872,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "plx_nuvio_probe"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "plx_base",
+ "plx_media_codecs",
+ "plx_net",
+ "plx_plex",
+]
+
+[[package]]
 name = "plx_os"
 version = "0.0.0"
 dependencies = [
@@ -1077,6 +1088,7 @@ dependencies = [
  "plx_media",
  "plx_media_codecs",
  "plx_net",
+ "plx_nuvio_probe",
  "plx_os",
  "plx_play_feed",
  "plx_play_uri",

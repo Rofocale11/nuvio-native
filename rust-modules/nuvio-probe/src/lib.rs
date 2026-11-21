@@ -1,22 +1,68 @@
 //! **What a third-party stream actually is** — NuvioNative's answer to a server that cannot tell us.
 //!
 //! A Plex server reads every part with its own scanner and reports codecs, tracks and Dolby Vision
-//! configuration; the route (`crate::route`) and the Load payload trust those fields. A Stremio stream
-//! comes with nothing but a label (`"4K DV HDR10 … DTS-HD"`) that may be wrong, so the PMS shim asks
-//! this module to OPEN the selected stream with the bundled libavformat — over the same libcurl
-//! transport the demuxer reads with (`crate::curlio`), redirects, TLS fallback and all — and reports
-//! the real container, video codec/raster/HDR signalling/Dolby Vision record, and every audio and
-//! subtitle track in file order. The shim turns that into PMS `Media`/`Stream` fields, so every
-//! decision downstream (direct play, the Load codecs, audio track choice, the DV presentation, the
-//! embedded-subtitle menu) is made on what the file IS.
+//! configuration; the route and the Load payload trust those fields. A Stremio stream comes with
+//! nothing but a label (`"4K DV HDR10 … DTS-HD"`) that may be wrong, so the PMS shim asks this crate
+//! to OPEN the selected stream with the bundled libavformat — over the same libcurl byte-range
+//! transport the demuxer uses, redirects, TLS fallback and all — and reports the real container,
+//! video codec/raster/HDR signalling/Dolby Vision record, and every audio and subtitle track in
+//! file order. The shim turns that into PMS `Media`/`Stream` fields, so every decision downstream
+//! (direct play, the Load codecs, audio track choice, the DV presentation, the embedded-subtitle
+//! menu) is made on what the file IS.
 //!
 //! Cost: one HTTP open plus libavformat's probe window (`find_stream_info`, a few MB at most for
 //! Matroska; an MP4 with its index at the end costs one ranged seek). Bounded by `deadline`.
 //!
-//! Callable from any thread once [`super::boot`] has run; refuses (`Err`) when the bundled FFmpeg is
-//! absent or not the ABI this build expects, exactly as the demuxer does.
+//! # Fork Rofocale11: why this is its own crate
+//!
+//! This used to be `plx_media::ff::probe` (`media/src/ff_probe.rs`), reached through `super::*`.
+//! That made it borrow upstream's `ff.rs` names and carry a SECOND `dynlib!` table with its own
+//! filename candidates — the two tables disagreed in the Linux simulator, so media reported FFmpeg
+//! bound while the probe refused every stream. It now speaks to `plx_media_codecs::ffi` directly:
+//! one ABI table, one set of candidate names, and no edit to an upstream-owned file on merge.
+//!
+//! Callable from any thread once `plx_media_codecs::ffi::boot()` has run; it self-boots as a
+//! fallback for standalone use, and refuses (`Err`) when the bundled FFmpeg is absent or not the
+//! ABI this build expects — exactly as the demuxer does.
 
-use super::*;
+use plx_media_codecs::ffi::*;
+use std::os::raw::{c_char, c_int, c_void};
+
+/// `AVStream.disposition` and `AVStream.avg_frame_rate` — derived from FFmpeg 9's AVStream layout
+/// beside the offsets in `plx_media_codecs::ffi` (`ci/ffabi-assert.c` holds all of them, including
+/// these two, against the very headers the bundled libraries were built from). They stay local
+/// because upstream reads neither field: adding them to the shared table would be a fork edit in
+/// an upstream-owned file, which is the whole cost this crate exists to avoid.
+#[cfg(target_pointer_width = "32")]
+const OFF_STREAM_DISPOSITION: usize = 56;
+#[cfg(target_pointer_width = "64")]
+const OFF_STREAM_DISPOSITION: usize = 64;
+#[cfg(target_pointer_width = "32")]
+const OFF_STREAM_AVG_FRAME_RATE: usize = 76;
+#[cfg(target_pointer_width = "64")]
+const OFF_STREAM_AVG_FRAME_RATE: usize = 88;
+const AV_DISPOSITION_DEFAULT: c_int = 1 << 0;
+const AV_DISPOSITION_FORCED: c_int = 1 << 6;
+/// AVSTREAM attached picture (cover art) is a VIDEO stream; skip it.
+const AV_DISPOSITION_ATTACHED_PIC: c_int = 1 << 10;
+
+// The seek constants FFmpeg's AVIO callbacks use. `libc` already defines the SEEK_* trio; only
+// AVSEEK_SIZE is FFmpeg's own. Kept local for the same reason as the two offsets above.
+const AVSEEK_SIZE: c_int = 0x10000;
+
+/// Fork Rofocale11: the media layer's `curlio::PlexAuthorization` bound to the shared byte-range
+/// source. Duplicated here rather than imported from `plx_media` because that would make this
+/// low-level crate depend on the orchestration layer above it (and invert `ci/module-layers.ini`).
+/// The policy call is identical: a request that carries a credential reaches the wire only when
+/// the Plex grant says its origin may carry one — including every redirect hop of an addon URL.
+struct ProbeAuthorization;
+impl plx_net::range_io::UrlAuthorizer for ProbeAuthorization {
+    fn allows(url: &str) -> bool {
+        let (origin, path) = plx_net::net::origin::split(url);
+        plx_plex::http::credential_transport_allowed(&origin, path, &[])
+    }
+}
+type ProbeSource = plx_net::range_io::CurlSource<ProbeAuthorization>;
 
 /// One probed video track.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -105,27 +151,9 @@ impl MediaProbe {
     }
 }
 
-/// `AVStream.disposition` and `AVStream.avg_frame_rate` — derived from FFmpeg 9's AVStream layout
-/// beside the offsets above (`ci/ffabi-assert.c` holds them).
-#[cfg(target_pointer_width = "32")]
-const OFF_STREAM_DISPOSITION: usize = 56;
-#[cfg(target_pointer_width = "64")]
-const OFF_STREAM_DISPOSITION: usize = 64;
-#[cfg(target_pointer_width = "32")]
-const OFF_STREAM_AVG_FRAME_RATE: usize = 76;
-#[cfg(target_pointer_width = "64")]
-const OFF_STREAM_AVG_FRAME_RATE: usize = 88;
-const AV_DISPOSITION_DEFAULT: c_int = 1 << 0;
-const AV_DISPOSITION_FORCED: c_int = 1 << 6;
-const AVMEDIA_TYPE_VIDEO: c_int = 0;
-const AVMEDIA_TYPE_AUDIO: c_int = 1;
-const AVMEDIA_TYPE_SUBTITLE: c_int = 3;
-/// AVSTREAM attached picture (cover art) is a VIDEO stream; skip it.
-const AV_DISPOSITION_ATTACHED_PIC: c_int = 1 << 10;
-
 /// The probe's AVIO state: one curl source, the logical offset and the deadline.
 struct ProbeIo {
-    src: Box<crate::curlio::CurlSource>,
+    src: Box<ProbeSource>,
     off: i64,
     deadline: std::time::Instant,
 }
@@ -137,7 +165,11 @@ extern "C" fn probe_read(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             return AVERROR_EOF;
         }
         let buf = std::slice::from_raw_parts_mut(dst, n.max(0) as usize);
-        let r = s.src.read_until(buf, Some(s.deadline), &mut plx_base::checkpoint::NoCheckpoint);
+        let r = s.src.read_until(
+            buf,
+            Some(s.deadline),
+            &mut plx_base::checkpoint::NoCheckpoint,
+        );
         if r > 0 {
             s.off += r as i64;
             r
@@ -156,9 +188,9 @@ extern "C" fn probe_seek(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
         }
         let target = match whence & !0x20000 {
             // AVSEEK_FORCE is a hint we do not need.
-            SEEK_SET => offset,
-            SEEK_CUR => s.off + offset,
-            SEEK_END if size >= 0 => size + offset,
+            libc::SEEK_SET => offset,
+            libc::SEEK_CUR => s.off + offset,
+            libc::SEEK_END if size >= 0 => size + offset,
             _ => return -1,
         };
         if target < 0 || std::time::Instant::now() >= s.deadline {
@@ -185,43 +217,102 @@ unsafe fn dict_value(s: *mut AVStream, key: &std::ffi::CStr) -> String {
     if e.is_null() || (*e).value.is_null() {
         return String::new();
     }
-    std::ffi::CStr::from_ptr((*e).value).to_string_lossy().trim().to_string()
+    std::ffi::CStr::from_ptr((*e).value)
+        .to_string_lossy()
+        .trim()
+        .to_string()
+}
+
+/// The container's own name for this track — `title` (Matroska and most formats), else `name`
+/// (MP4's per-track `udta` name box, which is what FFmpeg's mov demuxer exposes it as).
+///
+/// Deliberately NOT `handler_name`: MP4 sets it to a constant per media type, so it is the same
+/// string on every track and reading it would give the picker nine identical sub-lines.
+unsafe fn stream_name(s: *mut AVStream) -> String {
+    let dict = *((s as *const u8).add(OFF_STREAM_METADATA) as *const *const AVDictionary);
+    if dict.is_null() {
+        return String::new();
+    }
+    for key in [c"title", c"name"] {
+        let e = av_dict_get(dict, key.as_ptr(), std::ptr::null(), 0);
+        if e.is_null() || (*e).value.is_null() {
+            continue;
+        }
+        let v = std::ffi::CStr::from_ptr((*e).value)
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    String::new()
 }
 
 unsafe fn codec_name(id: c_int) -> String {
-    std::ffi::CStr::from_ptr(avcodec_get_name(id)).to_string_lossy().into_owned()
+    std::ffi::CStr::from_ptr(avcodec_get_name(id))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The Dolby Vision configuration record attached to this stream, if the demuxer found one.
+/// `coded_side_data` is STREAM-level (not per-packet) and both bundled demuxers populate it: `mov`
+/// from the `dvcC`/`dvvC` box, matroska from the `DolbyVisionConfiguration` block. Reading it needs
+/// no frame decode. Nine plain bytes, so this is a zero-risk read on any target.
+unsafe fn dovi_conf(cp: *const AVCodecParameters) -> Option<AVDOVIDecoderConfigurationRecord> {
+    let (list, n) = ((*cp).coded_side_data, (*cp).nb_coded_side_data);
+    if list.is_null() || n <= 0 {
+        return None;
+    }
+    for i in 0..n as usize {
+        let sd = &*list.add(i);
+        if sd.type_ != AV_PKT_DATA_DOVI_CONF || sd.data.is_null() {
+            continue;
+        }
+        let bytes = std::slice::from_raw_parts(sd.data, sd.size);
+        if bytes.len() < 9 {
+            return None;
+        }
+        return Some(AVDOVIDecoderConfigurationRecord {
+            dv_version_major: bytes[0],
+            dv_version_minor: bytes[1],
+            dv_profile: bytes[2],
+            dv_level: bytes[3],
+            rpu_present_flag: bytes[4],
+            el_present_flag: bytes[5],
+            bl_present_flag: bytes[6],
+            dv_bl_signal_compatibility_id: bytes[7],
+            dv_md_compression: bytes[8],
+        });
+    }
+    None
 }
 
 /// Open `url` and report what it holds. `Err` carries a short reason for the log (never the URL,
 /// whose query may be a signature).
 pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe, String> {
-    // Fork Rofocale11: after the upstream merge the app boots `plx_media_codecs::ffi`, NOT this
-    // module's own dynlib table. `ABI_OK` and the avformat/avcodec pointers this probe calls are
-    // published only by this module's `load_libraries`/`boot`; without the fork's old
-    // `plx_media::ff::boot()` call in app boot, every probe would be refused (and any call that
-    // slipped past would dereference a null symbol). Bring the fork's table up once here, with
-    // the same major check `boot` applies, so the probe keeps reporting the real stream on a
-    // merged build. A missing or foreign lib still refuses — no guessed codecs at unverified ABI.
-    if !ABI_OK.load(Ordering::Relaxed) {
-        if !load_libraries() {
-            return Err("bundled FFmpeg unavailable".into());
+    // One ABI table: this is the same `plx_media_codecs::ffi` the demuxer uses, so there is no
+    // second `dynlib!` to drift out of sync and no way for media to report "bound" while the probe
+    // refuses. The app boots it at startup; self-boot here only covers standalone use/test.
+    if !abi_ok() {
+        plx_media_codecs::ffi::boot();
+        if !abi_ok() {
+            return Err("bundled FFmpeg unavailable or the wrong ABI".into());
         }
-        unsafe {
-            let (fmt, cod, utl) = (avformat_version(), avcodec_version(), avutil_version());
-            if (fmt >> 16, cod >> 16, utl >> 16) != (63, 63, 61) {
-                return Err("bundled FFmpeg ABI mismatch".into());
-            }
-        }
-        ABI_OK.store(true, Ordering::Relaxed);
     }
     ensure_registered();
     let until = std::time::Instant::now() + deadline;
     // A private transfer: never the player's ACTIVE one, so a probe beside a playing stream cannot
     // be woken by (or wake) the movie's teardown. Its abort handle is not needed — the deadline
     // bounds every read.
-    let (src, _abort) = crate::curlio::CurlSource::open_private(url, 0).map_err(|e| format!("open failed: {e:?}"))?;
+    let (src, _abort) =
+        ProbeSource::open_private(url, 0).map_err(|e| format!("open failed: {e:?}"))?;
     let size = src.size();
-    let mut io = Box::new(ProbeIo { src, off: 0, deadline: until });
+    let mut io = Box::new(ProbeIo {
+        src,
+        off: 0,
+        deadline: until,
+    });
     unsafe {
         let buf = av_malloc(65536) as *mut u8;
         if buf.is_null() {
@@ -246,7 +337,12 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
             return Err("avformat_alloc_context failed".into());
         }
         (*fmt).pb = avio;
-        let r = avformat_open_input(&mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut());
+        let r = avformat_open_input(
+            &mut fmt,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
         if r < 0 || fmt.is_null() {
             free_avio(avio);
             return Err(format!("not a recognised container (r={r})"));
@@ -262,7 +358,9 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
                 if ifmt.is_null() || (*ifmt).is_null() {
                     String::new()
                 } else {
-                    std::ffi::CStr::from_ptr(*ifmt).to_string_lossy().into_owned()
+                    std::ffi::CStr::from_ptr(*ifmt)
+                        .to_string_lossy()
+                        .into_owned()
                 }
             },
             duration_ms: fmt_duration(fmt).max(0) / 1000,
@@ -275,15 +373,26 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
             let disposition = *((st as *const u8).add(OFF_STREAM_DISPOSITION) as *const c_int);
             let default = disposition & AV_DISPOSITION_DEFAULT != 0;
             match (*cp).codec_type {
-                AVMEDIA_TYPE_VIDEO if out.video.is_none() && disposition & AV_DISPOSITION_ATTACHED_PIC == 0 => {
-                    let fr = *((st as *const u8).add(OFF_STREAM_AVG_FRAME_RATE) as *const AVRational);
-                    let fr = if fr.num > 0 && fr.den > 0 { fr } else { (*cp).framerate };
+                AVMEDIA_TYPE_VIDEO
+                    if out.video.is_none() && disposition & AV_DISPOSITION_ATTACHED_PIC == 0 =>
+                {
+                    let fr =
+                        *((st as *const u8).add(OFF_STREAM_AVG_FRAME_RATE) as *const AVRational);
+                    let fr = if fr.num > 0 && fr.den > 0 {
+                        fr
+                    } else {
+                        (*cp).framerate
+                    };
                     let hdr = matches!((*cp).color_trc, 16 | 18);
                     out.video = Some(ProbedVideo {
                         codec: codec_name((*cp).codec_id),
                         width: (*cp).width,
                         height: (*cp).height,
-                        fps: if fr.num > 0 && fr.den > 0 { fr.num as f64 / fr.den as f64 } else { 0.0 },
+                        fps: if fr.num > 0 && fr.den > 0 {
+                            fr.num as f64 / fr.den as f64
+                        } else {
+                            0.0
+                        },
                         bit_depth: match (*cp).bits_per_raw_sample {
                             b @ 8..=12 => b,
                             _ if hdr || (*cp).profile == 2 || dovi_conf(cp).is_some() => 10,
@@ -332,8 +441,11 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
 /// Which audio track a television without a DTS decoder should start on: the container's default
 /// when it is decodable, else the first decodable one, else `None` (nothing playable — the caller
 /// says so rather than declaring a codec the pipeline cannot open). `decodable` is the device's
-/// own rule (`crate::route` / the codec table); index is the AUDIO ordinal in file order.
-pub fn preferred_audio(tracks: &[ProbedAudio], decodable: impl Fn(&ProbedAudio) -> bool) -> Option<usize> {
+/// own rule; index is the AUDIO ordinal in file order.
+pub fn preferred_audio(
+    tracks: &[ProbedAudio],
+    decodable: impl Fn(&ProbedAudio) -> bool,
+) -> Option<usize> {
     let default = tracks.iter().position(|t| t.default).unwrap_or(0);
     if tracks.get(default).is_some_and(&decodable) {
         return Some(default);
@@ -346,36 +458,55 @@ mod tests {
     use super::*;
 
     fn a(codec: &str, default: bool) -> ProbedAudio {
-        ProbedAudio { codec: codec.into(), default, ..ProbedAudio::default() }
+        ProbedAudio {
+            codec: codec.into(),
+            default,
+            ..ProbedAudio::default()
+        }
     }
 
     #[test]
     fn a_dts_default_falls_back_to_the_first_track_the_set_decodes() {
         let no_dts = |t: &ProbedAudio| t.codec != "dts";
-        assert_eq!(preferred_audio(&[a("dts", true), a("ac3", false), a("eac3", false)], no_dts), Some(1));
-        assert_eq!(preferred_audio(&[a("aac", false), a("eac3", true)], no_dts), Some(1));
+        assert_eq!(
+            preferred_audio(&[a("dts", true), a("ac3", false), a("eac3", false)], no_dts),
+            Some(1)
+        );
+        assert_eq!(
+            preferred_audio(&[a("aac", false), a("eac3", true)], no_dts),
+            Some(1)
+        );
         assert_eq!(preferred_audio(&[a("dts", true)], no_dts), None);
-        assert_eq!(preferred_audio(&[a("eac3", false), a("dts", false)], no_dts), Some(0));
+        assert_eq!(
+            preferred_audio(&[a("eac3", false), a("dts", false)], no_dts),
+            Some(0)
+        );
         assert_eq!(preferred_audio(&[], no_dts), None);
     }
 
     #[test]
     fn the_container_spelling_is_the_pms_one() {
-        let p = |f: &str| MediaProbe { format: f.into(), ..MediaProbe::default() };
+        let p = |f: &str| MediaProbe {
+            format: f.into(),
+            ..MediaProbe::default()
+        };
         assert_eq!(p("matroska,webm").container(), "mkv");
         assert_eq!(p("mov,mp4,m4a,3gp,3g2,mj2").container(), "mp4");
         assert_eq!(p("mpegts").container(), "mpegts");
     }
 
     /// Live: `PLX_PROBE_URL=<media url> PLX_FFMPEG_DIR=<dir with libav*-plx dylibs> cargo test
-    /// -p plx_media --lib live_probe -- --nocapture`. Skipped without both.
+    /// -p plx_nuvio_probe --lib live_probe -- --nocapture`. Skipped without both.
     #[test]
     fn live_probe() {
-        let (Ok(url), Ok(_dir)) = (std::env::var("PLX_PROBE_URL"), std::env::var("PLX_FFMPEG_DIR")) else {
+        let (Ok(url), Ok(_dir)) = (
+            std::env::var("PLX_PROBE_URL"),
+            std::env::var("PLX_FFMPEG_DIR"),
+        ) else {
             return;
         };
         plx_net::net::global_init();
-        super::super::boot();
+        plx_media_codecs::ffi::boot();
         let p = probe_url(&url, std::time::Duration::from_secs(30));
         eprintln!("{p:#?}");
         assert!(p.is_ok());

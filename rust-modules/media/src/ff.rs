@@ -1370,9 +1370,10 @@ const AVSEEK_SIZE: c_int = 0x10000;
 mod subs;
 #[path = "ff_subside.rs"]
 pub(crate) mod subside;
-// NuvioNative: open a third-party stream and report what it really holds (the PMS shim's input).
-#[path = "ff_probe.rs"]
-pub mod probe;
+// Fork Rofocale11: the addon/debrid stream prober moved to the fork-owned `plx_nuvio_probe` crate
+// (src/app/nuvio.rs calls it directly). It used to be `#[path = "ff_probe.rs"] pub mod probe;` here,
+// borrowing this file's names and a second dynlib! table. Removing the declaration on merge is all
+// that is left of the fork in this upstream-owned file for the probe.
 use subs::SubKind;
 #[cfg(test)]
 use std::sync::Arc;

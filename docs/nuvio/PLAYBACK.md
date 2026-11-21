@@ -32,7 +32,7 @@ issuer (a 2020 CX firmware lacks newer roots), the request is retried once again
 shared `net::keypin` ladder, so the **control plane (addon JSON via `plx_net::net::request`) gets
 the same fallback**.
 
-## Real metadata: `plx_media::ff::probe::probe_url`
+## Real metadata: `plx_nuvio_probe::probe_url`
 
 The route, the Load payload (`"video":"H265"`, `"audio":"AC3 PLUS"`), the audio-track pick and
 the Dolby Vision presentation are all derived from PMS metadata **before** the stream opens
@@ -40,14 +40,15 @@ the Dolby Vision presentation are all derived from PMS metadata **before** the s
 codec that is wrong makes the Load declare the wrong decoder and stall. So:
 
 ```rust
-let p = plx_media::ff::probe::probe_url(&stream_url, Duration::from_secs(45))?;
+let p = plx_nuvio_probe::probe_url(&stream_url, Duration::from_secs(45))?;
 ```
 
 opens the URL with the bundled libavformat over a private curl transfer and returns container,
 duration, size, the video track (codec, WxH, fps, bit depth, profile, `color_trc/primaries/space`,
 `dovi {profile, level, bl_compat, rpu, el, bl}`), and every audio/subtitle track in **file order**
 (codec, profile, channels, language, title, default, forced). Callable from any thread after
-`ff::boot()`. The shim runs it when the player asks `/video/:/transcode/universal/decision`
+`plx_media_codecs::ffi::boot()` — it is the same single ABI table the demuxer uses, not a second
+one. The shim runs it when the player asks `/video/:/transcode/universal/decision`
 for an item (or when a stream is picked), caches it per stream URL, and emits the PMS fields from it:
 
 | PMS field | from |
@@ -86,7 +87,7 @@ An explicit user audio choice takes precedence over this initial selection.
 direct-play. With accurate `Stream(type 2)` rows the route's existing smart-direct-play picks a
 compatible AAC/AC3/EAC3 sibling of a DTS/TrueHD default. **When there is no compatible track the
 route asks the server to convert it — the shim cannot.** The shim must answer such a decision with
-a refusal and the UI says "audio format not supported"; `ff::probe::preferred_audio` is the helper
+a refusal and the UI says "audio format not supported"; `plx_nuvio_probe::preferred_audio` is the helper
 that tells the shim this ahead of time (rank such streams last / mark them in the source list).
 On-device DTS→AC3 was assessed and NOT implemented: the bundled FFmpeg is built
 `--disable-everything` with no audio decoders/encoders; it would need `dca` decode + `ac3`
