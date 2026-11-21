@@ -1073,10 +1073,20 @@ pub fn register_with_client_id(
     // were stamped InsecureOnly, failing the upstream registry tests. Name the developer-build policy
     // explicitly through the existing `*_and_policy` seam instead of adding a cfg(test) fork to
     // production code; production registration still uses the build's own policy.
-    register_pinned_with_client_id_and_policy(
-        machine_id, &Origin::http(host, port), token, None, client_id,
-        ConnectionFacts::default(), CredentialPolicy::AllowPlaintext,
-    )
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        register_pinned_with_client_id_and_policy(
+            machine_id, &Origin::http(host, port), token, None, client_id,
+            ConnectionFacts::default(), CredentialPolicy::AllowPlaintext,
+        )
+    }
+    // Fork Rofocale11: the policy-forcing seam exists only for tests. Shipping and
+    // --no-default-features builds must keep upstream's build-policy registration.
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        register_pinned_with_client_id(machine_id, &Origin::http(host, port), token, None, client_id,
+            ConnectionFacts::default())
+    }
 }
 
 /// [`register_with_client_id`], given the whole [`Origin`] and, optionally, a resolve pin — the
