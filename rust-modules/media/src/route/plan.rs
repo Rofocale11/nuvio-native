@@ -2826,6 +2826,15 @@ fn land_queue(plan: &mut Plan, q: QueueInfo) {
 /// when it re-encodes it (an HLS rung, `no_video_copy`, a burned subtitle) — the encoder owns that
 /// rate and nothing here knows it. The one place the rule lives: the plan, the recovery install and
 /// the retranscode landing all ask it.
+// Fork Rofocale11: upstream added this URI-engine explanation helper when it refactored the plan;
+// the fork's retained older plan.rs did not carry it, but upstream's decision tests still call it.
+pub(super) fn uri_decline_line(engine: plx_plex::plex::session::UriEngine, plan: &Plan) -> Option<String> {
+    if engine != plx_plex::plex::session::UriEngine::On || plan.uri_original.is_some() {
+        return None;
+    }
+    plan.uri_decline.map(|why| format!("uri: original declined ({})", why.log_name()))
+}
+
 pub(super) fn video_copy_fps(contract: &plx_plex::plex::EncodeContract, src_fps: f64) -> f64 {
     if contract.remux && !contract.no_video_copy { src_fps } else { 0.0 }
 }

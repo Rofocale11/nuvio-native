@@ -18,8 +18,6 @@ use plx_play_feed::ff_test_support::*;
 use plx_play_feed::{demux, DemuxTransport};
 #[cfg(test)]
 use plx_media_codecs::subtitle_extract::pts_ns;
-#[cfg(test)]
-pub(crate) use crate::subtitle_job as subside;
 
 // The integration fixtures remain in media because they exercise its player
 // session and route adapter. Their physical vocabulary is imported from the
@@ -32,8 +30,6 @@ use plx_playback_contract::adaptive::TrialClock;
 use plx_playback_contract::demux::{DemuxCallbackEffect, DemuxObserver, DemuxSession};
 #[cfg(test)]
 use plx_play_feed::SendPtr;
-#[cfg(test)]
-use plx_net::stream::HttpStream;
 #[cfg(test)]
 use plx_net::net::origin::Origin;
 // Fork Rofocale11: NuvioNative's `ff::probe` (ff_probe.rs) opens third-party addon/debrid streams
