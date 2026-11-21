@@ -138,6 +138,11 @@ All adaptations carry `// Fork Rofocale11:` comments.
   `PLXNATIVE_APP_DIR=$(pwd)/pkg PLXNATIVE_RUNTIME_DIR=/tmp/plxnative-sim` launch,
   the sim logs `ff: bound avutil/avcodec/avformat/swscale -> ...-host.so.*` and
   lands 336 items / 28 shelves from 11 addons, with no redirect refusals.
+  The fork's probe has its OWN ABI table in `media/src/ff.rs`; it needed the same
+  host candidate names, or `ff::probe` refused every addon stream even though
+  `media-codecs` reported FFmpeg bound. A direct sim launch also needs the
+  `/tmp/plxnative-sim/plxnative-token` dev-token trigger, otherwise it boots the
+  plex.tv sign-in flow instead of registering the Nuvio shim.
   `ci/stage-host-ffmpeg.sh` remains macOS-only (`.dylib` + `install_name_tool`),
   so this Linux staging is manual and the staged binaries are untracked.
 
