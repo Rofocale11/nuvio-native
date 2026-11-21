@@ -180,7 +180,7 @@ pub(crate) fn boot() {
         }
     };
     handle.shim.probes.set_prober(prober());
-    handle.shim.set_audio_codecs(plx_platform::devcaps::caps().audio.split(',').map(str::to_string).collect());
+    handle.shim.set_audio_codecs(plx_os::devcaps::caps().audio.split(',').map(str::to_string).collect());
     plx_base::local_server::set(handle.origin(), handle.token.clone(), plx_pmsshim::MACHINE_ID.to_string());
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
@@ -231,7 +231,7 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
             log(&format!("nuvio: probe {} {}x{} fps={:.3} dovi={} audio={} subs={}",
                 v.codec, v.width, v.height, v.fps, v.dovi.is_some(), m.audio.len(), m.subtitles.len()));
         }
-        let caps = plx_platform::devcaps::caps();
+        let caps = plx_os::devcaps::caps();
         let video_decodable = m.video.as_ref().is_some_and(|v| match v.codec.as_str() {
             "h264" => true,
             "hevc" => caps.hevc,
