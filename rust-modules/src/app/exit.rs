@@ -507,6 +507,13 @@ mod lifecycle_tests {
         for entry in &owns_process_end {
             assert!(entry.is_file(), "{}: an entry the scan allows is gone; update the list", entry.display());
         }
+        // Fork Rofocale11: `plx_pmsshim`'s `pmsshim-serve` is a standalone `fn main()` helper binary
+        // (a loopback PMS server for the simulator), not library code a host runs. Its bind-failure
+        // path uses `std::process::exit(1)` in its OWN process, the same class of entry this scan
+        // already leaves out for the `storage` helper and `base/src/process.rs`. Skip only this one
+        // file: the app's process entries below still have to end through `exit_now` and are checked.
+        let standalone_helper_entry = root.join("pmsshim/src/bin/serve.rs");
+        assert!(standalone_helper_entry.is_file(), "{}: the standalone helper is gone; update the list", standalone_helper_entry.display());
         let (libc_exit, std_exit, exit_now) =
             (concat!("process::", "exit("), concat!("libc::", "exit("), concat!("exit_", "now("));
         let mut hits = Vec::new();
@@ -516,6 +523,7 @@ mod lifecycle_tests {
                 || path.contains("/storage_service/")
                 || path.contains("/tests/")
                 || path.ends_with("_tests.rs")
+                || f == standalone_helper_entry
             {
                 continue;
             }

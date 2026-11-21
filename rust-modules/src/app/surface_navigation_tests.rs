@@ -1065,6 +1065,12 @@ fn a_card_menus_commit_reports_one_request_carrying_the_row_it_captured() {
         "the same-frame Play commit retires its already-dismissed menu");
     assert!(d.nav.entry(host).is_some(), "the launch retains its originating page");
     assert!(matches!(d.top_arg(), Some(AppArg::Player)), "the product runner performs the captured Play");
+    // Fork Rofocale11: the committed Play starts a process-global route resolve. Withdraw it and
+    // join its worker here rather than leave `route::play_pending()` latched for the next test
+    // (the deeplink preview waits assert on that global). Only this fixture's resolve is cancelled.
+    let mut ps = plx_media::route::PlaybackSession::default();
+    plx_media::route::cancel_play(&mut ps);
+    assert!(plx_media::route::wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
 }
 
 /// **The Settings row hands one surface to another without ever un-freezing the host** (§16.5).

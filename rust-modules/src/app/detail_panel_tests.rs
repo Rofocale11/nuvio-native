@@ -317,6 +317,9 @@ fn page_instance(d: &Dispatcher<AppHost>) -> InstanceId {
 #[test]
 fn a_picked_version_plays_that_version_though_its_panel_is_still_closing() {
     use plx_machine::machine::AppCommandOutcome;
+    // Fork Rofocale11: this pick dispatches a process-global play resolve (`route::PLAY_BUSY`);
+    // `World` already holds the one global-test lock, so the cleanup at the end is serialized with
+    // every other test that reads `route::play_pending()`.
     let versions = plx_appkit::version_list::sample();
     let pick = versions[1].id;
     let mut w = World::detail_page("play-version-pick", plx_data::metadata::Detail {
@@ -347,6 +350,12 @@ fn a_picked_version_plays_that_version_though_its_panel_is_still_closing() {
         "the page asked to play the SECOND version, once, and the runner executed it: {}", tap.account());
     assert!(w.d.nav.modals.surfaces.is_empty(), "the panel closed");
     assert!(matches!(w.d.top_arg(), Some(AppArg::Player)), "the pick entered the player");
+    // Fork Rofocale11: cancel the resolve this pick started and join its worker. Without this the
+    // process-global `route::play_pending()` stays latched and a later test (the deeplink preview
+    // waits) sees a Play it never asked for. This only withdraws our own fixture's resolve.
+    let mut ps = plx_media::route::PlaybackSession::default();
+    plx_media::route::cancel_play(&mut ps);
+    assert!(plx_media::route::wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
 }
 
 /// **Play Version on a platform that composed no playback driver (W6c):** the panel's rows are the
