@@ -102,9 +102,23 @@ The fork's retained FFmpeg core needed adapting to the APIs upstream moved:
 
 All adaptations carry `// Fork Rofocale11:` comments.
 
+## Verification result
+
+- `make check`: **146 steps all ok**, harness 753 tests OK, all 22 Rust test binaries
+  green (notably `plx_media` 2183, `plx_screens` 2322, `plx_plex` 822, `plx_net` 338,
+  app crate 1486). No test was skipped, ignored or weakened to get there.
+- `SCREEN_SHAPES_PIN` was re-pinned for the merged Also-available shape (which gained
+  `nuvio` and a stream-request correlation id).
+- Three historical replay fixtures were re-recorded by the merge; their reviewed
+  digests are consolidated in `tests/replay-historical-profiles.json`, and the
+  stale doc claim about byte-for-byte unchanged fixtures was corrected.
+- Three reach caps in the fork's shim are now flagged `status = open` by
+  `ci/list-caps.ini` (200 streams, 40 subtitle refs, 20 cast/crew tags) — a known
+  limitation, not a gate failure.
+
 ## Still to verify
 
-- `SCREEN_SHAPES_PIN` in `registry.rs` is upstream's value; the merged tree needs a
-  re-pin and replay re-record.
-- Full workspace `cargo check`, `make check`, `make check-nodef`, ARM build and UI
-  capture. A host pass is not a device proof.
+- `make check-nodef` (shipping feature set) and the ARM cross-build.
+- UI capture / device playback. A host pass is not a device proof; `ff::probe`
+  (the shim's probed-codec path) is compiled and unit-tested but has not been
+  exercised against a real addon stream on the television.
