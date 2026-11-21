@@ -129,8 +129,14 @@ All adaptations carry `// Fork Rofocale11:` comments.
   refused and Home landed with 0 shelves; after it the simulator lands 48 items
   across 4 shelves.
 - `sim-linux` deliberately needs no host FFmpeg; the ARM `.so`s staged in `pkg/`
-  are not loadable by the host simulator, so `ff: ... MISSING` in the sim log is
-  expected and playback is intentionally unavailable there.
+  are not loadable by the host simulator, so `ff: ... MISSING` in a plain
+  `PLXNATIVE_APP_DIR=pkg` run is expected. For verification here,
+  `HOST=1 ./ci/build-ffmpeg.sh` was rebuilt in this checkout and its x86-64
+  libraries were staged under their loader names (`libavutil-plx.so.61`, etc.)
+  into a separate `PLXNATIVE_APP_DIR`; the sim then logged
+  `ff: bound avutil/avcodec/avformat/swscale` and landed 48 items / 4 shelves.
+  `ci/stage-host-ffmpeg.sh` remains macOS-only (`.dylib` + `install_name_tool`),
+  so this Linux staging was done manually and did not touch `pkg/`.
 
 ## Still to verify
 
