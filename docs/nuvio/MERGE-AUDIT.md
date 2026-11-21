@@ -116,6 +116,22 @@ All adaptations carry `// Fork Rofocale11:` comments.
   `ci/list-caps.ini` (200 streams, 40 subtitle refs, 20 cast/crew tags) — a known
   limitation, not a gate failure.
 
+## Post-gate simulator fixes
+
+- `Makefile`: `RUST_INPUTS`'s `find` now excludes colon-named files. A private
+  `nuvio.local.env:Zone.Identifier` Windows artifact in `rust-modules/stremio/`
+  made the prerequisite rule parse as multiple target patterns.
+- `stremio/src/addon_http.rs`: upstream's new net guard refuses redirect-following
+  requests that carry any caller header. Benign addon GETs now follow redirects
+  with no headers (like upstream's public fetch); Nuvio account calls keep their
+  `apikey`/`Authorization` headers and do not follow redirects, so tokens are
+  never replayed to a redirect target. Before this fix every addon request was
+  refused and Home landed with 0 shelves; after it the simulator lands 48 items
+  across 4 shelves.
+- `sim-linux` deliberately needs no host FFmpeg; the ARM `.so`s staged in `pkg/`
+  are not loadable by the host simulator, so `ff: ... MISSING` in the sim log is
+  expected and playback is intentionally unavailable there.
+
 ## Still to verify
 
 - The ARM **storage helper** (`pkg/plxnative-storage`) fails to link on this host:
