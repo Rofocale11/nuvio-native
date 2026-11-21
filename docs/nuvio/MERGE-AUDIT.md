@@ -65,6 +65,22 @@ Debian `control` file.
 | `rust-modules/screens/src/detail/hero.rs` | Upstream's whole hero control/disc refactor | `ELEM_MY_LIST`, `HeroCtl::MyList`, `HeroSet.list`, `HeroWidths.list`, trailing My List pill — account-backed list toggle, mutually exclusive with upstream's plex.tv Watchlist because `catalog_hex_of_guid` only accepts `plex://` guids. |
 | `rust-modules/screens/src/detail/hero_watchlist_tests.rs`, `no_driver_tests.rs` | Upstream's watchlist/no-driver sweeps | Added `list: false` / `list: 0.0` to their literals — the fork's extra hero field must be initialised in upstream's tests. |
 
+## Upstream files edited after the merge (for future merges)
+
+These were touched only to keep the fork's own code building against newer upstream files;
+each is a place to watch on the next upstream merge.
+
+- `rust-modules/screens/src/detail/hero_watchlist_tests.rs`,
+  `rust-modules/screens/src/detail/no_driver_tests.rs` — added `list: false` / `list: 0.0`
+  because NuvioNative's `HeroSet`/`HeroWidths` carry an extra My List field.
+- `rust-modules/screens/src/preferences_tests.rs` — added `PickerKind::RatingSource` to the
+  expected Playback field list (the Nuvio IMDb/RT picker).
+- `locales/{ca,de,fr,hu,it,nl,pl,pt,ru}/{browse,settings}.json` (18 files, JSON permits no
+  comment) — added the fork's 12 pre-existing Nuvio keys (My List, stream picker, rating
+  source) with the English wording verbatim. Upstream's catalog build requires every
+  English key in every locale; no new wording or branding was introduced. These are the
+  keys to re-check on every upstream locale change.
+
 ## Still to verify
 
 - `SCREEN_SHAPES_PIN` in `registry.rs` is upstream's value; the merged tree needs a

@@ -541,6 +541,8 @@ fn video_and_playback_lists_video_player_and_up_next() {
     let granted = MarkerPrefsView { scope: 1, intro_granted: true, credits_granted: true, ..Default::default() };
     let all = FieldListInputs { marker_prefs: granted, ..inputs_of(Kind::Playback, None) };
     assert_eq!(fields_of(&all), vec![
+        // Fork Rofocale11: NuvioNative adds the IMDb/Rotten Tomatoes rating-source picker to the
+        // Playback page; upstream's expected field list has no such kind.
         PickerKind::Quality, PickerKind::DirectPlay, PickerKind::DolbyVision, PickerKind::UriEngine, PickerKind::RatingSource,
         PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::HdrOverlay, PickerKind::IntroSkip, PickerKind::CreditsSkip,
         PickerKind::NextEpisode, PickerKind::DeckPress,

@@ -1,6 +1,11 @@
 //! The bookmark disc: where it sits in the row, which face it wears, how a flip moves, and what a
 //! press asks for. Pure values only — the paint and the effect push are `DetailScreen`'s.
 
+// Fork Rofocale11: this is an upstream-owned test file; the `list: false` literals below were added
+// because NuvioNative's HeroSet/HeroWidths carry an extra My List field (the account-backed toggle
+// for `nuvio://` items) that upstream's plex.tv Watchlist tests do not have. Keep these additions
+// when merging future upstream changes to this file.
+
 use super::*;
 use plx_data::catalog::Membership;
 
