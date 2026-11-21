@@ -218,6 +218,10 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libavformat-plx.so.63",
         "libavformat-plx.63.dylib",
+        // Fork Rofocale11: this is the probe's own ABI table, separate from media-codecs'. The
+        // Linux host sim needs the HOST=1 library names here too, or ff::probe refuses every
+        // addon stream while media-codecs reports FFmpeg as bound.
+        "libavformat-plx-host.so.63",
     ] {
     // Declared beside libavformat's other entry points because that is the library that DEFINES
     // it. Under `#[link]` the final link resolved every name against every library at once and
@@ -275,6 +279,8 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libavcodec-plx.so.63",
         "libavcodec-plx.63.dylib",
+        // Fork Rofocale11: Linux host sim — see the libavformat candidates above.
+        "libavcodec-plx-host.so.63",
     ] {
     fn avcodec_version() -> c_uint;
     fn av_packet_alloc() -> *mut AVPacket;
@@ -321,6 +327,8 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libavutil-plx.so.61",
         "libavutil-plx.61.dylib",
+        // Fork Rofocale11: Linux host sim — see the libavformat candidates above.
+        "libavutil-plx-host.so.61",
     ] {
     fn avutil_version() -> c_uint;
     fn av_malloc(size: usize) -> *mut c_void;
@@ -350,6 +358,8 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libswscale-plx.so.10",
         "libswscale-plx.10.dylib",
+        // Fork Rofocale11: Linux host sim — see the libavformat candidates above.
+        "libswscale-plx-host.so.10",
     ] {
     fn sws_getContext(
         src_w: c_int, src_h: c_int, src_fmt: c_int,
