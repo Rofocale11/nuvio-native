@@ -304,13 +304,18 @@ struct PlaybackCells {
     dolby_vision: plx_plex::plex::session::DolbyVisionMode,
     deck_press: plx_media::route::DeckPress,
     skip: plx_media::route::SkipInterval,
+    // Fork Rofocale11: the Nuvio IMDb/Rotten Tomatoes picker is a local Playback picker with its
+    // own canonical-session cell, so it is restored alongside upstream's live settings.
+    rating_source: plx_plex::plex::session::RatingSource,
 }
 impl PlaybackCells {
     fn capture() -> Self {
         use plx_media::route as r;
         PlaybackCells { quality: r::quality(), direct_play: r::direct_play_mode(), size: r::subtitle_size(),
             position: r::subtitle_position(), tone: plx_media::player::subtitle_tone(), hdr: r::hdr_overlay_brightness(), next_episode: r::next_episode_mode(), instant_dpad_seeking: r::instant_dpad_seeking(), uri_engine: r::uri_engine(),
-            dolby_vision: r::dolby_vision_mode(), deck_press: r::deck_press(), skip: r::skip_interval() }
+            dolby_vision: r::dolby_vision_mode(), deck_press: r::deck_press(), skip: r::skip_interval(),
+            // Fork Rofocale11: see the field above.
+            rating_source: plx_plex::plex::nuvio::rating_source() }
     }
 }
 impl Drop for PlaybackCells {
@@ -321,6 +326,8 @@ impl Drop for PlaybackCells {
         plx_media::player::restore_subtitle_tone(self.tone);
         r::restore_hdr_overlay_brightness(self.hdr); r::restore_next_episode_mode(self.next_episode); r::restore_instant_dpad_seeking(self.instant_dpad_seeking); r::restore_uri_engine(self.uri_engine);
         r::restore_dolby_vision_mode(self.dolby_vision); r::restore_deck_press(self.deck_press); r::restore_skip_interval(self.skip);
+        // Fork Rofocale11: see the field above.
+        let _ = plx_plex::plex::nuvio::set_rating_source(self.rating_source);
     }
 }
 
@@ -374,6 +381,10 @@ fn every_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row() {
     r::restore_instant_dpad_seeking(*ses::InstantDpadSeeking::LADDER.last().unwrap());
     r::restore_uri_engine(*ses::UriEngine::LADDER.last().unwrap());
     r::restore_dolby_vision_mode(*ses::DolbyVisionMode::LADDER.last().unwrap());
+    // Fork Rofocale11: seat the Nuvio rating-source picker on its last line (Rotten Tomatoes), as
+    // the other pickers above are seated on their last rung, so the checked-line walk cannot pass
+    // merely by landing on the first row.
+    let _ = plx_plex::plex::nuvio::set_rating_source(plx_plex::plex::session::RatingSource::RottenTomatoes);
     let captured = ses::ProfilePrefs {
         playback_quality: Some(quality), direct_play_mode: Some(r::DirectPlayMode::Disabled),
         subtitle_size: ses::SubtitleSize::LADDER.last().copied(), subtitle_position: ses::SubtitlePosition::LADDER.last().copied(),
@@ -396,10 +407,14 @@ fn every_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row() {
         PickerKind::InstantDpadSeeking => ladder_last(ses::InstantDpadSeeking::LADDER.len()),
         PickerKind::UriEngine => ladder_last(ses::UriEngine::LADDER.len()),
         PickerKind::DolbyVision => ladder_last(ses::DolbyVisionMode::LADDER.len()),
+        // Fork Rofocale11: the Nuvio IMDb/Rotten Tomatoes picker is a local Playback picker too.
+        PickerKind::RatingSource => 1,
         other => panic!("{other:?} is not a local picker"),
     };
     let playback = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
-    assert_eq!(playback.len(), 10, "every Playback picker and the Player HUD page are in the table: {playback:?}");
+    // Fork Rofocale11: RatingSource (the Nuvio rating-provider picker) joins upstream's Playback
+    // rows — the count must be 11, not 10, and it sits in the Video group after the engine.
+    assert_eq!(playback.len(), 11, "every Playback picker and the Player HUD page are in the table: {playback:?}");
     assert_eq!(playback.iter().filter(|(_, d)| *d == SettingsPage::PlayerHud).count(), 1, "the Player HUD row is the one that is not a picker");
     for &(row, dest) in playback.iter().filter(|(_, d)| *d != SettingsPage::PlayerHud) {
         let SettingsPage::Picker(kind) = dest else { panic!("a Playback row pushes a picker: {dest:?}") };

@@ -563,7 +563,9 @@ fn intro_and_credits_skip_rows_follow_their_grants_in_the_player_group() {
     let _serial = plx_base::testlock::serial();
     let none = inputs_of(Kind::Playback, None);
     assert_eq!(fields_of(&none), vec![
-        PickerKind::Quality, PickerKind::DirectPlay, PickerKind::DolbyVision, PickerKind::UriEngine,
+        // Fork Rofocale11: NuvioNative's IMDb/Rotten Tomatoes rating-source picker is a Playback
+        // field; upstream's expected list predates it. Its position matches `fields_of`.
+        PickerKind::Quality, PickerKind::DirectPlay, PickerKind::DolbyVision, PickerKind::UriEngine, PickerKind::RatingSource,
         PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress]);
     let intro = FieldListInputs { marker_prefs: MarkerPrefsView { scope: 2, intro_granted: true, ..Default::default() }, ..inputs_of(Kind::Playback, None) };
     assert_eq!(fields_of(&intro).iter().filter(|f| matches!(f, PickerKind::IntroSkip | PickerKind::CreditsSkip)).collect::<Vec<_>>(), [&PickerKind::IntroSkip]);

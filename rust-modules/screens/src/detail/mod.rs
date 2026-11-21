@@ -4987,10 +4987,16 @@ impl DetailScreen {
                 ),
             }
         } else {
+            // Fork Rofocale11: the hero's accessibility subject names the card the page was opened
+            // from even when that card carries no playable part. Keep the fork's rule of falling back
+            // to the loaded detail for the media itself (part/codecs/route are untouched), but name
+            // the CARD's ratingKey in that fallback so the effect a press pushes is the title the
+            // subject guards — a movie page opened from a card reports and acts on that card.
+            let rk = self.selected().map_or(d.rk.as_str(), |m| m.rk.as_str()).to_owned();
             let play = self.selected().filter(|m| !m.part.is_empty()).map_or_else(
                 || PlayIntent::Item {
                     sid: plx_media::route::item_sid(d.sid),
-                    rk: d.rk.clone(),
+                    rk,
                     part: d.part.clone(),
                     vcodec: d.vcodec.clone(),
                     acodec: d.acodec.clone(),

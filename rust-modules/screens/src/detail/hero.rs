@@ -676,14 +676,26 @@ pub fn hero_widths(
     unfurl: [f32; DISCS],
     named_episode: bool,
 ) -> HeroWidths {
-    HeroWidths {
-        list: if set.list { my_list_width(measure) } else { 0.0 },
-        pill: hero_pill_w(measure, has_restart),
-        alt: alt_pill_w(measure),
-        // Fork Rofocale11: with the wide My List button present the discs stay closed so the row
-        // never runs into the People column; upstream's named-episode unfurl is used otherwise.
-        disc: if set.list { [CD; DISCS] } else { disc_caps(measure, set, unfurl, named_episode) },
-    }
+    let pill = hero_pill_w(measure, has_restart);
+    let alt = alt_pill_w(measure);
+    // Fork Rofocale11: with the wide My List button present the discs stay closed so the row
+    // never runs into the People column; upstream's named-episode unfurl is used otherwise.
+    let disc = if set.list { [CD; DISCS] } else { disc_caps(measure, set, unfurl, named_episode) };
+    // Fork Rofocale11: the widest translated Add/Remove/Saving label must not push My List into
+    // the People column. The discs are already closed above; cap the measured pill to the room
+    // that is left after Play, the Also available pill and every other disc plus their gaps, so
+    // the last control's right edge stays short of the People column in every shipped language.
+    // The control itself is still drawn with the same measured label — only its box is clamped.
+    let list = if set.list {
+        let (_, n) = hero_ctls(set);
+        let (others, _) = control_widths(set, HeroWidths { list: 0.0, pill, alt, disc });
+        let before: f32 = others[..n].iter().sum();
+        let right_without_list = plx_ui::consts::MARGIN_X + before
+            + plx_appkit::hero_layout::CGAP * n.saturating_sub(1) as f32;
+        let people_left = plx_ui::consts::SCR_W - plx_ui::consts::MARGIN_X - plx_ui::detail_layout::PEOPLE_W;
+        my_list_width(measure).min((people_left - right_without_list - 1.0).max(0.0))
+    } else { 0.0 };
+    HeroWidths { list, pill, alt, disc }
 }
 
 pub fn hero_credit(d: &Detail) -> Option<(&'static str, Vec<&str>)> {
