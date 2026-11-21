@@ -1514,7 +1514,13 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let origin = Origin::http("127.0.0.1", port as i32);
+        // Fork Rofocale11: `origin::is_loopback` exempts the in-process PMS shim's literal
+        // loopback origin from the store's plaintext-credential gate, so a 127.0.0.1 origin
+        // cannot grade this gate — it is admitted and dials (Idle), which is exactly what the
+        // sibling `store_policy_refuses_credentials_over_plaintext_http` already works around.
+        // "localhost" still resolves to the bound listener if the gate ever lets a dial through,
+        // so the no-socket assertion below stays meaningful while the store policy stays strict.
+        let origin = Origin::http("localhost", port as i32);
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let end = stream_under(
             CredentialPolicy::HttpsOnly, &origin, "/s", &["X-Plex-Token: not-a-real-token"], None,

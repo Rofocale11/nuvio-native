@@ -1066,8 +1066,17 @@ pub fn register_with_client_id(
     // D5 names and `register_lazy`'s own assertion is one call away rather than at this frame.
     #[cfg(any(test, feature = "test-support"))]
     plx_base::testlock::assert_held("the plex server registry (register_with_client_id)");
-    register_pinned_with_client_id(machine_id, &Origin::http(host, port), token, None, client_id,
-        ConnectionFacts::default())
+    // Fork Rofocale11: this test seam stands in for `register_origin` on a developer build. That
+    // build's `devtriggers` feature is unified in by the application crate during `make check`,
+    // but a bare `cargo test -p plx_plex --lib` leaves it off, so `CredentialPolicy::build()` was
+    // HttpsOnly here: plaintext LAN registrations came back tokenless, never became current and
+    // were stamped InsecureOnly, failing the upstream registry tests. Name the developer-build policy
+    // explicitly through the existing `*_and_policy` seam instead of adding a cfg(test) fork to
+    // production code; production registration still uses the build's own policy.
+    register_pinned_with_client_id_and_policy(
+        machine_id, &Origin::http(host, port), token, None, client_id,
+        ConnectionFacts::default(), CredentialPolicy::AllowPlaintext,
+    )
 }
 
 /// [`register_with_client_id`], given the whole [`Origin`] and, optionally, a resolve pin — the

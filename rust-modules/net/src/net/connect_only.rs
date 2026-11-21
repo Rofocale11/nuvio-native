@@ -8,7 +8,9 @@ use super::{
 use std::ffi::CString;
 use std::os::raw::{c_int, c_long, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 plx_base::dynlib! {
     raw: ["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"] {
@@ -48,6 +50,47 @@ pub enum Io {
 pub struct Socket {
     easy: Easy,
     fd: c_int,
+}
+
+// Fork Rofocale11: upstream polls the caller's cancel flag through libcurl's progress/XFERINFO
+// callback, but libcurl 8.x on Linux never invokes that callback while a CONNECT_ONLY TLS
+// handshake is stalled on a peer that says nothing — the dial only fails at
+// CURLOPT_CONNECTTIMEOUT (~10 s) with rc 28, so `ws::run` returned Refused instead of Cancelled
+// (a_cancel_during_the_tls_handshake_ends_the_dial, every run). Run the blocking perform on a
+// short-lived worker and poll the flag in the caller instead. Everything the worker touches is
+// owned by it (the easy handle, both CStrings, and an Arc-backed abort flag the progress callback
+// may still read), so a caller that leaves on Cancelled cannot dangle any of it. The fork's roots
+// mode and diagnostic redaction live in net.rs and are deliberately untouched here.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+
+/// The easy handle is set up entirely before the worker starts and is touched by one thread at a
+/// time: the worker during `curl_easy_perform`, the caller only after the outcome is sent back.
+struct SendEasy(Easy);
+unsafe impl Send for SendEasy {}
+
+type Outcome = (c_int, c_int, bool, SendEasy);
+
+struct Dial {
+    easy: SendEasy,
+    // Kept alive for the whole perform: libcurl retains the URL and CAINFO pointers.
+    url: CString,
+    bundle: Option<CString>,
+    stop: Arc<AtomicBool>,
+    watching: bool,
+    tx: Sender<Outcome>,
+}
+
+fn perform(dial: Dial) {
+    let Dial { easy: SendEasy(easy), url: _url, bundle: _bundle, stop: _stop, watching, tx } = dial;
+    let rc = unsafe { curl_easy_perform(easy.0) };
+    if watching {
+        unsafe { curl_easy_setopt_long(easy.0, CURLOPT_NOPROGRESS, 1) };
+    }
+    let mut fd: c_int = -1;
+    let socket = rc == CURLE_OK
+        && unsafe { curl_easy_getinfo_socket(easy.0, CURLINFO_ACTIVESOCKET, &mut fd) } == CURLE_OK
+        && fd >= 0;
+    let _ = tx.send((rc, fd, socket, SendEasy(easy)));
 }
 
 pub fn open(
@@ -97,19 +140,46 @@ pub fn open(
         curl_easy_setopt_long(easy.0, CURLOPT_NOSIGNAL, 1);
         curl_easy_setopt_long(easy.0, CURLOPT_CONNECTTIMEOUT, connect_timeout_s);
         apply_user_agent(easy.0);
-        let watching = watch_cancel(easy.0, cancel);
-        let rc = curl_easy_perform(easy.0);
-        if watching {
-            curl_easy_setopt_long(easy.0, CURLOPT_NOPROGRESS, 1);
-        }
-        if rc == CURLE_ABORTED_BY_CALLBACK && cancel.load(Ordering::Acquire) {
+        // The callback (when this libcurl does call it) watches our own Arc, not the caller's
+        // flag: the worker may still be dialling after the caller has returned on Cancelled.
+        let stop = Arc::new(AtomicBool::new(false));
+        let watching = watch_cancel(easy.0, stop.as_ref());
+        let (tx, rx) = mpsc::channel::<Outcome>();
+        let (hand_tx, hand_rx) = mpsc::channel::<Dial>();
+        let worker = plx_base::task::spawn("ws-connect (cancel-polled dial)", move || {
+            if let Ok(dial) = hand_rx.recv() {
+                perform(dial);
+            }
+        });
+        let dial = Dial { easy: SendEasy(easy), url, bundle, stop: Arc::clone(&stop), watching, tx };
+        let (rc, fd, socket, SendEasy(easy)) = if worker.is_some() {
+            let _ = hand_tx.send(dial);
+            let mut outcome = None;
+            while outcome.is_none() {
+                match rx.recv_timeout(CANCEL_POLL) {
+                    Ok(got) => outcome = Some(got),
+                    Err(RecvTimeoutError::Timeout) => {
+                        if cancel.load(Ordering::Acquire) {
+                            stop.store(true, Ordering::Release);
+                            return Err(OpenError::Cancelled);
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Err(OpenError::Unavailable),
+                }
+            }
+            outcome.unwrap()
+        } else {
+            // A refused thread must not take the transport down: keep the upstream inline dial.
+            perform(dial);
+            rx.recv().map_err(|_| OpenError::Unavailable)?
+        };
+        if rc == CURLE_ABORTED_BY_CALLBACK && stop.load(Ordering::Acquire) {
             return Err(OpenError::Cancelled);
         }
         if rc != CURLE_OK {
             return Err(OpenError::Connect { rc, why: tls_failure_reason(easy.0, rc) });
         }
-        let mut fd: c_int = -1;
-        if curl_easy_getinfo_socket(easy.0, CURLINFO_ACTIVESOCKET, &mut fd) != CURLE_OK || fd < 0 {
+        if !socket {
             return Err(OpenError::NoSocket);
         }
         Ok(Socket { easy, fd })
