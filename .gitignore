@@ -235,3 +235,6 @@ rust-modules/target*-none/
 
 # Empryo local workspace state, reviews and scratch artifacts.
 /.empryo/
+
+# Fork Rofocale11: HOST=1 FFmpeg staged by hand for the Linux simulator. Rebuildable, never shipped.
+/pkg/*-plx-host.so.*
