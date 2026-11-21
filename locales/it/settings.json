@@ -406,20 +406,8 @@
   "settings.audio.group_look": "Aspetto",
   "settings.playback.overridden_value": "Sostituita",
   "settings.audio.page_copy": "Le preferenze di lingua per audio e sottotitoli sono sincronizzate con il tuo account Plex. Le impostazioni di riproduzione appartengono a ciascun profilo.",
-  "settings.ratings.title": {
-    "value": "Rating source",
-    "description": "Nuvio rating provider preference."
-  },
-  "settings.ratings.copy": {
-    "value": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
-    "description": "Nuvio rating provider preference."
-  },
-  "settings.ratings.imdb": {
-    "value": "IMDb",
-    "description": "Rating provider brand."
-  },
-  "settings.ratings.tomatoes": {
-    "value": "Rotten Tomatoes",
-    "description": "Rating provider brand."
-  }
+  "settings.ratings.title": "Rating source",
+  "settings.ratings.copy": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
+  "settings.ratings.imdb": "IMDb",
+  "settings.ratings.tomatoes": "Rotten Tomatoes"
 }

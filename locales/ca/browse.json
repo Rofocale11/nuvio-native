@@ -286,36 +286,12 @@
   "browse.detail.mark_episode_watched": "Marca l'episodi com a vist",
   "browse.detail.mark_episode_unwatched": "Marca l'episodi com a no vist",
   "browse.detail.minutes_left": "Queden {minutes} min",
-  "browse.streams.loading": {
-    "value": "Finding streams…",
-    "description": "Addon stream picker status"
-  },
-  "browse.streams.empty": {
-    "value": "No playable streams found.",
-    "description": "Addon stream picker status"
-  },
-  "browse.streams.failed": {
-    "value": "Couldn’t load streams. Close and try again.",
-    "description": "Addon stream picker status"
-  },
-  "browse.list.add": {
-    "value": "Add to My List",
-    "description": "Nuvio account My List action/status."
-  },
-  "browse.list.remove": {
-    "value": "Remove from My List",
-    "description": "Nuvio account My List action/status."
-  },
-  "browse.list.saving": {
-    "value": "Syncing My List…",
-    "description": "Nuvio account My List action/status."
-  },
-  "browse.list.retry": {
-    "value": "Retry My List",
-    "description": "Nuvio account My List action/status."
-  },
-  "browse.list.signin": {
-    "value": "Sign in for My List",
-    "description": "Nuvio account My List action/status."
-  }
+  "browse.streams.loading": "Finding streams…",
+  "browse.streams.empty": "No playable streams found.",
+  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
+  "browse.list.add": "Add to My List",
+  "browse.list.remove": "Remove from My List",
+  "browse.list.saving": "Syncing My List…",
+  "browse.list.retry": "Retry My List",
+  "browse.list.signin": "Sign in for My List"
 }
