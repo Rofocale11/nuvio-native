@@ -70,6 +70,16 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
   nonempty timed subtitle cues (dialogue is never logged).
 - Addons restored from DB8 after app reinstall/relaunch.
 
+## Device playback verification (upstream merge, 2026-11-22)
+
+The owner deployed the merged debug build to an LG `45UR7500PSC` (webOS 10.3.1,
+board `K8LPN_DVB`) and confirmed playback of a probed addon stream. The event log
+shows `ff::probe` reporting `hevc 3840x2160`, a DIRECT PLAY decision, `SMP Load
+ok=1`, the exported window bound to the video plane, `feed: presented`,
+`timeline playing` advancing for ~135 s, and a clean stop with the callback gate
+reporting `dropped=0`. See `docs/nuvio/MERGE-AUDIT.md` for the exact evidence and
+its scope (HDR10, not DV P8; no seek/resume cases in this run).
+
 ## Stable TV observation
 
 The user confirmed Home, 4K Dolby Vision playback, seek, pause/resume and visible

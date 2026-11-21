@@ -75,6 +75,9 @@ each is a place to watch on the next upstream merge.
   because NuvioNative's `HeroSet`/`HeroWidths` carry an extra My List field.
 - `rust-modules/screens/src/preferences_tests.rs` — added `PickerKind::RatingSource` to the
   expected Playback field list (the Nuvio IMDb/RT picker).
+- `ci/arm-cc.py` — drops rustc 1.100's `-fuse-ld=lld` for cargo-driven links; the
+  evidence checker parses GNU ld maps, so without this the storage helper cannot link
+  on this host. Reproduced on the original fork commit before changing the wrapper.
 - `locales/{ca,de,fr,hu,it,nl,pl,pt,ru}/{browse,settings}.json` (18 files, JSON permits no
   comment) — added the fork's 12 pre-existing Nuvio keys (My List, stream picker, rating
   source) with the English wording verbatim. Upstream's catalog build requires every
@@ -146,13 +149,47 @@ All adaptations carry `// Fork Rofocale11:` comments.
   `ci/stage-host-ffmpeg.sh` remains macOS-only (`.dylib` + `install_name_tool`),
   so this Linux staging is manual and the staged binaries are untracked.
 
+## Device verification (owner-run, debug install)
+
+Deployed with `make FLAVOR=debug deploy TV=<address>`; `verify-deploy: 48 files match`.
+
+**Set:** LG `45UR7500PSC`, board `K8LPN_DVB`, webOS `10.3.1` (codename
+`ponytail-papikonda`), PowerVR B-Series BXE-4-32. The debug install boot line was
+`install: id=com.nuvionative.app.debug flavour=debug … features=dev`.
+
+**Evidence from the owner's event log** (hostnames and token values omitted):
+
+- `nuvio: shim serving …`, `plex: server slot 1 registered at 127.0.0.1:32420`;
+  the Nuvio QR sign-in completed (`auth: reached "Nuvio" … via 127.0.0.1:32420`)
+  and the account pulled 11 addons (Cinemeta, Streaming Catalogs, Sootio, Meteor,
+  subtitle addons, Unraid, Torrentio, BetterPosters).
+- `ff: bound avutil/avcodec/avformat/swscale -> libav*-plx.so.*` — the ARM FFmpeg
+  libraries bound on the device.
+- `nuvio: probe hevc 3840x2160 fps=23.976 dovi=false audio=4 subs=4`, then
+  `decision: part=directplay … -> DIRECT PLAY`, `SMP: Load returned ok=1`,
+  `vplane: exported window placed` and `videoplane: BOUND`.
+- `ff: open https status=200 …`, `ff: container names 8/8 tracks`,
+  `ff: v=#0 codec=hevc … 3840x2160`, `smp_cb type=4 … hdrType:HDR10`,
+  `feed: presented`, repeated `sink: displayed` (type=49), and
+  `timeline playing t=5s/10606s` advancing through `t=135s/10606s`.
+- A side-loaded subtitle track fetched and prepared (`sidecar: … ready, 1917 cues`,
+  `assperf … late=0 stale=0`).
+- Clean stop: `timeline stopped t=144s/10606s ok=1`,
+  `native callback gate: epoch=1 intercepted=1455 dropped=0 proven=1`,
+  `native lifecycle: off-frame Unload epoch=1 released 510 ms after the stop`,
+  `videoplane: unbound`; no crash-tracer line in the log.
+
+**Scope of the claim:** direct play of a probed addon stream with the hardware
+video plane works on this set. This run played an HDR10 item (`dovi=false` on the
+probe), so it does **not** by itself prove Dolby Vision P8, seek/resume cases, or
+long-duration stability.
+
+**Observed in the same session, not attributed to the merge:** poster art
+`GET /photo/:/transcode status=404`, repeated `curl rc=28` timeouts to a subtitle
+provider host, `marker-grants: seat=owner unavailable (Refused)` in the automated
+boot, and brief `main-thread hang` lines during heavy concurrent probing.
+Playback itself advanced continuously for the whole observed interval.
+
 ## Still to verify
 
-- The ARM **storage helper** (`pkg/plxnative-storage`) fails to link on this host:
-  rustc 1.100 passes `-fuse-ld=lld`, and `ci/arm-cc.py`'s evidence checker expects
-  a GNU ld map. This reproduces unchanged on the original fork commit `97ed03c9`
-  in a clean worktree, so it is a pre-existing toolchain/environment issue, not a
-  merge regression. The main ARM binary `pkg/plxnative` **links successfully**.
-- UI capture / device playback. A host pass is not a device proof; `ff::probe`
-  (the shim's probed-codec path) is compiled and unit-tested but has not been
-  exercised against a real addon stream on the television.
+- Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.
