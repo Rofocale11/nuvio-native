@@ -19,6 +19,11 @@ def main():
     linking = '-o' in args and not any(x in args for x in ('-c', '-S', '-E'))
     if not linking:
         return subprocess.call([str(real), *args])
+    # Fork Rofocale11: rustc 1.100 passes `-fuse-ld=lld` for cargo-driven links. lld's link map is
+    # not the GNU ld map check_inputs() parses, so the storage helper's evidence was rejected on
+    # this host even though the same link succeeded on the original fork commit with older rustc.
+    # Drop that one flag; the NDK gcc then uses its own GNU ld, which emits the expected map.
+    args = [a for a in args if a != '-fuse-ld=lld']
     output = Path(args[args.index('-o') + 1]).absolute()
     mapfile = Path(str(output) + '.link.map')
     tracefile = Path(str(output) + '.link.trace')
