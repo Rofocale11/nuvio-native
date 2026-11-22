@@ -1998,6 +1998,22 @@ unbracketed (there were none left to rewrite). What it taught:
   606). `cargo test -p plx_screens` alone and the application's tests alone passed on three runs
   each. `--report` lists every layer as ready and no `cfg(test)` item named across layers.
 
+## Fork addition: `nuvio_probe`
+
+NuvioNative's addon/debrid stream prober used to be `media/src/ff_probe.rs`, declared from
+upstream's `media/src/ff.rs` as `#[path = "ff_probe.rs"] pub mod probe;`. It reached FFmpeg through
+`use super::*`, which tied 383 lines of fork code to upstream's names, and it carried a second
+FFmpeg `dynlib!` table whose filename candidates could disagree with `media_codecs`' — they did,
+in the Linux simulator. It is now the fork-owned crate `plx_nuvio_probe` (`rust-modules/nuvio-probe/`),
+calling `plx_media_codecs::ffi` directly and named from the application's `app/nuvio.rs` adapter.
+
+`ci/module-layers.ini` gains `[nuvio_probe]`, with `uses = base net plex media_codecs` and one member,
+`nuvio_probe`, mounted from the manifest via `[package.metadata.plx] mount = "nuvio_probe"` (the same
+mechanism as `plx_ui` and `plx_screens`, so its `crate::` paths and unit tests land in its own layer).
+`[app]` gains the matching edge. The crate uses the same credential-bound `plx_net` byte-range source
+as `media::curlio`, bound locally rather than importing from `plx_media` so the reference does not
+point upward. It adds no worker, global or `cfg(test)` production fork.
+
 ## What the split cost the binary, and how the release profile pays it back
 
 The split made the shipped binary bigger, split by split. Every layer crate is compiled on its own,
