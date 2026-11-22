@@ -6,6 +6,34 @@ fn frame(rig: &mut Bridge, d: &mut Dispatcher<AppHost>) {
     rig.settle_session_io_for_test(d);
 }
 
+/// Fork Rofocale11: a Nuvio boot must keep the stored account and its one profile — the shim's
+/// PMS token is not a dev identity. The upstream dev capture does the opposite, which is why the
+/// Settings rows stayed read-only after every restart.
+#[test]
+fn nuvio_boot_capture_keeps_the_account_authority_and_stored_identity() {
+    use plx_session::auth::owner::BootstrapAuthority;
+    use plx_plex::plex::session::{HomeUserRef, ServerRef, SourceRef, UserRef};
+    let user = UserRef { id: 1, uuid: "nuvio-profile-1".into(), title: "Nuvio account".into(),
+        ..Default::default() };
+    let home_users = vec![HomeUserRef { id: 1, uuid: "nuvio-profile-1".into(), admin: true,
+        ..Default::default() }];
+    let extras = vec![SourceRef { machine_id: "nuvionative-pmsshim-0001".into(), ..Default::default() }];
+    let saved = plx_plex::plex::session::Session { account_token: "saved-nuvio-account".into(),
+        user: user.clone(), home_users: home_users.clone(), ..Default::default() };
+
+    let init = super::super::captured_nuvio_boot(saved.clone(), extras.clone());
+    assert!(matches!(&init.authority, BootstrapAuthority::Account { extras } if extras.len() == 1));
+    assert_eq!(init.persisted.account_token, saved.account_token);
+    assert_eq!(init.persisted.user.uuid, "nuvio-profile-1");
+    assert_eq!(init.persisted.home_users.len(), 1);
+
+    let dev = super::super::captured_session_for_boot(saved.clone(),
+        Some(ServerRef { address: "127.0.0.1".into(), token: "shim-pms".into(), ..Default::default() }),
+        Vec::new());
+    assert!(matches!(dev.authority, BootstrapAuthority::DevPms { .. }));
+    assert!(dev.persisted.account_token.is_empty(), "upstream dev capture wipes the account");
+}
+
 fn dev_fixture() -> crate::app::runtime_owners::Harness {
     let saved = plx_plex::plex::session::Session { client_id: "synthetic-device".into(),
         account_token: "synthetic-saved-a".into(), ..Default::default() };

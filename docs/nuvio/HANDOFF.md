@@ -119,6 +119,15 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
   on addon metadata. The user chose poster ratings for now; no MDBList key was added.
 - The Nuvio account backend session, addon configuration and all native preferences are
   records in the one `nuvio.redb`; none of them is a DB8 record or a separate runtime file.
+- Account audio/subtitle preferences are **provided by the shim** on the same
+  `/api/v2/user`, `/api/v2/user/profile` surface the mock grades: one Nuvio login is one profile,
+  `/user`, the Home roster and switch share its identity, the Settings rows read and PUT through
+  that surface, and the values persist in `AccountPrefs` across a restart.
+- A Nuvio boot no longer takes upstream's dev-bootstrap path: the shim token is a PMS credential,
+  not a dev identity, so the boot keeps the account authority, resumes the stored Nuvio sign-in
+  and publishes its one profile. That seat is what makes the Settings rows editable. A fresh
+  install with no stored sign-in now opens the Nuvio QR sign-in instead of dropping straight into
+  Home.
 - Torrents require a configured Stremio-compatible server or explicit local scanning.
   The user's P2P-disabled setup was tested with HTTP/debrid streams.
 - <!-- Fork Rofocale11: was "No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required." -->

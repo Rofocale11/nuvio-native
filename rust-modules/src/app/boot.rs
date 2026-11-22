@@ -606,6 +606,20 @@ pub(crate) fn captured_session_for_boot(saved: plx_plex::plex::session::Session,
     plx_session::auth::SessionInit::captured_boot(saved, dev_primary, extras)
 }
 
+/// Fork Rofocale11: the in-process shim's token is a PMS credential, NOT a plex.tv dev token.
+/// `dev::scenarios::dev_token()` returns it on every Nuvio boot, and `captured_boot` would then
+/// classify the boot as `DevPms` and wipe the stored account — which is why a Nuvio install never
+/// seated a profile and the Settings rows stayed dimmed even after a sign-in and restart. This
+/// capture keeps the ACCOUNT authority and the stored credentials intact; the shim is still
+/// installed as the PMS from the session's own sources. One Nuvio login is one profile, and
+/// `ResumeStored` publishes it, so the account preference surface the shim provides is reachable.
+pub(crate) fn captured_nuvio_boot(saved: plx_plex::plex::session::Session,
+    extras: Vec<plx_plex::plex::session::SourceRef>) -> plx_session::auth::SessionInit {
+    let mut init = plx_session::auth::SessionInit::captured(saved);
+    init.authority = plx_session::auth::owner::BootstrapAuthority::Account { extras };
+    init
+}
+
 fn captured_dev_sources(servers: &[crate::dev::DevServer]) -> Vec<plx_plex::plex::session::SourceRef> {
     servers.iter().filter(|s| s.usable()).filter_map(|s| {
         let origin = s.origin()?;
@@ -905,6 +919,10 @@ pub(crate) unsafe fn construct(
     // flushes.
     if !preflight.controlled() { plx_telemetry::telemetry::flush_soon(); }
 
+    // Fork Rofocale11: the shim is the Nuvio account's plex.tv stand-in. Its token is a PMS
+    // credential, so `dev_token` below is always non-empty here — but a Nuvio boot must still go
+    // through the ACCOUNT authority to resume a sign-in and seat its one profile.
+    let nuvio_local = plx_base::local_server::get().is_some();
     // NO token is compiled into this binary. PMS access comes from the signed-in session,
     // or — for automated runs only (the regression harness, headless captures) — from the
     // /tmp/plxnative-token dev trigger. The value is NEVER logged (only that one is in effect).
@@ -1040,10 +1058,13 @@ pub(crate) unsafe fn construct(
             tier: Some(plx_plex::plex::probe::configured_tier(origin.host())), ..Default::default()
         }
     });
+    let dev_extras = captured_dev_sources(&dev_servers.unwrap_or_default());
     let session_init = match &initial {
         Some(initial) => initial.session.clone(),
-        None => captured_session_for_boot(session.clone(), dev_primary,
-            captured_dev_sources(&dev_servers.unwrap_or_default())),
+        // Fork Rofocale11: the shim's token must not turn a signed-in Nuvio boot into a dev boot.
+        // Keeping the account authority is what lets the stored login seat its profile.
+        None if nuvio_local => captured_nuvio_boot(session.clone(), dev_extras),
+        None => captured_session_for_boot(session.clone(), dev_primary, dev_extras),
     };
     let (mut runtime, mut retained) = if controlled {
         super::bridge::BridgeRetained::controlled_home(plx_base::diag::heartbeat::now_us, platform.shell,
@@ -1093,7 +1114,10 @@ pub(crate) unsafe fn construct(
         #[cfg(feature = "devtriggers")]
         log("boot: /tmp/plxnative-login — starting QR login");
         BootTo::Login
-    } else if !dev_token.is_empty() {
+    // Fork Rofocale11: with the shim running, `dev_token` is always its PMS token, not a harness
+    // identity. Taking the dev branch here would skip the account authority and leave nobody
+    // seated, so a Nuvio boot resumes its stored sign-in (or opens the Nuvio QR sign-in) instead.
+    } else if !dev_token.is_empty() && !nuvio_local {
         // `Origin::http` names the assumption out loud: the host and port compiled into the
         // C shim are a plaintext address, with no scheme to read off them.
         //

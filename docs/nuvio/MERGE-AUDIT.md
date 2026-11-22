@@ -285,6 +285,50 @@ the edit is recorded here (inline `# Fork Rofocale11:` notes were added above ea
   string, so the build stamp and behavior are unchanged; when set, the stamp changes so a
   configured binary is relinked rather than silently shared with an unconfigured one.
 
+## Account preferences provided by the shim (Fork Rofocale11)
+
+A real Plex account owns the audio/subtitle preference rows and a real PMS echoes them on
+`/api/v2/user/profile`. Nuvio has neither, so the loopback shim provides that surface from the
+one redb file; the app's unchanged account client — not a second preferences path — reads and
+writes it. The contract is the one `tests/mock_pms.py` grades (`/user` embeds the same row as
+`/user/profile`; PUT takes an empty body plus named query keys and returns the updated row).
+
+- `rust-modules/pmsshim/src/shim_account.rs` (fork-heavy file, inline markers) — implements
+  `GET`/`PUT /api/v2/user/profile` over `plx_nuvio_store::Table::AccountPrefs` with the mock's
+  defaults and validation, and makes `/user`, `/home/users` and switch publish ONE identity:
+  one Nuvio login is one Plex-style profile. The uuid is a fixed account identity rather than a
+  live Nuvio profile id so an in-flight addon load at login cannot make the three answers disagree.
+- `rust-modules/plex/src/plex/account/preferences.rs` (upstream-owned, inline markers) —
+  **removed** the fork's earlier `Source::{Plex,Nuvio}` split and `nuvio_load`/`nuvio_save`, which
+  read/wrote redb directly and bypassed the shim. `capture()` still refuses a request with neither
+  an account token nor a registered local server; `load`/`save` now always use the account HTTP
+  path, which `plex_tv()` already points at the shim on Nuvio. This structural field removal is
+  recorded here because a future upstream merge may reintroduce the enum or a direct-store path.
+  `PreferenceRequest::fixture_for_test` keeps its signature, so the screen/test crates are intact.
+
+## Nuvio boot keeps the account authority (Fork Rofocale11)
+
+The first device deploy of the account-preference change still showed Settings dimmed. The event
+log showed why: `boot: dev token` — in this fork `dev::scenarios::dev_token()` returns
+`local_server.token` on every Nuvio boot, so `SessionInit::captured_boot` classified it as
+`DevPms`, wiped the stored credentials and (by upstream design) published no profile. Upstream
+dims the rows when nobody is seated; the shim's account surface is unreachable from Settings until
+a seat exists.
+
+- `rust-modules/src/app/boot.rs` (upstream-owned, inline `Fork Rofocale11:` markers) — new pure
+  `captured_nuvio_boot` keeps `BootstrapAuthority::Account` and the stored identity/extras; the
+  boot chooses it whenever the shim is registered. The `dev_token` is still built so the shim
+  stays the PMS, but a Nuvio boot skips the `ActivateDevBootstrap` branch and resumes the stored
+  sign-in (or opens the Nuvio QR sign-in) instead. This changes the no-session first boot from
+  Home to the QR screen, which is the point: a Settings value has to belong to a profile.
+- `rust-modules/src/app/session_dev_bootstrap_tests.rs` (upstream-owned test file) — added
+  `nuvio_boot_capture_keeps_the_account_authority_and_stored_identity`, contrasting the two
+  captures. The machine itself is untouched: no new ledger site, no `cfg(test)` fork in `step`.
+
+Verification: app crate 1490 lib + 3 host-interface + doc tests pass; `make check-nodef`,
+`ci/check-deps.sh` and `ci/check-module-layers.py` green. Device re-deploy and sign-in not yet
+verified at the time of writing.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.

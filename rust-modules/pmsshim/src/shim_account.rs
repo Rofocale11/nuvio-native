@@ -7,16 +7,17 @@
 //! | `POST /api/v2/pins` | `nuvio::start_login` (the code is Nuvio's user code) |
 //! | `GET /api/v2/pins/qr/{code}` | a PNG of Nuvio's `verification_uri_complete` |
 //! | `GET /api/v2/pins/{id}` | `nuvio::poll_login`; on approval the session is kept and a local token returned |
-//! | `GET /api/v2/user` | the signed-in Nuvio account (or the local "Nuvio" user) |
+//! | `GET /api/v2/user` | the signed-in Nuvio account (or the local "Nuvio" user), with its account preferences |
 //! | `GET /api/v2/resources` | exactly this shim, as the one owned server |
-//! | `GET /api/v2/home/users` | `nuvio::profiles` |
+//! | `GET /api/v2/home/users` | the ONE profile of the signed-in Nuvio account |
 //! | `POST /api/v2/home/users/{uuid}/switch` | that profile's addons (`nuvio::addons`) → the addon sink |
+//! | `GET`/`PUT /api/v2/user/profile` | account preferences from the one redb file, in plex.tv's shape |
 //!
 //! Without a Nuvio account (or a build without its backend configured) the app never reaches any
 //! of this: it boots straight into the shim with the local addon set.
 
 use crate::shim_http::{Request, Response};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -64,6 +65,90 @@ fn session_from_json(v: &Value) -> Option<plx_stremio::nuvio::Session> {
         user_id: v["user_id"].as_str().unwrap_or("").to_string(),
         expires_at_unix: v["expires_at_unix"].as_u64().unwrap_or(0),
     })
+}
+
+// Fork Rofocale11: a real Plex account owns these rows and a real PMS echoes them on
+// `/api/v2/user/profile`. Nuvio has neither, so the shim provides the same surface from the ONE
+// redb file. Keeping plex.tv's camelCase keys on the wire means the app's unchanged account
+// client (Settings → Account/Subtitles and playback's preference warmup) reads and writes them
+// exactly as it does against `tests/mock_pms.py`.
+const PREF_KEYS: &[&str] = &[
+    "autoSelectAudio",
+    "defaultAudioLanguage",
+    "defaultSubtitleLanguage",
+    "autoSelectSubtitle",
+    "defaultSubtitleForced",
+];
+
+/// The same starting row the mock serves: language picking on, English audio and subtitles,
+/// subtitles "when needed". A Nuvio account that never opened Settings still reads as a complete
+/// profile rather than a Retry card.
+fn default_prefs() -> Map<String, Value> {
+    let mut prefs = Map::new();
+    prefs.insert("autoSelectAudio".into(), json!(true));
+    prefs.insert("defaultAudioLanguage".into(), json!("en"));
+    prefs.insert("defaultSubtitleLanguage".into(), json!("en"));
+    prefs.insert("autoSelectSubtitle".into(), json!(1));
+    prefs.insert("defaultSubtitleForced".into(), json!(0));
+    prefs.insert("defaultSubtitleAccessibility".into(), json!(0));
+    prefs
+}
+
+/// Read the stored profile over the defaults. Only the keys the account client knows are adopted:
+/// an older build's row could carry other shapes, and unknown fields must never leak onto the
+/// account surface.
+fn read_prefs(store: Option<&plx_nuvio_store::Store>) -> Map<String, Value> {
+    let mut prefs = default_prefs();
+    let bytes = store.and_then(|s| s.get(plx_nuvio_store::Table::AccountPrefs, "prefs"));
+    if let Some(bytes) = bytes {
+        if let Ok(Value::Object(stored)) = serde_json::from_slice::<Value>(&bytes) {
+            for (key, value) in stored {
+                if PREF_KEYS.contains(&key.as_str()) {
+                    prefs.insert(key, value);
+                }
+            }
+        }
+    }
+    prefs
+}
+
+fn put_prefs(
+    store: Option<&plx_nuvio_store::Store>,
+    prefs: &Map<String, Value>,
+) -> Result<(), String> {
+    let store = store.ok_or_else(|| "the Nuvio store is not installed".to_string())?;
+    let bytes = serde_json::to_vec(&Value::Object(prefs.clone()))
+        .map_err(|e| format!("cannot encode account preferences: {e}"))?;
+    store.put(plx_nuvio_store::Table::AccountPrefs, "prefs", &bytes)
+}
+
+/// A PUT changes only the named keys and validates them the way the mock does: an empty language
+/// is a real value ("Original"/"Off"), booleans accept 1/0 as well as true/false, and the two
+/// numeric modes have the Plex ranges. A bad query leaves `prefs` untouched.
+fn apply_profile_update(
+    prefs: &mut Map<String, Value>,
+    query: &HashMap<String, String>,
+) -> Result<(), &'static str> {
+    for (key, value) in query {
+        let parsed = match key.as_str() {
+            "defaultAudioLanguage" | "defaultSubtitleLanguage" => Value::String(value.clone()),
+            "autoSelectAudio" => match value.as_str() {
+                "true" | "1" => json!(true),
+                "false" | "0" => json!(false),
+                _ => return Err("invalid profile preference"),
+            },
+            "autoSelectSubtitle" | "defaultSubtitleForced" => {
+                let limit = if key == "autoSelectSubtitle" { 2 } else { 3 };
+                match value.parse::<i64>() {
+                    Ok(n) if (0..=limit).contains(&n) => json!(n),
+                    _ => return Err("invalid profile preference"),
+                }
+            }
+            _ => return Err("unknown profile preference"),
+        };
+        prefs.insert(key.clone(), parsed);
+    }
+    Ok(())
 }
 
 impl Account {
@@ -183,7 +268,7 @@ impl Account {
             (_, ["pins", "qr", code]) => self.qr(code),
             (_, ["pins", id]) => self.poll_pin(id.parse().unwrap_or(-1)),
             (_, ["user"]) => self.user(),
-            (_, ["user", "profile"]) => Response::json(&json!({"autoSelectAudio": true, "autoSelectSubtitle": 0, "defaultSubtitleLanguage": "en"})),
+            (_, ["user", "profile"]) => self.user_profile(req),
             (_, ["resources"]) => self.resources(),
             (_, ["home", "users"]) => self.home_users(),
             ("POST", ["home", "users", uuid, "switch"]) => self.switch(uuid),
@@ -249,14 +334,50 @@ impl Account {
         }
     }
 
+    /// Fork Rofocale11: one Nuvio login is one Plex Home profile. Every account route must name
+    /// that same identity — the mock proves the app only seats a profile and enables its Settings
+    /// when `/user`, the Home roster and the switch reply agree on id and uuid. The uuid is a fixed
+    /// account identity rather than a live Nuvio profile id, so an addon load still in flight at
+    /// login cannot make these three answers disagree.
+    fn profile_identity(&self) -> (i64, String, String) {
+        let title = if self.signed_in() { "Nuvio account" } else { "Nuvio" };
+        (1, format!("{PROFILE_UUID_PREFIX}1"), title.to_string())
+    }
+
     fn user(&self) -> Response {
-        let signed_in = self.signed_in();
+        let (id, uuid, title) = self.profile_identity();
+        // Fork Rofocale11: `/user` carries the same preference row as `/user/profile`, just as the
+        // mock does, so playback's account warmup and Settings never see two different answers.
+        let profile = read_prefs(plx_nuvio_store::get());
         Response::json(&json!({
-            "id": 1, "uuid": "nuvio-local", "username": "nuvio", "title": if signed_in { "Nuvio account" } else { "Nuvio" },
+            "id": id, "uuid": uuid, "username": "nuvio", "title": title,
             "friendlyName": "Nuvio", "email": "", "thumb": "", "authToken": self.token,
-            "profile": {"autoSelectAudio": true, "defaultSubtitleLanguage": "en", "autoSelectSubtitle": 0},
+            "profile": profile,
             "subscription": {"active": true, "status": "Active", "plan": "lifetime"},
         }))
+    }
+
+    /// The plex.tv account-preference surface, backed by the single redb file. PUT uses an empty
+    /// body and query parameters, exactly as Plex and the mock do; the updated row is returned so
+    /// the caller can confirm what was saved without a second GET.
+    fn user_profile(&self, req: &Request) -> Response {
+        match req.method.as_str() {
+            "GET" | "HEAD" => Response::json(&Value::Object(read_prefs(plx_nuvio_store::get()))),
+            "PUT" => {
+                if !req.body.is_empty() {
+                    return Response::json_status(400, &json!({"error": "profile PUT requires an empty body"}));
+                }
+                let mut prefs = read_prefs(plx_nuvio_store::get());
+                if let Err(error) = apply_profile_update(&mut prefs, &req.query) {
+                    return Response::json_status(400, &json!({"error": error}));
+                }
+                match put_prefs(plx_nuvio_store::get(), &prefs) {
+                    Ok(()) => Response::json(&Value::Object(prefs)),
+                    Err(_) => Response::json_status(503, &json!({"error": "preferences not saved"})),
+                }
+            }
+            _ => Response::json_status(405, &json!({"error": "method not allowed"})),
+        }
     }
 
     fn resources(&self) -> Response {
@@ -272,24 +393,23 @@ impl Account {
     }
 
     fn home_users(&self) -> Response {
-        let profiles = self.fresh_session().and_then(|s| plx_stremio::nuvio::profiles(&s).ok()).unwrap_or_default();
-        let users: Vec<Value> = if profiles.is_empty() {
-            vec![json!({"id": 1, "uuid": "nuvio-local", "title": "Nuvio", "thumb": "", "admin": true, "restricted": false, "protected": false})]
-        } else {
-            profiles
-                .iter()
-                .enumerate()
-                .map(|(i, p)| json!({"id": i + 1, "uuid": format!("{PROFILE_UUID_PREFIX}{}", p.id), "title": p.name, "thumb": "",
-                                      "admin": i == 0, "restricted": false, "protected": false}))
-                .collect()
-        };
-        Response::json(&json!({"users": users}))
+        // Fork Rofocale11: one Nuvio login is one profile — the roster cannot grow a Plex Home the
+        // account does not have. Its uuid and id are the ones `/user` and switch publish.
+        let (id, uuid, title) = self.profile_identity();
+        Response::json(&json!({"users": [json!({
+            "id": id, "uuid": uuid, "title": title, "username": "nuvio", "thumb": "",
+            "admin": true, "restricted": false, "protected": false,
+        })]}))
     }
 
     fn switch(&self, uuid: &str) -> Response {
-        let profile = uuid.strip_prefix(PROFILE_UUID_PREFIX).map(str::to_string);
-        self.load_profile(profile.as_deref());
-        Response::json(&json!({"id": 1, "uuid": uuid, "title": "Nuvio", "authToken": self.token}))
+        // Fork Rofocale11: the picker is a formality for one profile. Accept the uuid the account
+        // routes publish, load that account's addons, and answer with the SAME identity so the app
+        // seats it instead of leaving Settings read-only.
+        let _ = uuid;
+        self.load_profile(None);
+        let (id, uuid, title) = self.profile_identity();
+        Response::json(&json!({"id": id, "uuid": uuid, "title": title, "authToken": self.token}))
     }
 
     /// Fetch a profile's addons (the first profile when `None`) and hand them to the sink, off the
@@ -351,10 +471,98 @@ pub fn qr_png(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn request(method: &str, query: &[(&str, &str)], body: &[u8]) -> Request {
+        Request {
+            method: method.to_string(),
+            path: "/api/v2/user/profile".to_string(),
+            query: query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            headers: HashMap::new(),
+            body: body.to_vec(),
+        }
+    }
+
     #[test]
     fn qr_is_a_png() {
         let png = super::qr_png("https://example.invalid/tv?code=ABCD").unwrap();
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    /// The mock's own selftest (`tests/mock_pms.py`, account-preference block): `/user`, the Home
+    /// roster and the switch reply all describe one profile, so the app seats it and reads its
+    /// Settings. A uuid mismatch here is what left Nuvio's Settings rows greyed out.
+    #[test]
+    fn account_routes_publish_one_profile_identity() {
+        let account = Account::new(None, "local-token");
+        let user: Value = serde_json::from_slice(&account.user().body).unwrap();
+        let roster: Value = serde_json::from_slice(&account.home_users().body).unwrap();
+        let switched: Value = serde_json::from_slice(&account.switch(user["uuid"].as_str().unwrap()).body).unwrap();
+        let only = &roster["users"][0];
+        assert_eq!(roster["users"].as_array().unwrap().len(), 1);
+        assert_eq!(user["uuid"], only["uuid"]);
+        assert_eq!(user["id"], only["id"]);
+        assert_eq!(user["uuid"], switched["uuid"]);
+        assert_eq!(user["id"], switched["id"]);
+        assert_eq!(user["title"], only["title"]);
+        assert_eq!(user["profile"], json!(default_prefs()), "the account row is on /user too");
+    }
+
+    #[test]
+    fn profile_get_and_put_follow_the_mock_contract() {
+        // GET serves the defaults even with no installed store (the memory-only build).
+        let account = Account::new(None, "local-token");
+        // Through `handle`, the route the app's `GET /api/v2/user/profile` actually takes.
+        let got = account.handle(&request("GET", &[], b""), &["user", "profile"]);
+        assert_eq!(got.status, 200);
+        assert_eq!(serde_json::from_slice::<Value>(&got.body).unwrap(), json!(default_prefs()));
+
+        // A body on PUT is refused, as in the mock.
+        assert_eq!(account.user_profile(&request("PUT", &[], b"body")).status, 400);
+        assert_eq!(account.user_profile(&request("POST", &[], b"")).status, 405);
+
+        // An update changes only the named keys; an empty language is a real value.
+        let mut prefs = default_prefs();
+        let query: HashMap<String, String> = [("defaultAudioLanguage", ""),
+            ("autoSelectAudio", "true"), ("defaultSubtitleForced", "3")]
+            .into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        apply_profile_update(&mut prefs, &query).unwrap();
+        assert_eq!(prefs["defaultAudioLanguage"], json!(""));
+        assert_eq!(prefs["autoSelectAudio"], json!(true));
+        assert_eq!(prefs["defaultSubtitleForced"], json!(3));
+        assert_eq!(prefs["defaultSubtitleLanguage"], json!("en"), "unnamed keys survive");
+        assert_eq!(prefs["autoSelectSubtitle"], json!(1));
+
+        // Bad values and unknown keys are refused and leave the row alone.
+        for bad in [("autoSelectSubtitle", "3"), ("defaultSubtitleForced", "9"),
+            ("autoSelectAudio", "yes"), ("unknown", "1")] {
+            let mut before = default_prefs();
+            let q: HashMap<String, String> = [(bad.0.to_string(), bad.1.to_string())].into_iter().collect();
+            assert!(apply_profile_update(&mut before, &q).is_err(), "{bad:?}");
+            assert_eq!(before, default_prefs(), "a refused PUT cannot partially apply");
+        }
+    }
+
+    /// The durable half: a PUT's row is what a later GET reads, including after a restart (a
+    /// second `Store::open_at` over the same file). Unknown redb rows are never echoed.
+    #[test]
+    fn account_preferences_round_trip_through_redb() {
+        let dir = std::env::temp_dir().join(format!("nuvio-account-prefs-test-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let file = dir.join("nuvio.redb");
+        let mut prefs = default_prefs();
+        prefs.insert("defaultSubtitleLanguage".into(), json!("nl"));
+        prefs.insert("bogus".into(), json!(1));
+        {
+            let store = plx_nuvio_store::Store::open_at(&file).unwrap();
+            put_prefs(Some(&store), &prefs).unwrap();
+        } // release redb's file lock before re-opening, as a process restart would
+        let reopened = plx_nuvio_store::Store::open_at(&file).unwrap();
+        let read = read_prefs(Some(&reopened));
+        assert_eq!(read["defaultSubtitleLanguage"], json!("nl"));
+        assert!(!read.contains_key("bogus"));
+        assert_eq!(read["autoSelectSubtitle"], json!(1));
     }
 }
 
