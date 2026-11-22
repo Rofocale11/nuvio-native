@@ -2290,6 +2290,28 @@ fn pointer_on_bar(app: &App, x: f32, y: f32) -> bool {
     app.pages.input.hit.top_at(x, y).is_some_and(|stop| stop.key.elem >= plx_ui::dispatch::STRIP_BASE)
 }
 
+/// Fork Rofocale11: the generation a newly observed account merge makes Home re-read. No server
+/// registered (a sign-in mid-flight) means the change stays owed until the roster exists.
+fn account_content_due(seen: u64, now: Option<u64>, servers: usize) -> Option<u64> {
+    if servers == 0 { return None; }
+    now.filter(|gen| *gen != seen)
+}
+
+#[cfg(test)]
+mod account_content_tests {
+    use super::account_content_due;
+
+    #[test]
+    fn a_merged_resume_point_is_owed_once_and_only_after_a_server_exists() {
+        assert_eq!(account_content_due(0, None, 1), None);
+        assert_eq!(account_content_due(0, Some(0), 1), None);
+        assert_eq!(account_content_due(0, Some(1), 0), None, "a mid-sign-in merge stays owed");
+        assert_eq!(account_content_due(0, Some(1), 1), Some(1));
+        assert_eq!(account_content_due(1, Some(1), 1), None, "one re-read per observed value");
+        assert_eq!(account_content_due(1, Some(2), 1), Some(2));
+    }
+}
+
 pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         #[cfg(feature = "play-feed")]
         park_on_decoder_release(app);
@@ -2462,6 +2484,20 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // would take it is still the player (input is step 2 of the frame, the dip crosses its
         // floor at step 4), so the whole batch goes to Home on the next frame.
         super::playback::return_hold_inputs(app, fr.now);
+        // Fork Rofocale11: a boot-time or profile-switch account pull can merge resume points
+        // after Home's first `/hubs` answer. The shim bumps its generation only on a real merge;
+        // re-read Home once per observed value. A sign-in can merge before the account's server is
+        // registered, so leave the change owed until one exists.
+        if let Some(gen) = account_content_due(app.content_gen_seen, super::nuvio::content_generation(),
+            plx_plex::plex::server_count()) {
+            app.content_gen_seen = gen;
+            super::bridge::execute_endpoint_outcomes(
+                &mut app.pages,
+                app.runtime.bridge(&mut app.bridge).hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints,
+            );
+            app.runtime.bridge(&mut app.bridge).browse_run(plx_data::stores::browse::BrowseCmd::HubsInvalidateAll);
+            log("home: hubs refresh queued after account pull");
+        }
         // post-playback home refresh (armed by every exit_player): refetch the hubs so
         // Continue Watching shows the new resume point / next episode. It waits for the stop
         // report to have reached the server (`timeline_stop_landed`), not for a clock: a read that
@@ -4127,6 +4163,7 @@ pub(in crate::app) mod lifecycle_regression_tests {
             deeplink: Default::default(),
             prev: Default::default(),
             refresh_hubs: Default::default(),
+            content_gen_seen: Default::default(),
             return_hold: Default::default(),
             plaintext_upgrade: Default::default(),
             reread: Default::default(),

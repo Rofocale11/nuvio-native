@@ -329,6 +329,33 @@ Verification: app crate 1490 lib + 3 host-interface + doc tests pass; `make chec
 `ci/check-deps.sh` and `ci/check-module-layers.py` green. Device re-deploy and sign-in not yet
 verified at the time of writing.
 
+## Account watch progress (Fork Rofocale11)
+
+The shim now mirrors local resume points into the Nuvio account's per-profile watch history and
+merges another device's rows back. The port came from the old fork's `053b7d982`, `33efb07ec` and
+`6cc885a85`, re-implemented against this tree (the old `shim_pms.rs` is ~4x larger and its app had
+generation polling this tree lacked). Every upstream-owned Rust file touched carries an inline
+`Fork Rofocale11:` marker; the non-commentable Markdown edits are recorded here.
+
+- `rust-modules/stremio/src/nuvio.rs` (upstream-owned, inline markers) — `WatchProgress` and the
+  two `sync_*_watch_progress` RPCs beside My List; `content_id_sNe` episode keys and a guard that
+  refuses the whole batch before any request.
+- `rust-modules/pmsshim/src/shim_store.rs`, `shim_pms.rs`, `shim_core.rs`, `shim_account.rs`
+  (fork-heavy, inline markers) — `account_keys` in the one redb watch record, newer-wins
+  `merge_remote`, IMDb-first identity, the 60 s throttle, pull-on-boot/profile-switch, and the
+  `content_generation` counter. `load_profile` now drops the `library` guard before firing the sink
+  and installs addons before pulling history (both orderings are load-bearing).
+- `rust-modules/src/app/{nuvio,boot,run}.rs` and `rust-modules/data/src/stores/deck.rs`
+  (upstream-owned, inline markers) — expose the generation, capture its baseline BEFORE the first
+  `/hubs`, re-read Home once per newly observed value (deferred until a server exists), and let a
+  lane placed on an empty preview adopt later cards. No machine step performs IO: `playback_tick`
+  polls a counter and emits the existing refetch effects.
+- `docs/nuvio/{AGENTS,HANDOFF,WATCH-PROGRESS}.md` — Markdown has no comment syntax: added the new
+  document of record and the delivery note here instead of inline markers.
+
+Verification: focused host tests for `plx_stremio`, `plx_pmsshim`, `plx_data` and the app crate
+pass; `cargo check --workspace` green. Cross-device behaviour on a real account is not yet verified.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.

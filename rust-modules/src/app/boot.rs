@@ -763,6 +763,11 @@ pub(crate) unsafe fn construct(
     deferred: Option<plx_plex::plex::session::DeferredLoad>,
 ) -> Result<App, Exit> {
     let controlled = preflight.controlled();
+    // Fork Rofocale11: capture the account-pull baseline BEFORE `activate_session` issues Home's
+    // first `/hubs`. The shim's boot-time pull runs on another thread, so a merge landing between
+    // that fetch and the `App` literal would otherwise be recorded as already seen and Home would
+    // keep showing empty Continue Watching until the next launch.
+    let content_gen_seen = super::nuvio::content_generation().unwrap_or(0);
     if let Some(initial) = &initial {
         plx_data::stores::tape::init(initial.person_credits(), preflight.replay());
         initial.home.restore(&mt).map_err(|_| Exit::refused(1))?;
@@ -1677,6 +1682,7 @@ pub(crate) unsafe fn construct(
         deeplink: Default::default(),
         prev,
         refresh_hubs,
+        content_gen_seen,
         return_hold: Default::default(),
         plaintext_upgrade: Default::default(),
         reread: Default::default(),

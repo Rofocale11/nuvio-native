@@ -47,6 +47,7 @@ new DB8 kind. See `ARCHITECTURE.md` for the in-process backend and the migration
   artwork order: TMDB backdrop/logo first, BetterPosters posters by resolved IMDb id,
   metahub art fallback-only.
 - `docs/nuvio/PLAYBACK.md` — probe, route and shim playback contract.
+- `docs/nuvio/WATCH-PROGRESS.md` — account mirror: IMDb identity, push/pull RPCs and Home refresh.
 - `docs/nuvio/VALIDATION.md` — what has and has not been verified.
 - `docs/nuvio/HANDOFF.md` — delivery history and known limitations.
 - `docs/nuvio/MERGE-AUDIT.md` — upstream conflicts and non-commentable fork edits.

@@ -125,6 +125,10 @@ struct WatchFile {
     items: HashMap<String, Watch>,
     /// The row snapshot of every item with progress, so Continue Watching draws without a fetch.
     rows: HashMap<String, serde_json::Value>,
+    // Fork Rofocale11: `"content_id|video_id" → ratingKey`. Nuvio and this device can name one
+    // episode differently, so the account row needs a durable local identity. It lives in this
+    // same redb record as the watch state — never in a second preference file.
+    account_keys: HashMap<String, i64>,
 }
 
 pub struct WatchState {
@@ -207,6 +211,35 @@ impl WatchState {
         self.save(&g);
     }
 
+    // Fork Rofocale11: apply a resume point pulled from the account. The newer side wins: a local
+    // report made after the remote one is the truth. A zero position is a delete, not a resume
+    // point, and a finished title keeps its view_count while taking a resume point.
+    pub fn merge_remote(&self, key: i64, offset_ms: i64, duration_ms: i64,
+        last_viewed_at: i64, row: Option<serde_json::Value>) -> bool {
+        if offset_ms <= 0 { return false; }
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let w = g.items.entry(key.to_string()).or_default();
+        if last_viewed_at < w.last_viewed_at { return false; }
+        w.offset_ms = offset_ms;
+        if duration_ms > 0 { w.duration_ms = duration_ms; }
+        w.last_viewed_at = last_viewed_at;
+        if let Some(r) = row { g.rows.insert(key.to_string(), r); }
+        self.save(&g);
+        true
+    }
+
+    /// Remember which local item an account resume point was pushed under.
+    pub fn bind_account_key(&self, content_id: &str, video_id: &str, key: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.account_keys.insert(format!("{content_id}|{video_id}"), key);
+        self.save(&g);
+    }
+
+    pub fn account_key(&self, content_id: &str, video_id: &str) -> Option<i64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.account_keys.get(&format!("{content_id}|{video_id}")).copied()
+    }
+
     /// Items with a resume point, most recent first, with their row snapshots.
     pub fn in_progress(&self) -> Vec<(i64, Watch, serde_json::Value)> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -249,6 +282,31 @@ mod tests {
         assert_eq!(k.ident(ka), Some(a));
         assert_eq!(k.key_of(&Ident::Season { series: "tt2".into(), n: 1 }), FIRST_KEY + 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_remote_takes_only_the_newer_side_and_never_binds_a_key() {
+        let w = WatchState::open(None);
+        w.progress(7, 1000, 10_000, None);
+        let local = w.get(7).last_viewed_at;
+        // An older remote report cannot move a fresh local one.
+        assert!(!w.merge_remote(7, 4000, 10_000, local - 60, None));
+        assert_eq!(w.get(7).offset_ms, 1000);
+        // A newer one lands, with the row snapshot Continue Watching draws.
+        assert!(w.merge_remote(7, 4000, 20_000, local + 60, Some(serde_json::json!({"ratingKey":"7"}))));
+        let got = w.get(7);
+        assert_eq!((got.offset_ms, got.duration_ms, got.last_viewed_at), (4000, 20_000, local + 60));
+        assert_eq!(w.in_progress().len(), 1);
+        // A delete is not a resume point.
+        assert!(!w.merge_remote(7, 0, 20_000, local + 120, None));
+        // A finished title keeps its scrobble and can still take a resume point.
+        w.scrobble(8, true);
+        assert!(w.merge_remote(8, 2000, 10_000, now_secs() + 60, None));
+        assert_eq!((w.get(8).view_count, w.get(8).offset_ms), (1, 2000));
+        // Binding is explicit and survives in the same record as the watch state.
+        assert_eq!(w.account_key("tt0903747", "tt0903747:1:2"), None);
+        w.bind_account_key("tt0903747", "tt0903747:1:2", 8);
+        assert_eq!(w.account_key("tt0903747", "tt0903747:1:2"), Some(8));
     }
 
     #[test]

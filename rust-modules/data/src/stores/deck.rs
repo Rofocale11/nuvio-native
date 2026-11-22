@@ -234,7 +234,14 @@ fn shown_count(lanes: &[Lane]) -> usize { lanes.iter().map(|lane| lane.shown().c
 pub(crate) fn place(lanes: &mut [Lane], previews: &[&[CwItem]]) {
     let mut fresh = Vec::new();
     for (i, (lane, preview)) in lanes.iter_mut().zip(previews).enumerate() {
-        if lane.placed { continue; }
+        if lane.placed {
+            // Fork Rofocale11: the Nuvio account's first `/hubs` answer can be empty — its watch
+            // pull has not merged yet. A lane seated on that empty preview holds nothing; when the
+            // pull lands and a later preview brings cards, skipping it leaves `fit` nothing to fit
+            // and Home draws no Continue Watching until the next launch.
+            if !lane.rows.is_empty() || preview.is_empty() { continue; }
+            *lane = Lane::default();
+        }
         if lane.rows.is_empty() {
             lane.rows = preview.iter().enumerate().map(|(at, row)| {
                 let mut row = row.clone();
@@ -924,6 +931,24 @@ mod tests {
             }
         }
         assert!(merged.iter().any(|key| key.starts_with("s2-")));
+    }
+
+    /// Fork Rofocale11: the account pull merges after Home's first (empty) `/hubs` answer. A lane
+    /// seated on that empty preview must adopt the cards the follow-up answer brings, or Home stays
+    /// empty until the next launch even though the rows are in the shim.
+    #[test]
+    fn a_lane_placed_on_an_empty_preview_adopts_the_cards_it_gets_later() {
+        let a = Server::new(1, &viewed(15, 10, 5000));
+        let mut lanes = vec![Lane::default()];
+        let empty: Vec<&[CwItem]> = vec![&[]];
+        place(&mut lanes, &empty);
+        assert!(lanes[0].placed, "the empty preview still seats the lane");
+        assert!(keys(&lanes).is_empty());
+
+        let rows = a.lane().rows;
+        place(&mut lanes, &[&rows[..]]);
+        assert_eq!(lanes[0].shown().count(), rows.len().min(MAX_SHELF_ITEMS));
+        assert!(!keys(&lanes).is_empty(), "the cards that arrived later must be shown");
     }
 
     /// A server's first answer lands on a deck that is already placed, as `settle_deck` runs it:

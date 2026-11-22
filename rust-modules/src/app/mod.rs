@@ -233,6 +233,9 @@ pub(crate) struct App {
     /// (`route::timeline_stop_landed`) and the player is off the route (never by a timer: a read
     /// that beats the stop's POST sees the old resume point).
     pub(crate) refresh_hubs: bool,
+    // Fork Rofocale11: the shim's account-pull generation already seen by Home. A real merge bumps
+    // the shim's count; the frame loop re-reads the hubs once per newly observed value.
+    pub(crate) content_gen_seen: u64,
     /// The return from the player to Home waiting on that refetch (`playback::ReturnHold`).
     pub(crate) return_hold: playback::ReturnHold,
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped

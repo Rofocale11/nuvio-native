@@ -34,6 +34,13 @@ pub(crate) fn handle() -> Option<&'static plx_pmsshim::Handle> {
     HANDLE.get()
 }
 
+/// Fork Rofocale11: the shim bumps this only when an account pull actually merged a resume point.
+/// Home polls it and re-reads its hubs once per observed value; the baseline is captured before the
+/// first `/hubs`, not when the `App` literal is built, so a merge racing that fetch is not lost.
+pub(crate) fn content_generation() -> Option<u64> {
+    handle().map(|h| h.shim.content_generation())
+}
+
 /// Fork Rofocale11: the data root now lives in `plx_base::paths` so the app, the shim and the
 /// in-process storage backend all resolve the SAME single redb file without a circular edge.
 fn data_dir() -> PathBuf {

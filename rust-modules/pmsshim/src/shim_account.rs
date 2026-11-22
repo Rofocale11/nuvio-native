@@ -26,6 +26,9 @@ use std::sync::{Arc, Mutex};
 /// Receives a profile's addon set when the user picks it in the who's-watching picker. The app
 /// persists it and swaps it into the running backend.
 pub type AddonSink = Arc<dyn Fn(plx_stremio::addons::AddonSet) + Send + Sync>;
+/// Fork Rofocale11: fires the account watch pull after a profile's addons are installed. The pull
+/// builds each resume point's row through those addons, so this order is load-bearing.
+pub type WatchSink = Arc<dyn Fn() + Send + Sync>;
 
 const PROFILE_UUID_PREFIX: &str = "nuvio-profile-";
 
@@ -37,6 +40,7 @@ pub struct Account {
     library: Arc<Mutex<LibraryContext>>,
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
+    watch_sink: Mutex<Option<WatchSink>>,
     /// The token handed to the app in place of a plex.tv account token.
     token: String,
     origin: Mutex<String>,
@@ -169,6 +173,7 @@ impl Account {
             library: Arc::new(Mutex::new(LibraryContext { profile, ..Default::default() })),
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
+            watch_sink: Mutex::new(None),
             token: token.to_string(),
             origin: Mutex::new(String::new()),
         }
@@ -176,6 +181,11 @@ impl Account {
 
     pub fn set_sink(&self, sink: AddonSink) {
         *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+    }
+
+    /// Fork Rofocale11: install the callback that merges this profile's account resume points.
+    pub fn set_watch_sink(&self, sink: WatchSink) {
+        *self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
 
     pub fn set_origin(&self, origin: &str) {
@@ -259,6 +269,39 @@ impl Account {
         context.cached = Some((std::time::Instant::now(), rows));
         plx_stremio::nuvio::log_account_event(if saved { "nuvio: My List add confirmed" } else { "nuvio: My List remove confirmed" });
         Ok(())
+    }
+
+    // Fork Rofocale11: account watch progress, on the same profile-scoped session as My List.
+    /// Report resume points to the account. No `library` guard is held across this call: a push
+    /// runs on the player's reporting thread while `load_profile` wants that lock.
+    pub fn push_watch_progress(&self, entries: &[plx_stremio::nuvio::WatchProgress]) -> plx_stremio::model::Result<()> {
+        let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
+        if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        let pid = self.profile_id(&session)?;
+        plx_stremio::nuvio::push_watch_progress(&session, &pid, entries)
+    }
+
+    /// The account's resume points for the active profile.
+    pub fn pull_watch_progress(&self) -> plx_stremio::model::Result<Vec<plx_stremio::nuvio::WatchProgress>> {
+        let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
+        if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
+            return Err(plx_stremio::model::Error::Status(401));
+        }
+        let pid = self.profile_id(&session)?;
+        plx_stremio::nuvio::pull_watch_progress(&session, &pid)
+    }
+
+    /// The active profile id, resolving the first profile when none was picked — the same fallback
+    /// `saved_library` uses. The `library` lock is never held across the HTTP call that resolves it.
+    fn profile_id(&self, session: &plx_stremio::nuvio::Session) -> plx_stremio::model::Result<String> {
+        if let Some(pid) = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() {
+            return Ok(pid);
+        }
+        let pid = plx_stremio::nuvio::profiles(session)?.first().map(|p| p.id.clone()).unwrap_or_else(|| "1".into());
+        self.library.lock().unwrap_or_else(|e| e.into_inner()).profile = Some(pid.clone());
+        Ok(pid)
     }
 
     /// The plex.tv surface. `segs` are the path segments after `api/v2`.
@@ -413,10 +456,13 @@ impl Account {
     }
 
     /// Fetch a profile's addons (the first profile when `None`) and hand them to the sink, off the
-    /// request: manifests are fetched per addon.
+    /// request: manifests are fetched per addon. Fork Rofocale11: the account watch pull fires only
+    /// AFTER those addons are installed — its rows are built through the addon backend, and a row
+    /// stored without a snapshot is dropped by Continue Watching until the next boot.
     fn load_profile(&self, profile: Option<&str>) {
         let Some(session) = self.fresh_session() else { return };
         let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+        let watch_sink = self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let profile = profile.map(str::to_string);
         let library = self.library.clone();
         let file = self.file.clone();
@@ -430,17 +476,30 @@ impl Account {
         };
         let _ = std::thread::Builder::new().name("pmsshim-profile".into()).spawn(move || {
             let pid = profile.clone().or_else(|| plx_stremio::nuvio::profiles(&session).ok().and_then(|p| p.first().map(|p| p.id.clone()))).unwrap_or_else(|| "1".into());
-            let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
-            if context.generation != generation { return; }
-            context.profile = Some(pid.clone());
-            if let Some(file) = file { save_session_file(&file, Some(&session), Some(&pid)); }
-            if let Ok(addons) = plx_stremio::nuvio::addons(&session, &pid) {
-                if !addons.is_empty() {
-                    sink(plx_stremio::addons::AddonSet { addons });
-                }
+            {
+                let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
+                if context.generation != generation { return; }
+                context.profile = Some(pid.clone());
             }
+            if let Some(file) = file { save_session_file(&file, Some(&session), Some(&pid)); }
+            // The guard is dropped: the pull resolves its profile through the same lock, and
+            // holding it here deadlocks on the first profile switch.
+            let addons = plx_stremio::nuvio::addons(&session, &pid);
+            activate_loaded_profile(&library, generation, &sink, watch_sink.as_ref(), addons);
         });
     }
+}
+
+/// Install a profile's addons, then fire its watch pull. Both are guarded by the load generation:
+/// a profile picked while this worker was fetching neither installs its set nor pulls its history.
+fn activate_loaded_profile(library: &Mutex<LibraryContext>, generation: u64, sink: &AddonSink,
+    watch_sink: Option<&WatchSink>, addons: plx_stremio::model::Result<Vec<plx_stremio::model::Addon>>) {
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
+    if let Ok(addons) = addons {
+        if !addons.is_empty() { sink(plx_stremio::addons::AddonSet { addons }); }
+    }
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
+    if let Some(watch) = watch_sink { watch(); }
 }
 
 /// A QR code PNG the way plex.tv serves one (RGBA, opaque modules on transparent, 8 px modules,
@@ -482,6 +541,30 @@ mod tests {
             headers: HashMap::new(),
             body: body.to_vec(),
         }
+    }
+
+    /// Fork Rofocale11: a profile's addons are installed before its watch pull. The pull builds
+    /// each resume point's row through the addon backend, so reversing this order stores positions
+    /// with no row snapshot and Continue Watching drops them until the next launch.
+    #[test]
+    fn a_profile_load_installs_addons_before_it_pulls_watch() {
+        use std::sync::Mutex as StdMutex;
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { generation: 7, ..Default::default() });
+        let sink_addons = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_| sink_addons.lock().unwrap().push("addons"));
+        let pull_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || pull_order.lock().unwrap().push("watch"));
+        let addon = plx_stremio::model::Addon { transport_url: "https://example.invalid/addon".into(), ..Default::default() };
+        activate_loaded_profile(&library, 7, &sink, Some(&watch), Ok(vec![addon]));
+        assert_eq!(*order.lock().unwrap(), ["addons", "watch"]);
+        // A stale load pulls nothing.
+        order.lock().unwrap().clear();
+        activate_loaded_profile(&library, 6, &sink, Some(&watch), Ok(Vec::new()));
+        assert!(order.lock().unwrap().is_empty());
+        // An empty addon answer still pulls the account history.
+        activate_loaded_profile(&library, 7, &sink, Some(&watch), Ok(Vec::new()));
+        assert_eq!(*order.lock().unwrap(), ["watch"]);
     }
 
     #[test]
