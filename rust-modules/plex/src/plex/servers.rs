@@ -1066,27 +1066,29 @@ pub fn register_with_client_id(
     // D5 names and `register_lazy`'s own assertion is one call away rather than at this frame.
     #[cfg(any(test, feature = "test-support"))]
     plx_base::testlock::assert_held("the plex server registry (register_with_client_id)");
-    // Fork Rofocale11: this test seam stands in for `register_origin` on a developer build. That
-    // build's `devtriggers` feature is unified in by the application crate during `make check`,
-    // but a bare `cargo test -p plx_plex --lib` leaves it off, so `CredentialPolicy::build()` was
-    // HttpsOnly here: plaintext LAN registrations came back tokenless, never became current and
-    // were stamped InsecureOnly, failing the upstream registry tests. Name the developer-build policy
-    // explicitly through the existing `*_and_policy` seam instead of adding a cfg(test) fork to
-    // production code; production registration still uses the build's own policy.
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        register_pinned_with_client_id_and_policy(
-            machine_id, &Origin::http(host, port), token, None, client_id,
-            ConnectionFacts::default(), CredentialPolicy::AllowPlaintext,
-        )
-    }
-    // Fork Rofocale11: the policy-forcing seam exists only for tests. Shipping and
-    // --no-default-features builds must keep upstream's build-policy registration.
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
-        register_pinned_with_client_id(machine_id, &Origin::http(host, port), token, None, client_id,
-            ConnectionFacts::default())
-    }
+    register_pinned_with_client_id(machine_id, &Origin::http(host, port), token, None, client_id,
+        ConnectionFacts::default())
+}
+
+/// Fork Rofocale11: the test-facing spelling of [`register_with_client_id`] that also names the
+/// credential policy. A bare `cargo test -p plx_plex --lib` leaves `devtriggers` off, so
+/// `CredentialPolicy::build()` is HttpsOnly there and plaintext LAN registrations come back
+/// tokenless; tests need `AllowPlaintext` explicitly. This item is wholly test-owned (`test` or
+/// `test-support`), so it is not a production `cfg(test)` fork: the production seam above always
+/// uses the build's own policy, exactly as upstream does. `docs/sans-io.md`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_with_client_id_for_test(
+    machine_id: &str,
+    host: &str,
+    port: i32,
+    token: &str,
+    client_id: &str,
+) -> ServerId {
+    plx_base::testlock::assert_held("the plex server registry (register_with_client_id_for_test)");
+    register_pinned_with_client_id_and_policy(
+        machine_id, &Origin::http(host, port), token, None, client_id,
+        ConnectionFacts::default(), CredentialPolicy::AllowPlaintext,
+    )
 }
 
 /// [`register_with_client_id`], given the whole [`Origin`] and, optionally, a resolve pin — the
@@ -1618,13 +1620,13 @@ mod tests {
     }
 
     fn reg(machine_id: &str, host: &str, token: &str) -> ServerId {
-        register_with_client_id(machine_id, host, 32400, token, "test-client-id")
+        register_with_client_id_for_test(machine_id, host, 32400, token, "test-client-id")
     }
 
     #[test]
     fn registration_refuses_an_empty_client_identifier() {
         let _g = fresh();
-        assert_eq!(register_with_client_id("synthetic-machine", "127.0.0.1", 9,
+        assert_eq!(register_with_client_id_for_test("synthetic-machine", "127.0.0.1", 9,
             "synthetic-token", ""), ServerId::UNSET);
         assert!(client_opt().is_none());
     }

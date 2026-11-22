@@ -389,7 +389,7 @@ mod tests {
         servers::reset_for_test();
         // past the old sixteen-slot table, so the rows are keyed on a slot the array never held
         let ids: Vec<ServerId> = (0..18)
-            .map(|i| servers::register_with_client_id(&format!("mach-so-{i}"), "10.0.0.1", 32400, "tok", "cid"))
+            .map(|i| servers::register_with_client_id_for_test(&format!("mach-so-{i}"), "10.0.0.1", 32400, "tok", "cid"))
             .collect();
         let far = *ids.last().unwrap();
         assert!(far.raw() >= 16);
@@ -417,7 +417,7 @@ mod tests {
         let _g = Fresh(plx_base::testlock::serial());
         servers::reset_for_test();
         let reg =
-            |m: &str, host: &str| servers::register_with_client_id(m, host, 32400, "tok", "cid");
+            |m: &str, host: &str| servers::register_with_client_id_for_test(m, host, 32400, "tok", "cid");
         let (a, b) = (reg("mach-A", "10.0.0.1"), reg("mach-B", "10.0.0.2"));
         // the per-server table outlives `reset_for_test` (it is keyed on the slot, not the client),
         // so start from the boot state explicitly rather than from what an earlier test left
@@ -500,7 +500,7 @@ mod tests {
         servers::reset_for_test();
         let ids: Vec<ServerId> = (0..41)
             .map(|n| {
-                servers::register_with_client_id(&format!("mach-{n}"), &format!("10.0.2.{n}"), 32400, "tok", "cid")
+                servers::register_with_client_id_for_test(&format!("mach-{n}"), &format!("10.0.2.{n}"), 32400, "tok", "cid")
             })
             .collect();
         let far = ids[40];
@@ -519,7 +519,7 @@ mod tests {
         use plx_machine::present::{Present, PresentEvent, Provenance, Scope};
         let _g = plx_base::testlock::serial();
         super::super::servers::reset_for_test();
-        let id = super::super::servers::register_with_client_id("facts-test", "127.0.0.1", 32400, "tok", "cid");
+        let id = super::super::servers::register_with_client_id_for_test("facts-test", "127.0.0.1", 32400, "tok", "cid");
         let before = facts_of(id);
         let mut present = Present::new();
         present.take(0);

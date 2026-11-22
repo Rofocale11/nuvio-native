@@ -154,7 +154,7 @@ pub use models::*;
 pub use params::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use servers::{
-    register_pinned_with_client_id_and_policy, register_with_client_id as register_for_test,
+    register_pinned_with_client_id_and_policy, register_with_client_id_for_test as register_for_test,
     reset_for_test as reset_servers_for_test, write_held_for_test,
 };
 // Only reached from `auth::register_observed_origin`'s `#[cfg(test)]` arm and from test files, so
