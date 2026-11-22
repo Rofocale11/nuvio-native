@@ -802,7 +802,9 @@ TELEMETRY_ENV = $(foreach v,PLX_SENTRY_DSN PLX_POSTHOG_KEY PLX_SENTRY_DSN_DEV PL
 # simply has no account sign-in. Spliced into TELEMETRY_ENV because that is the one variable every
 # cargo invocation in this file already carries.
 -include rust-modules/stremio/nuvio.local.env
-NUVIO_ENV_VARS = NUVIO_SUPABASE_URL NUVIO_SUPABASE_ANON_KEY NUVIO_SUPABASE_FALLBACK_URL DEVICE_LOGIN_WEB_BASE_URL TV_LOGIN_WEB_BASE_URL
+# Fork Rofocale11: TMDB enrichment reads its key with option_env!("TMDB_API_KEY") in plx_stremio;
+# the key reaches cargo only when set, so an unset key leaves the build byte-for-byte unchanged.
+NUVIO_ENV_VARS = NUVIO_SUPABASE_URL NUVIO_SUPABASE_ANON_KEY NUVIO_SUPABASE_FALLBACK_URL DEVICE_LOGIN_WEB_BASE_URL TV_LOGIN_WEB_BASE_URL TMDB_API_KEY
 TELEMETRY_ENV += $(foreach v,$(NUVIO_ENV_VARS),$(if $($(v)),$(v)='$($(v))',))
 
 # In the stamp, and it has to be: switching a build from unconfigured to configured changes what
@@ -810,7 +812,11 @@ TELEMETRY_ENV += $(foreach v,$(NUVIO_ENV_VARS),$(if $($(v)),$(v)='$($(v))',))
 # baked in from whichever build happened to run first -- the same class of trap as
 # `make RELEASE=1 && make deploy`. The values are hashed rather than written, so the stamp file
 # (which is not gitignored) never contains a credential.
-TELEMETRY_CFG  = $(shell printf '%s|%s|%s|%s' '$(PLX_SENTRY_DSN)' '$(PLX_POSTHOG_KEY)' '$(PLX_SENTRY_DSN_DEV)' '$(PLX_POSTHOG_KEY_DEV)' | shasum | cut -c1-12)
+# Fork Rofocale11: the TMDB key is folded into the build stamp exactly like the telemetry values —
+# hashed only, never written to a tracked file. The `$(if ...)` contributes NOTHING when the key is
+# unset, so an unconfigured build's stamp (and therefore its behavior) is byte-for-byte unchanged;
+# setting it changes the stamp so a configured binary is relinked rather than silently shared.
+TELEMETRY_CFG  = $(shell printf '%s|%s|%s|%s%s' '$(PLX_SENTRY_DSN)' '$(PLX_POSTHOG_KEY)' '$(PLX_SENTRY_DSN_DEV)' '$(PLX_POSTHOG_KEY_DEV)' '$(if $(TMDB_API_KEY),|$(TMDB_API_KEY),)' | shasum | cut -c1-12)
 # `+nightly:<date>` carries PLX_NIGHTLY_DATE into the stamp itself, the same reason SYMBOLS and the
 # telemetry pair are in it and RELEASE already was: a nightly binary's REPORTED version is dated by
 # this value (`build.rs`'s PLX_CHANNEL=nightly arm), so `ci/check-package.py` needs the exact date a

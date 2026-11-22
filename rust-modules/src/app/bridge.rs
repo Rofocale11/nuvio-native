@@ -592,6 +592,70 @@ pub(crate) struct Bridge<'a> {
     pub(super) retained: &'a mut BridgeRetained,
 }
 
+/// Fork Rofocale11: the app-side dedup for focus-dwell shim metadata warms. One worker per
+/// `(sid, rk)` per 60 s; a worker the runner could not start gives its key back so the next rest
+/// retries. Time is a monotonic `Instant` the runner supplies (this is the app layer, not a
+/// machine step), kept as a parameter so the TTL is gradeable without sleeping.
+#[derive(Default)]
+pub(crate) struct WarmDedup {
+    seen: std::collections::HashMap<(u16, String), std::time::Instant>,
+}
+
+impl WarmDedup {
+    fn new() -> Self { Self::default() }
+
+    /// True when this key should be started now; a hit records the claim.
+    pub(crate) fn claim(&mut self, key: (u16, String), now: std::time::Instant) -> bool {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+        if self.seen.get(&key).is_some_and(|at| now.duration_since(*at) < TTL) {
+            return false;
+        }
+        self.seen.insert(key, now);
+        true
+    }
+
+    /// A refused job releases its key ahead of the TTL.
+    pub(crate) fn release(&mut self, key: &(u16, String)) {
+        self.seen.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod warm_dedup_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn one_warm_per_key_within_the_ttl() {
+        let mut dedup = WarmDedup::new();
+        let now = Instant::now();
+        let key = (1u16, "rk".to_string());
+        assert!(dedup.claim(key.clone(), now));
+        assert!(!dedup.claim(key.clone(), now + Duration::from_secs(59)), "still inside 60 s");
+        assert!(dedup.claim(key.clone(), now + Duration::from_secs(60)), "TTL elapsed");
+    }
+
+    #[test]
+    fn keys_are_independent() {
+        let mut dedup = WarmDedup::new();
+        let now = Instant::now();
+        assert!(dedup.claim((1, "a".into()), now));
+        assert!(dedup.claim((1, "b".into()), now));
+        assert!(dedup.claim((2, "a".into()), now));
+        assert!(!dedup.claim((1, "a".into()), now));
+    }
+
+    #[test]
+    fn a_refused_job_releases_its_key() {
+        let mut dedup = WarmDedup::new();
+        let now = Instant::now();
+        let key = (3u16, "rk".to_string());
+        assert!(dedup.claim(key.clone(), now));
+        dedup.release(&key);
+        assert!(dedup.claim(key, now + Duration::from_millis(1)), "next rest may retry");
+    }
+}
+
 /// Per-App publications, capture scratch and resource bookkeeping, never machine owners.
 /// These remain separate from RuntimeOwners and are lent at the same App boundary.
 pub(crate) struct BridgeRetained {
@@ -626,6 +690,9 @@ pub(crate) struct BridgeRetained {
     // here and wakes the frame gate; `take_live_results` drains them into `AppResults`, and the
     // dispatcher delivers each as `ScreenEvent::Async` to the exact screen instance that asked.
     nuvio_results: std::sync::Arc<std::sync::Mutex<Vec<(plx_machine::machine::Addr, plx_screens::registry::NuvioResult)>>>,
+    // Fork Rofocale11: the (sid, rk) dedup for focus-dwell shim metadata warms, with a 60 s TTL.
+    // Lives in the app runner (not the screen machine), so a refused worker can release its key.
+    warm_dedup: WarmDedup,
 
     /// Host IO chosen at boot: production trigger reader, or an explicit neutral/scripted reader.
     metadata_alt_host: fn(plx_data::metadata::AltStandInReq, Option<&str>) -> plx_data::metadata::AltStandInAnswer,
@@ -995,6 +1062,7 @@ impl BridgeRetained {
             huds_notice: None,
             trace_save: None,
             nuvio_results: Default::default(),
+            warm_dedup: WarmDedup::new(),
 
             metadata_alt_host: crate::dev::scenarios::metadata_alt_stand_in,
             late_store_jobs: 0,
@@ -3469,7 +3537,24 @@ impl Bridge<'_> {
         Some((to, status))
     }
 
+    /// Fork Rofocale11: hand one focus-dwell warm to the store-runner adapter. The clock read, the
+    /// `client_for` registry read and the worker start live there (an IO port, not this machine);
+    /// the dedup state itself is retained on this Bridge so a refused job can release its key.
+    fn warm_detail(&mut self, sid: plx_plex::plex::ServerId, rk: &str) {
+        super::adapters::stores::launch_detail_warm(&mut self.retained.warm_dedup, sid, rk);
+    }
+
     fn app_effect(&mut self, from: MachineId, fx: InlineAppFx, out: &mut Effects<'_, AppHost>) {
+        // Fork Rofocale11: a warm is a best-effort background GET that installs nothing and that
+        // no replay fixture records, so handle it BEFORE the controlled codec check (a scene that
+        // rests on a card must not fail on an effect it has no spelling for). The screen emits only
+        // this typed command; the worker start and the registry read are here in the app layer.
+        if let InlineAppFx::Store(StoreId::Metadata, StoreCmd::Metadata(
+            plx_data::stores::metadata::MetadataCmd::Warm { sid, rk })) = &fx
+        {
+            self.warm_detail(*sid, rk);
+            return;
+        }
         // Replay status never consults the live recorder.
         if self.retained.home_io.is_some() && matches!(fx,
             InlineAppFx::PlaybackTrace(plx_os::playback_trace::Command::Status)) {

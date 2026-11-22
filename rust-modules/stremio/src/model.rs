@@ -195,6 +195,11 @@ pub struct Meta {
     /// IMDb id when the meta's own id is not one (`tmdb:…` catalogs carry it here).
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_id: Option<String>,
+    // Fork Rofocale11: Cinemeta carries TMDB's numeric id here; the shim reads it before paying
+    // a `/find` round trip. Upstream's Plex-only model has no equivalent field. The lenient
+    // deserializer keeps both the number and string wire shapes harmless.
+    #[serde(rename = "moviedb_id", deserialize_with = "crate::lenient::opt_u64")]
+    pub moviedb_id: Option<u64>,
     pub trailers: Vec<serde_json::Value>,
     pub behavior_hints: serde_json::Value,
 }

@@ -174,6 +174,13 @@ use super::StoreEv;
 
 #[derive(Clone)]
 pub enum MetadataCmd {
+    /// Fork Rofocale11: a focus-dwell "warm" of a Home card's shim metadata cache. This is a typed
+    /// command, not a spawn: the Home screen emits it once focus rests on a card for the dwell, and
+    /// the application runner executes one `client_for(sid)?.metadata(rk)` GET on a worker and drops
+    /// the body. It deliberately does NOT install a Detail, touch `current()`, move a loading or
+    /// generation counter, or raise a store notice (a notice relayouts a mounted Detail page). The
+    /// runner dedups by `(sid, rk)` with a 60 s TTL. A direct step of this command is inert.
+    Warm { sid: ServerId, rk: String },
     /// Supersede any in-flight load and emit the fetch of `(sid, rk)` as a job the application
     /// starts off-thread; lands through `pump_detail`.
     RequestDetail { sid: ServerId, rk: String },
@@ -352,6 +359,13 @@ impl MetadataStore {
     }
 
     fn run_with_optional_keys(&mut self, cmd: MetadataCmd, keys: Option<&plx_plex::plex::ClientKeys>) -> bool {
+        // Fork Rofocale11: a warm is executed by the application runner (a worker GET whose body is
+        // dropped), never by this machine. If one reaches a bare step it is inert: no state change,
+        // no notice generation bump. A notice here would relayout a mounted Detail page for a fetch
+        // nobody is looking at.
+        if matches!(&cmd, MetadataCmd::Warm { .. }) {
+            return false;
+        }
         if matches!(&cmd, MetadataCmd::Reset) {
             self.adapter = Arc::new(Default::default());
         }

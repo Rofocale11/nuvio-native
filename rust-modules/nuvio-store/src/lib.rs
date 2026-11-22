@@ -12,6 +12,7 @@ use plx_base::paths;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The one file name. Kept here so boot, the shim and the in-process backend cannot disagree.
 pub const FILE_NAME: &str = "nuvio.redb";
@@ -25,6 +26,11 @@ pub const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
 pub const ACCOUNT_SESSION: TableDefinition<&str, &[u8]> = TableDefinition::new("account_session");
 pub const ACCOUNT_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("account_prefs");
 pub const INSTALL_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("install_prefs");
+// Fork Rofocale11: TMDB enrichment answers are durable app records, so they live in this one file
+// beside the key table and watch state — never in a second JSONL cache beside it.
+pub const META_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta_cache");
+pub const ENRICH_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrich_cache");
+pub const IMDB_IDS: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_ids");
 
 /// The tables of the single file. A new feature that needs durable state adds one here rather
 /// than a second file or a new DB8 kind.
@@ -41,6 +47,18 @@ pub enum Table {
     AccountSession,
     AccountPrefs,
     InstallPrefs,
+    MetaCache,
+    EnrichCache,
+    ImdbIds,
+}
+
+/// Fork Rofocale11: the TTL-aware metadata caches. `cache_get` returns `None` on a miss or an
+/// expired row, so callers never parse a stale envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NuvioCache {
+    Meta,
+    Enrich,
+    Imdb,
 }
 
 impl Table {
@@ -55,6 +73,9 @@ impl Table {
             Self::AccountSession => ACCOUNT_SESSION,
             Self::AccountPrefs => ACCOUNT_PREFS,
             Self::InstallPrefs => INSTALL_PREFS,
+            Self::MetaCache => META_CACHE,
+            Self::EnrichCache => ENRICH_CACHE,
+            Self::ImdbIds => IMDB_IDS,
         }
     }
 }
@@ -77,6 +98,35 @@ impl Store {
     /// The shipping path: the shim's data directory under the fork's data root.
     pub fn open() -> Result<Arc<Self>, String> {
         Self::open_at(&paths::nuvio_store_path())
+    }
+
+    /// Fork Rofocale11: read a cached value that has not passed its TTL. The envelope is an
+    /// 8-byte big-endian expiry (Unix millis) followed by the owner's opaque bytes.
+    pub fn cache_get(&self, kind: NuvioCache, key: &str) -> Option<Vec<u8>> {
+        let table = match kind {
+            NuvioCache::Meta => Table::MetaCache,
+            NuvioCache::Enrich => Table::EnrichCache,
+            NuvioCache::Imdb => Table::ImdbIds,
+        };
+        let bytes = self.get(table, key)?;
+        let (expiry, value) = bytes.split_at_checked(8)?;
+        let expiry = u64::from_be_bytes(expiry.try_into().ok()?);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+        (now < expiry).then(|| value.to_vec())
+    }
+
+    pub fn cache_put(&self, kind: NuvioCache, key: &str, ttl: Duration, value: &[u8]) -> Result<(), String> {
+        let table = match kind {
+            NuvioCache::Meta => Table::MetaCache,
+            NuvioCache::Enrich => Table::EnrichCache,
+            NuvioCache::Imdb => Table::ImdbIds,
+        };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis() as u64;
+        let expiry = now.saturating_add(ttl.as_millis() as u64).to_be_bytes();
+        let mut envelope = Vec::with_capacity(8 + value.len());
+        envelope.extend_from_slice(&expiry);
+        envelope.extend_from_slice(value);
+        self.put(table, key, &envelope)
     }
 
     pub fn get(&self, table: Table, key: &str) -> Option<Vec<u8>> {
@@ -142,4 +192,48 @@ pub fn install_default() -> Result<Arc<Store>, String> {
     let store = Store::open()?;
     let _ = install(store.clone());
     Ok(store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> Arc<Store> {
+        static STORE: OnceLock<Arc<Store>> = OnceLock::new();
+        STORE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("nuvio-cache-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Store::open_at(&dir.join("cache.redb")).unwrap()
+        }).clone()
+    }
+
+    #[test]
+    fn cache_rows_round_trip_and_expire() {
+        let store = store();
+        store.cache_put(NuvioCache::Enrich, "movie:tt1", Duration::from_secs(60), b"payload").unwrap();
+        assert_eq!(store.cache_get(NuvioCache::Enrich, "movie:tt1").unwrap(), b"payload");
+        store.cache_put(NuvioCache::Enrich, "movie:tt1", Duration::ZERO, b"payload").unwrap();
+        assert_eq!(store.cache_get(NuvioCache::Enrich, "movie:tt1"), None);
+    }
+
+    #[test]
+    fn cache_kinds_and_keys_are_isolated() {
+        let store = store();
+        store.cache_put(NuvioCache::Imdb, "movie:tt2", Duration::from_secs(60), b"tt0133093").unwrap();
+        assert_eq!(store.cache_get(NuvioCache::Imdb, "movie:tt2").unwrap(), b"tt0133093");
+        store.cache_put(NuvioCache::Imdb, "movie:tt3", Duration::from_secs(60), b"tt0133093").unwrap();
+        assert_eq!(store.cache_get(NuvioCache::Imdb, "show:tt3"), None);
+        assert_eq!(store.cache_get(NuvioCache::Meta, "movie:tt3"), None);
+        store.cache_put(NuvioCache::Meta, "movie:tt3", Duration::from_secs(60), b"meta").unwrap();
+        assert_eq!(store.cache_get(NuvioCache::Meta, "movie:tt3").unwrap(), b"meta");
+        assert_eq!(store.cache_get(NuvioCache::Imdb, "movie:tt3").unwrap(), b"tt0133093");
+    }
+
+    #[test]
+    fn cache_overwrite_wins() {
+        let store = store();
+        store.cache_put(NuvioCache::Imdb, "movie:tt4", Duration::from_secs(60), b"first").unwrap();
+        store.cache_put(NuvioCache::Imdb, "movie:tt4", Duration::from_secs(60), b"second").unwrap();
+        assert_eq!(store.cache_get(NuvioCache::Imdb, "movie:tt4").unwrap(), b"second");
+    }
 }

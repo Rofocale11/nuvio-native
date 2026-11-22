@@ -4284,6 +4284,16 @@ pub fn finish_detail_fetch(
     port.done(addr, (key, d));
 }
 
+/// Fork Rofocale11: the worker body of a focus-dwell warm. It is the SAME GET the detail fetch
+/// opens with (`Client::metadata(rk)` -> `GET /library/metadata/{rk}` against the in-process shim),
+/// so the shim's cache is warm before a later OK asks for the page. The parsed body is deliberately
+/// dropped: a warm builds no `Detail`, lands no port and raises no store notice. The caller (the
+/// application runner) resolves the client from the captured `sid` on the worker; this function
+/// knows nothing about registries or machines.
+pub fn warm_detail_get(client: &'static plx_plex::plex::Client, rk: &str) {
+    let _ = client.metadata(rk);
+}
+
 /// `stores::metadata`'s one door onto every [`MetadataCmd`](crate::stores::metadata::MetadataCmd)
 /// variant (D3): the match used to live in `stores/metadata.rs::run`, calling `pub`
 /// mutators across the module boundary. Relocating it here is what lets those go private. The
@@ -4298,6 +4308,9 @@ pub fn run_with_keys(state: &mut MetadataState, adapter: &std::sync::Arc<Metadat
     use crate::stores::metadata::MetadataCmd;
     let _ = keys;
     match cmd {
+        // Fork Rofocale11: a warm is executed by the application runner's worker, not this machine.
+        // A bare step is a no-op: no Detail is installed, no counter or generation moves, no notice.
+        MetadataCmd::Warm { .. } => false,
         MetadataCmd::RequestDetail { sid, rk } => {
             let prefer = selected_season_number(state, sid, &rk);
             state.detail_stamp = state.ledger.stamp();

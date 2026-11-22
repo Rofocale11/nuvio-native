@@ -255,6 +255,36 @@ and `ci/check-deps.sh`'s `forks` ledger gap at `plex/servers.rs::register_with_c
   of a storage helper. It is upstream-owned but carries the fork reason in its module docstring.
 - The new `docs/nuvio/AGENTS.md` is fork-owned and needs no marker.
 
+## TMDB metadata client (Fork Rofocale11)
+
+New fork behaviour, confined to the shim's crate and fork-owned docs. The public API and field
+shapes are pinned in `docs/nuvio/TMDB.md` so the shim lane can code against them.
+
+- `rust-modules/stremio/src/addons_tmdb.rs` (NEW, fork-owned) — TMDB client with a 15-minute
+  `(api_key, path)` cache and a local per-key `Condvar` single-flight (upstream's
+  `plx_base::flight` does not exist here). No request is made when the key is unset. Module doc
+  carries the `Fork Rofocale11:` marker.
+- `rust-modules/stremio/src/lib.rs` — added `pub mod addons_tmdb; pub use addons_tmdb::*;` with
+  an inline `Fork Rofocale11:` comment. Upstream has no TMDB module.
+- `rust-modules/stremio/src/model.rs` — added `Meta::moviedb_id` (`moviedb_id` wire name,
+  lenient `opt_u64` for number/string shapes) with an inline `Fork Rofocale11:` comment. Upstream's
+  Plex model carries no TMDB id; the shim reads this before paying a `/find` round trip.
+- `docs/nuvio/TMDB.md` (NEW, fork-owned doc) — needs no marker.
+
+### Makefile edit (non-commentable per fork policy; recorded here)
+
+`Makefile` is upstream-owned and its variable/hash lines cannot carry a stable inline marker, so
+the edit is recorded here (inline `# Fork Rofocale11:` notes were added above each line too):
+
+- `NUVIO_ENV_VARS` gained `TMDB_API_KEY` so `option_env!("TMDB_API_KEY")` in `plx_stremio` sees the
+  key. The existing `$(if $($(v)),$(v)='$($(v))',)` means an unset key passes nothing to cargo —
+  identical to upstream's build.
+- `TELEMETRY_CFG` gained a conditional `$(if $(TMDB_API_KEY),|$(TMDB_API_KEY),)` field in the
+  `printf` piped to `shasum`. The key is **hashed only**, never written to a tracked file. When the
+  key is unset the field is empty and the `printf` output is byte-identical to upstream's four-field
+  string, so the build stamp and behavior are unchanged; when set, the stamp changes so a
+  configured binary is relinked rather than silently shared with an unconfigured one.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.

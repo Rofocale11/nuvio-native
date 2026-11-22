@@ -43,6 +43,9 @@ new DB8 kind. See `ARCHITECTURE.md` for the in-process backend and the migration
 ## Documents of record
 
 - `docs/nuvio/ARCHITECTURE.md` — components, storage, identity.
+- `docs/nuvio/TMDB.md` — the TMDB client contract, the five synthetic key ranges, and the
+  artwork order: TMDB backdrop/logo first, BetterPosters posters by resolved IMDb id,
+  metahub art fallback-only.
 - `docs/nuvio/PLAYBACK.md` — probe, route and shim playback contract.
 - `docs/nuvio/VALIDATION.md` — what has and has not been verified.
 - `docs/nuvio/HANDOFF.md` — delivery history and known limitations.

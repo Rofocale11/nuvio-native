@@ -47,10 +47,18 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 - Settings → Playback → Rating source offers IMDb or Rotten Tomatoes. The preference
   uses the canonical session record in the single redb file and updates cached detail presentation. Rotten
   Tomatoes detail scores must be supplied by a metadata addon; absent scores remain absent.
-- BetterPosters (`btttr.cc`) supplies posters for IMDb movie/series identities across
-  Home, search, My List and detail metadata. Posters request Rotten Tomatoes scores
-  (`rs=RT`); non-IMDb titles retain their addon artwork. The image proxy falls back
-  to the original image when the poster provider fails.
+- BetterPosters (`btttr.cc`) supplies posters wherever the shim resolves an IMDb id — not
+  only for a literal `tt…` item id, but also for `tmdb:` catalog items and synthetic TMDB
+  rows, whose IMDb id comes from the addon meta or one cached TMDB `external_ids` lookup.
+  Posters request Rotten Tomatoes scores (`rs=RT`); titles with no IMDb mapping retain
+  their addon artwork, and the image proxy falls back to the original image on a 404.
+  TMDB-only related cards keep their TMDB poster: a recommendation result carries no IMDb
+  id, and resolving one per card would add ten HTTP round trips to the detail page.
+- TMDB is the primary source for landscape backdrops and clear logos, including on detail,
+  Continue Watching, related and franchise rows. Cinemeta's `images.metahub.space` art is
+  **strictly a fallback** when TMDB has no answer or the key is not configured; it is never
+  chosen as a Continue Watching backdrop over a poster crop. A missing TMDB logo omits
+  `clearLogo` entirely rather than substituting the poster.
 - Movie/show details have Add to My List / Remove from My List. The active Nuvio
   account profile owns the list; individual item RPCs preserve other devices' titles.
   A fresh pull confirms each mutation before the button updates. Home has a paged

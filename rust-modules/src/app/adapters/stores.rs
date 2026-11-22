@@ -173,6 +173,34 @@ pub(crate) fn refill_client_keys(keys: &mut ClientKeys) {
     );
 }
 
+/// Fork Rofocale11: execute one focus-dwell shim metadata warm — the runner half of the typed
+/// `MetadataCmd::Warm` a Home rest emitted. This is the adapter/IO boundary, so the monotonic clock
+/// and the `client_for` registry read belong here, never in the screen machine or the bridge's
+/// logical path. The GET reuses the detail path's `Client::metadata(rk)` and drops the body: no
+/// Detail is installed, no counter or generation moves, no store notice is raised. Dedup is keyed
+/// by `(sid, rk)` for 60 s; a worker the runner could not start releases its key so the next rest
+/// retries. (Listed as an adapter in `ci/ports.ini`, so the clock read here is intended.)
+pub(crate) fn launch_detail_warm(
+    dedup: &mut crate::app::bridge::WarmDedup,
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+) {
+    use std::time::Instant;
+    let rk = rk.to_string();
+    let key = (sid.raw(), rk.clone());
+    if !dedup.claim(key.clone(), Instant::now()) {
+        return;
+    }
+    let spawned = plx_base::task::spawn("nuvio-detail-warm", move || {
+        if let Some(client) = plx_plex::plex::client_for(sid) {
+            plx_data::metadata::warm_detail_get(client, &rk);
+        }
+    });
+    if spawned.is_none() {
+        dedup.release(&key);
+    }
+}
+
 /// The client a job's step decided on, if the registry still holds it: `client_for(sid)` accepted
 /// only when it is the very client (and credential) the step's [`ClientKeys`] named. A job the
 /// registry has moved on from (a sign-out, a re-registration, a retoken) is not started.

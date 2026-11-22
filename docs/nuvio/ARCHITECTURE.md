@@ -98,6 +98,31 @@ marked seams into `plx_nuvio_store`; `plx_pmsshim` and `plx_nuvio_probe` are ent
 | `rust-modules/plex` (`plx_plex`) | upstream, fork-marked | `plx_nuvio_store` — Nuvio account preferences |
 | `rust-modules/src/app` (`plxnative-modules`) | upstream, fork-marked | all of the above — boot, appinfo, settings |
 
+### Cache tables in the one store
+
+`plx_nuvio_store` adds three `TableDefinition<&str, &[u8]>` tables to the SAME `nuvio.redb` —
+`META_CACHE`, `ENRICH_CACHE` and `IMDB_IDS` (the `Table` variants `MetaCache`, `EnrichCache` and
+`ImdbIds`). No second cache file and no JSONL sidecar. The shim lane uses a thin typed wrapper,
+`NuvioCache::{Meta, Enrich, Imdb}`, so callers never name a redb table or parse an envelope:
+
+- `Store::cache_get(kind, key) -> Option<Vec<u8>>` — `None` on a miss OR an expired entry;
+- `Store::cache_put(kind, key, ttl, value) -> Result<(), String>` — writes a TTL envelope
+  (expiry millis, big-endian u64, followed by the raw bytes) through the store's existing `put`.
+
+Keys are isolated per kind, a put overwrites both value and expiry, and a stale row simply reads as
+a miss (the next put replaces it). This is the durable cache the shim's metadata / enrichment /
+imdb-id GETs warm into; see `docs/nuvio/TMDB.md` for the shim-side producer.
+
+### Focus-warm (sans-IO)
+
+Home issues one background shim metadata GET when focus rests on a card for 750 ms, so the shim's
+cache is warm before OK. The screen is a machine: it emits the typed `MetadataCmd::Warm { sid, rk }`
+command; the application runner executes a single `client_for(sid)?.metadata(rk)` GET on a worker
+and drops the body. No Detail is installed, `current()` and the loading/generation counters are
+untouched, and no store notice is raised (a notice would relayout a mounted Detail page). The
+runner dedups by `(sid, rk)` for 60 s and releases the key if the worker is refused. A scroll step
+(300-500 ms per card) never reaches the dwell.
+
 ## App identity
 
 - appid `com.nuvionative.app`, title "Nuvio Native". Installs beside `space.nuvio.webos`; never

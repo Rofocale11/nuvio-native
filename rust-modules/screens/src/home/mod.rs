@@ -17,6 +17,9 @@ use std::sync::Arc;
 use plx_data::pms::{HeroRef, HubIdentity, HubRef, HubsView, PmsMovie};
 use plx_ui::a11y::{A11y, A11yPath, Role as A11yRole, Seg};
 use plx_data::stores::hubs::HubsCmd;
+// Fork Rofocale11: the focus-warm dwell emits a typed `MetadataCmd::Warm` instead of spawning on
+// this machine; the application runner does the shim GET off-frame.
+use plx_data::stores::metadata::MetadataCmd;
 use plx_data::stores::{StoreCmd, StoreId, StoreWork};
 use plx_ui::cards::{self as ui_cards, RowStyle};
 use plx_ui::cards::{CardSource, SectionFrame, Shelf};
@@ -311,6 +314,48 @@ impl HeroTint {
 /// for all of it.
 fn may_read_hero_ground(live: bool, row: Rect, page_alpha: f32) -> bool {
     live && page_alpha >= 0.999 && row.x >= 0.0 && row.x + row.w <= SCR_W
+}
+
+/// Fork Rofocale11: the focus-warm dwell, one lifecycle field rather than a phase plus loose flags.
+/// A card the viewer rests on long enough gets ONE background shim metadata GET so the shim's cache
+/// is warm before OK opens its Detail. Time is the `Tick.ms` handed to the screen — never a clock.
+/// A scroll step crosses cards in 300-500 ms, well under the dwell, so it never fires a warm.
+#[derive(Default)]
+struct WarmDwell {
+    key: Option<(u16, String)>,
+    since_ms: u32,
+    emitted: bool,
+}
+
+/// Fork Rofocale11: how long focus must rest on one Home card before its `(sid, rk)` is warmed.
+/// Well above a scroll step's per-card time and well below a deliberate pause before OK.
+const WARM_DWELL_MS: u32 = 750;
+
+impl WarmDwell {
+    /// Fork Rofocale11: advance the dwell with this tick's focused card. Returns the card exactly
+    /// once — on the tick the rest first reaches [`WARM_DWELL_MS`]. A different card (or no card)
+    /// restarts the clock and re-arms the one-shot, so focus moving away and back can warm again;
+    /// the APPLICATION's dedup decides whether that second warm is actually issued within 60 s.
+    fn tick(&mut self, item: Option<&PmsMovie>, ms: u32) -> Option<(u16, String)> {
+        let key = item.map(|m| (m.sid.raw(), m.rk.clone()));
+        if self.key != key {
+            self.key = key.clone();
+            self.since_ms = ms;
+            self.emitted = false;
+        }
+        if key.is_some() && !self.emitted && ms.wrapping_sub(self.since_ms) >= WARM_DWELL_MS {
+            self.emitted = true;
+            key
+        } else {
+            None
+        }
+    }
+
+    /// Fork Rofocale11: a focus move retires the rest even when the engine still reports a card.
+    fn reset(&mut self) {
+        self.key = None;
+        self.emitted = false;
+    }
 }
 
 struct Backdrop {
@@ -831,6 +876,9 @@ pub struct HomeScreen {
     tint: HeroTint,
     backdrop: Backdrop,
     grid: Grid,
+    /// Fork Rofocale11: focus-rest dwell for the one-shot shim metadata warm (paint/background
+    /// state, not logical state — no input, focus or reveal decision reads it).
+    warm: WarmDwell,
 }
 
 impl HomeScreen {
@@ -885,6 +933,7 @@ impl HomeScreen {
             tint: HeroTint::default(),
             backdrop: Backdrop::new(),
             grid: Grid::new(),
+            warm: WarmDwell::default(),
         }
     }
 
@@ -2123,6 +2172,23 @@ impl HomeScreen {
             dt,
             t.ms,
         );
+        // Fork Rofocale11 (old-fork DETAIL-LATENCY Stage 1C, sans-IO): a card the viewer has rested
+        // on for WARM_DWELL_MS issues ONE typed `MetadataCmd::Warm` — the application runner does a
+        // single shim `client_for(sid)?.metadata(rk)` GET on a worker and drops the body, so the
+        // shim's cache is warm before OK. No spawn here, no Detail installed, no current()/counter
+        // touched and no store notice raised (a notice would relayout a mounted Detail page). A
+        // scroll step crosses cards in 300-500 ms, under the dwell, so it never fires a warm.
+        if !self.covered && !snap_moving {
+            if let Some((sid_raw, rk)) = self.warm.tick(grid_item, t.ms) {
+                fx.push(Fx::App(AppFx::Store(StoreId::Metadata,
+                    StoreCmd::Metadata(MetadataCmd::Warm {
+                        sid: plx_plex::plex::ServerId::from_raw(sid_raw),
+                        rk,
+                    }))));
+            }
+        } else {
+            self.warm.reset();
+        }
         self.prefetch(view);
         let hint = self.hint_input(cx, snap_moving);
         if let Some(event) = self.hold_hint.step(hint, t.ms, dt, &mut |ev| fx.note(ev), cx.hold_hint) {
@@ -2946,7 +3012,11 @@ impl LogicalState for HomeScreen {
             plaintext: _, plaintext_alert: _, clock: _,
             // The hold hint is a paint-only standing note on a `Tick` timer: no input, reveal or
             // focus decision reads it, and it is not hashed (the way `status_ms` is not).
-            hold_hint: _ } = self;
+            hold_hint: _,
+            // Fork Rofocale11: the focus-warm dwell is the same kind of tick-timer paint state;
+            // it decides no replayed input, focus or reveal and is deliberately not hashed (SHAPE
+            // and the committed replay fixtures stay unchanged).
+            warm: _ } = self;
         c.f32(self.snap_target)
             .f32(self.snap.pos).f32(self.snap.vel)
             .f32(self.hero_flip_cd)
@@ -3722,6 +3792,9 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { from, to, by } => {
+                // Fork Rofocale11: a focus move ends the warm rest even when the engine still
+                // reports a card, so the next card starts a fresh 750 ms dwell.
+                self.warm.reset();
                 if let Some((row, _)) = self.focused_grid(*from) {
                     if self.focused_grid(Some(*to)).is_none_or(|(next, _)| next != row) {
                         self.cancel_row_page(row, cx, fx);
@@ -4751,5 +4824,62 @@ impl<H: HomeLike> CardSource<H> for HomeCards<'_> {
 
     fn hover(&self, _i: usize) -> Hover {
         self.hover
+    }
+}
+
+#[cfg(test)]
+mod warm_dwell_tests {
+    use super::*;
+
+    fn item(sid: u16, rk: &str) -> PmsMovie {
+        PmsMovie {
+            sid: plx_plex::plex::ServerId::from_raw(sid),
+            rk: rk.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_warm_only_after_the_dwell_and_only_once_per_rest() {
+        let card = item(1, "rk-1");
+        let mut dwell = WarmDwell::default();
+        assert_eq!(dwell.tick(Some(&card), 0), None, "arriving starts the clock");
+        assert_eq!(dwell.tick(Some(&card), WARM_DWELL_MS - 1), None, "one ms short");
+        assert_eq!(dwell.tick(Some(&card), WARM_DWELL_MS), Some((1, "rk-1".into())));
+        assert_eq!(dwell.tick(Some(&card), WARM_DWELL_MS + 1), None, "one warm per rest");
+        assert_eq!(dwell.tick(Some(&card), WARM_DWELL_MS * 10), None, "still no second warm");
+    }
+
+    #[test]
+    fn a_scroll_step_across_cards_never_reaches_the_dwell() {
+        let a = item(1, "a");
+        let b = item(1, "b");
+        let c = item(2, "c");
+        let mut dwell = WarmDwell::default();
+        assert_eq!(dwell.tick(Some(&a), 0), None);
+        assert_eq!(dwell.tick(Some(&b), 400), None, "400 ms per card");
+        assert_eq!(dwell.tick(Some(&c), 800), None, "another scroll step");
+        assert_eq!(dwell.tick(Some(&c), 800 + WARM_DWELL_MS), Some((2, "c".into())),
+            "the dwell is from the LAST move");
+    }
+
+    #[test]
+    fn focus_leaving_and_returning_rearms_the_rest() {
+        let a = item(1, "a");
+        let mut dwell = WarmDwell::default();
+        assert_eq!(dwell.tick(Some(&a), 0), None);
+        assert_eq!(dwell.tick(None, 100), None, "focus off the shelves");
+        assert_eq!(dwell.tick(Some(&a), 200), None, "return starts a fresh clock");
+        assert_eq!(dwell.tick(Some(&a), 200 + WARM_DWELL_MS), Some((1, "a".into())));
+    }
+
+    #[test]
+    fn an_explicit_focus_move_resets_the_rest() {
+        let a = item(1, "a");
+        let mut dwell = WarmDwell::default();
+        assert_eq!(dwell.tick(Some(&a), 0), None);
+        dwell.reset();
+        assert_eq!(dwell.tick(Some(&a), 0), None, "reset re-arms even on the same card");
+        assert_eq!(dwell.tick(Some(&a), WARM_DWELL_MS), Some((1, "a".into())));
     }
 }

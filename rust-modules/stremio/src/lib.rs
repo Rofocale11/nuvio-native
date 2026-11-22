@@ -21,6 +21,12 @@ pub use classify::{classify_stream, StreamInfo};
 
 pub mod nuvio;
 
+// Fork Rofocale11: TMDB enrichment has no upstream equivalent — upstream feeds the Plex API, not
+// Stremio addons. The in-process shim codes against `plx_stremio::TmdbClient` and the public types
+// below; keep this re-export stable for that lane.
+pub mod addons_tmdb;
+pub use addons_tmdb::*;
+
 /// The HTTP door. Named `addon_http` because the module-layer gate reads every workspace crate as
 /// one module tree, where `http` is already `plx_plex`'s; `plx_stremio::http` stays the public path.
 pub mod addon_http;
