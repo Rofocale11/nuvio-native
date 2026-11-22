@@ -553,7 +553,11 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                 self.stream_error = list.is_none();
                 if let Some(list) = list {
                     self.stream_choices = list.streams.clone();
-                    if !list.complete && self.stream_attempts < 60 { self.request_streams(fx); }
+                    // Fork Rofocale11: the shim's addon fan-out can run to its 60 s deadline. A
+                    // finite retry budget used to expire first and leave the menu stuck on
+                    // "No playable streams found" while addons were still answering. Poll until
+                    // the shim says `complete`; `request_streams` re-arms the pending caption.
+                    if !list.complete { self.request_streams(fx); }
                 }
                 self.rebuild(Sel::Keep, H::metadata(cx));
                 fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));

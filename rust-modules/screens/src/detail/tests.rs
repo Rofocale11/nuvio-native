@@ -6230,3 +6230,25 @@ fn the_play_pill_reads_disabled_when_no_playback_driver_is_composed() {
     assert_eq!(inks[1], Some(plx_ui::theme::INK_DISABLED), "no driver: the disabled ink");
     assert!(inks[0].is_some() && inks[0] != inks[1], "a driver composed: the ordinary ink");
 }
+
+/// Fork Rofocale11: a Nuvio item's addon sources belong in the Streams menu only. The detail page
+/// used to also offer the same ranked list as Play Version; that left the Streams menu empty while
+/// Play Version had every source (owner report on 45UR7500PSC).
+#[test]
+fn a_nuvio_item_keeps_its_sources_out_of_play_version() {
+    let mut d = versioned("movie", 2);
+    d.guid = "nuvio://movie/tt0133093".into();
+    let guard = install(d);
+    let screen = bare(&guard, ServerId::UNSET, "leaf");
+    let set = screen.hero_set(test_store().view());
+    assert!(set.list, "premise: a nuvio:// guid is a Nuvio item");
+    assert!(!set.version, "addon sources are in Streams, not Play Version");
+}
+
+#[test]
+fn a_normal_item_keeps_its_play_version_disc() {
+    let d = versioned("movie", 2);
+    let guard = install(d);
+    let screen = bare(&guard, ServerId::UNSET, "leaf");
+    assert!(screen.hero_set(test_store().view()).version, "upstream's Play Version is untouched for Plex items");
+}

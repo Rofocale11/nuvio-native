@@ -31,6 +31,7 @@ pub fn playable_url(s: &Stream, torrent_server: Option<&str>) -> Option<String> 
     Some(format!("{TORRENT_SCHEME}{hash}"))
 }
 
+#[derive(Clone)]
 pub struct Classified {
     pub stream: Stream,
     pub info: StreamInfo,

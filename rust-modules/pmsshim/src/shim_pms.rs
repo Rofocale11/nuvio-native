@@ -49,6 +49,10 @@ struct SlotState {
     /// A stream (arrival index) the user picked; it leads `Media[]`.
     selected: Option<usize>,
     subs: Vec<SubRef>,
+    /// Fork Rofocale11: the ranked list the detail/metadata path already built for this item. The
+    /// Streams panel used to re-rank with an 800 ms window and show "No playable streams found"
+    /// while Play Version showed the very same stream from the cached `Media[]`. One slot, one list.
+    ranked: Vec<(usize, shim_media::Classified)>,
 }
 
 struct StreamSlot {
@@ -664,6 +668,14 @@ impl Shim {
             let dur = row["duration"].as_i64().unwrap_or(0);
             let wait = if probe_index.is_some() { self.cfg.stream_deadline } else { DETAIL_WAIT };
             let (ranked, subs, done) = self.ranked(rk, &ident, u32::try_from(dur / 1000).ok(), wait);
+            // Fork Rofocale11: publish the same ranked list the detail page just used to the Streams
+            // panel's slot. Both menus must show one source; previously Streams re-ranked with a short
+            // window and could answer empty while this `Media[]` held the very same stream.
+            if !ranked.is_empty() {
+                if let Some(slot) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).cloned() {
+                    slot.state.lock().unwrap_or_else(|e| e.into_inner()).ranked = ranked.clone();
+                }
+            }
             let mut media = Vec::with_capacity(ranked.len().max(1));
             // Pre-probe the leading stream once the list is complete, off this request: the play that
             // usually follows a detail page then finds real fields (and a warmed source) waiting.
@@ -1056,10 +1068,46 @@ impl Shim {
             (_, ["nuvio", "streams"]) => {
                 let rk = req.q("ratingKey").and_then(|v| v.parse().ok()).unwrap_or(-1);
                 let Some(ident) = self.keys.ident(rk) else { return Response::not_found() };
-                let (ranked, _, _) = self.ranked(rk, &ident, None, DETAIL_WAIT);
-                let done = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).is_some_and(|s| s.state.lock().map(|g| g.done).unwrap_or(true));
-                Response::json(&json!({"ratingKey": rk, "complete": done,
-                    "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>()}))
+                // Fork Rofocale11: serve the very list the detail/metadata path ranked for `Media[]`
+                // instead of a second 800 ms re-rank that could answer empty while Play Version
+                // showed the same stream. Fall back to a live re-rank only before that list exists.
+                let slot = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).cloned();
+                let cached = slot.as_ref().and_then(|s| {
+                    let g = s.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if !g.done || g.ranked.is_empty() { return None; }
+                    let mut ranked = g.ranked.clone();
+                    // `/nuvio/select` can land after the list was cached; the chosen stream still
+                    // leads, exactly as `ranked()` orders it for `Media[]`.
+                    if let Some(sel) = g.selected {
+                        if let Some(p) = ranked.iter().position(|(i, _)| *i == sel) {
+                            let chosen = ranked.remove(p);
+                            ranked.insert(0, chosen);
+                        }
+                    }
+                    Some(ranked)
+                });
+                let (ranked, done) = if let Some(r) = cached {
+                    (r, true)
+                } else {
+                    let (r, _, d) = self.ranked(rk, &ident, None, DETAIL_WAIT);
+                    if !r.is_empty() {
+                        if let Some(s) = slot {
+                            s.state.lock().unwrap_or_else(|e| e.into_inner()).ranked = r.clone();
+                        }
+                    }
+                    (r, d)
+                };
+                // The Streams menu must show what the file IS, not the addon's label guess — the
+                // same fields `item_probed` applies to `Media[]` (docs/nuvio/PLAYBACK.md).
+                let streams: Vec<Value> = ranked.iter().map(|(i, c)| {
+                    let mut summary = shim_media::summary_json(*i, c);
+                    let url = self.resolved.lock().unwrap_or_else(|e| e.into_inner()).get(&(rk, c.url.clone())).cloned().unwrap_or_else(|| c.url.clone());
+                    if let Some(Ok(p)) = self.probes.cached(&url) {
+                        crate::shim_probe::apply_summary(&mut summary, &p);
+                    }
+                    summary
+                }).collect();
+                Response::json(&json!({"ratingKey": rk, "complete": done, "streams": streams}))
             }
             (_, ["nuvio", "select"]) => {
                 let rk = req.q("ratingKey").and_then(|v| v.parse().ok()).unwrap_or(-1);
@@ -1449,5 +1497,53 @@ mod rating_tests {
         assert_eq!(tomato_score(&MetaPreview::default()), None);
         let m: MetaPreview = serde_json::from_value(json!({"rottenTomatoesRating":101})).unwrap();
         assert_eq!(tomato_score(&m), None);
+    }
+}
+
+#[cfg(test)]
+mod streams_menu_regression {
+    use super::*;
+
+    fn probe_ok() -> crate::shim_probe::ProbeInfo {
+        crate::shim_probe::ProbeInfo {
+            container: "mkv".into(), duration_ms: 90_000, size: 9_000_000, video_decodable: true,
+            video: Some(crate::shim_probe::Video {
+                codec: "hevc".into(), width: 3840, height: 2160, fps: 23.976,
+                color_trc: 16, ..Default::default()
+            }),
+            audio: vec![crate::shim_probe::Audio { codec: "eac3".into(), channels: 6, ..Default::default() }],
+            ..Default::default()
+        }
+    }
+
+    /// The Streams menu used to answer "No playable streams found" while Play Version showed the
+    /// very same stream from the detail metadata's `Media[]` (owner report on 45UR7500PSC).
+    #[test]
+    fn streams_menu_shows_the_same_probed_stream_as_play_version() {
+        let shim = Arc::new(Shim::new(Arc::new(crate::shim_fake::FakeBackend), Config::default()));
+        shim.probes.set_prober(Arc::new(|_, _| Ok(probe_ok())));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt1254207".into() });
+        let req = |path: String, query: HashMap<String, String>| Request {
+            method: "GET".into(), path, query, headers: HashMap::new(), body: Vec::new(),
+        };
+
+        // Detail page: `Media[]` (what Play Version reads) and the ranked slot are populated.
+        let meta: Value = serde_json::from_slice(&shim.handle(&req(format!("/library/metadata/{rk}"), HashMap::new())).body).unwrap();
+        let media = meta["MediaContainer"]["Metadata"][0]["Media"].as_array().unwrap().clone();
+
+        // The decision path caches the probe under the resolved URL.
+        let _ = shim.handle(&req("/video/:/transcode/universal/decision".into(), HashMap::from([
+            ("path".into(), format!("/library/metadata/{rk}")), ("mediaIndex".into(), "0".into()),
+        ])));
+
+        let resp = shim.handle(&req("/nuvio/streams".into(), HashMap::from([("ratingKey".into(), rk.to_string())])));
+        let list: Value = serde_json::from_slice(&resp.body).unwrap();
+        let streams = list["streams"].as_array().unwrap();
+        assert!(!streams.is_empty(), "Streams menu must not be empty when Play Version has a version: {list}");
+        assert_eq!(streams.len(), media.len(), "both menus must show the same single source of truth");
+        assert_eq!(streams[0]["videoCodec"], "hevc", "the probed codec, not the addon label guess");
+        assert_eq!(streams[0]["height"], 2160);
+        assert_eq!(streams[0]["hdr"], "HDR10");
+        assert_eq!(streams[0]["audioCodec"], "eac3");
     }
 }

@@ -1014,6 +1014,12 @@ impl DetailScreen {
         cards::Cards::new(which, d, policy, key_by_local, local_by_key)
     }
 
+    /// Fork Rofocale11: is this page's item served by the Nuvio shim? A `nuvio://` guid is only ever
+    /// minted by that backend (the same fact `alt_available` reads as data), so no registry lookup.
+    fn is_nuvio_item(d: &Detail) -> bool {
+        d.guid.starts_with("nuvio://movie/") || d.guid.starts_with("nuvio://series/")
+    }
+
     fn detail<'a>(&self, meta: plx_data::metadata::MetadataView<'a>) -> Option<&'a Detail> {
         meta.current().filter(|d| {
             plx_plex::plex::same_item((d.sid, d.rk.as_str()), (self.sid, self.rk.as_str()))
@@ -4686,11 +4692,13 @@ impl DetailScreen {
         // handling stays correct even though the disc itself is never shown.)
         hero::HeroSet {
             // Fork Rofocale11: the My List control is offered for Nuvio-backed movie/series items
-            // only — the Nuvio account backend owns those lists, not the plex.tv Watchlist. The
-            // upstream Play Version / Go to Show / More controls are independent and are kept.
-            list: self.detail(meta).is_some_and(|d| d.guid.starts_with("nuvio://movie/") || d.guid.starts_with("nuvio://series/")),
+            // only — the Nuvio account backend owns those lists, not the plex.tv Watchlist.
+            // Nuvio's addon sources belong in the Streams menu, NOT in Play Version: without this
+            // guard the same ranked list appears twice and Streams is left empty when the addon
+            // fetch is still in flight while the cached `Media[]` already fills Play Version.
+            list: self.detail(meta).is_some_and(|d| Self::is_nuvio_item(d)),
             more: self.detail(meta).is_some_and(|d| hero::hero_episode(d).is_some()),
-            version: self.detail(meta).is_some_and(|d| hero_versions(d).len() >= 2),
+            version: self.detail(meta).is_some_and(|d| !Self::is_nuvio_item(d) && hero_versions(d).len() >= 2),
             go_show: self.detail(meta).is_some_and(|d| hero::go_to_show_target(d).is_some()),
             restart,
             trailer: false,

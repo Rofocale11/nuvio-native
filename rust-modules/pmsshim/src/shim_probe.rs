@@ -134,6 +134,44 @@ pub fn refusal(p: &ProbeInfo) -> Option<String> {
     None
 }
 
+/// Fork Rofocale11: overlay what the file IS onto a `/nuvio/streams` summary row. The shim's detail
+/// path applies [`ProbeInfo`] to PMS `Media[]` through [`apply`]; the Streams menu reads a different
+/// endpoint and used to show the addon's label guesses (or "No playable streams found"). This keeps
+/// both menus on the same, probed facts without changing either screen.
+pub fn apply_summary(summary: &mut Value, p: &ProbeInfo) {
+    let Some(v) = &p.video else { return };
+    summary["videoCodec"] = json!(v.codec);
+    if v.height > 0 {
+        summary["height"] = json!(v.height);
+    }
+    let hdr = if let Some(d) = &v.dovi {
+        // A profile-7 dual-layer with an HDR10/SDR-compatible base plays as that base.
+        if d.profile == 7 && matches!(d.bl_compat, 1 | 6) {
+            trc_name(v.color_trc).unwrap_or("").to_string()
+        } else {
+            format!("DV P{}", d.profile)
+        }
+    } else {
+        match v.color_trc {
+            16 => "HDR10".to_string(),
+            18 => "HLG".to_string(),
+            _ => "SDR".to_string(),
+        }
+    };
+    if !hdr.is_empty() {
+        summary["hdr"] = json!(hdr);
+    }
+    if p.size > 0 {
+        summary["sizeBytes"] = json!(p.size);
+        if p.duration_ms > 0 {
+            summary["bitrateKbps"] = json!(p.size * 8 / p.duration_ms);
+        }
+    }
+    if let Some(a) = p.audio.first() {
+        summary["audioCodec"] = json!(a.codec);
+    }
+}
+
 fn audio_name(a: &Audio) -> String {
     match (a.codec.as_str(), a.profile) {
         ("dts", 60) => "DTS-HD MA".into(),

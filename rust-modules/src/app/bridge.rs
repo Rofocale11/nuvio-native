@@ -3143,7 +3143,7 @@ impl Bridge<'_> {
                     // Fork Rofocale11: a controlled/replay effect is refused by the `external()`
                     // codec check above; here the shim call runs on a worker in the app layer.
                     Ok(ExternalAppFx::Nuvio(request)) => {
-                        self.execute_nuvio(request);
+                        self.execute_nuvio(d, request);
                         if self.controlled_failure().is_some() { AppCommandOutcome::Refused }
                         else { AppCommandOutcome::Completed }
                     }
@@ -3506,8 +3506,8 @@ impl Bridge<'_> {
     /// the screen that asked is a machine and does neither. A refused worker still owes its owner
     /// exactly one terminal answer, matching the screen's old `spawn.is_none()` path so no panel is
     /// left pending forever.
-    fn execute_nuvio(&mut self, request: plx_screens::registry::NuvioReq) {
-        use plx_machine::machine::{Addr, RequestId};
+    fn execute_nuvio(&mut self, d: &mut Dispatcher<AppHost>, request: plx_screens::registry::NuvioReq) {
+        use plx_machine::machine::{Addr, MachineId, RequestId};
         use plx_screens::registry::{NuvioReply, NuvioReq, NuvioResult};
         let NuvioReply { to, request: correlation } = match &request {
             NuvioReq::Streams { reply, .. } | NuvioReq::Select { reply, .. } | NuvioReq::MyList { reply, .. } => *reply,
@@ -3518,6 +3518,15 @@ impl Bridge<'_> {
             NuvioReq::MyList { .. } => NuvioResult::MyList(None),
         };
         let addr = Addr { to, req: RequestId(correlation) };
+        // Fork Rofocale11: the typed-effect refactor moved Nuvio IO off the screen, but the
+        // dispatcher only delivers an addressed answer when its request is registered as
+        // inflight on the asking instance. Without this, EVERY reply (streams, select and
+        // My List) is dropped as undeliverable and the panel sits on its empty caption while
+        // the shim answers correctly. Pre-merge the fork wrote straight to a screen mailbox
+        // and had no inflight index to keep in step with.
+        if let MachineId::Instance(inst) = to {
+            d.track_inflight(inst, RequestId(correlation));
+        }
         let mailbox = std::sync::Arc::clone(&self.retained.nuvio_results);
         let emit = move |result: NuvioResult| {
             if let Ok(mut results) = mailbox.lock() {

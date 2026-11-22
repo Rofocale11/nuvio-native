@@ -1106,6 +1106,47 @@ pub(crate) mod focus_and_hit {
             Some(plx_machine::machine::Fx::Nav(plx_machine::machine::NavOp::Dismiss(e))) if *e == entry
         ));
     }
+
+/// Fork Rofocale11: the shim's addon fan-out runs to its 60 s deadline. A finite retry budget used
+/// to expire first and leave the menu stuck on "No playable streams found" while addons were still
+/// answering (reproduced on host: the same ratingKey returned `complete:false, streams:[]` first
+/// and 25 streams ~8 s later). The panel must keep polling until the shim says `complete`.
+#[test]
+fn streams_menu_keeps_polling_while_addons_are_still_answering() {
+    let _guard = plx_base::testlock::serial();
+    let mut p = AltSourcesScreen::new(
+        EntryId(7),
+        AltSourcesArg {
+            host: InstanceId(1), sid: sid(1), rk: "10012".into(),
+            anchor: [0.0f32, 0.0, 100.0, 40.0].map(f32::to_bits), nuvio: true,
+        },
+        test_store().view(),
+    );
+    let cx = fixture_cx(None);
+    let mut present = plx_machine::present::Present::default();
+
+    // Mount emits the first stream-list request.
+    let mut mount_fx = Vec::new();
+    {
+        let mut fx = plx_machine::machine::Effects::new(&mut mount_fx, plx_machine::machine::MachineId::Input, &mut present);
+        assert_eq!(Machine::step(&mut p, &ScreenEvent::Mount, &cx, &mut fx), Handled::Yes);
+    }
+    assert_eq!(p.stream_attempts, 1, "Mount starts the poll");
+
+    // The shim's first answer is the real host observation: not complete, no streams yet.
+    let mut answer_fx = Vec::new();
+    {
+        let mut fx = plx_machine::machine::Effects::new(&mut answer_fx, plx_machine::machine::MachineId::Input, &mut present);
+        let answer = NuvioResult::Streams(Some(plx_plex::plex::nuvio::StreamList {
+            complete: false, streams: Vec::new(),
+        }));
+        let ev = ScreenEvent::Async(plx_machine::machine::RequestId(1), AppMsg::Nuvio(answer));
+        assert_eq!(Machine::step(&mut p, &ev, &cx, &mut fx), Handled::Yes);
+    }
+    assert_eq!(p.stream_attempts, 2, "an incomplete answer must re-arm the poll");
+    assert!(p.stream_pending, "the loading caption stays until addons finish");
+    assert!(p.stream_choices.is_empty(), "premise: nothing to show yet");
+}
 }
 
 /// **Every app-owned run of the *Also available* panel fits its column, in every shipped
