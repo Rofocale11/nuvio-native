@@ -179,8 +179,19 @@ pub(crate) fn boot() {
             return;
         }
     };
+    // Fork Rofocale11: Nuvio-only switch — in Auto, DTS/TrueHD/Opus that this TV cannot decode
+    // are converted by the app to stereo 48 kHz PCM instead of refused. Upstream Plex builds do
+    // not call this, so their behavior is untouched across merges.
+    plx_os::devcaps::fork_enable_auto_convert();
     handle.shim.probes.set_prober(prober());
-    handle.shim.set_audio_codecs(plx_os::devcaps::caps().audio.split(',').map(str::to_string).collect());
+    // Fork Rofocale11: DTS/TrueHD/Opus are converted by the app in Auto when this TV has no
+    // native path, so the shim's stream ranking must not mark those tracks unplayable.
+    handle.shim.set_audio_codecs(
+        plx_os::devcaps::caps().audio.split(',')
+            .map(str::to_string)
+            .chain(plx_os::devcaps::auto_convert_codecs().map(str::to_string))
+            .collect::<Vec<_>>()
+    );
     plx_base::local_server::set(handle.origin(), handle.token.clone(), plx_pmsshim::MACHINE_ID.to_string());
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
@@ -268,7 +279,11 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,
-                    decodable: caps.audio_supports(&a.codec, i64::from(a.channels)),
+                    // Fork Rofocale11: "decodable" also covers a track the app converts to
+                    // stereo PCM itself in Auto when the TV has no native path for it. Without
+                    // this the shim refuses DTS/TrueHD/Opus before the player ever opens them.
+                    decodable: caps.audio_supports(&a.codec, i64::from(a.channels))
+                        || caps.app_decodes_lossy_track(&a.codec, i64::from(a.channels), 0, false),
                 })
                 .collect(),
             subtitles: m

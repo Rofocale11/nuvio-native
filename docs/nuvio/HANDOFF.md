@@ -112,7 +112,8 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
   addon configuration and native preference persistence are separate DB8 records.
 - Torrents require a configured Stremio-compatible server or explicit local scanning.
   The user's P2P-disabled setup was tested with HTTP/debrid streams.
-- No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required.
+- <!-- Fork Rofocale11: was "No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required." -->
+  In Auto the app now converts DTS, TrueHD and Opus to stereo 48 kHz PCM when the TV has no native path; a compatible AAC/AC3/EAC3 track is no longer required for those.
 - P7 enhancement-layer playback is unsupported; the HDR10 base-layer fallback has
   not been tested on this CX. P8 Dolby Vision was tested.
 - Some upstream images/logos are absent; the proxy cannot manufacture missing images.

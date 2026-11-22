@@ -84,6 +84,25 @@ each is a place to watch on the next upstream merge.
   English key in every locale; no new wording or branding was introduced. These are the
   keys to re-check on every upstream locale change.
 
+## In-app DTS / TrueHD / Opus conversion (Fork Rofocale11, 2026-11-22)
+
+All of these carry `// Fork Rofocale11:` comments inline. Re-check each on every upstream merge:
+
+- `rust-modules/os/src/devcaps.rs` — `AppDecoded::auto_convert` opt-in on the DTS, TrueHD and new
+  Opus rows; `auto_converts_codec` / `auto_convert_codecs` helpers; an Auto arm in
+  `Caps::app_decodes_lossy_track`. Upstream's policy (`AppLossy`) is unchanged: the fork's arm is
+  independent of a measured table row and of the debug trigger, but a set that decodes natively
+  still does.
+- `rust-modules/src/app/nuvio.rs` — the shim's `set_audio_codecs` includes the converted codecs,
+  and the prober marks such tracks `decodable`. This is the real Nuvio gate: without it the shim
+  refuses "Audio format not supported" before the player opens the stream. The shim does not use
+  a PMS transcode profile, so no `plex/transcoder.rs` change is needed here.
+- `rust-modules/os/src/devcaps.rs` also carries an AtomicBool opt-in
+  (`fork_enable_auto_convert`), set only by the Nuvio boot; upstream tests never set it, so Plex
+  behavior and its characterization tests stay byte-for-byte unchanged.
+- `docs/nuvio/{PLAYBACK,HANDOFF,VALIDATION}.md` — HTML comment markers replace the old
+  "no DTS/TrueHD conversion" limitation.
+
 ## Post-merge port to upstream APIs (plx_media)
 
 The fork's retained FFmpeg core needed adapting to the APIs upstream moved:

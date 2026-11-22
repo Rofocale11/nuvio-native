@@ -121,14 +121,20 @@ pub struct AppDecoded {
     /// ([`AppLossy::Measured`]); turning a row on is `Some(..)` plus its evidence. Always `None` for a
     /// lossless row, where the field means nothing.
     pub measured: Option<&'static str>,
+    // Fork Rofocale11: added field — Auto-mode local stereo conversion opt-in.
+    /// Convert this codec in the app in Auto mode whenever the set has no native path for the
+    /// track, regardless of [`AppLossy`] or whether a device table was read. The viewer asked for
+    /// every such track to be decoded locally to stereo PCM rather than handed to PMS or refused.
+    /// Only lossy rows set it; a lossless row is already always app-decoded via [`PCM_AUDIO_CODECS`].
+    pub auto_convert: bool,
 }
 
 /// The app-decoded set, and the ONLY place a decoder name is tied to a codec: the demuxer asks
 /// [`app_decoded_by_ffmpeg_name`], and a test holds every decoder here to `ci/build-ffmpeg.sh`'s
 /// `--enable-decoder` list, so a codec cannot be offered that the bundled library cannot decode.
 pub const APP_DECODED: &[AppDecoded] = &[
-    AppDecoded { id: "flac", codecs: &["flac"], decoders: &["flac"], lossy: false, measured: None },
-    AppDecoded { id: "alac", codecs: &["alac"], decoders: &["alac"], lossy: false, measured: None },
+    AppDecoded { id: "flac", codecs: &["flac"], decoders: &["flac"], lossy: false, measured: None, auto_convert: false }, // Fork Rofocale11: new field, row unchanged
+    AppDecoded { id: "alac", codecs: &["alac"], decoders: &["alac"], lossy: false, measured: None, auto_convert: false }, // Fork Rofocale11: new field, row unchanged
     // LPCM in MKV (`A_PCM/INT/LIT`, `/BIG`) and MP4 (`sowt`, `twos`, `in24`, `in32`). The integer
     // widths only: a float or 8-bit track is not claimed ([`audio_codec_id`]), because the
     // path is bit-exact and the Load declares 16 or 32 bits.
@@ -138,9 +144,12 @@ pub const APP_DECODED: &[AppDecoded] = &[
         decoders: &["pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_s32be"],
         lossy: false,
         measured: None,
+        auto_convert: false, // Fork Rofocale11: new field, LPCM stays lossless/bit-exact
     },
+    // Fork Rofocale11: DTS also converts in Auto whenever the set has no native path for the track.
     // DTS core, downmixed to stereo and resampled to 48 kHz: for a set with no DTS decoder (webOS 10+)
-    // and for Force Direct Play there. Enabled on a read table: the TV has measured what it costs.
+    // and for Force Direct Play there, and in Auto for every track the set cannot decode. Enabled on a
+    // read table: the TV has measured what it costs.
     AppDecoded {
         id: "dts",
         codecs: &["dts"],
@@ -150,17 +159,25 @@ pub const APP_DECODED: &[AppDecoded] = &[
             "U5 2026-10: DTS core decode on the dev set (webOS 4.5), whole app 13.1% of one core of four, \
              system 25% busy, 60 fps held",
         ),
+        auto_convert: true, // Fork Rofocale11: DTS opts into Auto conversion
     },
     // MP3 and Vorbis (S4-4): stereo 48 kHz PCM through the same decoder and the same policy as DTS. Unlike
     // a DTS core they can be above 48 kHz, so they stay rate bound ([`audio_rate_bounded`]). Unmeasured:
     // off on a read table until their U5 evidence is recorded here.
-    AppDecoded { id: "mp3", codecs: &["mp3"], decoders: &["mp3"], lossy: true, measured: None },
-    AppDecoded { id: "vorbis", codecs: &["vorbis"], decoders: &["vorbis"], lossy: true, measured: None },
+    AppDecoded { id: "mp3", codecs: &["mp3"], decoders: &["mp3"], lossy: true, measured: None, auto_convert: false }, // Fork Rofocale11: new field, not opted in
+    AppDecoded { id: "vorbis", codecs: &["vorbis"], decoders: &["vorbis"], lossy: true, measured: None, auto_convert: false }, // Fork Rofocale11: new field, not opted in
+    // Fork Rofocale11: TrueHD also converts in Auto when the set has no native path for the track.
     // TrueHD (S4-5): up to eight channels (FFmpeg's `truehd` decodes the 7.1 bed; an Atmos object
     // substream is not rendered), mixed by layout to stereo 48 kHz. The only lossy entry without a rate
     // bound beside DTS, because the app's resampler (`speed_audio::Resampler`) low-passes high rates ([`audio_rate_bounded`]).
-    // Unmeasured, like MP3 and Vorbis.
-    AppDecoded { id: "truehd", codecs: &["truehd"], decoders: &["truehd"], lossy: true, measured: None },
+    // Unmeasured like MP3 and Vorbis, but like DTS it is converted in the app in Auto whenever the set
+    // has no native path for the track.
+    AppDecoded { id: "truehd", codecs: &["truehd"], decoders: &["truehd"], lossy: true, measured: None, auto_convert: true }, // Fork Rofocale11: opted into Auto conversion
+    // Fork Rofocale11: NEW row — Opus converts in the app in Auto when the set cannot decode it.
+    // Opus: the TV's pipeline decodes it natively only up to two channels (`OPUS_AUTO_MAX_CHANNELS`);
+    // a wider track, or a set with no Opus row, is decoded by the app to stereo 48 kHz PCM. FFmpeg's
+    // `opus` decoder is in the bundled build, and the converter resamples nothing (Opus is 48 kHz).
+    AppDecoded { id: "opus", codecs: &["opus"], decoders: &["opus"], lossy: true, measured: None, auto_convert: true }, // Fork Rofocale11: new row, decoder already in ci/build-ffmpeg.sh
 ];
 
 /// Which lossy [`APP_DECODED`] rows a [`Caps`] value may decode in the app.
@@ -219,6 +236,39 @@ pub(crate) fn lossy_row_enabled(row: &AppDecoded, policy: AppLossy) -> bool {
 /// The [`APP_DECODED`] entry covering the stream whose `avcodec_get_name` is `name`.
 pub fn app_decoded_by_ffmpeg_name(name: &str) -> Option<&'static AppDecoded> {
     APP_DECODED.iter().find(|c| c.codecs.contains(&name))
+}
+
+// Fork Rofocale11: NEW helper — the Auto 'convert every DTS/TrueHD/Opus track locally' gate.
+/// Whether `codec` is one the app always converts to stereo PCM in Auto when the set has no
+/// native path for the track (DTS, TrueHD and Opus). This is deliberately independent of
+/// [`AppLossy`] and of whether a device table was read: the viewer's Auto request is that every
+/// such track be converted locally instead of refused. The fork's shim still has to mark the
+/// track `decodable` in its probe verdict so it answers the decision with a direct play.
+pub fn auto_converts_codec(codec: &str) -> bool {
+    let id = audio_codec_id(codec);
+    APP_DECODED.iter().any(|r| r.auto_convert && r.id == id)
+}
+
+// Fork Rofocale11: NEW helper — feeds the Auto PMS profile's direct-play audio list.
+/// The ids of every [`auto_converts_codec`] row, for the fork's shim audio list.
+pub fn auto_convert_codecs() -> impl Iterator<Item = &'static str> {
+    APP_DECODED.iter().filter(|r| r.auto_convert).map(|r| r.id)
+}
+
+// Fork Rofocale11: opt-in switch, off by default so upstream Plex behaviour (and its
+// characterization tests) survives a merge unchanged. The fork's app wiring turns it on at boot.
+static NUVIO_AUTO_CONVERT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Fork Rofocale11: enable the fork's Auto-mode in-app conversion of DTS, TrueHD and Opus.
+/// Called once by `src/app/nuvio.rs`; Auto's mode gate still applies, this only makes the
+/// conversion rows eligible on this app.
+pub fn fork_enable_auto_convert() {
+    NUVIO_AUTO_CONVERT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn fork_auto_convert_enabled() -> bool {
+    NUVIO_AUTO_CONVERT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The channel ceiling of the PCM path: `pcmInfo.channelMode` has `mono` and `stereo` (and
@@ -874,19 +924,26 @@ impl Caps {
 
     /// The app decodes this lossy track to stereo 48 kHz PCM on this value: the policy admits the
     /// row, and the codec is either in force or Force Direct Play has no native path for the track (so
-    /// the app replaces what would be a refusal; a set that plays it natively keeps doing so). The
-    /// track's own limit is the rate bound of a rate-bound row ([`audio_track_fits`]); the channel
-    /// count is no limit of the DECODER (it mixes by layout down to two), but **Force Direct Play
-    /// never mixes a surround source down** ([`Caps::app_may_mix_down`], owner 2026-10-28, #1082): there
-    /// the app decodes a stereo or mono track only, and a surround one keeps its refusal. Auto's value
-    /// with the codec in force (the recovery ladder's last rung) decodes any width.
+    /// the app replaces what would be a refusal; a set that plays it natively keeps doing so). In Auto
+    /// an [`auto_converts_codec`] row (DTS, TrueHD, Opus) is converted whenever the set has no native
+    /// path for the track, once the fork's app has switched that behavior on at boot; it needs neither
+    /// the debug trigger nor a measured table row, and a set that decodes it natively keeps doing so. The track's own limit is the rate bound of a rate-bound row
+    /// ([`audio_track_fits`]); the channel count is no limit of the DECODER (it mixes by layout down to
+    /// two), but **Force Direct Play never mixes a surround source down** ([`Caps::app_may_mix_down`],
+    /// owner 2026-10-28, #1082): there the app decodes a stereo or mono track only, and a surround one
+    /// keeps its refusal. Auto's value with the codec in force (the recovery ladder's last rung) also
+    /// decodes any width.
     pub fn app_decodes_lossy_track(&self, codec: &str, channels: i64, sample_rate: i64, forced: bool) -> bool {
         let id = audio_codec_id(codec);
-        self.app_may_decode_lossy(&id)
+        // Fork Rofocale11: Auto arm of the decision — enabled only by the fork's app boot, so
+        // upstream Plex behaviour stays unchanged (and its characterization tests keep passing).
+        let auto = !forced && fork_auto_convert_enabled() && auto_converts_codec(&id);
+        (auto || self.app_may_decode_lossy(&id)) // Fork Rofocale11: Auto arm no longer needs the measured/debug gate
             && audio_track_fits(&id, channels, sample_rate)
             && self.app_may_mix_down(channels, forced)
             && (self.app_lossy_in_force.contains(id.as_ref())
-                || (forced && !self.native_audio_track(&id, channels, sample_rate, true)))
+                || (forced && !self.native_audio_track(&id, channels, sample_rate, true))
+                || (auto && !self.native_audio_track(&id, channels, sample_rate, false))) // Fork Rofocale11: added Auto no-native-path arm
     }
 
     /// The width/height upper bound for `vcodec` (PMS's lower-case spelling), per axis the lowest
@@ -2820,10 +2877,13 @@ mod tests {
 
     /// Force Direct Play decodes in the app only where the set has no path of its own for the track: a
     /// set whose table lists DTS keeps playing it natively, and one without a DTS row (webOS 10+) does
-    /// not. Auto never takes this path on its own, and a refusal the install learned
-    /// ([`Caps::minus`]) is "no native path" for that width.
+    /// not. Auto also takes this path for the [`auto_converts_codec`] rows, and a refusal the install
+    /// learned ([`Caps::minus`]) is "no native path" for that width.
+    // Fork Rofocale11: the Auto assertion below now expects an in-app conversion.
     #[test]
     fn forced_app_decode_is_only_where_the_set_has_no_native_path() {
+        // Fork Rofocale11: this fork's app turns the Auto conversion on at boot.
+        fork_enable_auto_convert();
         let native = parse(REAL).unwrap();
         assert!(native.audio_has("dts"));
         assert!(!native.app_decodes_lossy_track("dts", 6, 0, true), "the set decodes DTS itself");
@@ -2835,7 +2895,8 @@ mod tests {
             assert!(rowless.app_decodes_lossy_track(spelling, 2, 96_000, true), "{spelling}");
         }
         assert!(!rowless.native_audio_track("dts", 8, 0, true));
-        assert!(!rowless.app_decodes_lossy_track("dts", 6, 0, false), "Auto converts on the server instead");
+        // Fork Rofocale11: CHANGED — Auto converts in-app instead of leaving the track to PMS.
+        assert!(rowless.app_decodes_lossy_track("dts", 6, 0, false), "Auto converts a track the set cannot decode in the app");
         assert!(!Caps::assumed().app_decodes_lossy_track("dts", 2, 0, true), "off is off");
         let learned = native.minus(&[refusal("dts", 6)], "");
         assert!(
@@ -2848,6 +2909,28 @@ mod tests {
             assert!(!unmeasured.app_decodes_lossy_track(codec, 2, 44_100, true), "{codec}: no evidence, no decode");
         }
         assert!(!rowless.app_decodes_lossy_track("ac3", 6, 0, true), "only the lossy rows");
+    }
+
+    // Fork Rofocale11: NEW regression — in Auto every DTS / TrueHD / Opus track the set cannot
+    // decode is converted by the app to stereo PCM, while a natively playable track stays native.
+    #[test]
+    fn auto_converts_dts_truehd_and_opus_when_the_set_has_no_native_path() {
+        // Fork Rofocale11: the fork's boot switch; no upstream test sets it.
+        fork_enable_auto_convert();
+        let rowless = parse(&REAL.replace("DTS", "WMA")).unwrap();
+        for codec in ["dts", "dca", "truehd", "opus"] {
+            assert!(auto_converts_codec(codec), "{codec}: opted in");
+            assert!(rowless.app_decodes_lossy_track(codec, 6, 48_000, false), "{codec}: Auto converts a 5.1 track");
+            assert!(!rowless.native_audio_track(codec, 6, 48_000, false), "{codec}: no native path here");
+        }
+        let native = parse(REAL).unwrap();
+        assert!(!native.app_decodes_lossy_track("dts", 6, 48_000, false), "native DTS stays native");
+        assert!(!native.app_decodes_lossy_track("opus", 2, 48_000, false), "native stereo Opus stays native");
+        for codec in ["dts", "truehd", "opus"] {
+            assert!(Caps::assumed().app_decodes_lossy_track(codec, 6, 48_000, false), "{codec}: unread table still converts");
+        }
+        assert!(!rowless.app_decodes_lossy_track("mp3", 2, 44_100, false), "MP3 untouched");
+        assert!(!rowless.app_decodes_lossy_track("vorbis", 2, 44_100, false), "Vorbis untouched");
     }
 
     /// **The app never mixes a surround source down by default** (owner, 2026-10-28, #1082). Force Direct

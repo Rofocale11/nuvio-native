@@ -83,16 +83,20 @@ preference. Without English dialogue, the compatible file default is retained.
 An explicit user audio choice takes precedence over this initial selection.
 
 
-`devcaps` admits DTS only when the TV's codec table lists it (a 2020 CX does not); TrueHD is never
-direct-play. With accurate `Stream(type 2)` rows the route's existing smart-direct-play picks a
-compatible AAC/AC3/EAC3 sibling of a DTS/TrueHD default. **When there is no compatible track the
-route asks the server to convert it — the shim cannot.** The shim must answer such a decision with
-a refusal and the UI says "audio format not supported"; `plx_nuvio_probe::preferred_audio` is the helper
-that tells the shim this ahead of time (rank such streams last / mark them in the source list).
-On-device DTS→AC3 was assessed and NOT implemented: the bundled FFmpeg is built
-`--disable-everything` with no audio decoders/encoders; it would need `dca` decode + `ac3`
-encode added to `ci/build-ffmpeg.sh` and an audio-transcode lane in the buffer-feed pump (AU
-timing, seek, A/V sync) — a multi-day change.
+<!-- Fork Rofocale11: this section previously said DTS/TrueHD conversion was NOT implemented.
+     The upstream merge brought the bundled `dca`/`truehd`/`opus` decoders and the app's PCM
+     Load path; this fork now uses them in Auto, so keep this paragraph on the merge checklist. -->
+`devcaps` still admits DTS only when the TV's codec table lists it (a 2020 CX does not), and TrueHD
+is never natively direct-play — **but in Auto the app now converts DTS, TrueHD and Opus itself**
+when the TV has no native path for the track. `src/app/nuvio.rs` marks such tracks `decodable` in
+the probe (so the shim's `refusal()` no longer refuses them) and includes them in the shim's
+audio-codec list (so stream ranking does not mark them bad). The route then direct-plays the
+stream, `route::stream_pcm` declares a stereo 48 kHz S16 PCM Load, and `ff_pcm::PcmDecoder`
+downmixes by the frame's channel layout and feeds raw PCM to libpf. A 5.1/7.1 source is mixed
+down to stereo; the track menu labels it "played in stereo". A TV that can decode a codec
+natively keeps using its own decoder, because the app arm only fires when there is no native
+path. A stream that is unprobed, has undecodable video, or has no playable audio at all is still
+refused by the shim as before.
 
 ### Dolby Vision on the CX
 

@@ -84,9 +84,10 @@ Physical confirmation of the new audio default and rating setting is still pendi
 
 ## Limitations
 
+<!-- Fork Rofocale11: DTS/TrueHD conversion was listed here as follow-up work; it is now
+     implemented for Auto (in-app stereo PCM) and must be re-checked on every merge. -->
 See `HANDOFF.md`: watch state/key table and account backend session persistence
-across TV reboot, configured torrent service, DTS/TrueHD conversion and P7 fallback
-remain follow-up work. RT scores require metadata supplied by an addon; MDBList
+across TV reboot, configured torrent service and P7 fallback remain follow-up work. RT scores require metadata supplied by an addon; MDBList
 was not configured or tested here.
 
 
