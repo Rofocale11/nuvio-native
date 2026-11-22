@@ -510,6 +510,9 @@ fn ls2_probe() {
 
 /// Grade only the allowlisted fields in the LS2 wake reply. The raw platform JSON never enters a
 /// report or the local snapshot.
+// Fork Rofocale11: no helper is packaged or activated; kept only for its host test of the LS2
+// reply grammar, which still documents the upstream service contract.
+#[allow(dead_code)]
 #[cfg(any(test, target_os = "linux"))]
 fn storage_activation_reply(reply: &str) -> plx_os::storage::wire::failure::Detail {
     use plx_os::storage::wire::failure::{Detail, Stage};
@@ -536,6 +539,7 @@ fn storage_activation_reply(reply: &str) -> plx_os::storage::wire::failure::Deta
 /// The helper publishes readiness from its startup path, so neither a successful method reply nor
 /// delivery of `/wake` is required; the result is retained only as diagnostics and the authenticated
 /// Unix-socket `Hello` is the sole readiness proof.
+#[allow(dead_code)]
 #[cfg(all(target_os = "linux", not(test)))]
 pub fn activate_storage_helper(service: &str) -> plx_os::storage::wire::failure::Detail {
     use plx_os::storage::wire::failure::{Detail, Stage};
@@ -552,6 +556,7 @@ pub fn activate_storage_helper(service: &str) -> plx_os::storage::wire::failure:
 }
 
 /// A test process has no storage helper to wake: the same answer an absent port gives.
+#[allow(dead_code)]
 #[cfg(all(target_os = "linux", test))]
 pub fn activate_storage_helper(_service: &str) -> plx_os::storage::wire::failure::Detail {
     use plx_os::storage::wire::failure::{Detail, Stage};

@@ -250,7 +250,9 @@ const AUDIO_PREFERENCES_FAILURE_TTL_MAX: Duration = Duration::from_secs(10 * 60)
 
 /// The account-language input consumed by the playback route. `None` is a successful, explicit
 /// "do not auto-select audio" / unset answer, distinct inside the cache from a failed request.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// Fork Rofocale11: serde is added so the Nuvio account's language picks can round-trip through the
+// single redb file; the Plex account DTO conversion below is untouched.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioPreferences {
     pub language: Option<String>,
     /// What plex.tv actually answered, kept only so an unset `language` can say WHY on the route

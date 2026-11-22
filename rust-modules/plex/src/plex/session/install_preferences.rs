@@ -85,6 +85,15 @@ fn candidates() -> Vec<PathBuf> {
 /// The first candidate this build accepts: the retained choices and, from a version 2 file, the
 /// install's client id.
 pub(super) fn read() -> Option<(Retained, Option<String>)> {
+    // Fork Rofocale11: install-wide choices (language, UI resolution, client id) live in the one
+    // redb file on a Nuvio build. A legacy `language.json` is still read as a migration source.
+    if let Some(store) = plx_nuvio_store::get() {
+        if let Some(bytes) = store.get(plx_nuvio_store::Table::InstallPrefs, "prefs") {
+            if let Some(saved) = serde_json::from_slice::<Saved>(&bytes).ok().and_then(Saved::accepted) {
+                return Some(saved);
+            }
+        }
+    }
     candidates().into_iter().find_map(|path| {
         let bytes = read_owned_regular(&path)?;
         serde_json::from_slice::<Saved>(&bytes).ok()?.accepted()
@@ -97,6 +106,10 @@ pub(super) fn load() -> Option<Retained> {
 
 /// Write `bytes` to the first candidate that takes them and reads back exactly.
 fn write_first(bytes: &[u8]) -> bool {
+    if let Some(store) = plx_nuvio_store::get() {
+        return store.put(plx_nuvio_store::Table::InstallPrefs, "prefs", bytes).is_ok()
+            && store.get(plx_nuvio_store::Table::InstallPrefs, "prefs").as_deref() == Some(bytes);
+    }
     for path in candidates() {
         if write_atomic(&path, bytes).is_ok()
             && std::fs::File::open(path.parent().expect("preference parent"))
@@ -133,6 +146,12 @@ pub(super) fn save_v2(kept: Retained, client_id: &str) -> bool {
 
 /// Delete every candidate, including a stale earlier fallback. No credential resource is read.
 pub(super) fn erase() -> Vec<String> {
+    if let Some(store) = plx_nuvio_store::get() {
+        if store.remove(plx_nuvio_store::Table::InstallPrefs, "prefs").is_err() {
+            return vec!["install preferences: redb erase failed".into()];
+        }
+        return Vec::new();
+    }
     candidates().into_iter().filter_map(|path| {
         plx_os::storage::remove_file_or_prove_absent(&path)
             .err().map(|error| format!("{}: {error}", path.display()))

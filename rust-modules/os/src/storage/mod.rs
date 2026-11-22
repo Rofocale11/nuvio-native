@@ -1189,10 +1189,14 @@ mod tests {
     }
 }
 
-// Exercise client → coordinator → real helper backend with injected external DB8 RPC on host.
-#[cfg(any(test, feature = "test-support"))]
+// Fork Rofocale11: the canonical backend and keymanager engine are no longer test-only. Nuvio
+// Native runs them IN PROCESS against the single redb file (see `redb_backend`), so the app never
+// talks to the separate DB8 helper. Upstream keeps these modules test-only in the helper binary;
+// the fork's client dispatches to them on every build.
 #[path = "../storage_service/backend.rs"]
 pub mod backend;
-#[cfg(any(test, feature = "test-support"))]
 #[path = "../storage_service/keymanager.rs"]
 pub mod keymanager;
+// Fork Rofocale11: DB8-shaped Luna calls answered from the single redb file.
+#[path = "redb_backend.rs"]
+pub mod redb_backend;

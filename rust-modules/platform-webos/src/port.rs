@@ -169,8 +169,9 @@ pub extern "C" fn plex_run(pms_host: *const c_char, pms_port: c_int) -> c_int {
 /// credentials, see `plx_os::storage::client`), not a statement that this is a webOS build; the helper's
 /// own wire type keeps the wake-up out of `tv::StorageHooks`.
 fn plex_main(pms_host: *const c_char, pms_port: c_int) -> ! {
-    #[cfg(target_os = "linux")]
-    let _ = plx_os::storage::client::install_activator(crate::webos::activate_storage_helper);
+    // Fork Rofocale11: no helper binary is packaged and the storage client now dispatches to the
+    // in-process redb backend, so there is no LS2 service to wake. Upstream's activator remains
+    // installed nowhere; the upstream call is intentionally dropped here.
     plx_gfx::gfx::install_clear_probe(crate::system::frame_probe_waiting, crate::system::frame_probe_acquired);
     // SAFETY: `src/main.c` hands `PMS_HOST`, a NUL-terminated string literal, so the pointer is never NULL.
     let host = unsafe { std::ffi::CStr::from_ptr(pms_host) };

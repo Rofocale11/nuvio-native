@@ -242,6 +242,19 @@ pre-existing failures were observed and reproduced on the untouched baseline:
 `plx_media::player::tests::the_feed_counts_a_gap_only_between_two_stamped_callbacks`
 and `ci/check-deps.sh`'s `forks` ledger gap at `plex/servers.rs::register_with_client_id`.
 
+## Agent instructions and non-commentable edits (single-store change)
+
+- `AGENTS.md` is upstream-owned. The only fork edit in it is the two-line pointer under
+  "Load the right context" that sends agents to `docs/nuvio/AGENTS.md`. It carries the literal
+  `Fork Rofocale11:` marker, but is recorded here too because a future upstream rewrite of that
+  section is the likeliest place for the pointer to be dropped. The fork rules themselves live in
+  fork-owned `docs/nuvio/AGENTS.md`, never in the upstream file.
+- `rust-modules/Cargo.lock` gained `redb 4.6.0` and `ring 0.17.14` edges for `plx_nuvio_store` and
+  `plx_os`. Lockfiles cannot carry a comment; regenerate rather than hand-edit on merge.
+- `ci/test_storage_service_package.py` was rewritten (not merely patched) to grade the *absence*
+  of a storage helper. It is upstream-owned but carries the fork reason in its module docstring.
+- The new `docs/nuvio/AGENTS.md` is fork-owned and needs no marker.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.

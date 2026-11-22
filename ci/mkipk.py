@@ -112,32 +112,21 @@ def storage_archive_errors(blob: bytes, app_id: str) -> list[str]:
                 errors.append("duplicate archive members are forbidden")
             if any(n.startswith(f"usr/palm/applications/{app_id}/state") for n in members):
                 errors.append("obsolete writable app state is forbidden")
+            # Fork Rofocale11: no storage helper is packaged. Any service payload is a regression
+            # to DB8 and must fail the package check.
             files = {n for n, m in members.items() if m.isfile() and n.startswith("usr/palm/services/")}
-            if files != {prefix + "services.json", prefix + "plxnative-storage"}:
-                errors.append("service payload must contain exactly this flavor's descriptor and helper")
-            executable = members.get(prefix + "plxnative-storage")
-            if executable is None or not executable.isfile() or executable.mode & 0o7777 != 0o755:
-                errors.append("storage helper must be a regular executable with mode 0755")
-            elif executable.uid != 0 or executable.gid != 0:
-                errors.append("storage helper must have normalized root ownership")
-            else:
-                header = tf.extractfile(executable).read(20)
-                if len(header) != 20 or header[:6] != b"\x7fELF\x01\x01" or header[18:20] != b"\x28\x00":
-                    errors.append("storage helper must be a little-endian ARM ELF32 binary")
-            for name in (prefix + "services.json", f"usr/palm/packages/{app_id}/packageinfo.json", f"usr/palm/applications/{app_id}/appinfo.json"):
+            if files:
+                errors.append("Nuvio Native must not package a storage helper service")
+            for name in (f"usr/palm/packages/{app_id}/packageinfo.json", f"usr/palm/applications/{app_id}/appinfo.json"):
                 member = members.get(name)
                 if member is None or not member.isfile():
                     errors.append("missing regular " + name)
                     continue
                 metadata = json.load(tf.extractfile(member))
-                if name.endswith("services.json"):
-                    if metadata != {"id": service_id, "description": "PlxNative private storage", "engine": "native", "executable": "plxnative-storage", "services": [{"name": service_id, "commands": []}]}:
-                        errors.append("service identity/activation-only metadata differs")
-                else:
-                    if metadata.get("id") != app_id or metadata.get("requiredPermissions") != STORAGE_PERMISSIONS:
-                        errors.append("app/package identity or storage capability groups differ")
-                    if name.endswith("packageinfo.json") and (metadata.get("app") != app_id or metadata.get("services") != [service_id]):
-                        errors.append("package/app/service membership differs")
+                if metadata.get("id") != app_id or metadata.get("requiredPermissions") != STORAGE_PERMISSIONS:
+                    errors.append("app/package identity or storage capability groups differ")
+                if name.endswith("packageinfo.json") and (metadata.get("app") != app_id or metadata.get("services") != []):
+                    errors.append("package must declare no storage service")
             if any(Path(n).name in {"auth.json", "session.json", "consent.json", "state.json", "rendezvous.json", "storage.sock"} for n in members):
                 errors.append("runtime credentials or rendezvous files must not be packaged")
     except (tarfile.TarError, OSError, ValueError) as exc:
@@ -195,9 +184,11 @@ def write_packageinfo(data: Path, app: dict) -> Path:
     out = pkg_dir / "packageinfo.json"
     # Key order and 4-space indent match what `ares-package` emits, so a diff against a
     # stock-tooling package shows only the values.
+    # Fork Rofocale11: Nuvio Native dissolved the private DB8 helper into the app's single redb
+    # file, so this package declares no service at all.
     out.write_text(json.dumps({
         "app": app["id"],
-        "services": [app["id"] + ".storage"],
+        "services": [],
         "requiredPermissions": STORAGE_PERMISSIONS,
         "id": app["id"],
         "loc_name": app["title"],
@@ -333,7 +324,8 @@ def main() -> int:
     if [p.name for p in staged] != [app["id"]]:
         sys.exit(f"staged applications/{[p.name for p in staged]} does not match appinfo id {app['id']}")
     write_packageinfo(root / "data", app)
-    stage_storage_service(repo, root / "data", app)
+    # Fork Rofocale11: no storage service is staged. The in-process redb backend in
+    # plx_os::storage::redb_backend answers the same protocol inside the app process.
     # Before `control_with_size`, which sums the staged tree for `Installed-Size`.
     locales = stage_resources(repo, root / "data", app)
     control, kib = control_with_size(root / "ctl" / "control", root / "data", flav)

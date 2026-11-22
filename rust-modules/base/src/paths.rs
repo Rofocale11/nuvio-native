@@ -1376,6 +1376,45 @@ pub fn persistent_state_root() -> PathBuf {
     }
 }
 
+// Fork Rofocale11: the fork's one durable store lives in the shim's data directory. This used to
+// be private to `app/nuvio.rs`; it moved here so the app, the shim and the in-process storage
+// backend all resolve the SAME file without any of them depending on the application crate. The
+// writability probe is unchanged: a Developer Mode jail answers `is_dir` and even
+// `create_dir_all` on paths it then refuses files in, so the first candidate that can actually
+// create a file wins. The runtime dir is the last resort — writable everywhere, but /tmp on a TV.
+pub fn nuvio_data_dir() -> PathBuf {
+    let writable = |d: &Path| {
+        std::fs::create_dir_all(d).is_ok() && {
+            let probe = d.join(".probe");
+            let ok = std::fs::write(&probe, b"1").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            ok
+        }
+    };
+    let candidates = [
+        PathBuf::from(format!("/media/developer/{}.nuvio", app_id())),
+        persistent_state_root().join("nuvio"),
+        runtime_dir().join("nuvio"),
+    ];
+    for d in &candidates {
+        if writable(d) {
+            return d.clone();
+        }
+    }
+    candidates[2].clone()
+}
+
+/// Fork Rofocale11: the single `nuvio.redb` every Nuvio Native record is kept in.
+pub fn nuvio_store_path() -> PathBuf {
+    nuvio_data_dir().join("shim").join(nuvio_store_file_name())
+}
+
+/// Fork Rofocale11: the file name lives in the store crate; kept as a function here so `base`
+/// has no dependency on that crate (it would be an upward edge from base to a leaf).
+fn nuvio_store_file_name() -> &'static str {
+    "nuvio.redb"
+}
+
 /// The per-process scratch directory an un-redirected test resolves to, instead of the real,
 /// machine-wide `runtime_dir().join("state")`. Empty at first use in this process, isolated from
 /// every other checkout, worktree, and concurrently running `cargo test` invocation, and never the

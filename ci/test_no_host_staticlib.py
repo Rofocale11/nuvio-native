@@ -47,9 +47,11 @@ CRATE = "plxnative_modules"
 # Fork Rofocale11: `plx_stremio` and `plx_pmsshim` are NuvioNative's Stremio-addon backend and
 # loopback PMS-dialect shim layer crates. They stay in this gate so a host build cannot silently
 # turn either into an archive; upstream's list omits them because it has no shim wiring at all.
-# `plx_nuvio_probe` is the fork's extracted addon-stream prober, held to the same rlib-only rule.
+# Fork Rofocale11: `plx_nuvio_store` (one redb file for the whole fork) joins the layer-crate list
+# and the throwaway-workspace file list; upstream has neither. `plx_nuvio_probe` is the fork's
+# extracted addon-stream prober, held to the same rlib-only rule.
 # Upstream's `plx_platform` -> `plx_os` rename and new playback/platform crates are kept.
-LAYER_CRATES = ("plx_base", "plx_machine", "plx_net", "plx_os", "plx_gfx", "plx_ui", "plx_plex", "plx_telemetry", "plx_data", "plx_session", "plx_media", "plx_playback_contract", "plx_play_uri", "plx_play_feed", "plx_media_codecs", "plx_appkit", "plx_screens", "plx_shell_sdl", "plx_stremio", "plx_pmsshim", "plx_nuvio_probe")
+LAYER_CRATES = ("plx_base", "plx_machine", "plx_net", "plx_os", "plx_gfx", "plx_ui", "plx_plex", "plx_telemetry", "plx_data", "plx_session", "plx_media", "plx_playback_contract", "plx_play_uri", "plx_play_feed", "plx_media_codecs", "plx_appkit", "plx_screens", "plx_shell_sdl", "plx_stremio", "plx_pmsshim", "plx_nuvio_probe", "plx_nuvio_store")
 # The two platform crates (W7b): dependents of the app crate, never dependencies of it, so they are
 # in a unit graph of their own, and held to the same rule.
 PLATFORM_CRATES = ("plx_platform_webos", "plx_platform_desktop")
@@ -62,7 +64,7 @@ TOOLCHAIN = pinned()  # the repo's one toolchain
 # graph resolve in the throwaway copy fails on the missing shim packages.
 # Fork Rofocale11: `nuvio-probe` is the fork-owned stream-prober crate; like stremio/pmsshim it must be
 # symlinked into the throwaway workspace or cargo cannot resolve the manifest's `plx_nuvio_probe` edge.
-WORKSPACE_FILES = (".cargo", "Cargo.lock", "build.rs", "build_support", "src", "storage", "base", "machine", "net", "os", "gfx", "ui", "plex", "telemetry", "data", "session", "media", "playback-contract", "play-uri", "play-feed", "media-codecs", "appkit", "screens", "shell-sdl", "platform-webos", "platform-desktop", "owp", "stremio", "pmsshim", "nuvio-probe")
+WORKSPACE_FILES = (".cargo", "Cargo.lock", "build.rs", "build_support", "src", "storage", "base", "machine", "net", "os", "gfx", "ui", "plex", "telemetry", "data", "session", "media", "playback-contract", "play-uri", "play-feed", "media-codecs", "appkit", "screens", "shell-sdl", "platform-webos", "platform-desktop", "owp", "stremio", "pmsshim", "nuvio-probe", "nuvio-store")
 
 
 def offences(unit_graph=None, metadata=None, crate=CRATE):

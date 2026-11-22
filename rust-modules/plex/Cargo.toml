@@ -33,6 +33,9 @@ plx_base = { path = "../base" }
 plx_machine = { path = "../machine" }
 plx_os = { path = "../os" }
 plx_net = { path = "../net" }
+# Fork Rofocale11: Nuvio Native has no plex.tv account, so the account-language preferences are
+# kept in the app's one redb file instead of /api/v2/user.
+plx_nuvio_store = { path = "../nuvio-store" }
 libc = "0.2"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }

@@ -43,9 +43,19 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   and refuses media that cannot direct play; the native route uses its probed fields.
   The Streams overlay uses `/nuvio/streams` and `/nuvio/select`, retaining the shim's
   ranked index instead of confusing it with the selected-first Media list.
-- Addon configuration: a separate opaque JSON record in the app's private DB8 kind,
-  loaded/saved through the authenticated storage helper. Stable/debug/nightly own
-  separate records. The helper verifies readback before import files are removed.
+- **One durable store, no DB8.** Every Nuvio Native record — the canonical session and all its
+  Settings preferences, addon configuration, install-wide preferences (language, resolution,
+  client id), the Nuvio account's audio/subtitle preferences, watch state, the ratingKey table,
+  the Nuvio backend session and the shim's local settings — lives in a single `nuvio.redb` in
+  `<data>/shim/`. Upstream's `storage_service::backend::Backend` is run **in process** by
+  `plx_os::storage::redb_backend`: DB8's objects and Keymanager3's AES-256-GCM envelopes are two
+  more tables in that file, so the session/preference/consent layers keep their exact wire
+  semantics and tests. The separate `plxstorage` helper is no longer built, packaged or activated
+  (the ipk declares no service). Host/simulator builds still use upstream's `Files` authority.
+  Legacy on-disk files (`settings.json`, `watch.json`, `keys.tsv`, the account-session JSON and
+  `language.json`) are read once as migration sources and written into redb. DB8 records cannot
+  be migrated — no helper is available to read them — so anything that lived only there starts
+  fresh.
 - Torrents (`infoHash`): played through a Stremio-compatible streaming server URL
   (`<server>/<infoHash>/<fileIdx>`) when one is configured; debrid-resolved HTTP links from
   Torrentio/AIOStreams play directly. Local server scanning is off by default and
@@ -66,17 +76,27 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   The selected profile is retained with the backend session. The UI uses
   `/nuvio/library`, runs requests on a worker and refreshes Home after a confirmed
   reply; the shelf pages through `/hubs/nuvio/list`.
-- Watch state / progress: stored locally by the shim (the app already reports timeline to "the
-  server"). Developer Mode's writable-directory fallback is `/tmp`, so this state
-  and the key table are not yet durable across TV reboots.
+- Watch state / progress: stored by the shim in the same redb file (the app already reports
+  timeline to "the server"). Durability across a TV reboot is now whatever `nuvio_data_dir()`
+  resolves to: `/media/developer/<appid>.nuvio` when writable, else the persistent state root,
+  else the Developer Mode runtime fallback (`/tmp`). Confirm the chosen directory on the set
+  before claiming reboot durability.
 
 ## Crates
 
+The fork-owned crates are separate workspace members so an upstream rewrite of a shared file
+cannot drag fork code through a merge. `plx_os`, `plx_plex` and the application crate have small
+marked seams into `plx_nuvio_store`; `plx_pmsshim` and `plx_nuvio_probe` are entirely fork-owned.
+
 | crate | owner | depends on |
 |---|---|---|
-| `rust-modules/stremio` (`plx_stremio`) | backend | `plx_base`, `plx_net`, serde |
-| `rust-modules/pmsshim` (`plx_pmsshim`) | shim | `plx_stremio`, `plx_base` |
-| app wiring (boot, appinfo, settings) | lead/integration | all |
+| `rust-modules/stremio` (`plx_stremio`) | fork-owned backend | `plx_base`, `plx_net`, serde |
+| `rust-modules/pmsshim` (`plx_pmsshim`) | fork-owned shim | `plx_stremio`, `plx_net`, `plx_nuvio_store`, serde |
+| `rust-modules/nuvio-probe` (`plx_nuvio_probe`) | fork-owned probe | `plx_base`, `plx_net`, `plx_plex`, `plx_media_codecs` |
+| `rust-modules/nuvio-store` (`plx_nuvio_store`) | fork-owned single store | `redb`, `plx_base` |
+| `rust-modules/os` (`plx_os`) | upstream, fork-marked | `plx_nuvio_store`, `ring` — runs the canonical storage backend in process |
+| `rust-modules/plex` (`plx_plex`) | upstream, fork-marked | `plx_nuvio_store` — Nuvio account preferences |
+| `rust-modules/src/app` (`plxnative-modules`) | upstream, fork-marked | all of the above — boot, appinfo, settings |
 
 ## App identity
 

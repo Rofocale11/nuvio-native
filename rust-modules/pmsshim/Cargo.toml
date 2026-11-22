@@ -17,6 +17,9 @@ path = "src/bin/serve.rs"
 [dependencies]
 plx_net = { path = "../net" }
 plx_stremio = { path = "../stremio" }
+# Fork Rofocale11: the shim keeps its key table, watch state and account session in the app's one
+# redb file, never in a second on-disk format.
+plx_nuvio_store = { path = "../nuvio-store" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 # gunzip of addon subtitle downloads (already in the tree through `image`'s png decoder).

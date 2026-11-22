@@ -382,6 +382,18 @@ static START_GATE: std::sync::Mutex<StartGate> = std::sync::Mutex::new(StartGate
 fn transact(command: Request) -> Result<Response, ClientError> {
     let _block = plx_base::task::assert_may_block(const { &plx_base::task::BlockingLabel::new("storage helper transact") });
     failure::clear();
+    // Fork Rofocale11: Nuvio Native keeps NO DB8 record and ships NO helper. The same wire
+    // protocol is dispatched in process against the single redb file; the socket path below is
+    // retained only for the upstream helper and is never reached in a fork build.
+    match super::redb_backend::dispatch(command) {
+        Ok(response) => return Ok(response),
+        Err(message) => {
+            plx_base::eventlog::log(&format!("storage: redb backend unavailable: {message}"));
+            return Err(failed(Stage::BackendRejected, None, ClientError::Unavailable));
+        }
+    }
+    #[allow(unreachable_code)]
+    {
     let mut report = TransactionReport::new();
     let until = Instant::now() + START_DEADLINE;
     let mut hinted = false;
@@ -487,6 +499,7 @@ fn transact(command: Request) -> Result<Response, ClientError> {
             return Err(error);
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
     }
 }
 

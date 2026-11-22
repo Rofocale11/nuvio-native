@@ -2014,6 +2014,22 @@ mechanism as `plx_ui` and `plx_screens`, so its `crate::` paths and unit tests l
 as `media::curlio`, bound locally rather than importing from `plx_media` so the reference does not
 point upward. It adds no worker, global or `cfg(test)` production fork.
 
+## Fork Rofocale11: addition of `nuvio_store`
+
+Nuvio Native keeps every durable record in ONE file, `nuvio.redb` under `<data>/shim/`: the
+canonical session and all Settings preferences, install-wide preferences, the Nuvio account's
+audio/subtitle picks, addon configuration, watch state, the ratingKey table, the Nuvio backend
+session and the shim's local settings. `ci/module-layers.ini` gains `[nuvio_store]` with
+`uses = base` and one mounted member, nuvio_store; `[os]`, `[plex]`, `[pmsshim]` and `[app]` gain
+the matching edge. It names no schema — callers own the bytes — so it cannot pull in an upper
+layer and the graph stays acyclic.
+
+`plx_os::storage::redb_backend` runs upstream's unchanged `storage_service::backend::Backend`
+in process against that file: DB8's objects and Keymanager3's AES-256-GCM envelopes are two more
+tables, so the session, consent and preference layers keep their protocol and tests while no DB8
+helper is built or packaged. The ipk declares no service (`ci/mkipk.py`); `ci/module-layers.ini`,
+`ci/test_no_host_staticlib.py` and the package check hold the new crate and the absent helper.
+
 ## What the split cost the binary, and how the release profile pays it back
 
 The split made the shipped binary bigger, split by split. Every layer crate is compiled on its own,

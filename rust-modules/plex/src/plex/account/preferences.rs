@@ -10,6 +10,15 @@ use std::time::Instant;
 static PREFERENCE_IO: Mutex<()> = Mutex::new(());
 const CLIENTS_PLEX_TV: &str = "https://clients.plex.tv";
 
+// Fork Rofocale11: Nuvio Native has no plex.tv account to own these rows. When the in-process
+// shim is registered instead, the very same typed snapshot is read from and written to the
+// single redb file, so every Settings row works without inventing a second preferences surface.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Plex,
+    Nuvio,
+}
+
 #[derive(Clone)]
 pub struct PreferenceRequest {
     stamp: String,
@@ -17,6 +26,7 @@ pub struct PreferenceRequest {
     credential: String,
     user: crate::plex::session::UserRef,
     key: AudioPreferencesKey,
+    source: Source,
 }
 
 #[derive(Clone, Debug)]
@@ -65,11 +75,18 @@ impl PreferenceRequest {
     pub fn capture() -> Option<Self> {
         let current = crate::plex::session::current_snapshot();
         let user = current.user.clone()?;
-        let credential = crate::plex::session::plex_tv_credential(&user)?;
+        let credential = crate::plex::session::plex_tv_credential(&user);
         let client_id = crate::plex::session::peek().client_id.clone();
         if client_id.is_empty() { return None; }
+        let source = if credential.is_some() {
+            Source::Plex
+        } else if plx_base::local_server::get().is_some() {
+            Source::Nuvio
+        } else {
+            return None;
+        };
         Some(Self { stamp: current.stamp.clone(), key: AudioPreferencesKey::new(&user, current.generation),
-            client_id, credential, user })
+            client_id, credential: credential.unwrap_or_default(), user, source })
     }
 
     /// Marker reads may prove the implicit owner through the captured account's Home roster.
@@ -106,10 +123,14 @@ impl PreferenceRequest {
         plx_base::testlock::assert_held("account preference receipt fixture");
         let key = AudioPreferencesKey::new(&user, generation);
         (Self { stamp: String::new(), client_id: "preference-fixture-client".into(), credential: "synthetic-token".into(),
-            user, key: key.clone() }, PreferenceSnapshot { preferences, key, revision: 0 })
+            user, key: key.clone(), source: Source::Plex }, PreferenceSnapshot { preferences, key, revision: 0 })
     }
 
     pub fn load(&self) -> Result<PreferenceSnapshot, PreferenceError> {
+        // Fork Rofocale11: the Nuvio account has no plex.tv /api/v2/user row. Its language picks
+        // are local, in the same redb file as every other preference, and carry the same typed
+        // snapshot the Account/Subtitles pages already draw.
+        if self.source == Source::Nuvio { return self.nuvio_load(); }
         self.load_with(&super::AUDIO_PREFERENCES_CACHE, &PREFERENCE_IO,
             || self.is_current(), |method, path, query| self.request(method, path, query))
     }
@@ -117,8 +138,35 @@ impl PreferenceRequest {
     pub fn save(&self, snapshot: &PreferenceSnapshot, update: PreferenceUpdate)
         -> Result<PreferenceSnapshot, PreferenceError>
     {
+        if self.source == Source::Nuvio { return self.nuvio_save(update); }
         self.save_with(&super::AUDIO_PREFERENCES_CACHE, &PREFERENCE_IO, snapshot, update,
             || self.is_current(), |method, path, query| self.request(method, path, query))
+    }
+
+    fn nuvio_load(&self) -> Result<PreferenceSnapshot, PreferenceError> {
+        let store = plx_nuvio_store::get().ok_or(PreferenceError::Unavailable)?;
+        let preferences = store
+            .get(plx_nuvio_store::Table::AccountPrefs, "prefs")
+            .and_then(|bytes| serde_json::from_slice::<AudioPreferences>(&bytes).ok())
+            .unwrap_or_default();
+        Ok(PreferenceSnapshot { preferences, key: self.key.clone(), revision: 1 })
+    }
+
+    fn nuvio_save(&self, update: PreferenceUpdate) -> Result<PreferenceSnapshot, PreferenceError> {
+        let store = plx_nuvio_store::get().ok_or(PreferenceError::Unavailable)?;
+        let mut next = self.nuvio_load()?.preferences;
+        if let Some(v) = update.auto_select_audio { next.auto_select_audio = Some(v); }
+        if let Some(v) = update.audio_language {
+            next.language = (!v.is_empty()).then_some(v.clone());
+            next.stated_language = (!v.is_empty()).then_some(v);
+        }
+        if let Some(v) = update.subtitle_language { next.subtitle_language = (!v.is_empty()).then_some(v); }
+        if let Some(v) = update.subtitle_mode { next.subtitle_mode = v; }
+        if let Some(v) = update.subtitle_forced { next.subtitle_forced = v; }
+        let bytes = serde_json::to_vec(&next).map_err(|_| PreferenceError::InvalidPreference)?;
+        store.put(plx_nuvio_store::Table::AccountPrefs, "prefs", &bytes)
+            .map_err(|_| PreferenceError::Unavailable)?;
+        Ok(PreferenceSnapshot { preferences: next, key: self.key.clone(), revision: 1 })
     }
 
     fn request(&self, method: &str, path: &str, query: &str)
@@ -292,7 +340,7 @@ mod tests {
             token: "pms-only-token".into(), plex_tv_token: Some("account-only-token".into()),
             ..Default::default() };
         PreferenceRequest { stamp: String::new(), client_id: "fixture-client".into(), credential: "account-only-token".into(),
-            key: AudioPreferencesKey::new(&user, 4), user }
+            key: AudioPreferencesKey::new(&user, 4), user, source: Source::Plex }
     }
     fn response(body: &str) -> plx_net::net::Resp {
         plx_net::net::Resp { status: 200, body: body.as_bytes().to_vec(), peer_pin: None, etag: None }

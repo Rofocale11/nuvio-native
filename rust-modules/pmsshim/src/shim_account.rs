@@ -69,7 +69,12 @@ fn session_from_json(v: &Value) -> Option<plx_stremio::nuvio::Session> {
 impl Account {
     pub fn new(dir: Option<&std::path::Path>, token: &str) -> Account {
         let file = dir.map(|d| d.join("nuvio-session.json"));
-        let stored = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        // Fork Rofocale11: the Nuvio backend session lives in the one redb file. A legacy JSON
+        // file is still read on first boot so an install can migrate without signing in again.
+        let stored = match plx_nuvio_store::get().and_then(|s| s.get(plx_nuvio_store::Table::AccountSession, "session")) {
+            Some(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+            None => file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok()),
+        };
         let session = stored.as_ref().and_then(session_from_json);
         let profile = stored.as_ref().and_then(|v| v["profile_id"].as_str()).filter(|s| s.parse::<u32>().is_ok_and(|n| n > 0)).map(str::to_string);
         Account {
@@ -361,6 +366,20 @@ fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
 
 
 fn save_session_file(file: &std::path::Path, session: Option<&plx_stremio::nuvio::Session>, profile: Option<&str>) {
+    // Fork Rofocale11: one file, one record. The path is kept only as the in-memory-mode gate.
+    if let Some(store) = plx_nuvio_store::get() {
+        match session {
+            Some(session) => {
+                let mut value = session_to_json(session);
+                value["profile_id"] = json!(profile);
+                if let Ok(bytes) = serde_json::to_vec(&value) {
+                    let _ = store.put(plx_nuvio_store::Table::AccountSession, "session", &bytes);
+                }
+            }
+            None => { let _ = store.remove(plx_nuvio_store::Table::AccountSession, "session"); }
+        }
+        return;
+    }
     match session {
         Some(session) => {
             let mut value = session_to_json(session);

@@ -2,13 +2,15 @@
 //! addons and install it as the app's one server (`plx_base::local_server`), before anything asks
 //! for a server or for plex.tv. See `docs/nuvio/ARCHITECTURE.md`.
 //!
-//! - TV addons live in private DB8 storage; host addons live in `<data>/addons.json` (`plx_stremio::AddonSet`'s format); Cinemeta + OpenSubtitles
+//! - Every Nuvio Native record (TV addons included) lives in ONE `nuvio.redb`; host addons fall back
+//!   to `<data>/addons.json` (`plx_stremio::AddonSet`'s format); Cinemeta + OpenSubtitles
 //!   when there is none.
 //! - `<runtime dir>/nuvio-import/nuvio-import.json` (written by `tools/nv-import-nuvio.mjs` from the user's Nuvio
 //!   install) replaces that set once, is persisted, then deleted.
-//! - The shim's watch state and key table live in `<data>/shim/`. `<data>` survives an app
-//!   reinstall only when a persistent writable directory is available. Developer Mode falls
-//!   back to `/tmp`, so watch progress and key mappings can be lost on reboot.
+//! - The shim's watch state, key table, account session and local settings live in the same
+//!   `<data>/shim/nuvio.redb`. `<data>` survives an app reinstall only when a persistent writable
+//!   directory is available; Developer Mode's last fallback is `/tmp`, so durability across a
+//!   reboot depends on which `nuvio_data_dir()` candidate the set grants.
 //! - Streams are probed with the bundled FFmpeg at play time ([`prober`]).
 //! - Torrents play through a Stremio-compatible streaming server: `<data>/settings.json`'s
 //!   `torrentServer`, else an explicitly enabled (`enableTorrents`) local scan.
@@ -32,33 +34,13 @@ pub(crate) fn handle() -> Option<&'static plx_pmsshim::Handle> {
     HANDLE.get()
 }
 
+/// Fork Rofocale11: the data root now lives in `plx_base::paths` so the app, the shim and the
+/// in-process storage backend all resolve the SAME single redb file without a circular edge.
 fn data_dir() -> PathBuf {
-    // The first candidate this process can really WRITE: a Developer Mode jail answers `is_dir`
-    // and even `create_dir_all` on paths it then refuses files in. The runtime dir is the last
-    // resort — writable everywhere, but on a TV it is /tmp, so it lasts until the set reboots.
-    let writable = |d: &Path| {
-        std::fs::create_dir_all(d).is_ok() && {
-            let probe = d.join(".probe");
-            let ok = std::fs::write(&probe, b"1").is_ok();
-            let _ = std::fs::remove_file(&probe);
-            ok
-        }
-    };
-    let candidates = [
-        PathBuf::from(format!("/media/developer/{}.nuvio", plx_base::paths::app_id())),
-        plx_base::paths::persistent_state_root().join("nuvio"),
-        plx_base::paths::runtime_dir().join("nuvio"),
-    ];
-    for d in &candidates {
-        if writable(d) {
-            log(&format!("nuvio: data dir {}", d.display()));
-            return d.clone();
-        }
-    }
-    candidates[2].clone()
+    plx_base::paths::nuvio_data_dir()
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     torrent_server: Option<String>,
@@ -112,7 +94,7 @@ fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
     {
         match plx_os::storage::client::load_nuvio() {
             Ok(Some(payload)) => {
-                log("nuvio: addon configuration restored from DB8");
+                log("nuvio: addon configuration restored from the single store");
                 return plx_stremio::AddonSet::from_json(&payload);
             }
             Err(_) => log("nuvio: addon storage unavailable; retaining import/cache for retry"),
@@ -120,7 +102,7 @@ fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
         }
         if let Some(set) = plx_stremio::AddonSet::load(path) {
             if save_addons(&set, path) {
-                log("nuvio: addon configuration migrated to DB8");
+                log("nuvio: addon configuration migrated to the single store");
                 let _ = std::fs::remove_file(path);
             }
             return Some(set);
@@ -139,7 +121,7 @@ pub(crate) fn boot() {
     let _ = std::fs::create_dir_all(&data);
     let addons_path = data.join("addons.json");
     // The dev shell and native app have different UIDs. A group-writable, non-sticky
-    // handoff directory lets the app remove the dev-owned file after verified DB8 save.
+    // handoff directory lets the app remove the dev-owned file after a verified store save.
     // Stable's runtime root is sticky /tmp; a file placed directly there cannot be removed.
     let handoff = plx_base::paths::runtime_dir().join("nuvio-import/nuvio-import.json");
     let import_path = if handoff.is_file() { handoff } else {
@@ -164,7 +146,27 @@ pub(crate) fn boot() {
     }
     let set = imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults);
     log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
-    let settings: Settings = std::fs::read(data.join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    // Fork Rofocale11: one store for the whole app. Published before the shim starts so the
+    // shim's key table, watch state and account session land in the SAME file as the canonical
+    // session record (the storage backend opens it lazily on its first call).
+    match plx_nuvio_store::install_default() {
+        Ok(_) => log("nuvio: single redb store opened"),
+        Err(e) => log(&format!("nuvio: redb store unavailable: {e}")),
+    }
+    let settings_path = data.join("settings.json");
+    let settings: Settings = plx_nuvio_store::get()
+        .and_then(|s| s.get(plx_nuvio_store::Table::LocalSettings, "settings"))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .or_else(|| {
+            let from_file = std::fs::read(&settings_path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            if let (Some(store), Some(value)) = (plx_nuvio_store::get(), from_file.as_ref()) {
+                if let Ok(bytes) = serde_json::to_vec(value) {
+                    let _ = store.put(plx_nuvio_store::Table::LocalSettings, "settings", &bytes);
+                }
+            }
+            from_file
+        })
+        .unwrap_or_default();
     let cfg = plx_pmsshim::Config {
         data_dir: Some(data.join("shim")),
         torrent_server: settings.torrent_server.clone(),

@@ -3,8 +3,7 @@
 //! watch state (PMS keeps watch state server-side; this server is the only one there is).
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 /// The first ratingKey handed out. Section keys are 1 and 2; keeping items far above them means a
@@ -44,7 +43,6 @@ impl Ident {
 
 /// Append-only key table: line N (0-based) is ratingKey `FIRST_KEY + N`.
 pub struct Keys {
-    file: Option<PathBuf>,
     inner: Mutex<KeysInner>,
 }
 
@@ -56,18 +54,39 @@ struct KeysInner {
 
 impl Keys {
     pub fn open(dir: Option<&Path>) -> Keys {
-        let file = dir.map(|d| d.join("keys.tsv"));
         let mut inner = KeysInner::default();
-        if let Some(text) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
-            for line in text.lines() {
-                // A line that does not decode still occupies its slot, so later keys keep their numbers.
-                let ident = Ident::decode(line).unwrap_or(Ident::Title { type_: String::new(), id: format!("\u{0}{}", inner.by_key.len()) });
+        // Fork Rofocale11: the append-only TSV became one JSON row in the single redb file. The
+        // slot-for-slot placeholder rule is unchanged so a cached ratingKey keeps its meaning.
+        let rows = plx_nuvio_store::get()
+            .and_then(|s| s.get(plx_nuvio_store::Table::Keys, "ids"))
+            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+            .or_else(|| {
+                // One-time migration from the old TSV: read it, persist it, then let the old file
+                // be removed by the caller's cleanup. Never re-read it once redb has a record.
+                let legacy = dir?.join("keys.tsv");
+                let text = std::fs::read_to_string(legacy).ok()?;
+                let rows: Vec<String> = text.lines().map(str::to_string).collect();
+                let bytes = serde_json::to_vec(&rows).ok()?;
+                let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Keys, "ids", &bytes);
+                Some(rows)
+            });
+        if let Some(rows) = rows {
+            for line in rows {
+                let ident = Ident::decode(&line).unwrap_or(Ident::Title { type_: String::new(), id: format!("\u{0}{}", inner.by_key.len()) });
                 let key = FIRST_KEY + inner.by_key.len() as i64;
                 inner.by_ident.insert(ident.clone(), key);
                 inner.by_key.push(ident);
             }
         }
-        Keys { file, inner: Mutex::new(inner) }
+        Keys { inner: Mutex::new(inner) }
+    }
+
+    fn save(g: &KeysInner) {
+        let Some(store) = plx_nuvio_store::get() else { return };
+        let rows: Vec<String> = g.by_key.iter().map(Ident::encode).collect();
+        if let Ok(bytes) = serde_json::to_vec(&rows) {
+            let _ = store.put(plx_nuvio_store::Table::Keys, "ids", &bytes);
+        }
     }
 
     pub fn key_of(&self, ident: &Ident) -> i64 {
@@ -76,13 +95,9 @@ impl Keys {
             return *k;
         }
         let key = FIRST_KEY + g.by_key.len() as i64;
-        if let Some(f) = &self.file {
-            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
-                let _ = writeln!(fh, "{}", ident.encode());
-            }
-        }
         g.by_ident.insert(ident.clone(), key);
         g.by_key.push(ident.clone());
+        Self::save(&g);
         key
     }
 
@@ -113,7 +128,6 @@ struct WatchFile {
 }
 
 pub struct WatchState {
-    file: Option<PathBuf>,
     inner: Mutex<WatchFile>,
 }
 
@@ -123,22 +137,27 @@ pub fn now_secs() -> i64 {
 
 impl WatchState {
     pub fn open(dir: Option<&Path>) -> WatchState {
-        let file = dir.map(|d| d.join("watch.json"));
-        let inner = file
-            .as_ref()
-            .and_then(|f| std::fs::read(f).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        WatchState { file, inner: Mutex::new(inner) }
+        // Fork Rofocale11: watch state moved from `watch.json` to the one redb file. The JSON
+        // document is unchanged; the old file is migrated once when redb has no record yet.
+        let loaded = plx_nuvio_store::get()
+            .and_then(|s| s.get(plx_nuvio_store::Table::Watch, "state"))
+            .and_then(|b| serde_json::from_slice::<WatchFile>(&b).ok())
+            .or_else(|| {
+                let legacy = dir?.join("watch.json");
+                let bytes = std::fs::read(legacy).ok()?;
+                let parsed = serde_json::from_slice::<WatchFile>(&bytes).ok()?;
+                if let Ok(encoded) = serde_json::to_vec(&parsed) {
+                    let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Watch, "state", &encoded);
+                }
+                Some(parsed)
+            });
+        WatchState { inner: Mutex::new(loaded.unwrap_or_default()) }
     }
 
     fn save(&self, g: &WatchFile) {
-        let Some(f) = &self.file else { return };
-        let tmp = f.with_extension("json.tmp");
+        let Some(store) = plx_nuvio_store::get() else { return };
         if let Ok(bytes) = serde_json::to_vec(g) {
-            if std::fs::write(&tmp, bytes).is_ok() {
-                let _ = std::fs::rename(&tmp, f);
-            }
+            let _ = store.put(plx_nuvio_store::Table::Watch, "state", &bytes);
         }
     }
 
@@ -208,6 +227,13 @@ mod tests {
 
     #[test]
     fn keys_persist_and_are_stable() {
+        static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        STORE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("nuvio-store-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let store = plx_nuvio_store::Store::open_at(&dir.join("t.redb")).unwrap();
+            let _ = plx_nuvio_store::install(store);
+        });
         let dir = std::env::temp_dir().join(format!("pmsshim-keys-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

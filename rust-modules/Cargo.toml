@@ -35,6 +35,8 @@ members = [
     # Fork Rofocale11: the addon/debrid stream prober, kept in its own crate so an upstream rewrite
     # of media/ff.rs cannot reintroduce a merge conflict or a second FFmpeg ABI table.
     "nuvio-probe",
+    # Fork Rofocale11: the fork's single durable store (one redb file for the whole app).
+    "nuvio-store",
 ]
 resolver = "2"
 
@@ -297,6 +299,7 @@ plx_pmsshim = { path = "pmsshim" }
 # Fork Rofocale11: NuvioNative's addon/debrid stream prober. Own crate so it uses
 # plx_media_codecs' single FFmpeg ABI table instead of a duplicate in media/ff.rs.
 plx_nuvio_probe = { path = "nuvio-probe" }
+plx_nuvio_store = { path = "nuvio-store" }
 # The shell_sdl layer (ci/module-layers.ini `[shell_sdl]`): the stock-SDL shell the application opens its
 # window through: SDL's init, the window and its GL context, the swap, the event queue, the stock
 # key, pointer, wheel and text layouts of both SDLs, and the synthetic events pushed back onto the

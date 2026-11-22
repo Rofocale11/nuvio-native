@@ -1,6 +1,6 @@
 # Nuvio Native handoff (2026-10-10)
 
-Repo: ~/Developer/nuvio-native/app. Fork: https://github.com/current/nuvio-native. Commit as `Chris <dahl1376@umn.edu>` with no AI
+Repo: ~/Developer/nuvio-native/app. Fork: https://github.com/current/nuvio-native. Commit as `Rofocale11 <131918567+Rofocale11@users.noreply.github.com>` with no AI
 attribution lines. Never modify the installed `space.nuvio.webos` app. Never print
 or commit addon URLs or `rust-modules/stremio/nuvio.local.env`.
 
@@ -31,11 +31,11 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
   `enableTorrents: true`; HTTP/debrid playback works without them.
 - The photo endpoint resolves relative metadata images and proxies image bytes;
   supported CDN sizing avoids decoding unnecessarily large posters.
-- TV addon configuration uses the private DB8 storage helper, separate from the
-  session record. Legacy/import files are removed only after verified persistence. The importer uses a
-  group-writable handoff directory so the native UID can unlink its dev-owned file,
-  including stable's sticky `/tmp` runtime root.
-  Host configuration remains file-backed.
+- TV addon configuration, the canonical session and every Settings preference now live in ONE
+  `nuvio.redb` under `<data>/shim/`, with upstream's storage backend running in process against
+  that file. No DB8 helper is packaged or activated; legacy/import files are removed only after
+  verified redb persistence. The importer still uses a group-writable handoff directory so the
+  native UID can unlink its dev-owned file. Host configuration remains file-backed.
 - The Streams overlay lists the shim's ranked choices, with codec, HDR/DV,
   resolution, size and bitrate, and selects through `/nuvio/select` before refreshing
   detail metadata. It waits for discovery so indices do not shift under a selection.
@@ -45,7 +45,7 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 - Initial audio selection prefers compatible English dialogue over a foreign-language
   file default or English commentary. Explicit audio selection still takes precedence.
 - Settings → Playback → Rating source offers IMDb or Rotten Tomatoes. The preference
-  uses the canonical session/DB8 record and updates cached detail presentation. Rotten
+  uses the canonical session record in the single redb file and updates cached detail presentation. Rotten
   Tomatoes detail scores must be supplied by a metadata addon; absent scores remain absent.
 - BetterPosters (`btttr.cc`) supplies posters for IMDb movie/series identities across
   Home, search, My List and detail metadata. Posters request Rotten Tomatoes scores
@@ -100,16 +100,17 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
 
 ## Known limitations / follow-up
 
-- Watch progress and the shim key table can still be lost on a TV reboot because
-  their Developer Mode fallback is `/tmp`; the addon configuration is in DB8.
+- Watch progress and the shim key table now live in the same `nuvio.redb` as the addon config
+  and every preference; they survive a reboot only when `nuvio_data_dir()` resolves to a
+  persistent directory (confirm on the set — the last fallback is `/tmp`).
 - The prior stable QR attempt authenticated but failed discovery with
   `discovery_insecure_only`. A host regression reproduces that failure and passes
   with the registered-shim fix. Fresh stable approval reached the server and loaded
   account addons.
 - Rotten Tomatoes on posters comes from BetterPosters. Separate detail scores depend
   on addon metadata. The user chose poster ratings for now; no MDBList key was added.
-- The account backend session file remains in the Developer Mode runtime directory;
-  addon configuration and native preference persistence are separate DB8 records.
+- The Nuvio account backend session, addon configuration and all native preferences are
+  records in the one `nuvio.redb`; none of them is a DB8 record or a separate runtime file.
 - Torrents require a configured Stremio-compatible server or explicit local scanning.
   The user's P2P-disabled setup was tested with HTTP/debrid streams.
 - <!-- Fork Rofocale11: was "No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required." -->

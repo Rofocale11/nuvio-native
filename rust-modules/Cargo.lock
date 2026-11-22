@@ -883,6 +883,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plx_nuvio_store"
+version = "0.0.0"
+dependencies = [
+ "plx_base",
+ "redb",
+]
+
+[[package]]
 name = "plx_os"
 version = "0.0.0"
 dependencies = [
@@ -895,6 +903,8 @@ dependencies = [
  "libc",
  "plx_base",
  "plx_machine",
+ "plx_nuvio_store",
+ "ring",
  "serde",
  "serde_json",
 ]
@@ -974,6 +984,7 @@ dependencies = [
  "plx_base",
  "plx_machine",
  "plx_net",
+ "plx_nuvio_store",
  "plx_os",
  "serde",
  "serde_json",
@@ -985,6 +996,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "plx_net",
+ "plx_nuvio_store",
  "plx_stremio",
  "png",
  "qrcodegen",
@@ -1089,6 +1101,7 @@ dependencies = [
  "plx_media_codecs",
  "plx_net",
  "plx_nuvio_probe",
+ "plx_nuvio_store",
  "plx_os",
  "plx_play_feed",
  "plx_play_uri",
@@ -1205,6 +1218,15 @@ dependencies = [
  "time",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "redb"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "096b1dd5ec053c9c2a5a26a93aafeadf73ebcb710ea54dc3151f17a8e20535ef"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

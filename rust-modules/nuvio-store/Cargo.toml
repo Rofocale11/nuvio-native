@@ -1,0 +1,21 @@
+[package]
+name = "plx_nuvio_store"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "NuvioNative's single durable store: one redb file holding every app record."
+publish = false
+
+[package.metadata.plx]
+mount = "nuvio_store"
+
+[lib]
+name = "plx_nuvio_store"
+crate-type = ["rlib"]
+
+[dependencies]
+redb = "=4.6.0"
+plx_base = { path = "../base" }
+
+[lints]
+workspace = true

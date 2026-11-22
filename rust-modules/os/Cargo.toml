@@ -30,6 +30,10 @@ test-support = ["plx_base/test-support", "plx_machine/test-support"]
 [dependencies]
 plx_base = { path = "../base" }
 plx_machine = { path = "../machine" }
+# Fork Rofocale11: the fork's single redb file replaces DB8, and `ring` provides the AES-256-GCM
+# envelopes the in-process backend must produce for the canonical credential record.
+plx_nuvio_store = { path = "../nuvio-store" }
+ring = "0.17"
 libc = "0.2"
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

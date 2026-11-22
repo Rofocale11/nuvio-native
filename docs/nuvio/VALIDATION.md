@@ -82,6 +82,37 @@ source probed as HEVC 3840×1604, 23.976 fps, Dolby Vision, two audio tracks and
 embedded subtitles. That probe alone does not establish playback or English audio.
 Physical confirmation of the new audio default and rating setting is still pending.
 
+## Single redb store, no DB8 helper (2026-11-22)
+
+The fork now keeps every durable record in one `nuvio.redb` under `<data>/shim/`: canonical session
+and Settings preferences, addon config, install-wide preferences, Nuvio account audio/subtitle
+picks, watch state, key table, Nuvio backend session and local settings. Upstream's storage backend
+runs in process against that file (`plx_os::storage::redb_backend`), with DB8-shaped objects and
+Keymanager3 AES-256-GCM envelopes as two more tables. The `plxstorage` helper is no longer built,
+packaged, activated or verified; the ipk declares no service.
+
+Evidence on this tree:
+
+- ARM cross-build `make pkg/plxnative`: pass; `make check-nodef`: pass.
+- `check-deps` and `check-module-layers`: green (24 layers, new `nuvio_store` layer).
+- Host tests: app 1486/1486, screens 2325/2325, os 424/424 (three new redb/keymanager tests),
+  pmsshim 18/18; rewritten no-service package tests 4/4.
+- Simulator rebuilt and booted twice from a fresh runtime: `state/nuvio/shim/nuvio.redb` created,
+  no errors.
+- Debug build deployed to `com.nuvionative.app.debug` on the set with the owner's HDMI override;
+  `verify-deploy` matched 47 files. **Not launched or driven after deploy.**
+
+Three known limits, not claimed as verified:
+
+- DB8 records are not migrated (no helper can read them); legacy on-disk files are migrated once.
+- Reboot durability depends on which `nuvio_data_dir()` candidate the set grants; the last fallback
+  is `/tmp`.
+- `plx_plex` has three pre-existing `transcoder.rs` failures at HEAD (the fork added `opus` to the
+  codec list without updating those expectations). They are unrelated to the store change.
+
+Still needed from the owner on device: relaunch persistence of a Settings pick, and that addons,
+My List and watch state load after the switch.
+
 ## Limitations
 
 <!-- Fork Rofocale11: DTS/TrueHD conversion was listed here as follow-up work; it is now
