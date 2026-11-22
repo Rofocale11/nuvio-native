@@ -356,6 +356,21 @@ generation polling this tree lacked). Every upstream-owned Rust file touched car
 Verification: focused host tests for `plx_stremio`, `plx_pmsshim`, `plx_data` and the app crate
 pass; `cargo check --workspace` green. Cross-device behaviour on a real account is not yet verified.
 
+## Last played source is local (Fork Rofocale11)
+
+- `rust-modules/pmsshim/src/shim_store.rs` and `shim_pms.rs` (fork-heavy, inline markers) — the
+  `Watch` record gains a `LastStream` fingerprint (addon + `info_hash`/`file_idx`, or direct
+  filename/size/height; never a signed URL or arrival index), written only at a successful
+  `/decision` probe and promoted in `ranked()` only when the viewer has not picked in the slot.
+  Finish/scrobble/remove clear it; an account merge does not touch it. This is local-only state in
+  the one redb watch record, so the old fork's `watch.json` wording is deliberately not carried over.
+- `docs/nuvio/{HANDOFF,WATCH-PROGRESS}.md` — Markdown has no comment syntax: the new section and
+  delivery note are recorded here instead of inline markers.
+
+Verification: focused `plx_pmsshim` tests for the fingerprint's persistence, promotion and explicit
+pick precedence; `cargo check --workspace` green. No device verification of a resume choosing the
+same file after re-resolution.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.

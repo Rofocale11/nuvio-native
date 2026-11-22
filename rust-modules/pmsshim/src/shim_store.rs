@@ -116,6 +116,25 @@ pub struct Watch {
     pub duration_ms: i64,
     pub view_count: i64,
     pub last_viewed_at: i64,
+    // Fork Rofocale11: the source last played for this item, so a resume re-selects that file
+    // instead of re-deriving it from whichever addon happens to rank first now. Local only: the
+    // account watch schema has no source column, so this never leaves the TV.
+    pub last_stream: Option<LastStream>,
+}
+
+/// A stable identity of one playable stream: addon plus a release identity that survives
+/// re-ranking. Never a signed URL (debrid links expire) and never the arrival index (that moves as
+/// addons answer). Two streams match only on the fields here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LastStream {
+    pub addon: String,
+    pub info_hash: Option<String>,
+    pub file_idx: Option<u32>,
+    pub filename: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub height: Option<u32>,
+    pub label: String,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -181,6 +200,7 @@ impl WatchState {
         if w.duration_ms > 0 && offset_ms * 10 >= w.duration_ms * 9 {
             w.view_count += 1;
             w.offset_ms = 0;
+            w.last_stream = None;
         } else {
             w.offset_ms = offset_ms.max(0);
         }
@@ -197,6 +217,7 @@ impl WatchState {
         if watched {
             w.view_count += 1;
             w.last_viewed_at = now_secs();
+            w.last_stream = None;
         } else {
             w.view_count = 0;
         }
@@ -207,7 +228,28 @@ impl WatchState {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(w) = g.items.get_mut(&key.to_string()) {
             w.offset_ms = 0;
+            w.last_stream = None;
         }
+        self.save(&g);
+    }
+
+    // Fork Rofocale11: remember the source that was actually played, so a resume re-selects it
+    // while the addons still offer it. An empty identity records nothing (no file to promote).
+    pub fn set_last_stream(&self, key: i64, last: LastStream) {
+        if last.addon.is_empty() && last.info_hash.is_none() && last.filename.is_none() { return; }
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let w = g.items.entry(key.to_string()).or_default();
+        w.last_stream = Some(last);
+        self.save(&g);
+    }
+
+    pub fn last_stream(&self, key: i64) -> Option<LastStream> {
+        self.get(key).last_stream
+    }
+
+    pub fn clear_last_stream(&self, key: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = g.items.get_mut(&key.to_string()) { w.last_stream = None; }
         self.save(&g);
     }
 
@@ -282,6 +324,35 @@ mod tests {
         assert_eq!(k.ident(ka), Some(a));
         assert_eq!(k.key_of(&Ident::Season { series: "tt2".into(), n: 1 }), FIRST_KEY + 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn last_stream_survives_a_reopen_and_clears_with_the_resume_point() {
+        static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        let dir = std::env::temp_dir().join(format!("pmsshim-last-stream-{}", std::process::id()));
+        STORE.get_or_init(|| {
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(store) = plx_nuvio_store::Store::open_at(&dir.join("t.redb")) {
+                let _ = plx_nuvio_store::install(store);
+            }
+        });
+        let last = LastStream {
+            addon: "Torrentio".into(),
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            file_idx: Some(0), filename: Some("Film.2160p.mkv".into()),
+            size_bytes: Some(58_200_000_000), height: Some(2160), label: "4K DV".into(),
+        };
+        {
+            let w = WatchState::open(Some(&dir));
+            w.progress(5, 1000, 10_000, None);
+            w.set_last_stream(5, last.clone());
+        }
+        let reopened = WatchState::open(Some(&dir));
+        assert_eq!(reopened.last_stream(5), Some(last), "the pick lives in the one redb record");
+        reopened.set_last_stream(6, LastStream::default());
+        assert_eq!(reopened.last_stream(6), None, "an empty identity records nothing");
+        reopened.progress(5, 9500, 10_000, None);
+        assert_eq!(reopened.last_stream(5), None, "a finished title clears its pick");
     }
 
     #[test]

@@ -118,6 +118,28 @@ preview and marked it placed; the follow-up answer with rows was skipped as "alr
 Home stayed empty until the next launch, whose first answer already held the persisted rows.
 `place` now treats a placed-but-empty lane as unplaced when a later preview brings cards.
 
+## Last played source
+
+The account mirror carries only the position. A resume that re-ranked from scratch often picked a
+different file: seeders move, addon order moves, and the film's best source on Monday is not the
+best source on Friday. The shim therefore keeps — **local to this TV, in the same `nuvio.redb` watch
+record** — a stable identity of the stream each resume point last played:
+
+- addon name, and for a torrent the `info_hash` + `file_idx` (the engine selects its file by that
+  digest); for a direct/debrid stream the addon, file name, size and height. **Never the signed URL
+  and never the arrival index:** debrid links expire on every re-resolution and the arrival index
+  shifts as addons answer.
+- The identity is written when a stream is actually probed at `/decision` (the play that starts),
+  not on a detail read and not on every `/:timeline` tick. A failed probe records nothing.
+- On the next play, `ranked()` promotes a still-offered stream matching that identity ahead of the
+  best-ranked one. An explicit picker choice in the current slot outranks the memory, and a source
+  the addons no longer offer falls back to plain ranking instead of promoting a dead pick. A Part
+  id names a stream by arrival index, so the play queue deliberately does **not** re-select here:
+  it must serve the file the viewer saw in the picker.
+- `merge_remote` does not touch it: a position pulled from the account says where a viewer stopped,
+  not which file this TV should prefer. A finished title, a scrobble or a Continue Watching removal
+  clears it. Each episode is its own ratingKey, so an episode's pick cannot bleed into another.
+
 ## What is not covered
 
 - The local watch state and account-key map live in `nuvio.redb` under the shim's data directory;
@@ -141,6 +163,9 @@ Host tests (`make test-crate C=plx_pmsshim`, `C=plx_stremio`, `C=plx_data`, plus
   synthetic-episode placement through season/episode, and bumping only on a real merge.
 - `shim_account::tests::a_profile_load_installs_addons_before_it_pulls_watch`.
 - `stores::deck::tests::a_lane_placed_on_an_empty_preview_adopts_the_cards_it_gets_later`.
+- `shim_store::tests::last_stream_survives_a_reopen_and_clears_with_the_resume_point` — the pick is
+  durable, an empty identity records nothing, and a finished title clears it.
+- `shim_pms::account_progress_tests::a_remembered_source_promotes_but_an_explicit_pick_or_a_missing_source_wins`.
 - `app::run::account_content_tests` — a merge is owed once and only after a server exists.
 
 Not verified on the TV against a real account. A device check should play past a few minutes on the

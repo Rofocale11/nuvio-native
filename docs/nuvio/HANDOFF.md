@@ -110,7 +110,9 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
 
 - Watch progress, its account-key map and the shim key table now live in the same `nuvio.redb` as
   the addon config and every preference; they survive a reboot only when `nuvio_data_dir()` resolves
-  to a persistent directory (confirm on the set — the last fallback is `/tmp`). The shim now mirrors
+  to a persistent directory (confirm on the set — the last fallback is `/tmp`). The last-played
+  source fingerprint lives there too: a resume re-selects the file the viewer actually played while
+  addons still offer it, without ever storing a signed URL. The shim now mirrors
   `/:timeline` into the Nuvio account and pulls other devices' resume points back, with IMDb-first
   identity, a 60 s playing throttle and a newer-wins merge. Home re-reads its hubs when a real merge
   bumps the shim's content generation, and a lane seated on an empty first answer adopts the cards
