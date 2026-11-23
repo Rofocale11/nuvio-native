@@ -50,6 +50,10 @@ pub mod connect_only;
 
 type CURL = c_void;
 pub type curl_slist = c_void;
+// Fork Rofocale11: restore the old fork's process-wide CURLSH share so detail opens stop paying
+// 4-6 cold DNS/TCP/TLS handshakes; key mode and the lab's pinned transfers stay excluded. Only the
+// pointer is named here — libcurl owns the share's layout.
+type CURLSH = c_void;
 
 /// The stable head of `curl_version_info_data`. Passing `CURLVERSION_FIRST` promises to inspect
 /// only these original fields; libcurl extends the struct at the tail for later ages, so this
@@ -97,6 +101,15 @@ plx_base::dynlib! {
     fn curl_easy_cleanup(handle: *mut CURL);
     fn curl_slist_append(list: *mut curl_slist, s: *const c_char) -> *mut curl_slist;
     fn curl_slist_free_all(list: *mut curl_slist);
+    // Fork Rofocale11: bind the CURLSH share trio for process-wide DNS/SSL-session reuse, plus a
+    // pointer-shaped setopt wrapper for the LOCKFUNC/UNLOCKFUNC callbacks. libcurl requires those
+    // callbacks whenever one share is used by multiple threads; without them the caches race.
+    // These are plain C symbols from libcurl 7.10, long before the TV's 7.53.1 floor, so the
+    // all-or-nothing dynlib load gate stays safe.
+    fn curl_share_init() -> *mut CURLSH;
+    fn curl_share_cleanup(handle: *mut CURLSH);
+    fn curl_share_setopt_long = "curl_share_setopt"(handle: *mut CURLSH, option: c_int, ..., v: c_long) -> c_int;
+    fn curl_share_setopt_ptr = "curl_share_setopt"(handle: *mut CURLSH, option: c_int, ..., v: *const c_void) -> c_int;
     // The four VARIADIC ones, and the `...` marks exactly what `curl.h` marks: the handle and the
     // option id are the only named parameters, and the value arrives through `va_arg`. Spelling
     // that value's type after the ellipsis is what lets one C symbol be bound as more than one
@@ -203,6 +216,20 @@ const CURLE_UNKNOWN_OPTION: c_int = 48;
 /// costs libcurl a decode of the WHOLE chain, which is why only a request that wants the peer's
 /// key sets it ([`peer_pin_wanted`]).
 const CURLOPT_CERTINFO: c_int = 172;
+// Fork Rofocale11: one process-wide CURLSH shares DNS and SSL-session caches so a detail open
+// does not pay a fresh lookup and full TLS handshake on every request. The connection cache is NOT
+// shared: libcurl documents CURL_LOCK_DATA_CONNECT as unsupported between concurrent threads, and
+// this share is used by several workers at once. Key mode, pinned transfers and resolve-pinned
+// requests are excluded at the attach site. The old fork's literals were wrong and made its share
+// a silent no-op — verified against curl 7.53.1's curl.h/share.c: CURLOPT_SHARE is
+// OBJECTPOINT+100 = 10100, and `CURLSHOPT_SHARE` takes a CURL_LOCK_DATA_* value (DNS 3) as its
+// THIRD argument; 1/2/3/4 there are separate CURLSHOPT_* ids, not cache selectors.
+const CURLOPT_SHARE: c_int = 10100;
+const CURLSHOPT_SHARE: c_int = 1;
+const CURLSHOPT_LOCKFUNC: c_int = 3;
+const CURLSHOPT_UNLOCKFUNC: c_int = 4;
+const CURL_LOCK_DATA_DNS: c_long = 3;
+const CURL_LOCK_DATA_SSL_SESSION: c_long = 4;
 // curl.h info ids (CURLINFO_LONG = 0x200000).
 const CURLINFO_RESPONSE_CODE: c_int = 0x20_0002;
 /// `CURLINFO_SSL_VERIFYRESULT` (LONG + 13) — the X509 verify result of the peer certificate, as
@@ -411,6 +438,65 @@ fn setup_legacy_crypto_locks(soname: &'static str) -> LegacyCrypto {
 
 pub fn available() -> bool {
     CURL_OK.load(Ordering::Acquire)
+}
+
+// Fork Rofocale11: libcurl calls these around every access to a shared cache. One mutex per data
+// kind, because libcurl asks for a different lock for each. The connection cache is deliberately
+// NOT shared: curl's own docs say CURL_LOCK_DATA_CONNECT is unsupported between concurrent
+// threads even with locks, and this share is used by the shim, account and addon workers at once.
+struct ShareLocks(std::cell::UnsafeCell<[libc::pthread_mutex_t; 2]>);
+unsafe impl Sync for ShareLocks {}
+static SHARE_LOCKS: ShareLocks = ShareLocks(std::cell::UnsafeCell::new([
+    libc::PTHREAD_MUTEX_INITIALIZER,
+    libc::PTHREAD_MUTEX_INITIALIZER,
+]));
+
+fn share_lock_index(data: c_int) -> usize {
+    if data == CURL_LOCK_DATA_SSL_SESSION as c_int { 1 } else { 0 }
+}
+
+unsafe extern "C" fn share_lock(_handle: *mut c_void, data: c_int, _access: c_int, _user: *mut c_void) {
+    let locks = SHARE_LOCKS.0.get();
+    libc::pthread_mutex_lock(&mut (*locks)[share_lock_index(data)]);
+}
+
+unsafe extern "C" fn share_unlock(_handle: *mut c_void, data: c_int, _user: *mut c_void) {
+    let locks = SHARE_LOCKS.0.get();
+    libc::pthread_mutex_unlock(&mut (*locks)[share_lock_index(data)]);
+}
+
+// Fork Rofocale11: one process-wide CURLSH shares DNS and SSL-session caches, so a detail open
+// does not pay a fresh DNS lookup and full TLS handshake on every request. Key mode, the lab's
+// pinned transfers and resolve-pinned requests are excluded at the attach site (they need fresh
+// handshakes or must not leak a resolve entry); a libcurl refusal degrades silently to per-call
+// handles, so reuse never becomes a correctness gate. The share is process-lifetime and never
+// freed — curl_share_cleanup is bound but deliberately not called, since freeing a share a handle
+// still references is a use-after-free.
+fn share_handle() -> Option<*mut CURLSH> {
+    // Fork Rofocale11: a raw pointer is not `Sync`, so the cell holds `usize` (libcurl's handle is
+    // a pointer and is never freed); the cast back is the one `curl_easy_setopt_ptr` performs.
+    static SHARE: OnceLock<usize> = OnceLock::new();
+    let s = *SHARE.get_or_init(|| unsafe {
+        let s = curl_share_init();
+        if s.is_null() {
+            return 0;
+        }
+        // Fork Rofocale11: locks MUST be installed before any handle attaches to the share, or the
+        // DNS/TLS caches race between the shim, account and addon workers. Set them before the
+        // shared data types, as libcurl's share-interface contract requires.
+        if curl_share_setopt_ptr(s, CURLSHOPT_LOCKFUNC, share_lock as *const c_void) != 0
+            || curl_share_setopt_ptr(s, CURLSHOPT_UNLOCKFUNC, share_unlock as *const c_void) != 0
+        {
+            return 0;
+        }
+        for data in [CURL_LOCK_DATA_DNS, CURL_LOCK_DATA_SSL_SESSION] {
+            if curl_share_setopt_long(s, CURLSHOPT_SHARE, data) != 0 {
+                return 0;
+            }
+        }
+        s as usize
+    });
+    if s == 0 { None } else { Some(s as *mut CURLSH) }
 }
 
 pub fn threaded_tls_ready() -> bool {
@@ -2284,6 +2370,23 @@ fn request_tls_sink(
                 return Err(RequestError::Transport.into());
             }
             let easy = Easy(h);
+            // Fork Rofocale11: attach the process-wide CURLSH share so detail opens reuse DNS and
+            // TLS sessions instead of paying a fresh lookup and full handshake. Key mode is excluded because keypin::apply
+            // needs a fresh handshake (FRESH_CONNECT / FORBID_REUSE, session cache off); the lab's
+            // pinned transfers are excluded because a pin checks a hash, not a chain. A refused
+            // share degrades silently to today's per-call handles, never failing the request.
+            // Fork Rofocale11: a resolve-pinned request injects a host:port -> address entry with
+            // CURLOPT_RESOLVE. Sharing the DNS cache would leak that entry to unrelated handles
+            // (and let a later request reuse an address it was never given), so those requests
+            // keep the per-call handle too.
+            let attach_share = !matches!(mode, keypin::Mode::Key { .. })
+                && !matches!(tls_c, TlsCfg::Pinned(_))
+                && resolve.is_none();
+            if attach_share {
+                if let Some(s) = share_handle() {
+                    curl_easy_setopt_ptr(easy.0, CURLOPT_SHARE, s as *const c_void);
+                }
+            }
             curl_easy_setopt_ptr(easy.0, CURLOPT_URL, url_c.as_ptr() as *const c_void);
             // In stream mode `sink` stays empty: the body goes through `stream`'s callbacks instead.
             let mut sink = BodySink::new(max_body);
@@ -5320,8 +5423,8 @@ mod key_mode_session_tests {
     use std::sync::Arc;
 
     /// `CURLOPT_SHARE` (OBJECTPOINT + 100), `CURLSHOPT_SHARE` and `CURL_LOCK_DATA_SSL_SESSION`, off
-    /// `curl/curl.h`. The share API is bound here, in the test, and nowhere in the product: nothing
-    /// of the application shares a handle.
+    /// `curl/curl.h`. The product binds the same trio for its process-wide share; this test binds
+    /// its own isolated handle so the handshake counts cannot be affected by other requests.
     const CURLOPT_SHARE: c_int = 10100;
     const CURLSHOPT_SHARE: c_int = 1;
     const CURL_LOCK_DATA_SSL_SESSION: c_long = 4;

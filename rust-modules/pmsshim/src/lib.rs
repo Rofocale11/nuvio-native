@@ -29,6 +29,9 @@ pub mod shim_store;
 pub mod shim_subs;
 pub mod shim_trailer;
 pub mod shim_core;
+// Fork Rofocale11: permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C). A new fork-owned
+// file keeps the only upstream edit in shim_pms.rs to visibility and four routed call sites.
+pub mod shim_tmdb_ids;
 
 pub use shim_backend::{AddonBackend, Backend, CatalogInfo};
 pub use shim_core::{start, start_on, Config, Handle, MACHINE_ID};

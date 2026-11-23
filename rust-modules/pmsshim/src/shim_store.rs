@@ -477,6 +477,11 @@ pub struct Enrichment {
     pub roles: Option<serde_json::Value>,
     /// The `Extras` object.
     pub extras: Option<serde_json::Value>,
+    /// The raw TMDB `videos` answer. The trailer shelf and the play-time alternate picker both
+    /// need it; without it each `/extras` request re-fetched `movie_details` just to rediscover
+    /// the same ids, which is what made a warm detail open pay ~1.5 s in `related_ms`.
+    /// Fork Rofocale11: keep it in the one redb row with the rest of the enrichment.
+    pub videos: Option<plx_stremio::addons_tmdb::TmdbVideos>,
     /// The recommendation list (`None` on a row written before the shelf was kept).
     pub related: Option<RelatedSource>,
     /// The franchise `/movie/{id}` named, when it named one.

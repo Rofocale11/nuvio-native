@@ -1017,3 +1017,67 @@ copy drawing they drive lives in `Backdrop::draw`/`paint` and `HomeScreen::draw_
 upstream file must change anyway; splitting only the helpers would leave the same conflict surface
 plus an indirection. No new persisted state or new crate is involved. Every upstream edit above
 carries a `Fork Rofocale11:` comment and is listed here.
+
+## Detail-page latency port (2026-11-24)
+
+Status and design are in the new `docs/nuvio/DETAIL-LATENCY.md`; the old fork's 452-line plan of
+the same name is not in this checkout and its line numbers are stale. The following edits close
+every implemented stage it described plus the three it left as plans (2C, 3B, 3C).
+
+**Upstream files touched (every edit carries a `Fork Rofocale11:` why-comment):**
+
+- `rust-modules/net/src/net.rs` — three `curl_share_*` entries and a pointer-shaped
+  `curl_share_setopt` wrapper in the runtime `dynlib!` table, `CURLOPT_SHARE`/`CURL_LOCK_DATA_*`/
+  `CURLSHOPT_LOCKFUNC` constants, two process-lifetime pthread mutexes, `share_handle()`, and the
+  attach block in `request_tls_sink`'s attempt closure. Reason: a process-wide DNS/TLS-session
+  share so a detail open stops paying a fresh lookup and full handshake. Key mode, the lab's pinned
+  transfers and resolve-pinned requests are excluded because they need fresh handshakes or must not
+  leak a `CURLOPT_RESOLVE` entry into other handles. A stale test comment that said nothing in the
+  product shares a handle was corrected. **The old fork's constant values were wrong** (`10237`
+  and `CURLSHOPT_*` ids instead of `CURL_LOCK_DATA_*` values): verified against curl 7.53.1's
+  headers and a host probe, and corrected here so the share actually works. A further correction
+  followed the first device run: curl requires mutex callbacks for a share used by several threads
+  and says `CURL_LOCK_DATA_CONNECT` is unsupported across concurrent threads even with locks, so
+  only DNS and SSL-session caches are shared now — the connection cache stays per-call.
+- `rust-modules/data/src/metadata.rs` — `ALL_LEAVES_MAX_ROWS`, `fetch_all_leaves`, pure
+  `leaves_for_season`, a new `load_show_seasons` signature, `beside` siblings for seasons and
+  all-leaves in `fetch_full`, phase timers, and pure `detail_summary_line`. Reason: the old plan's
+  3B/3C (collapse and parallelise the show chain) and Stage 0's app-side split log. The shim's
+  season rows and the later-page `/children` path are unchanged; a non-Nuvio server keeps the
+  original serial chain.
+- `rust-modules/src/app/adapters/stores.rs` — one `eventlog::log` line in the focus-warm worker.
+  Reason: the old fork's `detail: warm …` line is how a TV run proves the 750 ms dwell fired.
+
+**Fork-owned files (no upstream reconciliation):**
+
+- `rust-modules/plex/src/plex/nuvio.rs` — `Client::all_leaves`, guarded by `is_nuvio()`, for the
+  shim's `/library/metadata/{rk}/allLeaves` route. This is a new method on an existing fork-owned
+  module, so no upstream file or `mod` declaration changed.
+- `rust-modules/nuvio-store/src/lib.rs` — new `imdb_tmdb` table and `Table::ImdbTmdb`, holding a
+  plain 8-byte BE u64 with no TTL envelope, in the one `nuvio.redb`.
+- `rust-modules/pmsshim/src/shim_tmdb_ids.rs` (new) — `PersistentIdLookup`, which caches IMDb→TMDB
+  ids permanently while leaving negatives and non-IMDb ids alone; `shim_pms.rs` routes its four
+  real-client resolver call sites through it and widens `TmdbIdLookup` to `pub(crate)`.
+- `rust-modules/pmsshim/src/shim_backend.rs` + `shim_pms.rs` — `Backend::addons_fingerprint` with
+  an `AddonBackend` override using transport urls and `disabled` flags; `addons_changed()` returns
+  early when the set is unchanged. Reason: the old fork's Stage 2A fix, kept inside fork-owned
+  files so upstream `app/nuvio.rs` needs no edit. An initial catalog-only fingerprint missed
+  catalog-less addons and transport swaps; it was replaced before verification.
+- `rust-modules/pmsshim/src/lib.rs` one `mod` declaration and `ci/module-layers.ini` one
+  `[pmsshim] members` entry for the new module.
+
+**Trailer-videos follow-up (same day, after the first device runs).** Four TV opens showed
+`meta_ms=20…53` but `related_ms=1315…1944`, each preceded by two
+`trailer: youtube ids from tmdb videos` lines. The shim's `/extras` route builds trailer candidates
+twice per open and both builds re-fetched the full TMDB details object that enrichment had already
+paid for. `shim_store.rs` now keeps the raw `videos` answer in `Enrichment`, `shim_pms.rs` reads it
+before any network call, and rows without it are refreshed once (old-shape migration). Three
+fork-owned files only; no new upstream edit.
+
+Verified on the working tree: `plx_net` 338 passed, `plx_pmsshim` 159 passed, `plx_data` 1662
+passed, `plx_nuvio_store` 4 passed, `plx_plex` 821 passed with the same three pre-existing lossy-gate
+`opus` failures reproduced against unmodified `nuvio.rs`; `make check-nodef`, `check-module-layers`,
+`check-deps`, `git diff --check` and the debug ARM cross-build all green. On-device after the final
+deploy: warm movie and series re-opens `ms=84…282`, `related_ms=5…233`, inside the ≤300 ms warm
+target; a title never seen before still paid one TMDB enrichment up front (`ms=1439…2061`), so the
+≤800 ms cold target is not met on a first open. See `DETAIL-LATENCY.md` for the full run record.

@@ -31,6 +31,10 @@ pub const INSTALL_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("in
 pub const META_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta_cache");
 pub const ENRICH_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrich_cache");
 pub const IMDB_IDS: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_ids");
+// Fork Rofocale11: the IMDb -> TMDB id mapping never goes stale, so it is kept as a plain 8-byte
+// big-endian u64 with NO TTL envelope (unlike `cache_put`). A `/find` answer is paid for once per
+// title, not once per 15-minute cache window.
+pub const IMDB_TMDB: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_tmdb");
 
 /// The tables of the single file. A new feature that needs durable state adds one here rather
 /// than a second file or a new DB8 kind.
@@ -50,6 +54,8 @@ pub enum Table {
     MetaCache,
     EnrichCache,
     ImdbIds,
+    /// Fork Rofocale11: permanent IMDb -> TMDB id mapping (plain BE u64, no TTL envelope).
+    ImdbTmdb,
 }
 
 /// Fork Rofocale11: the TTL-aware metadata caches. `cache_get` returns `None` on a miss or an
@@ -76,6 +82,7 @@ impl Table {
             Self::MetaCache => META_CACHE,
             Self::EnrichCache => ENRICH_CACHE,
             Self::ImdbIds => IMDB_IDS,
+            Self::ImdbTmdb => IMDB_TMDB,
         }
     }
 }
@@ -254,5 +261,23 @@ mod tests {
         store.cache_put(NuvioCache::Imdb, "movie:tt4", Duration::from_secs(60), b"first").unwrap();
         store.cache_put(NuvioCache::Imdb, "movie:tt4", Duration::from_secs(60), b"second").unwrap();
         assert_eq!(store.cache_get(NuvioCache::Imdb, "movie:tt4").unwrap(), b"second");
+    }
+
+    #[test]
+    fn imdb_tmdb_rows_are_plain_be_u64_without_a_ttl_envelope() {
+        let store = store();
+        // Eight bytes exactly: a ninth byte would mean someone wrapped it in a TTL envelope.
+        store.put(Table::ImdbTmdb, "movie:tt0133093", &603u64.to_be_bytes()).unwrap();
+        let raw = store.get(Table::ImdbTmdb, "movie:tt0133093").unwrap();
+        assert_eq!(raw.len(), 8);
+        assert_eq!(u64::from_be_bytes(raw.try_into().unwrap()), 603);
+        // A movie and a show with the same IMDb id are different keys.
+        store.put(Table::ImdbTmdb, "show:tt0133093", &7u64.to_be_bytes()).unwrap();
+        assert_eq!(store.get(Table::ImdbTmdb, "show:tt0133093").unwrap(), 7u64.to_be_bytes());
+        assert_eq!(u64::from_be_bytes(store.get(Table::ImdbTmdb, "movie:tt0133093").unwrap().try_into().unwrap()), 603);
+        assert_eq!(store.get(Table::ImdbTmdb, "movie:tt0944947"), None);
+        // No expiry: the row outlives every TTL the envelope caches use.
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(store.get(Table::ImdbTmdb, "movie:tt0133093").unwrap(), 603u64.to_be_bytes());
     }
 }

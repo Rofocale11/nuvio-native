@@ -41,6 +41,16 @@ impl Client {
         serde_json::from_slice(&self.get_bytes(&path)?).ok()
     }
 
+    /// Fork Rofocale11: the shim answers `/library/metadata/{rk}/allLeaves` with every episode of
+    /// a show in one hop, built from the already-cached series meta (`shim_pms.rs`'s `leaves()`).
+    /// The detail data layer reads it instead of the serial season → season → episode chain so a
+    /// show open costs one round trip rather than three. A real PMS has no such route: return None
+    /// there so callers take the ordinary `/children` path unchanged.
+    pub fn all_leaves(&self, rk: &str) -> Option<super::MediaContainer> {
+        if !self.is_nuvio() { return None; }
+        self.get_json(&format!("/library/metadata/{rk}/allLeaves"))
+    }
+
     pub fn nuvio_select(&self, rk: &str, index: usize) -> bool {
         if !self.is_nuvio() { return false; }
         let path = QueryBuilder::new("/nuvio/select").str("ratingKey", rk).int("index", index as i64).build();

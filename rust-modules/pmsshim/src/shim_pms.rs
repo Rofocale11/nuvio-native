@@ -588,6 +588,10 @@ pub struct Shim {
     /// the `More Like This`/franchise data `related_hub` builds — persisted so a restart does not
     /// pay for it again.
     enrich: Arc<EnrichCache>,
+    /// Fork Rofocale11: the addon set the shim saw at construction. The boot path re-applies the
+    /// same set and calls `addons_changed()` before the first read; clearing there threw away the
+    /// meta rows the durable cache had just loaded. Only a real change may drop the caches.
+    addons_fp: Mutex<Option<Vec<(String, bool)>>>,
     /// One addon-meta fetch per `(type, id)` at a time: the focus prefetch and the detail click
     /// it was warming would otherwise each ask the addon for the same title.
     meta_flight: crate::shim_flight::Flight,
@@ -1208,7 +1212,9 @@ fn preview_from_meta(meta: &Meta, id: &str) -> MetaPreview {
 
 /// The TMDB id lookups the resolvers need, so a test can prove an id that the meta already
 /// carries never reaches the network.
-trait TmdbIdLookup {
+// Fork Rofocale11: `pub(crate)` so the fork's permanent-id wrapper can implement this seam from its
+// own file instead of growing the upstream shim with a cache that never expires.
+pub(crate) trait TmdbIdLookup {
     fn movie_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>>;
     fn series_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>>;
 }
@@ -2654,12 +2660,21 @@ struct AccountIdentity {
     episode: Option<i64>,
 }
 
+/// Fork Rofocale11: the addon-set fingerprint comes from the `Backend` seam, so the real
+/// `AddonBackend` can report its transport urls and `disabled` flags (catalog keys alone miss a
+/// catalog-less addon such as OpenSubtitles) while test backends fall back to their catalogs.
+/// Captured at `Shim::new` so the first `addons_changed()` after boot sees no change.
+fn addons_fingerprint(backend: &dyn Backend) -> Vec<(String, bool)> {
+    backend.addons_fingerprint()
+}
+
 impl Shim {
     pub fn new(backend: Arc<dyn Backend>, cfg: Config) -> Shim {
         let dir = cfg.data_dir.clone();
         let cfg_ts = cfg.torrent_server.clone();
         let cfg_p2p = cfg.p2p_enabled;
         let cfg_token = cfg.token.clone();
+        let initial_fp = addons_fingerprint(backend.as_ref());
         Shim {
             backend,
             keys: Keys::open(dir.as_deref()),
@@ -2668,6 +2683,7 @@ impl Shim {
             cfg,
             metas: MetaCache::open(dir.as_deref()),
             enrich: EnrichCache::open(dir.as_deref()),
+            addons_fp: Mutex::new(Some(initial_fp)),
             meta_flight: crate::shim_flight::Flight::default(),
             catalogs: Mutex::new(HashMap::new()),
             catalog_list: Mutex::new(None),
@@ -3013,6 +3029,17 @@ impl Shim {
 
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
+        // Fork Rofocale11: the boot path applies the session's addon set and calls this before the
+        // first request. With an unchanged fingerprint that call must NOT clear the meta rows just
+        // loaded from the durable cache — that was the cold-open regression of DETAIL-LATENCY 2A.
+        let fp = addons_fingerprint(self.backend.as_ref());
+        {
+            let mut seen = self.addons_fp.lock().unwrap_or_else(|e| e.into_inner());
+            if seen.as_ref() == Some(&fp) {
+                return;
+            }
+            *seen = Some(fp);
+        }
         self.metas.clear();
         self.enrich.clear();
         self.poster_fallbacks
@@ -3867,7 +3894,9 @@ impl Shim {
         if let Some(cached) = self.enrich.get(&type_, &id) {
             // A row written before the related shelf was kept has no recommendations in it: treat
             // it as incomplete and refresh it, so an upgraded install converges after one open.
-            if cached.related.is_some() {
+            // Fork Rofocale11: a row written before the raw `videos` were kept is incomplete too —
+            // refresh it once so the trailer shelf stops paying TMDB again on every later open.
+            if cached.related.is_some() && cached.videos.is_some() {
                 cached.apply(row);
                 return;
             }
@@ -3883,10 +3912,14 @@ impl Shim {
             }
             return;
         };
+        // Fork Rofocale11: an IMDb id maps to one TMDB id forever; persist any `/find` answer so a
+        // later open (or a restart) never pays that call again. The moviedb_id fast path and the
+        // fallback order inside the resolvers are unchanged.
+        let persistent = crate::shim_tmdb_ids::PersistentIdLookup::new(&client);
         let tmdb_id = match if series {
-            resolve_tmdb_series_id(&client, &id, meta.imdb_id.as_deref(), meta.moviedb_id)
+            resolve_tmdb_series_id(&persistent, &id, meta.imdb_id.as_deref(), meta.moviedb_id)
         } else {
-            resolve_tmdb_movie_id(&client, &id, meta.imdb_id.as_deref(), meta.moviedb_id)
+            resolve_tmdb_movie_id(&persistent, &id, meta.imdb_id.as_deref(), meta.moviedb_id)
         } {
             Ok(id) => id,
             Err(_) => None,
@@ -3936,6 +3969,10 @@ impl Shim {
                 }
             }
         };
+        // Fork Rofocale11: keep the raw videos beside the rendered Extras. The `/extras` route
+        // and the play-time picker ask for trailer ids again on every detail open; without this
+        // they re-fetch the SAME TMDB details the enrichment already paid for.
+        learned.videos = videos.clone();
         let candidates = self.trailer_candidates_from_videos(rk, videos.as_ref());
         if !candidates.is_empty() {
             row["Extras"] = trailer_extras(rk, &candidates);
@@ -3977,39 +4014,50 @@ impl Shim {
         // a live miss (its `tmdb:` id is TMDB's own) — this is the source that
         // gives those a shelf. Host tests never reach YouTube/TMDB here; the
         // in-hand `trailer_candidates_from_videos` is what they exercise.
-        if (with_alternates || out.is_empty()) && !cfg!(test) {
-            if let Some(client) = TmdbClient::from_env() {
-                let tmdb_id = self
-                    .enrich
-                    .get(&type_, &id)
-                    .map(|enrich| enrich.tmdb_id)
-                    .or_else(|| self.meta(&type_, &id).and_then(|m| m.moviedb_id))
-                    .or_else(|| synthetic_show_tmdb_id(rk))
-                    .or_else(|| synthetic_tmdb_id(rk))
-                    .or_else(|| tmdb_id(&id, series));
-                if let Some(tmdb_id) = tmdb_id {
-                    let videos = if series {
-                        client
-                            .tv_details(tmdb_id)
-                            .ok()
-                            .and_then(|details| details.videos)
-                    } else {
-                        client
-                            .movie_details(tmdb_id)
-                            .ok()
-                            .and_then(|details| details.videos)
-                    };
-                    if let Some(videos) = videos {
-                        let mut from_tmdb = video_candidates(Some(&videos));
-                        if !from_tmdb.is_empty() {
-                            plx_base::eventlog::log(&format!(
-                                "trailer: youtube ids from tmdb videos rk={rk} ({})",
-                                from_tmdb.len()
-                            ));
-                            for candidate in from_tmdb.drain(..) {
-                                push_candidate(&mut out, candidate.youtube_id, &candidate.title);
-                            }
-                        }
+        if with_alternates || out.is_empty() {
+            // Fork Rofocale11: the enrichment row already holds the TMDB `videos` answer that
+            // `enrich_row` fetched and paid for. Use it before any network call — the shelf and the
+            // play-time picker both ask for trailer ids on every detail open, and re-fetching the
+            // whole details object twice was the main cost of a warm open. This read is local, so
+            // unlike the network fallback it runs under test too.
+            let cached_videos = self
+                .enrich
+                .get(&type_, &id)
+                .and_then(|enrich| enrich.videos.clone());
+            let videos = if let Some(videos) = cached_videos {
+                Some(videos)
+            } else if cfg!(test) {
+                None
+            } else {
+                let mut fetched = None;
+                if let Some(client) = TmdbClient::from_env() {
+                    let tmdb_id = self
+                        .enrich
+                        .get(&type_, &id)
+                        .map(|enrich| enrich.tmdb_id)
+                        .or_else(|| self.meta(&type_, &id).and_then(|m| m.moviedb_id))
+                        .or_else(|| synthetic_show_tmdb_id(rk))
+                        .or_else(|| synthetic_tmdb_id(rk))
+                        .or_else(|| tmdb_id(&id, series));
+                    if let Some(tmdb_id) = tmdb_id {
+                        fetched = if series {
+                            client.tv_details(tmdb_id).ok().and_then(|d| d.videos)
+                        } else {
+                            client.movie_details(tmdb_id).ok().and_then(|d| d.videos)
+                        };
+                    }
+                }
+                fetched
+            };
+            if let Some(videos) = videos {
+                let mut from_tmdb = video_candidates(Some(&videos));
+                if !from_tmdb.is_empty() {
+                    plx_base::eventlog::log(&format!(
+                        "trailer: youtube ids from tmdb videos rk={rk} ({})",
+                        from_tmdb.len()
+                    ));
+                    for candidate in from_tmdb.drain(..) {
+                        push_candidate(&mut out, candidate.youtube_id, &candidate.title);
                     }
                 }
             }
@@ -5058,7 +5106,9 @@ impl Shim {
         let meta = self.meta("movie", &id);
         let imdb_id = meta.as_ref().and_then(|meta| meta.imdb_id.clone());
         let moviedb_id = meta.as_ref().and_then(|meta| meta.moviedb_id);
-        resolve_tmdb_movie_id(client, &id, imdb_id.as_deref(), moviedb_id)
+        // Fork Rofocale11: the related shelf follows the same permanent mapping as enrich_row.
+        let persistent = crate::shim_tmdb_ids::PersistentIdLookup::new(client);
+        resolve_tmdb_movie_id(&persistent, &id, imdb_id.as_deref(), moviedb_id)
     }
 
     fn related_show_tmdb_id(
@@ -5079,7 +5129,9 @@ impl Shim {
         let meta = self.meta("series", &id);
         let imdb_id = meta.as_ref().and_then(|meta| meta.imdb_id.clone());
         let moviedb_id = meta.as_ref().and_then(|meta| meta.moviedb_id);
-        resolve_tmdb_series_id(client, &id, imdb_id.as_deref(), moviedb_id)
+        // Fork Rofocale11: the related shelf follows the same permanent mapping as enrich_row.
+        let persistent = crate::shim_tmdb_ids::PersistentIdLookup::new(client);
+        resolve_tmdb_series_id(&persistent, &id, imdb_id.as_deref(), moviedb_id)
     }
 
     fn tmdb_recommendation_row(&self, movie: &TmdbMovie) -> Value {
@@ -7991,6 +8043,9 @@ mod enrich_cache_tests {
                 roles: Some(json!([{"name": "Cached Actor"}])),
                 extras: Some(json!({"Video": [{"title": "Cached Trailer"}]})),
                 related: Some(RelatedSource::Movies(Vec::new())),
+                // Fork Rofocale11: raw videos are part of a complete row now — the trailer shelf
+                // reads them instead of re-fetching TMDB on every detail open.
+                videos: Some(plx_stremio::addons_tmdb::TmdbVideos::default()),
                 ..Default::default()
             },
         );
@@ -9430,10 +9485,54 @@ mod content_generation_tests {
         ))
     }
 
+    /// The real backend, so the test exercises the same `replace` -> `addons_changed` sequence the
+    /// account sink runs at boot and Settings runs at run time.
+    fn addon_shim() -> (Arc<Shim>, Arc<crate::shim_backend::AddonBackend>) {
+        let backend = Arc::new(crate::shim_backend::AddonBackend::new(
+            plx_stremio::addons::AddonSet::defaults(),
+        ));
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        (shim, backend)
+    }
+
     #[test]
     fn replacing_the_addon_set_asks_home_to_read_again() {
-        let shim = shim();
+        let (shim, backend) = addon_shim();
         let before = shim.content_generation();
+        let mut set = backend.snapshot();
+        // Cinemeta owns Home catalogs, so this is an observable addon-set change.
+        set.addons[0].disabled = true;
+        backend.replace(set);
+        shim.addons_changed();
+        assert_eq!(shim.content_generation(), before + 1);
+    }
+
+    /// Fork Rofocale11: at boot the account sink re-applies the persisted set before the first
+    /// request. That is not an addon change — clearing there threw away the rows `MetaCache` had
+    /// just loaded from the durable store (DETAIL-LATENCY Stage 2A).
+    #[test]
+    fn a_reapplied_addon_set_does_not_clear_the_caches() {
+        let (shim, backend) = addon_shim();
+        let before = shim.content_generation();
+        shim.metas.insert("movie", "tt0200400", Arc::new(plx_stremio::model::Meta {
+            id: "tt0200400".into(), type_: "movie".into(), name: "Kept".into(), ..Default::default()
+        }));
+        assert!(shim.metas.get("movie", "tt0200400").is_some());
+
+        // The first call after boot, and a second one with the same set, are both no-ops.
+        backend.replace(backend.snapshot());
+        shim.addons_changed();
+        shim.addons_changed();
+        assert_eq!(shim.content_generation(), before);
+        assert!(shim.metas.get("movie", "tt0200400").is_some(), "a boot re-apply must keep the warm-started row");
+
+        // A genuine change clears, and only once: the new set becomes the baseline.
+        let mut set = backend.snapshot();
+        set.addons[0].disabled = true;
+        backend.replace(set);
+        shim.addons_changed();
+        assert_eq!(shim.content_generation(), before + 1);
+        assert!(shim.metas.get("movie", "tt0200400").is_none(), "a real change must drop the cache");
         shim.addons_changed();
         assert_eq!(shim.content_generation(), before + 1);
     }
@@ -10706,6 +10805,43 @@ mod trailer_tests {
             backend.calls.load(Ordering::SeqCst) >= 2,
             "both kinds went to the backend live"
         );
+    }
+
+    /// Fork Rofocale11: the shelf and the play-time picker both ask for trailer ids on a warm
+    /// detail open. They must come from the raw TMDB videos the enrichment row already paid for,
+    /// not from a second live `movie_details` call (that was ~1.5 s of `related_ms` per open).
+    #[test]
+    fn trailer_candidates_come_from_the_persisted_videos() {
+        let backend = Arc::new(TrailerMetaBackend {
+            calls: AtomicUsize::new(0),
+            trailer: String::new(),
+        });
+        let shim = Arc::new(Shim::new(backend, Config::default()));
+        let rk = shim.keys.key_of(&Ident::Title { type_: "movie".into(), id: "tt0133093".into() });
+        shim.enrich.insert(
+            "movie",
+            "tt0133093",
+            crate::shim_store::Enrichment {
+                videos: Some(plx_stremio::addons_tmdb::TmdbVideos {
+                    results: vec![plx_stremio::addons_tmdb::TmdbVideo {
+                        id: "v1".into(),
+                        key: "dQw4w9WgXcQ".into(),
+                        site: "YouTube".into(),
+                        name: "Trailer".into(),
+                        type_: "Trailer".into(),
+                    }],
+                }),
+                ..Default::default()
+            },
+        );
+        // The fake backend names no trailer, so a cached video is the only possible answer.
+        for alternates in [false, true] {
+            let candidates = shim.trailer_candidates(rk, alternates);
+            assert_eq!(
+                candidates.first().map(|c| c.youtube_id.as_str()),
+                Some("dQw4w9WgXcQ")
+            );
+        }
     }
 }
 

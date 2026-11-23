@@ -191,6 +191,10 @@ pub(crate) fn launch_detail_warm(
     let spawned = plx_base::task::spawn("nuvio-detail-warm", move || {
         if let Some(client) = plx_plex::plex::client_for(sid) {
             plx_data::metadata::warm_detail_get(client, &rk);
+            // Fork Rofocale11: the old fork's focus-warm logged its GET so a TV run could prove
+            // the 750 ms dwell actually fired. Without this line the warm is invisible and a slow
+            // cold open looks like a missing prefetch when it is only a focus that never rested.
+            plx_base::eventlog::log(&format!("detail: warm rk={rk} sid={sid:?} — focus prefetch"));
         }
     });
     if spawned.is_none() {

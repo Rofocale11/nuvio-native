@@ -3497,6 +3497,51 @@ fn fetch_seasons(client: &'static plx_plex::plex::Client, rk: &str) -> Vec<Seaso
         .collect()
 }
 
+/// Fork Rofocale11: the most `/allLeaves` rows we will accept. The shim can answer a whole show
+/// in one JSON; a very long show makes that answer big enough that parsing and transferring it
+/// costs more than the two round trips it saves, so an oversized answer is refused and the normal
+/// paged `/children` path is used instead (old DETAIL-LATENCY.md plan 3B's "keep the current path
+/// for very long shows if the JSON is large").
+const ALL_LEAVES_MAX_ROWS: usize = 2000;
+
+/// Fork Rofocale11: the shim's one-hop show read. `Client::all_leaves` returns None on a real PMS,
+/// so a non-Nuvio server keeps its existing chain untouched. An oversized answer is logged and
+/// refused rather than parsed — see [`ALL_LEAVES_MAX_ROWS`].
+fn fetch_all_leaves(client: &'static plx_plex::plex::Client, rk: &str) -> Option<plx_plex::plex::MediaContainer> {
+    let mc = client.all_leaves(rk)?;
+    if mc.metadata.len() > ALL_LEAVES_MAX_ROWS {
+        plx_base::eventlog::log(&format!(
+            "detail: rk={rk} /allLeaves answered with {} rows (> {ALL_LEAVES_MAX_ROWS}) — using /children for this show",
+            mc.metadata.len()
+        ));
+        return None;
+    }
+    Some(mc)
+}
+
+/// Fork Rofocale11: PURE — filter the shim's all-leaves rows down to one season and build that
+/// season's page-0 [`Episode`]s with the existing wire → model mapping. Host-testable without a
+/// server; `None` means "these leaves cannot answer this season" (oversized answer, or no rows
+/// for it), which sends the caller back to the `/children` path. A leaf names its season by
+/// `parentRatingKey` (the shim always sends it); `parentIndex` is the fallback for a row that
+/// does not carry a rating key.
+fn leaves_for_season(mc: &plx_plex::plex::MediaContainer, season: &Season) -> Option<Vec<Episode>> {
+    if mc.metadata.len() > ALL_LEAVES_MAX_ROWS {
+        return None;
+    }
+    let rows: Vec<Episode> = mc.metadata.iter()
+        .filter(|x| {
+            if x.parent_rating_key.is_empty() {
+                x.parent_index == Some(season.index)
+            } else {
+                x.parent_rating_key == season.rk
+            }
+        })
+        .map(convert_episode)
+        .collect();
+    (!rows.is_empty()).then_some(rows)
+}
+
 /// A season's episode list, or **None when the `/children` GET failed**. The failure has to stay
 /// distinguishable from a genuinely empty season all the way to the pump: returning an empty Vec
 /// for both is what let one transient GET blank a populated episode row, with no spinner, no error
@@ -3823,19 +3868,43 @@ fn collection_shelf(
 /// The season is chosen HERE, in the fetch, and its episodes are loaded in the same pass: picking
 /// it later (a `LoadSeason` once the page landed) would flash season 1's row first and spend a
 /// round trip fetching episodes nobody looks at.
-fn load_show_seasons(client: &'static plx_plex::plex::Client, rk: &str, d: &mut Detail, prefer: Option<i64>) {
-    d.seasons = fetch_seasons(client, rk);
+///
+/// Fork Rofocale11: the seasons and all-leaves answer are handed in, already fetched beside the
+/// item GET (plans 3B/3C) — this function no longer issues the season GET itself. `d.seasons`
+/// still comes from `/children` (the shim's season rows carry the titles and viewed/leaf counts
+/// the tabs need; leaves are episode rows only), and only the opening season's page-0 episodes
+/// come from the leaves when they answer. Everywhere else — a missing/oversized/empty leaves
+/// answer, or a non-Nuvio server — the original `/children` fetch is unchanged.
+fn load_show_seasons(
+    client: &'static plx_plex::plex::Client,
+    rk: &str,
+    d: &mut Detail,
+    prefer: Option<i64>,
+    seasons: Option<Vec<Season>>,
+    leaves: Option<plx_plex::plex::MediaContainer>,
+) {
+    // `None` is the non-Nuvio path: the original serial season GET, before the `/children`
+    // episode GET below. Keeping it here leaves that chain byte-for-byte unchanged.
+    d.seasons = seasons.unwrap_or_else(|| fetch_seasons(client, rk));
     d.cur_season = initial_season(&d.seasons, d.on_deck.as_ref(), prefer);
     if let Some(season) = d.seasons.get(d.cur_season) {
-        // a season failure is not worth failing the whole page over — the hero, cast
-        // and Related still load, and there is no previous list here to protect. It is still
-        // named, because the `eps=` in the summary line cannot tell it from a season with no episodes.
-        d.episodes = fetch_episodes(client, &season.rk).unwrap_or_else(|| {
-            plx_base::eventlog::log(&format!(
-                "detail: rk={rk} season rk={} /children did not answer — the eps= below is that refusal",
-                season.rk));
-            EpisodeList::default()
-        });
+        let from_leaves = leaves.as_ref().and_then(|mc| leaves_for_season(mc, season));
+        d.episodes = match from_leaves {
+            Some(rows) => {
+                let mut list = EpisodeList::with_total(rows.len());
+                list.set_page(0, rows);
+                list
+            }
+            None => fetch_episodes(client, &season.rk).unwrap_or_else(|| {
+                // a season failure is not worth failing the whole page over — the hero, cast
+                // and Related still load, and there is no previous list here to protect. It is still
+                // named, because the `eps=` in the summary line cannot tell it from a season with no episodes.
+                plx_base::eventlog::log(&format!(
+                    "detail: rk={rk} season rk={} /children did not answer — the eps= below is that refusal",
+                    season.rk));
+                EpisodeList::default()
+            }),
+        };
     }
 }
 
@@ -3870,10 +3939,11 @@ fn selected_season_number(state: &MetadataState, sid: plx_plex::plex::ServerId, 
 /// The full detail fetch for `rk` (movie or show): item metadata + cast + streams, plus — for
 /// shows — seasons, the opening season's episodes ([`initial_season`]) and a stream backfill, plus
 /// the related hub.
-/// Round trips one after another: 2 for a movie (the item, with Related beside it; then extras,
-/// beside what is left of Related); for a show the item, then its seasons, then the opening
-/// season's episodes, with Related, the on-deck episode and extras beside them (a show nobody has
-/// started reads its first episode after those).
+/// Round trips: 2 for a movie (the item, with Related beside it; then extras, beside what is left
+/// of Related). Fork Rofocale11: for a Nuvio show the seasons and all-leaves reads now go BESIDE
+/// the item (plans 3B/3C), so the opening season's page comes from one of those answers rather
+/// than a fourth serial GET; a non-Nuvio server or an oversized/missing leaves answer falls back
+/// to the original `/children` request. Related, the on-deck episode and extras stay beside them.
 ///
 /// Every GET goes through `client`, the one the runner resolved for the job
 /// ([`finish_detail_fetch`]), the opening season's episodes included.
@@ -3905,10 +3975,23 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
     // Everything that needs nothing from the rest is asked beside it, on sibling threads of ONE
     // scope (`plx_base::task::beside`), so the page waits for the slowest chain, not their sum:
     // Related needs only the key, so it goes beside the item; extras and a show's on-deck episode
-    // need the item (its kind, its on-deck key) and go beside the seasons. The scope joins every
-    // sibling on every exit, the item-refused one included.
-    let (mut d, primary_extra_key, related, extras) = std::thread::scope(|s| {
+    // need the item (its kind, its on-deck key) and go beside it once it lands. Fork Rofocale11:
+    // the show's seasons and all-leaves reads need only the key too, so they also go beside the
+    // item. The scope joins every sibling on every exit, the item-refused one included.
+    // Fork Rofocale11: the phase timers restore the old fork's Stage 0 split so a cold open can be
+    // attributed without guessing — `meta_ms` is the item GET alone, `seasons_ms` the show's
+    // seasons/leaves work, `streams_ms` the stream backfill, and `related_ms` the wall time from
+    // just after the item GET through the related/extras install. `ms=` stays the whole chain.
+    let (mut d, primary_extra_key, related, extras, meta_ms, seasons_ms, streams_ms, t_item_done) = std::thread::scope(|s| {
         let related = plx_base::task::beside(s, "detail-related", move || fetch_related(client, sid, rk));
+        // Fork Rofocale11: plans 3B/3C — both of these need only `rk`, so they go beside the item
+        // GET rather than after it. Both are gated on `is_nuvio`: a real PMS has no /allLeaves route
+        // AND its movie chain must keep the exact original GET sequence, so the non-Nuvio path
+        // still fetches seasons serially inside `load_show_seasons` once the item has landed.
+        let nuvio = client.is_nuvio();
+        let seasons = nuvio.then(|| plx_base::task::beside(s, "detail-seasons", move || fetch_seasons(client, rk)));
+        let leaves = nuvio.then(|| plx_base::task::beside(s, "detail-leaves", move || fetch_all_leaves(client, rk)));
+        let t_meta = crate::instruments::start();
         let Some((mut d, primary_extra_key)) = fetch_detail(client, sid, rk) else {
             plx_base::eventlog::log(&format!("detail: rk={rk} sid={sid:?} — no metadata (the server refused or did not answer)"));
             // The Related request was asked before this was known; its answer is dropped unread —
@@ -3916,6 +3999,8 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
             // instead of logging it), which would read as a fact about an item that never loaded.
             return None;
         };
+        let meta_ms = crate::instruments::elapsed(t_meta).as_millis();
+        let t_item_done = crate::instruments::start();
         d.source_override = source_override;
         // Movie/show: the extras GET. Episode/season pages never show the Trailer control, so
         // they must not pay extras I/O.
@@ -3930,8 +4015,15 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
         // once they land.
         let on_deck = d.is_show.then(|| d.on_deck.as_ref().map(|e| e.rk.clone())).flatten()
             .map(|ep| plx_base::task::beside(s, "detail-hero", move || client.metadata(&ep)));
+        let mut seasons_ms: u128 = 0;
+        let mut streams_ms: u128 = 0;
         if d.is_show {
-            load_show_seasons(client, rk, &mut d, prefer);
+            let t_seasons = crate::instruments::start();
+            let season_rows = seasons.map(|job| job.finish());
+            let leaf_rows = leaves.and_then(|job| job.finish());
+            load_show_seasons(client, rk, &mut d, prefer, season_rows, leaf_rows);
+            seasons_ms = crate::instruments::elapsed(t_seasons).as_millis();
+            let t_streams = crate::instruments::start();
             let deck_item = on_deck.and_then(|job| job.finish());
             if let (Some(ep), Some(it)) = (&mut d.on_deck, &deck_item) {
                 ep.versions = crate::pms::versions_of(it);
@@ -3946,6 +4038,7 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
                     backfill_episode(&mut d, target, &it);
                 }
             }
+            streams_ms = crate::instruments::elapsed(t_streams).as_millis();
             // NB `part`/`vcodec`/`acodec` are deliberately NOT backfilled. They are the item's OWN
             // playable file, and "a show has an empty part" is load-bearing elsewhere — `app.rs`'s
             // play trigger reads it as "this is a show, take the episode's resume point instead",
@@ -3953,8 +4046,13 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
             // A consumer that wants to know how the HERO's episode will play asks the episode
             // (`ui::detail::draw_play_mode`), which is also the only place that knows which
             // episode the button would start.
+        } else {
+            // Fork Rofocale11: a movie never uses these answers; join them here so no sibling is
+            // left holding work on this item's behalf.
+            let _ = seasons.map(|job| job.finish());
+            let _ = leaves.and_then(|job| job.finish());
         }
-        Some((d, primary_extra_key, related.finish(), extras.map(|e| e.finish())))
+        Some((d, primary_extra_key, related.finish(), extras.map(|e| e.finish()), meta_ms, seasons_ms, streams_ms, t_item_done))
     })?;
     // Same shape as `fetch_seasons`: the degrade is deliberate, the silence is not — an item with
     // no related hub and a refused GET both reach `related=0` below.
@@ -3995,12 +4093,32 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
     // so the only mechanism for viewing content is that no call site writes it. This one did,
     // from the day it was added until phase 11 — `'{}'` with `d.title` in it, on every detail
     // open, in a log the maintainer routinely pastes into a public issue.
-    plx_base::eventlog::log(&format!(
-        "detail: sid={} rk={} show={} genres={} cast={} crew={} seasons={} eps={} related={} collection={} audio={} subs={} trailer={} extras={} ms={}",
-        d.sid.raw(), d.rk, d.is_show, d.genres.len(), d.cast.len(), d.crew.len(), d.seasons.len(), d.episodes.len(),
-        d.related.len(), d.collection.as_ref().map_or(0, |c| c.members.len()), d.audio.len(), d.subs.len(), u8::from(d.trailer().is_some()), extras_src, crate::instruments::elapsed(t0).as_millis()
-    ));
+    // Fork Rofocale11: this restores the old fork's Stage 0 split so a cold open can be attributed
+    // from one line. All existing fields keep their names and order; the four new ones sit just
+    // before the total, and `related_ms` runs to here (through the related/extras install).
+    let related_ms = crate::instruments::elapsed(t_item_done).as_millis();
+    plx_base::eventlog::log(&detail_summary_line(&d, extras_src, meta_ms, seasons_ms, streams_ms, related_ms, crate::instruments::elapsed(t0).as_millis()));
     Some(d)
+}
+
+/// Fork Rofocale11: PURE — the one `detail:` summary line, split out of [`fetch_full`] so the
+/// Stage 0 field shape is host-testable. Every existing field keeps its name and order; the four
+/// phase fields are appended immediately before `ms=` so old readers of the tail still find it.
+fn detail_summary_line(
+    d: &Detail,
+    extras_src: &str,
+    meta_ms: u128,
+    seasons_ms: u128,
+    streams_ms: u128,
+    related_ms: u128,
+    total_ms: u128,
+) -> String {
+    format!(
+        "detail: sid={} rk={} show={} genres={} cast={} crew={} seasons={} eps={} related={} collection={} audio={} subs={} trailer={} extras={} meta_ms={} seasons_ms={} streams_ms={} related_ms={} ms={}",
+        d.sid.raw(), d.rk, d.is_show, d.genres.len(), d.cast.len(), d.crew.len(), d.seasons.len(), d.episodes.len(),
+        d.related.len(), d.collection.as_ref().map_or(0, |c| c.members.len()), d.audio.len(), d.subs.len(),
+        u8::from(d.trailer().is_some()), extras_src, meta_ms, seasons_ms, streams_ms, related_ms, total_ms
+    )
 }
 
 // `load_detail_now` — `request_detail` but BLOCKING, `pub fn load_detail_now(sid, rk)` —
@@ -7015,3 +7133,90 @@ mod alt_runtime_tests {
 #[cfg(test)]
 #[path = "metadata/captured_inputs_tests.rs"]
 mod captured_inputs_tests;
+
+// Fork Rofocale11: plan 3B/3C host tests. The shim's all-leaves answer is plain model data, so the
+// season filter and the Stage 0 log shape can both be graded without a network or a television.
+#[cfg(test)]
+mod nuvio_all_leaves_tests {
+    use super::*;
+
+    fn leaf(rk: &str, index: i64, parent_rk: &str, parent_index: i64) -> plx_plex::plex::Metadata {
+        let mut x = plx_plex::plex::Metadata::default();
+        x.kind = "episode".into();
+        x.rating_key = rk.into();
+        x.index = index;
+        x.title = format!("Episode {index}");
+        x.parent_rating_key = parent_rk.into();
+        x.parent_index = Some(parent_index);
+        x
+    }
+
+    fn container(rows: Vec<plx_plex::plex::Metadata>) -> plx_plex::plex::MediaContainer {
+        let mut mc = plx_plex::plex::MediaContainer::default();
+        mc.metadata = rows;
+        mc
+    }
+
+    fn season(rk: &str, index: i64) -> Season {
+        Season { rk: rk.into(), index, title: format!("Season {index}"), leaf_count: 1, viewed_leaf_count: 0 }
+    }
+
+    #[test]
+    fn the_leaves_filter_picks_only_the_requested_season() {
+        let mc = container(vec![
+            leaf("e1", 1, "s1", 1),
+            leaf("e2", 2, "s2", 2),
+            leaf("e3", 3, "s2", 2),
+        ]);
+        let got = leaves_for_season(&mc, &season("s2", 2)).expect("season 2 has leaves");
+        assert_eq!(got.iter().map(|e| e.rk.as_str()).collect::<Vec<_>>(), ["e2", "e3"]);
+        assert_eq!(got[0].index, 2);
+        assert_eq!(got[0].season, 2, "the episode's season number comes from parentIndex");
+        assert_eq!(got[0].title, "Episode 2", "and the row still goes through convert_episode");
+    }
+
+    #[test]
+    fn a_row_without_a_parent_rating_key_falls_back_to_the_season_number() {
+        let mc = container(vec![leaf("e4", 4, "", 3), leaf("e2", 2, "s2", 2)]);
+        let got = leaves_for_season(&mc, &season("s3", 3)).expect("the number identifies the season");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].rk, "e4");
+        assert!(
+            leaves_for_season(&mc, &season("s4", 4)).is_none(),
+            "a wrong season number still matches nothing"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_oversized_leaves_answer_is_refused() {
+        let mc = container(vec![leaf("e1", 1, "s1", 1)]);
+        assert!(
+            leaves_for_season(&mc, &season("s9", 9)).is_none(),
+            "no leaves for the season → the /children fallback"
+        );
+        let mut big = plx_plex::plex::MediaContainer::default();
+        big.metadata = (0..=ALL_LEAVES_MAX_ROWS).map(|i| leaf(&format!("e{i}"), i as i64, "s1", 1)).collect();
+        assert_eq!(big.metadata.len(), ALL_LEAVES_MAX_ROWS + 1);
+        assert!(
+            leaves_for_season(&big, &season("s1", 1)).is_none(),
+            "an oversized answer is refused whole, even if the right rows are in it"
+        );
+    }
+
+    #[test]
+    fn the_detail_summary_keeps_its_fields_and_puts_the_split_before_ms() {
+        let d = Detail { rk: "42".into(), is_show: true, ..Default::default() };
+        let line = detail_summary_line(&d, "extras", 11, 22, 33, 44, 55);
+        let tail = "meta_ms=11 seasons_ms=22 streams_ms=33 related_ms=44 ms=55";
+        assert!(line.ends_with(tail), "{line}");
+        let before = line.strip_suffix(tail).expect("the split is the tail");
+        assert!(before.trim_end().ends_with(" extras=extras"), "{before}");
+        assert!(before.starts_with("detail: sid="), "{before}");
+        for field in [
+            "show=", "genres=", "cast=", "crew=", "seasons=", "eps=", "related=", "collection=",
+            "audio=", "subs=", "trailer=",
+        ] {
+            assert!(before.contains(field), "missing {field}: {before}");
+        }
+    }
+}

@@ -19,6 +19,24 @@ pub struct CatalogInfo {
 }
 
 pub trait Backend: Send + Sync {
+    /// A fingerprint of the addon set, used only to decide whether a cache-clearing addon change
+    /// actually happened. The concrete `AddonBackend` overrides this with the transport urls and
+    /// `disabled` flags of every installed addon — catalog keys alone would miss a catalog-less
+    /// addon (OpenSubtitles) and a transport swap that keeps the manifest id. Pseudo/test backends
+    /// have no addon set, so their observable catalogs are the best available signal.
+    /// Fork Rofocale11: this keeps the boot-time warm start from being wiped by a no-op re-apply.
+    fn addons_fingerprint(&self) -> Vec<(String, bool)> {
+        let mut fp: Vec<(String, bool)> = self.all_catalogs().into_iter().map(|c| (c.key, false)).collect();
+        for c in self.catalogs() {
+            match fp.iter_mut().find(|(key, _)| *key == c.key) {
+                Some(entry) => entry.1 = true,
+                None => fp.push((c.key, true)),
+            }
+        }
+        fp.sort();
+        fp
+    }
+
     /// Home-shelf catalogs, in the user's addon order.
     fn catalogs(&self) -> Vec<CatalogInfo>;
     /// Every browseable catalog (Home shelves plus ones hidden from Home), for the Library
@@ -78,6 +96,20 @@ fn info(set: &plx_stremio::addons::AddonSet, c: &plx_stremio::addons::CatalogRef
 }
 
 impl Backend for AddonBackend {
+    /// Fork Rofocale11: the exact set the account sink re-applies at boot and Settings replaces at
+    /// run time. A disabled addon, a removed addon or a transport swap all change this fingerprint,
+    /// so the shim clears its caches on a real change and keeps the warm start on a no-op re-apply.
+    fn addons_fingerprint(&self) -> Vec<(String, bool)> {
+        let set = self.snapshot();
+        let mut fp: Vec<(String, bool)> = set
+            .addons
+            .iter()
+            .map(|a| (a.transport_url.clone(), !a.disabled))
+            .collect();
+        fp.sort();
+        fp
+    }
+
     fn catalogs(&self) -> Vec<CatalogInfo> {
         let set = self.set.read().unwrap_or_else(|e| e.into_inner());
         set.home_catalogs().iter().map(|c| info(&set, c)).collect()
