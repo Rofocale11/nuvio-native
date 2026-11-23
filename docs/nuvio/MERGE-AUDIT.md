@@ -971,5 +971,15 @@ on `nuvio-native`; it failed at "Build the IPK", exit 2. Two fork-workflow defec
    secret is currently unused.
 
 Verified: the failed run's head SHA was `25b37b75`, the commit with the swresample fix, so the
-workflow was running the intended tree. The rotated key is present in no tracked file. No fix has
-been pushed yet; a rerun is needed to exercise the release gates that were skipped.
+workflow was running the intended tree. The fixes were committed as `bbf99e502` and pushed to
+`nuvio-native`. The owner confirmed the TMDB key was rotated, not merely moved to a Secret, and
+the rotated value is present in no tracked file.
+
+Rerun `45247306988` was green (12m11s) on `bbf99e502`: Build the IPK, package assertions, the
+C-engine check, the AVFrame probe and artifact upload all passed, with only a non-fatal Node 20
+deprecation annotation from `upload-artifact`. The downloaded `nuvio-native-ipk-stable` artifact
+carries `libsbengine.so`, `libswresample-plx.so.7` and an Opus-enabled `libavcodec` whose
+`NEEDED libswresample-plx.so.7` is satisfied; its version is 0.10.0 with the stable app id, and
+`ipk.sha256` matches the package. The run log shows `TMDB_API_KEY: ***` and no key-shaped strings.
+Release-only gates (ELF, size budget, font hinting, webosbrew, firmware matrix and the release
+attach) are skipped by design on `workflow_dispatch`; they still need a pushed `v*` tag run.
