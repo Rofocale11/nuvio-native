@@ -909,3 +909,45 @@ together. No new fork crate or file is involved in this change.
 Verified: `plx_plex` 834 passed with the three pre-existing lossy-gate profile-list failures (an
 extra `opus` codec, unrelated to this change), `plx_play_feed` 368, `plx_media` hostsim 2500, plus
 `make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy yet.
+
+**`build-ipk.yml` is now this fork's sole IPK/release workflow (2026-11-24).** The new fork-owned
+`.github/workflows/build-ipk.yml` is ported from the old fork: a `v*` tag builds the ARM engine and
+package, runs the tagged-release gates, and attaches the `.ipk` plus `ipk.sha256` to the GitHub
+Release; a manual dispatch builds the same package as a test artifact without publishing. Two
+boundary adaptations to this tree: the old nightly + `rust-src` install is replaced by the
+repository's pinned-toolchain action (this tree pins its release in `rust-modules/rust-toolchain.toml`
+and ships prebuilt ARMv7 std), and the
+bare `make setup-env` by the repository's cached, self-verifying NDK action whose `sdk-dir` output
+feeds the engine build and ELF checks. The workflow still passes `NUVIO_SUPABASE_*`, the login-web
+URLs and `TMDB_API_KEY` and masks them in the public log — the upstream `build-package.yml` passes
+none of them.
+
+Upstream edits, both marked and both kept small for the next merge: `release.yml` has only its
+`push: tags: ['v*']` publisher commented out (`workflow_dispatch` remains, so the file stays a valid
+workflow and the old publisher can be restored by uncommenting three lines); `ci/test_ci_workflows.py`
+asserts that *either* `release.yml` or `build-ipk.yml` carries the tag trigger, accepting both the
+upstream inline spelling and the fork's list spelling, so an upstream merge restoring the trigger
+needs no test change. All other upstream workflow files are untouched.
+
+Verified: all 103 `ci.test_ci_workflows` tests pass, and the new workflow's YAML structure was
+diffed against the known-valid old fork file. No GitHub run has been triggered, and no commit, push
+or deploy was made for this change.
+
+**Ship libswresample with the Opus decoder (2026-11-24, follow-up).** `ci/build-ffmpeg.sh` enables
+the swresample dependency of FFmpeg 9's native Opus decoder, and `media-codecs/src/ffi.rs` /
+`media/src/ff.rs` open `libswresample-plx.so.7` with `RTLD_GLOBAL` before `libavcodec`, but the
+Makefile's `FFMPEG_SONAMES` never staged that library — so a clean IPK carried a `libavcodec` with
+`NEEDED libswresample-plx.so.7` and no such file. A GitHub-built package would therefore have had
+the Opus build flag and the loader entry but no working decoder. Upstream edits, all marked:
+`Makefile` adds the SONAME to `FFMPEG_SONAMES`, to the deploy-time FFmpeg retirement glob and to
+`FFMPEG_HOST_NAMES`; `ci/build-ffmpeg.sh` adds it to the strip/link-evidence loop — without that,
+staging failed with `elf_sha256 mismatch` on a clean tree because no receipt existed for it;
+`ci/stage-host-ffmpeg.sh` adds its `/plx` load command to the rewrite list.
+`THIRD-PARTY-NOTICES.md` has no comment syntax for a marker, so its FFmpeg row now names the extra
+library here instead.
+
+Verified: after the FFmpeg receipt fix, `make ipk` completes and `ci/check-package.py` passes
+`THIRD-PARTY-NOTICES names exactly the distributed libraries`; the package reports
+"8 receipted + 1 digest-pinned ELF files verified", with `libswresample-plx.so.7` staged and the
+packaged `libavcodec` still declaring the dependency it satisfies. All 103 `ci.test_ci_workflows`
+tests pass.

@@ -993,7 +993,11 @@ src/%.o: src/%.c $(wildcard src/*.h) Makefile $(CONFIG_LOCAL_STAMP)
 FFMPEG_PREFIX = vendor/ffmpeg-prefix
 FFMPEG_INC    = $(FFMPEG_PREFIX)/include
 # Staged into pkg/ under their SONAMEs, which is the name media-codecs/src/ffi.rs dlopens by absolute path.
+# Fork Rofocale11: FFmpeg 9's native Opus decoder makes libavcodec NEED libswresample by SONAME.
+# media-codecs/src/ffi.rs opens it first with RTLD_GLOBAL, which only resolves against a file that
+# actually ships — leave it out and a clean install cannot load libavcodec, so Opus direct play dies.
 FFMPEG_SONAMES = libavutil-plx.so.61 libavcodec-plx.so.63 libavformat-plx.so.63 \
+                 libswresample-plx.so.7 \
                  $(if $(RELEASE),,libswscale-plx.so.10)
 FFMPEG_STAGED = $(addprefix pkg/,$(FFMPEG_SONAMES))
 
@@ -1423,7 +1427,9 @@ deploy: pkg/plxnative $(FFMPEG_STAGED) $(SENTRY_NATIVE_STAMP) $(APPINFO) release
 	# live .63/.61. Harmless (media-codecs/src/ffi.rs opens by exact name) but it accumulates, and it ships nothing:
 	# the .ipk only ever contains the current set. Removal comes AFTER the copy so there is never
 	# a moment with no FFmpeg on the device.
-	$(SSH) 'cd $(APPDIR) && for f in libav*-plx.so.* libswscale-plx.so.*; do case " $(FFMPEG_SONAMES) " in *" $$f "*) ;; *) rm -f "$$f";; esac; done'
+	# Fork Rofocale11: libswresample is not matched by `libav*`; a copy from an older build would
+	# otherwise sit on the television forever after the retirement loop below runs.
+	$(SSH) 'cd $(APPDIR) && for f in libav*-plx.so.* libswresample-plx.so.* libswscale-plx.so.*; do case " $(FFMPEG_SONAMES) " in *" $$f "*) ;; *) rm -f "$$f";; esac; done'
 
 	$(SCP) pkg/plxnative tv:$(APPDIR)/plxnative.new
 	@# The lab session file, under LAB=1 only. Shipped by deploy as well as by the .ipk so the
@@ -2569,7 +2575,8 @@ SIM_PRE = mkdir -p $(SIM_DIR); test -n "$(SIM_PMS)" || \
 # names. `APP_FILES` is an explicit list, so none of it can reach an .ipk or a television.
 FFMPEG_HOST_PREFIX = vendor/ffmpeg-prefix-host
 FFMPEG_HOST_INC    = $(FFMPEG_HOST_PREFIX)/include
-FFMPEG_HOST_NAMES  = libavutil-plx.61 libavcodec-plx.63 libavformat-plx.63 libswscale-plx.10
+# Fork Rofocale11: the simulator's Opus decoder has the same libswresample dependency as the TV's.
+FFMPEG_HOST_NAMES  = libavutil-plx.61 libavcodec-plx.63 libavformat-plx.63 libswresample-plx.7 libswscale-plx.10
 FFMPEG_HOST_STAGED = $(addprefix pkg/,$(addsuffix .dylib,$(FFMPEG_HOST_NAMES)))
 LIBASS_HOST_NAME = $(if $(filter Darwin,$(shell uname -s)),libass-plx.0.dylib,libass-plx-host.so.0)
 LIBASS_HOST_STAGED = pkg/$(LIBASS_HOST_NAME)

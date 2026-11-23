@@ -38,9 +38,15 @@ name: Release
 # NO DOUBLE BUILD: the tag `prepare` pushes uses GITHUB_TOKEN, and GitHub deliberately does not
 # start a workflow run from a GITHUB_TOKEN push. So the `push: tags` trigger below stays for a
 # hand-pushed tag without re-firing on our own.
+#
+# Fork Rofocale11: build-ipk.yml is this fork's sole IPK publisher, including on `v*` tags. This
+# upstream publisher would write the same GitHub Release assets on the same tag, so only the tag
+# trigger is disabled. The file stays otherwise untouched — `workflow_dispatch` keeps it a valid
+# workflow — so an upstream merge remains a small, marked diff.
 on:
-  push:
-    tags: ['v*']
+  # Fork Rofocale11: disabled — build-ipk.yml owns `v*` tags.
+  # push:
+  #   tags: ['v*']
   workflow_dispatch:
     inputs:
       bump:

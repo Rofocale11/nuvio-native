@@ -496,7 +496,10 @@ mkdir -p "$PREFIX"
 cp -R "$WORK/destdir/plx/." "$PREFIX/"
 # Strip each real ELF, then prove the exact strip transformation against its link receipt.
 if [ -z "$HOST" ]; then
-  for elf in "$SRC"/libavutil/libavutil-plx.so.* "$SRC"/libavcodec/libavcodec-plx.so.* "$SRC"/libavformat/libavformat-plx.so.* "$SRC"/libswscale/libswscale-plx.so.*; do
+  # Fork Rofocale11: libswresample ships too — FFmpeg 9's Opus decoder makes libavcodec NEED it —
+  # so it needs the same strip/evidence receipt as the other bundled libraries. Without this the
+  # Makefile's staging of the SONAME fails with "elf_sha256 mismatch" on a clean tree.
+  for elf in "$SRC"/libavutil/libavutil-plx.so.* "$SRC"/libavcodec/libavcodec-plx.so.* "$SRC"/libavformat/libavformat-plx.so.* "$SRC"/libswscale/libswscale-plx.so.* "$SRC"/libswresample/libswresample-plx.so.*; do
     case "$elf" in *.link.*) continue ;; esac
     [ -f "$elf" ] && [ ! -L "$elf" ] || continue
     target="$PREFIX/lib/$(basename "$elf")"

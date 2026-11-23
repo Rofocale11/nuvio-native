@@ -17,7 +17,9 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PREFIX="$ROOT/vendor/ffmpeg-prefix-host"
-LIBS='libavutil-plx.61 libavcodec-plx.63 libavformat-plx.63 libswscale-plx.10'
+# Fork Rofocale11: libavcodec's Opus decoder depends on libswresample; its /plx load command has
+# to be rewritten too, or the simulator fails to dlopen the decoder the same way the TV would.
+LIBS='libavutil-plx.61 libavcodec-plx.63 libavformat-plx.63 libswresample-plx.7 libswscale-plx.10'
 name=$1
 
 src=$(ls "$PREFIX/lib/$name".*.*.dylib 2>/dev/null | head -1)

@@ -1,0 +1,294 @@
+name: build-ipk
+
+# Fork Rofocale11: this fork's ONLY IPK build and release workflow. A `v*` tag builds the ARM
+# package, runs the release gates, and attaches the .ipk and its sha256 to a GitHub Release. A
+# manual dispatch on a branch builds the same package as a test artifact and never creates a
+# release. The upstream `release.yml` publisher is left in the tree but its v* trigger is disabled,
+# so an upstream merge stays a small, marked diff.
+#
+# The tag is only a label: the package version comes from the three files `ci/check-package.py`
+# reads (pkg/appinfo.json, ipkroot/ctl/control, rust-modules/Cargo.toml). The tag guard below
+# refuses a tag that does not match; bump all three together.
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: "FLAVOR (stable or debug)"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - debug
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # The webOS NDK publishes host builds for linux-aarch64, darwin-arm64 and darwin-x86_64 (plus
+    # an x86_64 Linux one upstream, enough for a local WSL build).
+    # ubuntu-24.04-arm gives us a native ARM64 Linux runner with the
+    # linux-aarch64 toolchain, so the build works as designed.
+    # Free on public repos. Private repos need a paid plan for ARM64 runners.
+    runs-on: ubuntu-24.04-arm
+    # The same bound as ci.yml's cross-build job, which is the closest measured ARM build+package
+    # job (upstream's release build measured up to 11.6 min before LTO and the FFmpeg rebuild);
+    # unset means GitHub's 360. The apt refresh below has its own 2-minute cap.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Version files must agree
+        # On a clean checkout this grades the three tracked version files. After `make ipk` the
+        # same script grades the staged package too, so a tag cannot describe a different build.
+        run: python3 ci/check-package.py
+
+      - name: Tag must match the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${TAG#v}"
+          pkg="$(python3 -c 'import json; print(json.load(open("pkg/appinfo.json"))["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $TAG does not match pkg/appinfo.json $pkg"
+            echo "::error::bump pkg/appinfo.json, ipkroot/ctl/control and rust-modules/Cargo.toml together"
+            exit 1
+          fi
+
+      - name: Install system prerequisites
+        run: |
+          timeout 120 sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 curl tar xz-utils bzip2 \
+            libssl-dev pkg-config file \
+            cmake perl
+
+      - name: Install the pinned Rust toolchain
+        # Fork adaptation: the old fork installed nightly + rust-src for `-Z build-std`. This tree
+        # pins 1.100.0 in rust-modules/rust-toolchain.toml and links prebuilt ARMv7 std, so it uses
+        # the repository's own action. Installing nightly here would be a wasted download and
+        # would not change the compiler the Makefile selects (`cargo +$(RUST_TOOLCHAIN)`).
+        uses: ./.github/actions/rust-toolchain
+
+      - name: Put cargo on PATH for the later build steps
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Provision the webOS NDK
+        # Fork adaptation: use the repository's own pinned, cached and self-verifying action rather
+        # than a bare `make setup-env`. Its `sdk-dir` output feeds the engine build and ELF checks.
+        id: ndk
+        uses: ./.github/actions/webos-ndk
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-modules/target-release
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/Cargo.lock', 'rust-modules/.cargo/config.toml', 'Makefile') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache bundled FFmpeg
+        # The prefix AND the verified upstream tarball, keyed by the build script. A miss falls
+        # back to ci/build-ffmpeg.sh's retried fetch; a hit avoids both the network and the
+        # ~2-minute rebuild.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/ffmpeg-prefix
+            vendor/ffmpeg-build
+          key: ffmpeg-${{ runner.arch }}-${{ hashFiles('ci/build-ffmpeg.sh') }}
+
+      - name: Cache the torrent engine's downloads
+        # Boost 1.86 is a 140 MB tarball and libtorrent a full clone; both land in
+        # `build/sbengine/deps` (FETCHCONTENT_BASE_DIR in ci/build-sbengine.sh) precisely because
+        # the engine's own `build/` directory is wiped on every configure. `vendor/downloads` is
+        # ci/deps.py's cache, which is where the pinned OpenSSL tarball goes.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/downloads
+            build/sbengine/deps
+          key: sbengine-deps-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-sbengine.sh', 'vendor/engine-sources/engine.patch', 'vendor/engine-sources/nuvio-engine/cmake/Dependencies.cmake') }}
+
+      - name: Cache the static OpenSSL prefix
+        # ci/build-openssl.sh installs libssl.a/libcrypto.a here; ci/build-sbengine.sh rebuilds it
+        # only when the prefix is missing, so a hit skips the ~5 minutes of OpenSSL entirely. The
+        # key carries the pin (ci/dependencies.json) and the script, so a version change is a miss.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/openssl-prefix
+          key: openssl-${{ runner.arch }}-${{ hashFiles('ci/build-openssl.sh', 'ci/dependencies.json') }}
+
+      - name: Build the C torrent engine
+        # libsbengine.so beside the binary is what makes the package use the in-process engine
+        # instead of the Node child. Without this step the package still builds and passes every
+        # gate — it just ships without the engine, which is how a release could look green and
+        # still not contain it.
+        timeout-minutes: 30
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+        run: |
+          set -euo pipefail
+          ./ci/build-sbengine.sh
+          test -f build/sbengine/libsbengine.so
+
+      - name: Build the IPK
+        shell: bash
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          # make echoes the cargo recipe, and that line carries these values inline
+          # ($(TELEMETRY_ENV) in the Makefile). Variables are not auto-masked like secrets,
+          # so without this the keys sit in a public run log.
+          for name in NUVIO_SUPABASE_ANON_KEY TMDB_API_KEY; do
+            value="${!name-}"
+            if [ -n "$value" ]; then echo "::add-mask::$value"; fi
+          done
+          FLAVOR="${{ github.event.inputs.flavor || 'stable' }}"
+          echo "Building FLAVOR=$FLAVOR RELEASE=1"
+          make FLAVOR="$FLAVOR" RELEASE=1 ipk
+        env:
+          NUVIO_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
+          NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
+          NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
+          DEVICE_LOGIN_WEB_BASE_URL: ${{ vars.DEVICE_LOGIN_WEB_BASE_URL }}
+          TV_LOGIN_WEB_BASE_URL: ${{ vars.TV_LOGIN_WEB_BASE_URL }}
+          TMDB_API_KEY: ${{ vars.TMDB_API_KEY }}
+
+      - name: Package assertions
+        env:
+          REQUIRE_PACKAGE: "1"
+        run: python3 ci/check-package.py
+
+      - name: The package carries the C engine
+        # A package without it is legal (Node fallback) and passes every other gate, so a release
+        # built from a checkout where the engine step was skipped would look green while shipping
+        # no engine at all. This is the assertion that distinguishes the two.
+        run: |
+          set -euo pipefail
+          staged=$(find ipkroot/data/usr/palm/applications -maxdepth 2 -name libsbengine.so)
+          [ -n "$staged" ] || {
+            echo "::error::libsbengine.so is not staged in the package — did the engine build run?"
+            exit 1
+          }
+          printf '%s\n' "$staged"
+          [ "$(printf '%s\n' "$staged" | wc -l)" -eq 1 ]
+          file "$staged"
+          cat pkg/link-evidence/*/unreceipted.sha256
+
+      - name: ELF assertions (tagged releases)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+        run: |
+          set -euo pipefail
+          ./ci/check-elf.sh
+
+      - name: Binary size budget (tagged releases)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          staged=$(ls ipkroot/data/usr/palm/applications/*/plxnative)
+          [ "$(printf '%s\n' "$staged" | wc -l)" -eq 1 ]
+          python3 ci/check-build-budgets.py --binary "$staged"
+
+      - name: Font hinting audit (tagged releases)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          pip install --quiet --break-system-packages freetype-py || pip install --quiet freetype-py
+          ./tools/font-hint-audit.py
+
+      - name: webosbrew compatibility check (tagged releases)
+        if: startsWith(github.ref, 'refs/tags/v')
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          debs=$(python3 ci/deps.py fetch webosbrew-toolbox --asset fw-symbols --asset ipk-verify)
+          sudo apt-get install -y $debs
+          webosbrew-ipk-verify --details --format markdown \
+            --fw-releases '>=4.0' pkg/*.ipk | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Firmware load matrix (tagged releases)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          {
+            echo '### Firmware load matrix'
+            echo '_Does the process start and do all symbols resolve? Says nothing about playback._'
+            echo '```'
+            ./tools/fwcompat.py --db /usr/share/webosbrew/compat-checker/data \
+              --min-release 4.4.2 pkg/plxnative
+            ./tools/fwcompat.py --db /usr/share/webosbrew/compat-checker/data \
+              --min-release 4.4.2 pkg/plxnative-storage
+            for lib in pkg/lib*-plx.so.*; do
+              case "$lib" in *.link.*) continue ;; esac
+              ./tools/fwcompat.py --db /usr/share/webosbrew/compat-checker/data \
+                --min-release 4.4.2 --shipped pkg "$lib"
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Probe AVFrame layout
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib
+          h = pathlib.Path("vendor/ffmpeg-prefix/include/libavutil/frame.h")
+          if not h.exists():
+              print("frame.h not found — did the FFmpeg build run?")
+              raise SystemExit(0)
+          src = h.read_text()
+          m = re.search(r"typedef struct AVFrame\s*\{(.*?)\}\s*AVFrame\s*;", src, re.DOTALL)
+          if not m:
+              print("AVFrame struct not matched"); raise SystemExit(0)
+          body = m.group(1)
+          lines = [l.strip() for l in body.splitlines()
+                   if l.strip() and not l.strip().startswith(('/*', '*', '//'))]
+          print("=== AVFrame fields, in order ===")
+          for i, l in enumerate(lines):
+              print(f"{i:3}  {l[:110]}")
+          print("=== end ===")
+          EOF
+
+      - name: List build outputs
+        if: always()
+        run: |
+          echo "--- pkg/ ---"
+          ls -la pkg/ || true
+          echo "--- ipkroot/ ---"
+          find ipkroot -type f 2>/dev/null | head -50 || true
+
+      - name: Upload IPK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nuvio-native-ipk-${{ github.event.inputs.flavor || 'stable' }}
+          path: |
+            pkg/*.ipk
+            pkg/ipk.sha256
+          if-no-files-found: error
+
+      - name: Attach IPK to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            pkg/*.ipk
+            pkg/ipk.sha256
+          generate_release_notes: true

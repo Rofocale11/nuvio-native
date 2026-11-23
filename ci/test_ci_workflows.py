@@ -1247,7 +1247,12 @@ class ReleaseMainPushKey(unittest.TestCase):
         self.assertIn("x-access-token:${GH_TOKEN}@", tag_push[0])
         self.assertNotIn("origin", tag_push[0])
         self.assertIn("GH_TOKEN: ${{ github.token }}", prepare)
-        self.assertIn("tags: ['v*']", code("release.yml"))
+        # Fork Rofocale11: build-ipk.yml owns v* tags in this fork and release.yml's trigger is
+        # disabled, so accept either publisher. An upstream merge restoring release.yml's trigger
+        # then needs no change here.
+        tag_trigger = re.compile(r"tags:\s*(?:\['v\*'\]|\n\s+- 'v\*')")
+        self.assertTrue(tag_trigger.search(code("release.yml"))
+                        or tag_trigger.search(code("build-ipk.yml")))
 
 
 class PerTestResults(unittest.TestCase):
