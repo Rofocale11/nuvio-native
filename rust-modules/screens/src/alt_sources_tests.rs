@@ -109,7 +109,7 @@ fn panel(host_sid: ServerId, rk: &str) -> AltSourcesScreen {
 
 /// The one section the screen draws for `list`, built through the same [`form_for`].
 fn section_for(list: &[AltRow]) -> plx_ui::table::Section {
-    let mut t = FormTable::<AltId, Action, std::convert::Infallible>::new(plx_ui::table_screen::BAND_BASE);
+    let mut t = FormTable::<AltId, Action, Action>::new(plx_ui::table_screen::BAND_BASE);
     t.set(form_for(list, sid(0), "0"), None);
     t.table.sections.remove(0)
 }
@@ -849,7 +849,7 @@ pub(crate) mod focus_and_hit {
     };
 
     #[derive(Clone)]
-    struct FixtureArg;
+    pub(crate) struct FixtureArg;
     impl LogicalState for FixtureArg {
         fn write(&self, _: &mut Canon) {}
         fn probe(&self, _: &mut String) {}
@@ -868,7 +868,7 @@ pub(crate) mod focus_and_hit {
             true
         }
     }
-    struct HostFixture;
+    pub(crate) struct HostFixture;
     impl Host for HostFixture {
         type Arg = FixtureArg;
         type Fx = AppFx;
@@ -883,7 +883,7 @@ pub(crate) mod focus_and_hit {
             test_store().view()
         }
     }
-    fn fixture_cx(focus: Option<FocusKey<u32>>) -> plx_machine::machine::Cx<'static, HostFixture> {
+    pub(crate) fn fixture_cx(focus: Option<FocusKey<u32>>) -> plx_machine::machine::Cx<'static, HostFixture> {
         plx_machine::machine::Cx {
             views: (),
             tick: Tick::default(),
@@ -1149,6 +1149,152 @@ fn streams_menu_keeps_polling_while_addons_are_still_answering() {
 }
 }
 
+// Fork Rofocale11: the two-level Streams picker. All of this is pure over the captured
+// `StreamList`; the only writes are effects, so no worker or registry is needed to host-test it.
+fn two_addons() -> Vec<plx_plex::plex::nuvio::StreamChoice> {
+    let choice = |index: usize, label: &str, addon: &str| plx_plex::plex::nuvio::StreamChoice {
+        index, label: label.into(), addon: Some(addon.into()), ..Default::default()
+    };
+    vec![choice(3, "4k DV", "Torrentio"), choice(5, "1080p", "Sootio"), choice(7, "720p", "Torrentio")]
+}
+
+/// The panel with the list already landed: addon list (`None`) or one addon's page (`Some`).
+fn picker(page: Option<usize>) -> AltSourcesScreen {
+    let mut p = panel(sid(0), "0");
+    p.stream_mode = true;
+    p.stream_choices = two_addons();
+    p.stream_page = page;
+    p.form.table.compact = false;
+    p.form.set(p.stream_form(), None);
+    p.form.table.set_title(p.stream_root());
+    p
+}
+
+fn ids(p: &AltSourcesScreen) -> Vec<AltId> {
+    (0..p.form.table.n_rows() as usize).filter_map(|i| p.form.id_at(i).cloned()).collect()
+}
+
+#[test]
+fn the_streams_picker_lists_addons_first_and_then_one_addons_streams() {
+    let _serial = plx_base::testlock::serial();
+    let p = picker(None);
+    let pages = plx_appkit::source_list::addon_pages(&p.stream_choices);
+    let shape: Vec<(&str, usize, Vec<usize>)> =
+        pages.iter().map(|g| (g.name.as_str(), g.lead, g.rows.clone())).collect();
+    assert_eq!(shape, vec![("Torrentio", 3, vec![0, 2]), ("Sootio", 5, vec![1])],
+        "groups in ranked order, each named by its lead stream's ranked index");
+
+    let rows = &p.form.table.sections[0].rows;
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["Torrentio", "Sootio"], "the first level lists addons, not streams");
+    let counts: Vec<Option<String>> = rows.iter().map(|r| r.value.clone()).collect();
+    assert_eq!(counts, [Some("2".into()), Some("1".into())], "each states its stream count");
+    assert_eq!(p.form.table.title(), None, "the first level carries no band");
+    assert_eq!(ids(&p).len(), 2);
+
+    let p = picker(Some(5));
+    assert_eq!(p.form.table.title().as_deref(), Some("Sootio"), "the band names the addon");
+    let rows = &p.form.table.sections[0].rows;
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["1080p"], "only that addon's stream");
+    assert!(!rows[0].detail.contains("Sootio"), "the row does not repeat the band");
+}
+
+#[test]
+fn the_picker_drills_in_and_back_out_with_the_shared_page_slide() {
+    use plx_base::fontcov::advances::ShippedMeasure;
+
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(None);
+    p.motion.step(1.0 / 60.0, p.natural(&ShippedMeasure));
+    assert!(!p.motion.transitioning(), "a fresh panel is at rest");
+
+    // an addon row is a Nav row: a press pushes a page, it does not leave the panel
+    assert_eq!(
+        p.form.index_of_key(RowKey(1)).and_then(|i| p.form.activate(i)),
+        Some(plx_ui::form::Activation::Push(Action::Addon(1))),
+    );
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    assert_eq!(p.stream_page, Some(5), "named by the addon's first RANKED index");
+    assert_eq!(p.form.table.title().as_deref(), Some("Sootio"));
+    assert_eq!(p.pages.top(), Some(5), "one page is banked on the shared PageStack");
+    assert!(p.motion.sliding(), "a push slides the pages");
+    assert!(p.motion.live_dx() > 0.0, "the arriving page comes in from the right");
+    assert_eq!(p.form.selected_id(), Some(&AltId::stream(5)), "the page opens on its first stream");
+    assert_eq!(p.pages.first().map(|s| s.return_id.clone()), Some(AltId::addon(1, "Sootio")));
+
+    let mut n = 0;
+    while p.motion.transitioning() {
+        p.step_motion(1.0 / 60.0, &ShippedMeasure);
+        n += 1;
+        if n > 240 { panic!("the push never settles"); }
+    }
+    assert_eq!(p.motion.live_dx(), 0.0);
+
+    assert!(p.pop_stream_page(), "BACK pops the page");
+    assert_eq!(p.stream_page, None);
+    assert_eq!(p.form.table.title(), None, "the band goes with the page");
+    assert_eq!(p.pages.len(), 0, "the stack is empty again");
+    assert!(p.motion.sliding(), "a pop slides the pages back");
+    assert!(p.motion.live_dx() < 0.0, "the arriving page comes in from the left");
+    assert_eq!(p.form.selected_id(), Some(&AltId::addon(1, "Sootio")), "the opener comes back focused");
+    assert!(!p.pop_stream_page(), "there is nothing to pop at the first level");
+}
+
+#[test]
+fn a_pop_whose_addon_was_dropped_by_a_rerank_goes_back_up() {
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(None);
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    assert_eq!(p.stream_page, Some(5));
+
+    p.stream_choices = p.stream_choices.into_iter()
+        .filter(|c| c.addon.as_deref() != Some("Sootio")).collect();
+    p.rebuild(Sel::Keep, test_store().view());
+
+    assert_eq!(p.stream_page, None, "the emptied page goes back up");
+    assert_eq!(p.pages.len(), 0);
+    assert_eq!(p.form.selected_id(), Some(&AltId::addon(0, "Torrentio")),
+        "the fallback is the first surviving row, not the dropped opener");
+}
+
+#[test]
+fn an_untagged_stream_gets_the_fallback_heading() {
+    let untagged = vec![plx_plex::plex::nuvio::StreamChoice {
+        index: 9, label: "720p".into(), addon: None, ..Default::default()
+    }];
+    assert_eq!(
+        plx_appkit::source_list::addon_pages(&untagged),
+        vec![plx_appkit::source_list::AddonPage {
+            name: plx_appkit::source_list::untagged_source().to_string(),
+            lead: 9, rows: vec![0],
+        }],
+    );
+}
+
+/// A pick while addons are still answering emits the addressed Select effect: the shim commits
+/// from its own slot, so a loading caption is no reason to refuse the viewer's choice.
+#[test]
+fn a_stream_pick_leaves_as_an_effect_while_addons_are_still_answering() {
+    use plx_machine::machine::Effects;
+
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(Some(5));
+    p.stream_pending = true;
+    let mut present = plx_machine::present::Present::default();
+    let mut buf = Vec::new();
+    {
+        let mut fx: Effects<'_, focus_and_hit::HostFixture> =
+            Effects::new(&mut buf, plx_machine::machine::MachineId::Input, &mut present);
+        p.commit(5, &mut fx);
+    }
+    assert!(p.stream_selecting, "a second pick is now refused until the answer lands");
+    assert!(buf.iter().any(|s| matches!(&s.fx, plx_machine::machine::Fx::App(
+        AppFx::Nuvio(crate::registry::NuvioReq::Select { index: 5, .. })))), "the pick is a typed effect, not IO");
+}
+
 /// **Every app-owned run of the *Also available* panel fits its column, in every shipped
 /// language.** Built through the real [`rows`] (from copies) and the same [`form_for`] the
 /// screen draws from; the library and a friend's name are server/user text and exempt, so what is
@@ -1186,4 +1332,84 @@ fn every_app_owned_run_fits_the_panel_in_every_language() {
         out.extend(table.app_fit_failures_hugged(language.tag()));
     }
     plx_ui::table::assert_no_fit_failures(&out);
+}
+
+/// The two levels hold their rows in every shipped language. The addon names, stream labels and
+/// technical facts are server text, but the fallback heading and the loading/failure notes are
+/// ours, and a drill-in page must fit the same panel as the addon list.
+#[test]
+fn the_streams_picker_pages_fit_the_panel_in_every_language() {
+    use plx_base::fontcov::advances::ShippedMeasure;
+    use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
+
+    let _serial = plx_base::testlock::serial();
+    let untagged = vec![plx_plex::plex::nuvio::StreamChoice {
+        index: 1,
+        label: "1080p".into(),
+        video_codec: Some("h264".into()),
+        audio_codec: Some("eac3".into()),
+        size_bytes: Some(15_000_000_000),
+        bitrate_kbps: Some(12_345),
+        ..Default::default()
+    }];
+    let mut out = Vec::new();
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        for page in [None, Some(5)] {
+            let p = picker(page);
+            out.extend(p.form.table.menu_cap_failure(&ShippedMeasure, language.tag()));
+            out.extend(p.form.table.app_fit_failures(MENU_MAX_W, language.tag()));
+            out.extend(p.form.table.app_fit_failures_hugged(language.tag()));
+        }
+        let mut p = picker(None);
+        p.stream_choices = untagged.clone();
+        p.form.set(p.stream_form(), None);
+        out.extend(p.form.table.menu_cap_failure(&ShippedMeasure, language.tag()));
+        out.extend(p.form.table.app_fit_failures(MENU_MAX_W, language.tag()));
+        out.extend(p.form.table.app_fit_failures_hugged(language.tag()));
+    }
+    plx_ui::table::assert_no_fit_failures(&out);
+}
+
+/// The second level's title band is a pointer-only stop that pops one page; the engine never
+/// seats a D-pad focus on it, so its key lives outside the form's row range.
+#[test]
+fn clicking_the_addon_title_band_pops_one_page() {
+    use plx_machine::machine::Effects;
+
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(None);
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    assert_eq!(p.stream_page, Some(5));
+    let cx = focus_and_hit::fixture_cx(None);
+    let mut present = plx_machine::present::Present::default();
+    let mut buf = Vec::new();
+    {
+        let mut fx: Effects<'_, focus_and_hit::HostFixture> =
+            Effects::new(&mut buf, plx_machine::machine::MachineId::Input, &mut present);
+        assert_eq!(Machine::step(&mut p, &ScreenEvent::Activate(page_stack::TITLE_KEY), &cx, &mut fx), Handled::Yes);
+    }
+    assert_eq!(p.stream_page, None, "the title band walks back one level");
+    assert_eq!(p.form.selected_id(), Some(&AltId::addon(1, "Sootio")), "the opener is restored");
+}
+
+/// A BACK out of a drill-in leaves the engine holding a focus key from the page that just left.
+/// `pop_stream_page` restores the cursor onto the opener; `reconcile` must honour that restored
+/// selection instead of falling back to the list's first row (which read as "snapped to the top").
+#[test]
+fn a_pop_reconciles_focus_to_the_opener_not_the_first_row() {
+    use plx_machine::machine::FocusKey;
+
+    let _serial = plx_base::testlock::serial();
+    let mut p = picker(None);
+    p.form.table.sel = 1;
+    p.push_stream_page(1);
+    let stale = FocusKey { entry: p.entry, elem: 5 }; // the stream row we drilled into
+    assert!(p.pop_stream_page());
+    assert_eq!(p.form.selected_id(), Some(&AltId::addon(1, "Sootio")));
+
+    let cx = focus_and_hit::fixture_cx(Some(stale));
+    let got = <AltSourcesScreen as Focusable<focus_and_hit::HostFixture>>::reconcile(&p, stale, &cx);
+    assert_eq!(got.elem, 1, "focus returns to the addon row the viewer opened, not row 0");
 }

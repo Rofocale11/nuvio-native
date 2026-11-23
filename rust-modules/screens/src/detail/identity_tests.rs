@@ -72,6 +72,7 @@ fn body(entry: EntryId, rk: &str) -> DetailScreen {
         list_pending: false,
         list_error: false,
         list_req: 0,
+        streams_episode: None,
         caption_policy: crate::registry::captions::policy(),
         entry, sid: ServerId::UNSET, rk: rk.into(), pending_season: None,
         keys: vec![], next_elem: FIRST_ITEM_ELEM, key_by_local: Default::default(),

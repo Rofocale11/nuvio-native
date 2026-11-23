@@ -2889,7 +2889,11 @@ mod tests {
         // `AltSourcesScreen.streams.req` (the correlation fence for the new `AppFx::Nuvio` shim
         // effects and their addressed `AppMsg::Nuvio` answers). No fork field is removed; the
         // historical profile identities above are kept frozen separately.
-        assert_eq!(state_fp(), 0xabe1_a9c9_0d91_8bd5, "current V13 producer census");
+        // Fork Rofocale11: the two-level Streams picker adds `streams.page` and `streams.root`
+        // to `AltSourcesScreen::SHAPE`, which the V13 producer census reaches through the screen
+        // shape inventory. Previous pin 0xabe1_a9c9_0d91_8bd5; the committed replay anchors need
+        // re-recording before a scenario replay is trusted.
+        assert_eq!(state_fp(), 0xda10_4203_5596_900b, "current V13 producer census");
         assert_ne!(state_fp(), 0xea74_3865_5115_46c5, "the census without the `Id` resolution row");
         assert_ne!(state_fp(), 0x3ed9_2e0f_25bd_7f8e, "V12 cannot describe captured positive-swap presentation inputs");
     }

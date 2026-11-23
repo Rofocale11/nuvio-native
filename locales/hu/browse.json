@@ -277,6 +277,7 @@
   "browse.streams.loading": "Finding streams…",
   "browse.streams.empty": "No playable streams found.",
   "browse.streams.failed": "Couldn’t load streams. Close and try again.",
+  "browse.streams.other": "Other sources",
   "browse.list.add": "Add to My List",
   "browse.list.remove": "Remove from My List",
   "browse.list.saving": "Syncing My List…",

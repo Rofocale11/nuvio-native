@@ -697,3 +697,48 @@ fingerprints, so those fields, their addressed `NuvioReq::MyList` read, its land
 `browse.list.*` locale data stay. They are marked in code as legacy replay state, never as a second
 Watchlist implementation. Removing them properly means re-recording the V13 anchor and historical
 replay profiles, which is a separate change.
+
+**Two-level Streams picker (2026-11-23).** The old fork's Detail Streams menu was a drill-in: first
+the addons that answered for the item, then one addon's ranked streams, picked with the same
+`plx_ui::page_stack::PageStack` + `plx_ui::panel_motion::PanelMotion` the player's Subtitles/More
+menus and the Library menu stand on. That UI was lost in the merged tree, which left a flat stream
+list; it has now been restored **without the old fork's IO**. The old `screens/src/alt_sources.rs`
+started two workers from the screen (`task::spawn` at old `request_streams` and `commit`), slept on
+a thread, read `client_for` in `new()` and on both workers, locked an `Arc<Mutex<Option<StreamReply>>>`
+mailbox in `Tick`, and wrote the process-global `route::set_available_streams` from that step. The
+merged tree's `AppFx::Nuvio(NuvioReq::Streams/Select)` effects, the app's `execute_nuvio` worker and
+the addressed `ScreenEvent::Async` answers with a `RequestId` fence are kept unchanged; the screen
+only builds forms, steps motion from `Tick` and emits effects. The pure helpers that were also lost
+(`source_list::addon_pages`, `addon_name`, `untagged_source`, `seeders_fact`, `stream_row_with` and
+`StreamChoice.seeders`, which the shim already sends) were ported back into `appkit`/`plex`, and the
+`browse.streams.other` locale key into every shipped language. `NuvioStreamSelected` now starts the
+picked stream immediately through Detail's `play_hero` (the old fork's behavior) instead of only
+re-reading the item.
+
+This changes `AltSourcesScreen::SHAPE`, so both shape pins moved and **the committed replay
+fixtures need `tools/plxnative-rec rerecord` on a macOS simulator** before `make check-replay` is
+trusted; the Linux host cannot do that step. Host evidence for the change: 33 focused `alt_sources`
+tests (including six pinned two-level tests, the all-language fit test and the title-band pop),
+a Detail test that a pick emits a Play effect, full nextest 1495/1495, `make check-nodef`, module
+layers, `check-deps`, ledger ratchet. Native playback and the slide animation still need a TV run
+under the TV lock; the host suite proves the state transitions and effect payloads, not device
+frame pacing.
+
+**Post-deploy fix — BACK no longer snaps the addon list to the top.** `AltSourcesScreen::reconcile`
+fell back to `form.opening_key()` when the engine's focus key was from the page that had just been
+popped, which re-seated the first row (and scrolled the list back to the top) even though
+`pop_stream_page` had restored the cursor onto the opener. It now uses the selected row first, the
+same rule `LibraryMenuScreen::reconcile` uses for its Genre drill-in. Regression test
+`a_pop_reconciles_focus_to_the_opener_not_the_first_row` pins a stale second-level focus key through
+the pop.
+
+**Episode rows open the Streams picker on Nuvio shows (2026-11-23).** `ContentPanel::AltSources`
+carries an optional episode ratingKey (the panel is no longer `Copy`), `ContentPanel::surface`
+uses it as the picker's subject, and Detail keeps an unhashed `streams_episode` latch. On a Nuvio
+show BOTH episode rows — the still (`episodes::Action::Play`) and the title
+(`Action::OpenDetail`) — now open the same two-level picker for THAT episode instead of playing
+`Media[0]` or pushing its detail page; the addressed `NuvioStreamSelected` answer then calls
+`play_episode_at` for the latched episode, or `play_hero` when the picker came from the hero pill.
+The Nuvio gate is the pure `is_nuvio_item(d)` guid check, not the old fork's `client_for` in a
+screen step. Plain Plex episodes keep direct play and their detail page. Three tests pin the two
+rows, the latch and the hero fallback; full nextest, `check-nodef` and `check-deps` are green.

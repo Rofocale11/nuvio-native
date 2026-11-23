@@ -1356,11 +1356,15 @@ pub enum ContentReq {
 /// overlays, which share a key ladder and a transport rule. These share nothing: two are read-only
 /// `Style::Alert` sheets (one with a page cursor, one with none), one is a `Style::Compact` menu
 /// anchored to a button whose OK navigates.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// Fork Rofocale11: no `Copy` — the Streams panel carries an optional episode ratingKey, owned
+// by the page that opened it, so the argument travels as a value exactly once.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ContentPanel {
     /// *Also available* (`screens::alt_sources`), anchored to the drawn rect of the pill that
     /// opened it — bit-preserving, so a canonical argument holds it without float equality.
-    AltSources { anchor: [u32; 4] },
+    /// Fork Rofocale11: an episode still opens the SAME picker for that episode: `item` names it
+    /// instead of the page's own item, so the shim lists ITS addon streams and a pick plays it.
+    AltSources { anchor: [u32; 4], item: Option<String> },
     /// *Play Version* (`screens::versions_panel`), anchored to the drawn rect of the disc that
     /// opened it, as [`Self::AltSources`] is to its pill.
     Versions { anchor: [u32; 4] },
@@ -1407,8 +1411,11 @@ impl ContentPanel {
     ) -> Option<(plx_ui::containers::modal::Style, AppArg)> {
         use plx_ui::containers::modal::Style;
         Some(match self {
-            Self::AltSources { anchor } => {
+            Self::AltSources { anchor, item } => {
                 let (sid, rk) = subject?;
+                // Fork Rofocale11: an episode's picker names the episode; the hero pill names the
+                // page's own item. Both keep the page's server — the shim is one local server.
+                let rk = item.as_deref().unwrap_or(rk);
                 (
                     Style::Compact,
                     AppArg::AltSources(crate::alt_sources::AltSourcesArg {
@@ -3060,7 +3067,11 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Fork Rofocale11: the Also-available arg now carries the captured `nuvio` capability and the
 // panel's shim-effect correlation is in its canonical shape; recomputed pin after those two
 // documented shape changes (previous pin 0x1427_1d82_bf6b_e04c). Replay anchors need re-recording.
-const SCREEN_SHAPES_PIN: u64 = 0x0352_35c6_6aaa_9324;
+// Fork Rofocale11: the Streams picker is two levels again. `AltSourcesScreen::SHAPE` gains the
+// showing page's lead ranked index and the addon name heading it, so a replay tells an addon list
+// from that addon's sources. Previous pin 0x0352_35c6_6aaa_9324; the committed replay anchors must
+// be re-recorded with `tools/plxnative-rec rerecord` before a scenario replay is trusted.
+const SCREEN_SHAPES_PIN: u64 = 0x2bcc_c48e_a227_da7e;
 
 #[cfg(test)]
 mod arg_tests {

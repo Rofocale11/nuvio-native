@@ -93,6 +93,7 @@ fn bare(sid: ServerId, rk: &str) -> DetailScreen {
         list_pending: false,
         list_error: false,
         list_req: 0,
+        streams_episode: None,
         caption_policy: crate::registry::captions::policy(),
         entry: EntryId(8),
         sid,

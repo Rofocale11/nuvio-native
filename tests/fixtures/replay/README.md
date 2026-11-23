@@ -744,3 +744,13 @@ observed being refused in both modes (`replay: REFUSED — replay measurement ta
 recorded afresh the same way (`tests/focusfp.sh --rec --only 12`, `plxnative-rec import`, `anchor:
 true` restored), then replayed SAME in Targets and Resolve on three consecutive runs.
 `docs/ui-replay-v13-anchor.md` has the record.
+
+The Nuvio Streams picker is a two-level menu again (2026-11-23): `AltSourcesScreen::SHAPE` gains
+`streams.page:opt<u32>` (the showing addon's lead ranked index) and `streams.root:opt<str>` (the addon
+whose name heads that page), moving `SCREEN_SHAPES_PIN` from `0x0352_35c6_6aaa_9324` to
+`0x2bcc_c48e_a227_da7e` and the current V13 producer census from `0xabe1_a9c9_0d91_8bd5` to
+`0xda10_4203_5596_900b`. **The committed anchors were NOT re-recorded in the change that did this:**
+the simulator is a macOS build and the edit was made on a Linux host. Every committed fixture is
+refused by the loader at the new shape until it is recorded afresh (`tests/focusfp.sh --rec`, then
+`tools/plxnative-rec rerecord`, preserving each anchor flag) and `make check-replay` is green again.
+Host gates (`cargo nextest`, `check-nodef`, layers, deps, ledger) cannot stand in for that step.

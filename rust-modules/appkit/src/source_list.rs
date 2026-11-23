@@ -10,15 +10,77 @@ use std::convert::Infallible;
 
 /// The same source row grammar for an addon stream: title, technical facts and size.
 pub fn stream_row(choice: &plx_plex::plex::nuvio::StreamChoice) -> Row {
+    stream_row_with(choice, true)
+}
+
+/// The seeder count as one fact line — `▲ 123` — or `None` when there is nothing to say.
+///
+/// Torrentio prints `👤 123`, but the shipped font subset carries no emoji, so the count takes
+/// the covered mark that means peers — the triangle a torrent client puts beside its seeds.
+/// Shared with the in-player Source page so the two pickers cannot drift on the one fact a P2P
+/// stream must state.
+pub fn seeders_fact(seeders: Option<u32>) -> Option<String> {
+    seeders.filter(|n| *n > 0).map(|n| format!("\u{25b2} {n}"))
+}
+
+/// [`stream_row`] with the source named on it or not. A row on its OWN addon's page omits it —
+/// the page's title band already says whose streams these are.
+pub fn stream_row_with(choice: &plx_plex::plex::nuvio::StreamChoice, addon: bool) -> Row {
     let mut facts = Vec::new();
+    // A P2P stream LEADS with its seeder count: whether anybody is still seeding decides whether
+    // the stream plays at all.
+    if let Some(fact) = seeders_fact(choice.seeders) {
+        facts.push(fact);
+    }
     if let Some(codec) = &choice.video_codec { facts.push(codec.to_uppercase()); }
     if choice.hdr.contains("DolbyVision") { facts.push("Dolby Vision".into()); }
     else if choice.hdr != "None" && !choice.hdr.is_empty() { facts.push(choice.hdr.clone()); }
     if let Some(codec) = &choice.audio_codec { facts.push(codec.to_uppercase()); }
     if let Some(size) = choice.size_bytes { facts.push(format!("{:.1} GB", size as f64 / 1_000_000_000.0)); }
     if let Some(rate) = choice.bitrate_kbps { facts.push(format!("{:.1} Mbps", rate as f64 / 1000.0)); }
-    if let Some(addon) = &choice.addon { facts.push(addon.clone()); }
+    if addon {
+        if let Some(addon) = &choice.addon { facts.push(addon.clone()); }
+    }
     Row::new(&choice.label).server_label().detail(facts.join(" · ")).server_detail()
+}
+
+/// A stream's addon, as the picker groups by it: the shim's `addon_name`, or the fallback word
+/// for a stream that named no source (an untagged stream stays reachable under one group).
+pub fn addon_name(choice: &plx_plex::plex::nuvio::StreamChoice) -> String {
+    match choice.addon.as_deref() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => untagged_source().to_string(),
+    }
+}
+
+pub fn untagged_source() -> &'static str {
+    plx_os::i18n::msg::browse_streams_other()
+}
+
+/// **One addon's page of the stream picker**: the name it is headed by, the ranked index that
+/// NAMES it (`/nuvio/select`'s own number, so a re-ranked list cannot point the page at another
+/// source), and the positions of its streams in the flat list the caller holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AddonPage {
+    pub name: String,
+    pub lead: usize,
+    /// Positions into the `choices` slice `addon_pages` was given.
+    pub rows: Vec<usize>,
+}
+
+/// **The stream picker's first page, from the panel's own choices**: the flat list grouped by
+/// the addon that returned each stream. Groups appear in FIRST-APPEARANCE order, which is ranked
+/// order — the addon holding the best stream leads. Pure over the captured list: no IO, no clock.
+pub fn addon_pages(choices: &[plx_plex::plex::nuvio::StreamChoice]) -> Vec<AddonPage> {
+    let mut groups: Vec<AddonPage> = Vec::new();
+    for (pos, choice) in choices.iter().enumerate() {
+        let name = addon_name(choice);
+        match groups.iter_mut().find(|g| g.name == name) {
+            Some(g) => g.rows.push(pos),
+            None => groups.push(AddonPage { name, lead: choice.index, rows: vec![pos] }),
+        }
+    }
+    groups
 }
 
 /// The two levels of the Sources list — **one per surface now, and not swappable from either.**

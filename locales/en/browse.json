@@ -2279,6 +2279,10 @@
     "value": "Couldn’t load streams. Close and try again.",
     "description": "Addon stream picker status"
   },
+  "browse.streams.other": {
+    "value": "Other sources",
+    "description": "Fallback group name for streams whose addon returned no name"
+  },
   "browse.list.add": {
     "value": "Add to My List",
     "description": "Nuvio account My List action/status."

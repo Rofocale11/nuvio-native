@@ -163,6 +163,7 @@ pub(super) fn bare_held(sid: ServerId, rk: &str) -> DetailScreen {
         list_pending: false,
         list_error: false,
         list_req: 0,
+        streams_episode: None,
         caption_policy: crate::registry::captions::policy(),
         entry: EntryId(7),
         sid,
@@ -2822,6 +2823,27 @@ fn play_item(effects: &[plx_machine::machine::Stamped<TestHost>]) -> Option<(&Pl
         Fx::App(AppFx::Content(ContentReq::Play { play, resume_ns })) => Some((play, *resume_ns)),
         _ => None,
     })
+}
+
+// Fork Rofocale11: the streams picker's addressed answer starts the picked stream immediately. A
+// dismissed picker sends no message, so this is the only path that plays without a Play press.
+#[test]
+fn a_movie_stream_pick_plays_the_movie() {
+    let _guard = install(Detail {
+        sid: ServerId::UNSET, rk: "movie".into(), kind: "movie".into(),
+        title: "Movie".into(), part: "/library/parts/42/1/file.mkv".into(),
+        vcodec: "hevc".into(), acodec: "eac3".into(), ..Default::default()
+    });
+    let mut screen = bare(&_guard, ServerId::UNSET, "movie");
+    let (_, effects) = step(&mut screen, &ScreenEvent::App(AppMsg::NuvioStreamSelected), None);
+    match play_item(&effects).expect("a pick must play the movie") {
+        (PlayIntent::Item { rk, part, .. }, _) => {
+            assert_eq!(rk, "movie");
+            assert_eq!(part, "/library/parts/42/1/file.mkv");
+        }
+        _ => panic!("a movie page plays its own item"),
+    }
+    clear();
 }
 
 #[test]
@@ -6225,4 +6247,81 @@ fn a_normal_item_keeps_its_play_version_disc() {
     let guard = install(d);
     let screen = bare(&guard, ServerId::UNSET, "leaf");
     assert!(screen.hero_set(test_store().view()).version, "upstream's Play Version is untouched for Plex items");
+}
+
+/// Fork Rofocale11: on a Nuvio show an episode still opens the same two-level Streams picker the
+/// hero pill opens, carrying THAT episode's ratingKey — it does not open its detail page or play
+/// the file the shim happened to leave in `Media[0]`. A plain Plex show keeps the old direct play.
+#[test]
+fn a_nuvio_episode_still_opens_the_streams_picker_for_that_episode() {
+    let sid = ServerId::UNSET;
+    let mut d = detail(sid, "show");
+    d.guid = "nuvio://series/abc".into();
+    let _guard = install(d);
+    let mut screen = bare(&_guard, sid, "show");
+    screen.sync_keys(test_store().view());
+    let elem = episode_key(&screen, 1, episodes::Row::Still).unwrap();
+    let (_, effects) = step(
+        &mut screen,
+        &ScreenEvent::PressCommit(plx_machine::machine::PressId(1)),
+        Some(elem),
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        &effect.fx,
+        Fx::App(AppFx::Content(ContentReq::Panel(ContentPanel::AltSources { item: Some(rk), .. })))
+            if rk == "e2"
+    )), "the picker is opened for episode e2");
+    assert!(!effects.iter().any(|effect| matches!(
+        &effect.fx,
+        Fx::App(AppFx::Content(ContentReq::Play { .. }))
+            | Fx::App(AppFx::Content(ContentReq::Push(ContentArg::Detail { .. })))
+    )), "no direct play and no episode-detail push");
+    assert_eq!(screen.streams_episode.as_deref(), Some("e2"));
+    clear();
+}
+
+/// The pick message names no item, so the episode latch decides what starts: the episode whose
+/// picker was opened, not the page's hero.
+#[test]
+fn an_episode_stream_pick_plays_the_latched_episode() {
+    let sid = ServerId::UNSET;
+    let _guard = install(detail(sid, "show"));
+    let mut screen = bare(&_guard, sid, "show");
+    screen.streams_episode = Some("e2".into());
+    let (_, effects) = step(&mut screen, &ScreenEvent::App(AppMsg::NuvioStreamSelected), None);
+    match play_item(&effects).expect("a pick must play the episode") {
+        (PlayIntent::Item { rk, .. }, _) => assert_eq!(rk, "e2"),
+        _ => panic!("an episode picker plays its episode through the item intent"),
+    }
+    assert_eq!(screen.streams_episode, None, "the latch is consumed by the pick");
+    clear();
+}
+
+/// The title row follows the still on a Nuvio show (owner's call): it opens the picker for that
+/// episode instead of pushing its detail page. On a plain Plex show it still opens the detail page.
+#[test]
+fn a_nuvio_episode_title_row_opens_the_picker_too() {
+    let sid = ServerId::UNSET;
+    let mut d = detail(sid, "show");
+    d.guid = "nuvio://series/abc".into();
+    let _guard = install(d);
+    let mut screen = bare(&_guard, sid, "show");
+    screen.sync_keys(test_store().view());
+    let elem = episode_key(&screen, 0, episodes::Row::Text).unwrap();
+    let (_, effects) = step(
+        &mut screen,
+        &ScreenEvent::PressCommit(plx_machine::machine::PressId(1)),
+        Some(elem),
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        &effect.fx,
+        Fx::App(AppFx::Content(ContentReq::Panel(ContentPanel::AltSources { item: Some(rk), .. })))
+            if rk == "e1"
+    )), "the title row opens the picker for e1");
+    assert!(!effects.iter().any(|effect| matches!(
+        &effect.fx,
+        Fx::App(AppFx::Content(ContentReq::Push(ContentArg::Detail { .. })))
+    )));
+    assert_eq!(screen.streams_episode.as_deref(), Some("e1"));
+    clear();
 }

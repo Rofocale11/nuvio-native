@@ -81,7 +81,6 @@
 //! beneath it, which is a smaller surprise than the cursor jumping mid-interaction.
 
 use std::borrow::Cow;
-use std::convert::Infallible;
 
 use plx_data::metadata::AltCopy;
 use plx_plex::plex::ServerId;
@@ -100,6 +99,11 @@ use plx_ui::screen::{
     Stop,
 };
 use plx_ui::form::{Form, FormSection, FormTable, RowKey, RowKind};
+// Fork Rofocale11: the two-level Streams picker stands on the same drill-in machinery the player's
+// Subtitles/More menus and the Library's menu use — PageStack remembers the opener, PanelMotion
+// slides the pages. Neither performs IO; both are pure state stepped from Tick's `dt`.
+use plx_ui::page_stack::{self, PageStack};
+use plx_ui::panel_motion::PanelMotion;
 use plx_ui::table::{Badge, Row, TableView};
 use plx_ui::{theme, Rect};
 
@@ -109,7 +113,7 @@ use plx_ui::{theme, Rect};
 pub const SHAPE: [&str; 2] = [
     // Fork Rofocale11: the arg carries the captured `nuvio` capability; `streams.req` is the
     // correlation of the one in-flight shim effect (0 = none), replacing the old worker mailbox.
-    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4],nuvio:bool},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,req:u32,rows:[{index:u32,label:str,detail:str}]}",
+    "AltSourcesScreen{arg:AltSourcesArg{host:u32,sid:u32,rk:str,anchor:[u32;4],nuvio:bool},rows:[{sid:u32,rk:str,label:str,detail:str,value:opt<str>,badge:opt<str>,checked:bool}],sel:i32,table:TableViewMotion,streams:{mode:bool,pending:bool,error:bool,attempts:u32,req:u32,page:opt<u32>,root:opt<str>,rows:[{index:u32,label:str,detail:str}]}",
     TableView::MOTION_SHAPE,
 ];
 
@@ -287,6 +291,12 @@ pub enum Action {
     None,
     /// Open `rk` on server `sid` — that copy's own page. Never a swap of the copy in place.
     Open { sid: ServerId, rk: String },
+    // Fork Rofocale11: the Streams picker's two levels. A drill-in reports nothing to the Detail
+    // page; only a stream pick does, and that is an addressed effect (never IO in this machine).
+    /// First level: drill into one addon's streams, by its position in `source_list::addon_pages`.
+    Addon(usize),
+    /// Second level: select this stream (the shim's ranked index) through the shim worker.
+    Stream(usize),
 }
 
 /// What one row's OK means, decided once when the row is declared, so the "the row you are on is
@@ -318,13 +328,23 @@ impl AltId {
         let nth = rows[..pos].iter().filter(|o| o.sid == r.sid && o.rk == r.rk).count();
         AltId { sid: r.sid, rk: r.rk.clone(), nth }
     }
+
+    // Fork Rofocale11: the Streams picker's rows use the SAME identity type: `sid` names nothing
+    // and `rk` carries a marker. An addon is keyed by name as well as group position (a re-ranked
+    // list must not rename the page under the cursor); a stream by the shim's own ranked index.
+    fn addon(group: usize, name: &str) -> Self {
+        AltId { sid: ServerId::default(), rk: format!("addon|{group}|{name}"), nth: 0 }
+    }
+    fn stream(index: usize) -> Self {
+        AltId { sid: ServerId::default(), rk: format!("stream|{index}"), nth: 0 }
+    }
 }
 
 /// The panel's one section, declared from the resolved rows alone (pure, so the text-fit suite
 /// drives it): every row carries its own destination ([`action_for`]). The dynamic rows' focus key
 /// is their position in the list (docs/settings-form.md, "Dynamic rows"): the list is one
 /// unheaded section whose length and order the store decides.
-pub fn form_for(rows: &[AltRow], here_sid: ServerId, here_rk: &str) -> Form<AltId, Action, Infallible> {
+pub fn form_for(rows: &[AltRow], here_sid: ServerId, here_rk: &str) -> Form<AltId, Action, Action> {
     let mut sec = FormSection::new("");
     for (pos, r) in rows.iter().enumerate() {
         let id = AltId::of(rows, pos);
@@ -349,8 +369,8 @@ pub struct AltSourcesScreen {
     arg: AltSourcesArg,
     /// The rows the `TableView` and `dests` were built from — the rebuild stamp (module doc).
     rows: Vec<AltRow>,
-    /// The table and what each row does, replaced together ([`form_for`]).
-    pub form: FormTable<AltId, Action, Infallible>,
+    /// The table and what each row does, replaced together ([`form_for`] / [`Self::stream_form`]).
+    pub form: FormTable<AltId, Action, Action>,
     stream_choices: Vec<plx_plex::plex::nuvio::StreamChoice>,
     // Fork Rofocale11: correlation of the one outstanding Nuvio shim effect (0 = none). The answer
     // comes back as an addressed `AppMsg::Nuvio`; this fence drops a reply the panel no longer owns.
@@ -359,6 +379,19 @@ pub struct AltSourcesScreen {
     stream_pending: bool,
     stream_error: bool,
     stream_attempts: u32,
+    // Fork Rofocale11: only a pick ALREADY committing refuses a second one. Addons still answering
+    // are no reason to wait — the shim commits the chosen index from its own slot — so this latch
+    // replaces the old `stream_pending` pick guard. Unhashed: a latch between two events.
+    stream_selecting: bool,
+    /// Which addon's page is showing: `None` is the addon list. NAMED by its lead ranked index so
+    /// a re-rank cannot point the page at another source.
+    stream_page: Option<usize>,
+    /// The opener and scroll the current page pushed over, so a pop restores them exactly. The
+    /// same shared `PageStack` the player's Subtitles/More menus use.
+    pages: PageStack<usize, AltId>,
+    /// The card's resize and page-slide motion (the player menus' `PanelMotion`). Stepped from
+    /// `Tick`'s `dt`; it holds the pointer while a page is sliding.
+    motion: PanelMotion,
 }
 
 impl AltSourcesScreen {
@@ -378,6 +411,10 @@ impl AltSourcesScreen {
             stream_pending: false,
             stream_error: false,
             stream_attempts: 0,
+            stream_selecting: false,
+            stream_page: None,
+            pages: PageStack::new(),
+            motion: PanelMotion::new(),
         };
         let mut screen = screen;
         screen.rebuild(Sel::OnTheCopyYouAreOn, meta);
@@ -405,20 +442,80 @@ impl AltSourcesScreen {
         })));
     }
 
-    fn stream_form(&self) -> Form<AltId, Action, Infallible> {
+    /// **The Streams picker, as the page that is showing**: the addons that answered on the first
+    /// level, one addon's streams on the second. Pure over the panel's own captured list, so both
+    /// pages are host-testable and no IO happens here.
+    ///
+    /// A row's focus key is its IDENTITY, not its position: the list is polled and re-ranked while
+    /// the panel is open, so a position-keyed row would slide onto its neighbour under the cursor.
+    fn stream_form(&self) -> Form<AltId, Action, Action> {
         // placeholder-exempt: this declares rows; draw() counts the visible waiting caption.
-        let mut section = FormSection::new("");
-        for choice in &self.stream_choices {
-            let rk = choice.index.to_string();
-            section = section.item_keyed(AltId { sid: self.arg.sid, rk: rk.clone(), nth: 0 },
-                RowKey(choice.index as u32), RowKind::Choice,
-                Action::Open { sid: self.arg.sid, rk }, plx_appkit::source_list::stream_row(choice));
+        let pages = plx_appkit::source_list::addon_pages(&self.stream_choices);
+        if let Some(page) = self.stream_page {
+            if let Some(group) = pages.iter().find(|g| g.lead == page) {
+                let sec = group.rows.iter().fold(FormSection::new(""), |sec, pos| {
+                    let choice = &self.stream_choices[*pos];
+                    // the page's title band already names the addon, so the row does not repeat it
+                    sec.item_keyed(AltId::stream(choice.index), RowKey(choice.index as u32),
+                        RowKind::Choice, Action::Stream(choice.index),
+                        plx_appkit::source_list::stream_row_with(choice, false))
+                });
+                return Form::new().section(sec);
+            }
         }
+        let mut section = pages.iter().enumerate().fold(FormSection::new(""), |sec, (group, g)| {
+            // the trailing count is our arithmetic; the name is the addon's own
+            let row = Row::new(g.name.clone()).server_label().value(g.rows.len().to_string());
+            sec.item_keyed(AltId::addon(group, &g.name), RowKey(group as u32),
+                RowKind::Nav(Action::Addon(group)), Action::Addon(group), row)
+        });
         if self.stream_choices.is_empty() || self.stream_error {
             section = section.note(if self.stream_error { plx_os::i18n::msg::browse_streams_failed() }
                 else if self.stream_pending { plx_os::i18n::msg::browse_streams_loading() } else { plx_os::i18n::msg::browse_streams_empty() });
         }
         Form::new().section(section)
+    }
+
+    /// The second level's title band: the addon whose streams are showing, else none (the first
+    /// level is the panel's own list).
+    fn stream_root(&self) -> Option<String> {
+        let page = self.stream_page?;
+        plx_appkit::source_list::addon_pages(&self.stream_choices)
+            .into_iter().find(|g| g.lead == page).map(|g| g.name)
+    }
+
+    /// Drill into one addon. The outgoing page is banked whole on the shared `PageStack` and
+    /// handed to `PanelMotion::begin_slide(+1.0)`, so the pages slide instead of snapping. Nothing
+    /// is reported to the Detail page: drilling is not a choice.
+    fn push_stream_page(&mut self, group: usize) {
+        let Some(g) = plx_appkit::source_list::addon_pages(&self.stream_choices).into_iter().nth(group)
+        else { return };
+        if let Some(opener) = self.form.selected_id().cloned() {
+            self.pages.push(g.lead, opener, self.form.table.scroll_pos());
+        }
+        self.stream_page = Some(g.lead);
+        let leaving = page_stack::leave_page(&mut self.form);
+        self.form.open(self.stream_form(), None);
+        self.form.table.set_title(self.stream_root());
+        self.motion.begin_slide(leaving, 1.0);
+    }
+
+    /// Pop one page: the addon list comes back with its opener and scroll, using the same slide
+    /// the player menus use. `false` at the root means the caller should dismiss the panel.
+    fn pop_stream_page(&mut self) -> bool {
+        if self.stream_page.take().is_none() { return false }
+        let Some(saved) = self.pages.pop() else { return true };
+        let leaving = page_stack::leave_page(&mut self.form);
+        self.motion.begin_slide(leaving, -1.0);
+        let form = self.stream_form();
+        let landing = if form.contains(&saved.return_id) {
+            Some(saved.return_id.clone())
+        } else {
+            form.slots().into_iter().flatten().next().map(|b| b.id.clone())
+        };
+        self.form.restore(form, landing.as_ref(), saved.scroll);
+        self.form.table.set_title(None);
+        true
     }
 
     /// The rows the store would produce right now, marked against **the server the open PAGE
@@ -453,6 +550,13 @@ impl AltSourcesScreen {
         if matches!(sel_mode, Sel::OnTheCopyYouAreOn) {
             self.rows = self.live_rows(meta);
         }
+        // A re-rank can drop the addon whose page was showing. The page cannot survive under a
+        // name the list no longer has: come back up, discard the banked opener, and let the form
+        // below be the addon list again.
+        if self.stream_mode && self.stream_page.is_some() && self.stream_root().is_none() {
+            self.stream_page = None;
+            self.pages.clear();
+        }
         let form = if self.stream_mode { self.stream_form() } else { form_for(&self.rows, self.arg.sid, &self.arg.rk) };
         // rows carry a sub-line — the track menu's size class, not the account popover's
         self.form.table.compact = false;
@@ -468,11 +572,28 @@ impl AltSourcesScreen {
                 self.form.set(form, here.as_ref());
             }
         }
+        // A late stream batch can rebuild the page under an open title band; keep the band naming
+        // the addon the reader drilled into (or clear it if that addon vanished from the list).
+        if self.stream_mode { self.form.table.set_title(self.stream_root()); }
     }
 
     pub fn frame(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
         let [x, y, w, h] = self.arg.anchor.map(f32::from_bits);
         plx_ui::popover::under_or_above(Rect::new(x, y, w, h), self.form.table.measured_width(measure), self.form.table.measured_height())
+    }
+
+    /// The card as laid out, unless a page slide is stretching it: `PanelMotion` caches the
+    /// natural rect by the table's layout revision and springs the drawn rect toward it.
+    fn natural(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
+        self.motion.natural(self.form.table.layout_rev(), || self.frame(measure))
+    }
+
+    /// Step the card's resize/page slide and the table's own springs from the Tick's `dt`. No
+    /// clock read here — `dt` is the only time a machine sees.
+    fn step_motion(&mut self, dt: f32, measure: &dyn plx_machine::machine::Measure) {
+        let natural = self.natural(measure);
+        self.form.table.update(dt, natural.h);
+        self.motion.step(dt, natural);
     }
 
     fn dismiss<H: AppLike>(&self, fx: &mut Effects<'_, H>) {
@@ -488,11 +609,23 @@ impl AltSourcesScreen {
     /// `AccountMenuScreen::activate` draws.
     fn commit<H: AppLike>(&mut self, elem: u32, fx: &mut Effects<'_, H>) {
         if self.stream_mode {
-            if self.stream_pending || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
+            // First level: drill into an addon. This is a page change in this machine, not a
+            // choice the Detail page has to act on, so it reports nothing outside the panel.
+            if self.stream_page.is_none() {
+                if let Some(plx_ui::form::Activation::Push(Action::Addon(group))) =
+                    self.form.index_of_key(RowKey(elem)).and_then(|i| self.form.activate(i))
+                {
+                    self.push_stream_page(group);
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+                return;
+            }
+            // Only a pick ALREADY committing refuses a second one. Addons still answering are no
+            // reason to wait: the shim commits the chosen index from its own slot.
+            if self.stream_selecting || !self.stream_choices.iter().any(|s| s.index == elem as usize) { return; }
             // Fork Rofocale11: the `/nuvio/select` write runs on an application worker as a typed
             // effect; its boolean answer returns as an addressed `AppMsg::Nuvio` (`Selected`) event.
-            // The screen here still gates on a known, pending-free row exactly as before.
-            self.stream_pending = true;
+            self.stream_selecting = true;
             let req = self.next_req();
             fx.push(Fx::App(AppFx::Nuvio(crate::registry::NuvioReq::Select {
                 sid: self.arg.sid,
@@ -566,7 +699,7 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
             ScreenEvent::Async(RequestId(req), AppMsg::Nuvio(NuvioResult::Selected(ok)))
                 if *req == self.stream_req =>
             {
-                self.stream_pending = false;
+                self.stream_selecting = false;
                 self.stream_req = 0;
                 if *ok {
                     self.dismiss(fx);
@@ -590,7 +723,7 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                     .filter(|key| key.entry == self.entry)
                     .and_then(|key| self.form.index_of_key(RowKey(key.elem)))
                     .map_or(self.form.table.sel, |i| i as i32);
-                self.form.table.update(tick.dt(), self.frame(cx.measure).h);
+                self.step_motion(tick.dt(), cx.measure);
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { to, .. } => {
@@ -604,7 +737,15 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
             // arming a hold — see `Focusable::groups` below. A pointer click on a registered row
             // stop reaches the same arm through the hit map's own `Activate::Immediate` policy.
             ScreenEvent::Activate(elem) => {
-                self.commit(*elem, fx);
+                // The "< ADDON" band is a pointer-only stop: a click pops one level, the same
+                // affordance the player's drill-in menus give it. D-pad BACK/LEFT uses the arm below.
+                if self.stream_mode && page_stack::is_title_key(*elem) {
+                    if self.pop_stream_page() {
+                        fx.invalidate(plx_machine::present::Provenance::Input);
+                    }
+                } else {
+                    self.commit(*elem, fx);
+                }
                 Handled::Yes
             }
             ScreenEvent::PressCommit(_) => {
@@ -621,6 +762,16 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
             // the panel — the same "click outside a popover dismisses it" rule this arm used to
             // implement by hand against raw pointer coordinates.
             ScreenEvent::Input(input) => match input.kind {
+                // Fork Rofocale11: the Streams picker walks back one level before it closes —
+                // the same LEFT/BACK rule the player's Subtitles and More menus use.
+                InputKind::Key {
+                    key: Key::Back | Key::Left,
+                    edge: Edge::Down,
+                    ..
+                } if self.stream_mode && self.pop_stream_page() => {
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                    Handled::Yes
+                }
                 InputKind::Key {
                     key: Key::Back,
                     edge: Edge::Down,
@@ -672,23 +823,27 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for AltSourcesScreen {
             None => Step::Edge,
         }
     }
-    fn place(&self, elem: &u32, cx: &Cx<'_, H>, _at: At) -> Option<Placed> {
+    fn place(&self, elem: &u32, cx: &Cx<'_, H>, at: At) -> Option<Placed> {
         let index = self.form.index_of_key(RowKey(*elem))?;
-        let rect = self.form.table.row_frame(self.frame(cx.measure), index as i32)?;
-        Some(Placed {
-            rect,
-            rest_rect: rect,
-            clip: self.frame(cx.measure),
-            index: Some(index as u32),
-        })
+        let frame = self.natural(cx.measure);
+        let row = self.form.table.row_frame(frame, index as i32)?;
+        let (clip, dx) = match at {
+            At::Drawn => (self.motion.shown(frame), self.motion.live_dx()),
+            At::SpringTarget => (frame, 0.0),
+        };
+        Some(page_stack::panel_stop(row, clip, dx, Some(index as u32)))
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, H>) -> FocusKey<u32> {
         if self.group_of(&want.elem, cx).is_some() {
             want
         } else {
+            // Fork Rofocale11: after a drill-in POP the page the engine still holds belongs to the
+            // level we just left. `form.restore` has already put the cursor back on the opener, so
+            // seat on the SELECTED row (the Library menu's rule), not on `opening_key()` — the
+            // latter is the first row of the restored list and is what made BACK snap to the top.
             FocusKey {
                 entry: self.entry,
-                elem: self.form.opening_key().map_or(0, |k| k.0),
+                elem: self.form.selected_key().or_else(|| self.form.opening_key()).map_or(0, |k| k.0),
             }
         }
     }
@@ -744,6 +899,10 @@ impl LogicalState for AltSourcesScreen {
         // Fork Rofocale11: `stream_req` is the in-flight shim-effect correlation, part of the
         // recorded state so a replay grades the same outstanding request.
         c.bool(self.stream_mode).bool(self.stream_pending).bool(self.stream_error).u32(self.stream_attempts).u32(self.stream_req);
+        // The two-level picker: the page is named by its lead ranked index and by the addon whose
+        // name heads it, so a re-rank cannot silently retarget a recorded page.
+        c.option(self.stream_page.as_ref(), |c, page| { c.u32(*page as u32); });
+        c.option(self.stream_root().as_deref(), |c, root| { c.str(root); });
         c.seq(self.stream_choices.len());
         for choice in &self.stream_choices {
             let row = plx_appkit::source_list::stream_row(choice);
@@ -786,7 +945,7 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
     }
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>) {
         let appear = f.page_alpha;
-        let r = self.frame(f.measure);
+        let natural = self.natural(f.measure);
         let p = f.painter.alpha(appear).translate(0.0, RISE * (1.0 - appear));
         if self.stream_mode && self.stream_pending && self.stream_choices.is_empty() {
             plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::WorkingReadout, &self.arg.rk);
@@ -796,8 +955,10 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
         // this panel is up can be read as the PANEL or as the host under it.
         let field = f.underlay;
         plx_ui::profile::phase("dt.alt", || {
-            plx_ui::widgets::panel_ground(p, r, PANEL_RAD, field, plx_ui::widgets::Ground::Sheet);
-            self.form.table.draw(p, r, measure);
+            // The frosted ground follows the animated card; `PanelMotion::draw` paints the live
+            // page and the leaving one inside the clip, which is the player menus' page slide.
+            plx_ui::widgets::panel_ground(p, self.motion.shown(natural), PANEL_RAD, field, plx_ui::widgets::Ground::Sheet);
+            self.motion.draw(p, natural, PANEL_RAD, &self.form.table, measure);
         });
         // The hit map's stops are registered against the SETTLED geometry (`self.frame()`, what
         // `Focusable::place` answers) rather than the transient slide `p` draws with — at rest
@@ -827,6 +988,26 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Screen<H> 
                 );
             }
         }
+        // The second level's title band is the drill-in's "back" affordance: a pointer-only
+        // stop at the shared page-stack key, never a D-pad row (the player menus' rule).
+        if self.stream_mode {
+            if let Some(band) = self.form.table.title_rect(natural) {
+                let placed = page_stack::panel_stop(band, self.motion.shown(natural), self.motion.live_dx(), None);
+                f.stop(hit_p, Stop {
+                    key: FocusKey { entry: self.entry, elem: page_stack::TITLE_KEY },
+                    rect: placed.rect,
+                    rest_rect: placed.rest_rect,
+                    clip: placed.clip,
+                    hover: Hover::Ignore,
+                    activate: Activate::Direct,
+                });
+            }
+        }
+    }
+    /// The pointer is held while a page slides or the card resizes, so no click can mutate a
+    /// surface in motion (the player overlay's `Panel::More` rule).
+    fn pointer_held(&self) -> bool {
+        self.motion.transitioning()
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::Page
