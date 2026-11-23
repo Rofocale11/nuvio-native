@@ -4696,7 +4696,15 @@ pub fn playback_preview_with_audio(
 /// `container=mp4` in PMS metadata.
 pub(super) fn part_is_streamable(part_key: &str) -> bool {
     let name = part_file_name(part_key);
-    name.ends_with(".mkv") || name.ends_with(".mp4") || name.ends_with(".m4v")
+    // Fork Rofocale11: `.mpd` is the shim's synthesized trailer DASH part. It is streamable by the
+    // Rust engine in `plx_play_feed::ff::dash` (the bundled FFmpeg has no `dash` demuxer). The
+    // upstream merge dropped this arm, so the planner sent trailers to `/transcode/universal/start.mkv`
+    // — a server the loopback shim does not implement — and every trailer died on a 90-byte
+    // "no transcoder" body before the DASH demux was ever reached.
+    name.ends_with(".mkv")
+        || name.ends_with(".mp4")
+        || name.ends_with(".m4v")
+        || name.ends_with(".mpd")
 }
 
 /// The file name a Part key ends in, without its query.

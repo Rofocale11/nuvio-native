@@ -592,10 +592,44 @@ unplayable picks. This is the cheap enable, not the Settings-toggle port — the
 preference and UI row remain unported. `nextest` 1646/1646 on the affected crates; workspace check
 clean.
 
-**Trailer DASH is NOT ported.** The shim-side generator (`dash_manifest`), the Node
-decipher/proxy children and their Rust parsing are present, but the player-side pieces are absent:
-`plx_media::dash` (the strict 529-line SegmentBase MPD parser), the `.mpd` → two progressive fMP4
-tracks demux path (old `media/src/ff.rs::dash_demux`), and boot's `set_trailer_reacher` /
-`probes.attach`. With no reacher installed the shim's end-of-file gate defaults to `true`, so a
-DASH row can be published for a URL that only serves its first 60 s. The muxed 360p fallback still
-plays. Porting DASH is not a copy: this fork moved the physical demuxer to `plx_play_feed`.
+**Trailer DASH is ported (fifteenth pass).** The player-side pieces from the old fork are now
+present: the strict 529-line SegmentBase MPD parser in the new fork-owned crate `plx_nuvio_dash`
+(pure Rust, no dependencies), the `.mpd` → two progressive fMP4 tracks demux in the new file
+`play-feed/src/dash.rs`, and boot's `set_trailer_reacher` / `probes.attach` in `app/nuvio.rs`.
+Porting was not a verbatim copy: this fork moved the physical demuxer to `plx_play_feed`, so the
+demux was adapted to its session effects (file size, duration, raster and tails publish as
+`DemuxEffect`, not direct `SHARED` atomics), two-lane curl transport and `hls::Resource` API.
+
+**Trailer audio pacing (device log, "plays then cuts out").** The DASH demux originally pushed
+one audio AU per video frame, mirroring the old fork. A 4K VP9 frame is ~42 ms but an AAC AU is
+~23.2 ms, so audio media time fell behind video from the first second (~16 s by the end of a
+150 s trailer) and Starfish's audio clock ran out of data. The audio lane now reads AUs until its
+pts reaches the last video AU's pts (bounded to 12 AUs per demux iteration), with a pure
+`audio_needs_catch_up` predicate and three host tests. This is a NEW rule, not an old-fork port:
+the old loop had the same 1:1 cadence. The old fork's actual audio-sync fixes — `#1343`
+(`audio_stale_ahead`, counted drops) and `#874` (`PushGate`) — are already present in this tree,
+and `pts_ns`/ADTS framing in the DASH demux are byte-for-byte the old code. The old fork's
+`9ccab8649` (`PrimeProfile::Preview`: start the audioSync master clock only after an audio AU is
+accepted) is NOT ported — this tree's prime implementation is upstream's and has no preview
+profile; the device log showed audio accepted before the sink was configured, so it was not the
+cause here.
+
+**The lost upstream arm that made all of the above unreachable.** The first device run after the
+port still failed: the log showed no `dash:` line at all — the planner sent the trailer Part to
+`/video/:/transcode/universal/start.mkv` (`directPlay=0&directStream=1`), and the shim answered a
+90-byte "no transcoder" body. `plan.rs::part_is_streamable` accepted only `.mkv`/`.mp4`/`.m4v`;
+the old fork also accepted `.mpd`, and that arm — plus its test — was dropped by an earlier upstream
+merge. Restored both (with a `Fork Rofocale11:` marker). This is the exact merge hazard the new
+crate layout is meant to shrink: a one-line arm in an upstream file can silently disable a whole
+fork feature, so the contract now has tests at both ends (generator→parser, and part-key→route).
+
+**What an upstream merge touches.** The edits to upstream-owned files for this feature are:
+two comments in `play-feed/src/ff.rs` (a `#[path = "dash.rs"] mod dash;` declaration and the
+`.mpd` routing branch in `demux`), the restored `.mpd` arm in `media/src/route/plan.rs` and its
+test, one dependency line each in `play-feed/Cargo.toml` and the workspace manifest, and two `uses`
+edges in `ci/module-layers.ini`. Everything else is new files:
+`rust-modules/nuvio-dash/` and `rust-modules/play-feed/src/dash.rs`. As a child module of `ff`,
+the demux borrows the private AVIO helpers (`packet_to_annexb`, `parse_extradata`, `adts_params`,
+`HlsInput`, `read_cb`…) without making any of them `pub`, so an upstream rewrite of `ff.rs` cannot
+drag fork code into the merge. The generator/parser contract is pinned by a test that feeds the
+MPD `shim_pms::dash_manifest` actually emits to `plx_nuvio_dash::parse_manifest`.

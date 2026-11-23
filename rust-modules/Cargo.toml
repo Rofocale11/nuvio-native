@@ -37,6 +37,9 @@ members = [
     "nuvio-probe",
     # Fork Rofocale11: the fork's single durable store (one redb file for the whole app).
     "nuvio-store",
+    # Fork Rofocale11: strict SegmentBase MPD parser for the shim's synthesized trailer DASH. Pure Rust;
+    # the physical demux that consumes it lives beside the Feed backend in plx_play_feed.
+    "nuvio-dash",
 ]
 resolver = "2"
 

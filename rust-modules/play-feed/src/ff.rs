@@ -694,6 +694,11 @@ pub mod acquisition;
 pub mod subs;
 #[path = "ff_native_audio.rs"]
 pub mod native_audio;
+// Fork Rofocale11: trailer DASH demux. A child module of `ff` so it borrows the AVIO transport and the
+// packet-framing helpers without making any of them public; the strict MPD parser it validates
+// lives in the fork-owned crate `plx_nuvio_dash`.
+#[path = "dash.rs"]
+mod dash;
 use plx_playback_contract::subtitle as subside;
 use subs::SubTracks;
 use acquisition::{AcquisitionRuntime, Phase, SegmentAcquisition};
@@ -6144,6 +6149,64 @@ pub fn demux(
         crate::aq::aq_set_eof(aq_p);
         crate::aq::aq_set_eof(aqa_p);
         session.media().record("hls: segmented demux ended");
+        return;
+    }
+    if path
+        .split_once('?')
+        .map_or(path.as_str(), |(plain, _)| plain)
+        .to_ascii_lowercase()
+        .ends_with(".mpd")
+    {
+        // Fork Rofocale11: trailer DASH. The Rust engine in `dash`, never FFmpeg's absent `dash`
+        // demuxer. No ABR — trailers are direct-play, so any adaptive control is deliberately
+        // ignored exactly as in the old fork.
+        if abr.is_some() {
+            session.media().record("dash: adaptive control present for DASH; ignored (direct-play only)");
+        }
+        let observer = session.observer();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dash::dash_demux(dash::DashContext {
+                origin: &origin,
+                path: &path,
+                acodec: &acodec,
+                aq: aq_p,
+                aqa: aqa_p,
+                hs: hs_p,
+                media: session.media(),
+                observer: Arc::clone(&observer),
+                transport: &transport,
+            })
+        }));
+        match outcome {
+            Ok(Ok(())) | Ok(Err(HlsExit::Aborted)) => {}
+            Ok(Err(HlsExit::Failed(why))) => {
+                session.media().record(&format!("dash: demux failed: {why}"));
+                if pushed_any() {
+                    session.media().publish(DemuxEffect::IoFailed);
+                } else {
+                    session.media().publish(DemuxEffect::FailFault(DemuxFault::HlsFailed));
+                }
+            }
+            Ok(Err(_)) => {
+                session.media().record("dash: demux failed");
+                if pushed_any() {
+                    session.media().publish(DemuxEffect::IoFailed);
+                } else {
+                    session.media().publish(DemuxEffect::FailFault(DemuxFault::HlsFailed));
+                }
+            }
+            Err(_) => {
+                session.media().record("dash: demux panicked");
+                session.media().publish(DemuxEffect::FailFault(DemuxFault::DemuxPanicked));
+            }
+        }
+        if unproductive_exit_failed(pushed_any(), unsafe {
+            crate::aq::aq_is_aborted(aq_p)
+        }) {
+            session.media().publish(DemuxEffect::FailFault(DemuxFault::NoAccessUnits));
+        }
+        crate::aq::aq_set_eof(aq_p);
+        crate::aq::aq_set_eof(aqa_p);
         return;
     }
     let mut original_watch = auto_original;

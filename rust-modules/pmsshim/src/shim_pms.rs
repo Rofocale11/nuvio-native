@@ -10108,6 +10108,20 @@ mod trailer_tests {
             !mpd.contains("<SegmentTemplate"),
             "parser rejects SegmentTemplate"
         );
+        // Fork Nuvio: the generator/parser contract, exercised rather than asserted as a comment.
+        // What the shim actually serves must parse into the two tracks the Feed demux opens.
+        let parsed = plx_nuvio_dash::parse_manifest(&mpd).expect("generated MPD parses");
+        assert_eq!(parsed.video.mime, "video/mp4");
+        assert_eq!(parsed.audio.mime, "audio/mp4");
+        assert_eq!(parsed.duration_ms, Some(145_000));
+        assert!(
+            parsed.video.base_url.starts_with("https://")
+                && parsed.audio.base_url.starts_with("https://"),
+            "the direct googlevideo BaseURLs survive XML unescaping"
+        );
+        assert_ne!(parsed.video.base_url, parsed.audio.base_url);
+        assert_eq!(parsed.video.init_range, (0, 999));
+        assert_eq!(parsed.video.index_range, (1000, 2000));
         let row = shim.trailer_row(parent).expect("a dash clip row");
         let media = row["Media"].as_array().unwrap();
         assert_eq!(media.len(), 2, "DASH leads, muxed falls back");

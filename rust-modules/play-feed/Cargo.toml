@@ -30,6 +30,9 @@ dolby_vision = { version = "3.4", default-features = false }
 plx_playback_contract = { path = "../playback-contract" }
 plx_media_codecs = { path = "../media-codecs" }
 plx_net = { path = "../net" }
+# Fork Rofocale11: the strict SegmentBase MPD parser for the shim's synthesized trailer DASH. New file
+# `src/dash.rs` (a submodule of `ff`, so it borrows no public helpers) is the only caller.
+plx_nuvio_dash = { path = "../nuvio-dash" }
 libc = "0.2"
 plx_base = { path = "../base" }
 plx_os = { path = "../os" }

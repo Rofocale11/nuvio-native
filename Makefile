@@ -1494,7 +1494,10 @@ VERIFY_FILES = pkg/plxnative $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(DEPLOY_FILES) 
                $(SUBS_FONT_FILES) $(JS_SERVICE_FILES) $(SBENGINE_STAGED) $(if $(LAB),pkg/lab.json,)
 verify-deploy: tv-lock-require
 	@echo "verify-deploy: comparing $(words $(VERIFY_FILES)) files against $(APPID) [$(FLAVOR)]"
-	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out $(SUBS_FONT_FILES) $(JS_SERVICE_FILES) $(SBENGINE_STAGED),$(VERIFY_FILES))) 2>&1; \
+	@# Fork Rofocale11: libsbengine.so is in VERIFY_FILES but must stay in the main md5sum group —
+	@# filtering it out here left no group that hashed it, so deploy always failed with
+	@# "libsbengine.so: MISSING" even after a correct copy. The engine lands in APPDIR itself.
+	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out $(SUBS_FONT_FILES) $(JS_SERVICE_FILES),$(VERIFY_FILES))) 2>&1; \
 	         cd $(APPDIR)/js-service && md5sum $(notdir $(JS_SERVICE_FILES)) 2>&1; \
 	         cd $(APPDIR)/$(SUBS_FONT_DIR) && md5sum $(notdir $(SUBS_FONT_FILES)) 2>&1' | \
 	  python3 ci/verify-deploy.py $(VERIFY_FILES)

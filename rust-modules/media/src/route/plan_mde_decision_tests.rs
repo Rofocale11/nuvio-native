@@ -42,6 +42,16 @@ fn mkv_and_mp4_parts_are_direct_playable() {
     );
     assert!(part_is_streamable("/library/parts/1/2/movie.mp4"));
     assert!(part_is_streamable("/library/parts/1/2/movie.m4v"));
+    // Fork Rofocale11: the shim's trailer DASH part must reach the Rust demux, not the shim's
+    // non-existent transcoder. The query must not defeat the gate either.
+    assert!(
+        part_is_streamable("/library/parts/X/0/file.mpd"),
+        ".mpd trailer DASH is streamable via the Rust dash engine, not the FFmpeg dash demuxer"
+    );
+    assert!(
+        part_is_streamable("/library/parts/1/2/file.mpd?x=1"),
+        "the query must not defeat the .mpd gate"
+    );
     assert!(
         !part_is_streamable("/library/parts/1/2/movie.mov"),
         "mov still remuxes"

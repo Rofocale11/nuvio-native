@@ -199,6 +199,20 @@ pub(crate) fn boot() {
     // not call this, so their behavior is untouched across merges.
     plx_os::devcaps::fork_enable_auto_convert();
     handle.shim.probes.set_prober(prober());
+    // A torrent's probe is the 10 s on a 4K remux (container header + tail cues, fetched from the
+    // swarm), re-paid on every relaunch because the payload is tmpfs. The verdict itself is a few
+    // KB and cannot go stale (an infohash fixes the bytes), so it persists beside the swarm state —
+    // the same ladder the engine uses, first writable rung.
+    if let Some(dir) = plx_base::paths::p2p_state_candidates()
+        .into_iter()
+        .find(|d| std::fs::create_dir_all(d).is_ok())
+    {
+        handle.shim.probes.attach(dir.join(plx_pmsshim::shim_probe::PROBE_CACHE_FILE));
+    }
+    // The DASH gate's second question: can each trailer track be read at its END? googlevideo
+    // serves some signed URLs only up to a prefix, and such a pair passes the probe and then fails
+    // mid-playback (see `Shim::trailer_tracks_reachable`).
+    handle.shim.set_trailer_reacher(trailer_reacher());
     // Fork Rofocale11: DTS/TrueHD/Opus are converted by the app in Auto when this TV has no
     // native path, so the shim's stream ranking must not mark those tracks unplayable.
     handle.shim.set_audio_codecs(
@@ -250,6 +264,18 @@ pub(crate) fn boot() {
 /// The shim's view of `plx_nuvio_probe::probe_url`, with this TV's decode verdicts.
 /// Fork Rofocale11: the probe used to live in upstream's `media::ff::probe`; it is now the
 /// fork-owned plx_nuvio_probe crate so a merge cannot reintroduce the conflict or a second ABI table.
+/// The shim's view of a trailer track's byte-offset reach: open `url` at `at` with a PRIVATE
+/// transfer (not the one the player's `ACTIVE` holds, so asking never disturbs playback) and
+/// report the total size. The transport's own bounded open/read deadlines apply; the shim's
+/// deadline argument is a policy hint it passes through, not a second clock to run here.
+fn trailer_reacher() -> plx_pmsshim::shim_probe::Reacher {
+    Arc::new(|url: &str, at: i64, _deadline: std::time::Duration| {
+        let (src, _abort) = plx_media::curlio::CurlSource::open_private(url, at)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(src.size())
+    })
+}
+
 fn prober() -> plx_pmsshim::shim_probe::Prober {
     use plx_pmsshim::shim_probe as p;
     Arc::new(|url: &str, deadline: std::time::Duration| {

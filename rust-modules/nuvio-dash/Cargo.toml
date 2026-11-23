@@ -1,0 +1,20 @@
+[package]
+name = "plx_nuvio_dash"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Fork Nuvio: strict SegmentBase MPD parser for the loopback shim's synthesized trailer DASH."
+publish = false
+
+# Fork Nuvio: this crate's lib.rs is ONE module of the application tree, not its root, so
+# `ci/module_graph.py` resolves `plx_nuvio_dash::parse_manifest` to the `nuvio_dash` member of
+# ci/module-layers.ini. It is pure Rust: no deps, no FFmpeg table, no transport.
+[package.metadata.plx]
+mount = "nuvio_dash"
+
+[lib]
+name = "plx_nuvio_dash"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

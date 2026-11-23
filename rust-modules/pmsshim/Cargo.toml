@@ -42,3 +42,9 @@ libc = "0.2"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Fork Nuvio: pin the generator/parser contract — the MPD `dash_manifest` emits must be the one
+# `plx_nuvio_dash::parse_manifest` accepts, with the same two tracks and ranges. Production never
+# parses here (the Feed demuxer does); this dependency exists only for that regression test.
+plx_nuvio_dash = { path = "../nuvio-dash" }

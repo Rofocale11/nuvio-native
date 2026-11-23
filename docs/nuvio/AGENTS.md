@@ -22,7 +22,11 @@ comment beside the edit, with a sentence explaining *why*, not just *what*. Exam
 Formats that have no comment syntax (generated lockfiles, JSON, some Markdown prose) cannot carry
 the marker inline: record the edit in `docs/nuvio/MERGE-AUDIT.md` instead. Never treat "it's only a
 doc" as an exemption. New fork behaviour should land in fork-owned places (`plx_nuvio_probe`,
-`plx_nuvio_store`, `docs/nuvio/`) so an upstream merge cannot reintroduce the conflict.
+`plx_nuvio_store`, `plx_nuvio_dash`, `docs/nuvio/`) so an upstream merge cannot reintroduce the
+conflict. Where a feature genuinely needs an upstream crate's private helpers — the trailer DASH
+demux needs the Feed's AVIO and packet-framing machinery — put it in a NEW file that is a child
+module of the upstream file (`play-feed/src/dash.rs` under `ff`), so the diff to the upstream file
+is only a `mod` declaration and a routing branch. `MERGE-AUDIT.md` records the exact surface.
 
 ## One durable store
 
