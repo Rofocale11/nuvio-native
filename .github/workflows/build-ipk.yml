@@ -78,7 +78,7 @@ jobs:
 
       - name: Install the pinned Rust toolchain
         # Fork adaptation: the old fork installed nightly + rust-src for `-Z build-std`. This tree
-        # pins 1.100.0 in rust-modules/rust-toolchain.toml and links prebuilt ARMv7 std, so it uses
+        # pins its toolchain in rust-modules/rust-toolchain.toml and links prebuilt ARMv7 std, so it uses
         # the repository's own action. Installing nightly here would be a wasted download and
         # would not change the compiler the Makefile selects (`cargo +$(RUST_TOOLCHAIN)`).
         uses: ./.github/actions/rust-toolchain
@@ -151,25 +151,25 @@ jobs:
 
       - name: Build the IPK
         shell: bash
+        # Fork Rofocale11: WEBOS_SDK must come from the NDK action's output. The Makefile's
+        # default ($HOME/webos-ndk/...) does not exist on the runner, so without this make
+        # fails at src/access.o with "arm-webos-linux-gnueabi-gcc: No such file or directory".
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          # make echoes the cargo recipe, and that line carries these values inline
-          # ($(TELEMETRY_ENV) in the Makefile). Variables are not auto-masked like secrets,
-          # so without this the keys sit in a public run log.
-          for name in NUVIO_SUPABASE_ANON_KEY TMDB_API_KEY; do
-            value="${!name-}"
-            if [ -n "$value" ]; then echo "::add-mask::$value"; fi
-          done
           FLAVOR="${{ github.event.inputs.flavor || 'stable' }}"
           echo "Building FLAVOR=$FLAVOR RELEASE=1"
           make FLAVOR="$FLAVOR" RELEASE=1 ipk
         env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
           NUVIO_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
           NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
           NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
           DEVICE_LOGIN_WEB_BASE_URL: ${{ vars.DEVICE_LOGIN_WEB_BASE_URL }}
           TV_LOGIN_WEB_BASE_URL: ${{ vars.TV_LOGIN_WEB_BASE_URL }}
-          TMDB_API_KEY: ${{ vars.TMDB_API_KEY }}
+          # Fork Rofocale11: a repository Secret, not a Variable. Variables are printed in the
+          # step's env dump before an in-script ::add-mask:: can run, which put the old key in a
+          # public log. Secrets are masked by the runner from the first line of the step.
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
 
       - name: Package assertions
         env:

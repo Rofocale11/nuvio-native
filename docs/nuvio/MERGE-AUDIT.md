@@ -951,3 +951,25 @@ Verified: after the FFmpeg receipt fix, `make ipk` completes and `ci/check-packa
 "8 receipted + 1 digest-pinned ELF files verified", with `libswresample-plx.so.7` staged and the
 packaged `libavcodec` still declaring the dependency it satisfies. All 103 `ci.test_ci_workflows`
 tests pass.
+
+**First dispatch run: NDK path and key masking (2026-11-23).** The owner dispatched a stable build
+on `nuvio-native`; it failed at "Build the IPK", exit 2. Two fork-workflow defects, both fixed in
+`build-ipk.yml` (no upstream file touched):
+
+1. The "Build the C torrent engine" step passes `WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}`, but
+   the "Build the IPK" step did not. The Makefile then used its default `$HOME/webos-ndk/...`,
+   which does not exist on the runner, so `src/access.o` failed with
+   `FileNotFoundError: .../arm-webos-linux-gnueabi-gcc` (make Error 1). The step now passes the
+   action's `sdk-dir` output too.
+2. `TMDB_API_KEY` was a repository **Variable**, and the step's `::add-mask::` loop ran after the
+   runner had already printed the step's `env:` block — so the key appeared in plaintext in a
+   public run log. The owner rotated the key and created a repository Secret; the workflow now
+   reads `secrets.TMDB_API_KEY` and the ineffective in-script mask loop is gone. The other values
+   (Supabase URL/anon key, login URLs) remain Variables: they are public client configuration.
+   `INNERTUBE_KEY` was also put in Secrets, but nothing in this tree reads it — the YouTube key is
+   a literal in `js-service/trailer-decipher.js` and there is no build-time substitution, so that
+   secret is currently unused.
+
+Verified: the failed run's head SHA was `25b37b75`, the commit with the swresample fix, so the
+workflow was running the intended tree. The rotated key is present in no tracked file. No fix has
+been pushed yet; a rerun is needed to exercise the release gates that were skipped.
