@@ -767,3 +767,54 @@ real stop + fresh resolve the old fork's `SetStream` used. Both levels use the s
 value. Five module tests and one overlay effect/answer test pin the pages, the seeder fact, the
 polling and the replacement of the Quality row; full default nextest, `check-nodef`, layers,
 deps and ledger are green. The six workspace-wide failures are the known baseline.
+
+**Home hero shows the plot under the identity band (2026-11-23).** Upstream deliberately replaced
+the hero plot with the "Movie · Year · Length" band (v0.10.0 rc1, owner's request), keeping the
+synopsis only on Detail. The owner has now asked for the plot on Home too. Both upstream files
+carry `Fork Rofocale11:` markers at the edit:
+
+- `screens/src/home/mod.rs` — `hero_plot()` reads the shim-published `summary` (the addon's
+  `description`, see `pmsshim::preview_row`) for movies, shows and episodes; `hero_content()` stacks
+  the plot under the identity band in one shared `VStack`, and `hero_ladder()` reserves the extra
+  lines so the title rises with the block while the foot stays pinned at 638. Kinds with no
+  identity band (season, collection) keep their single premise line. Plain Plex content shows the
+  same band-plus-plot as Nuvio content — the change is not gated on the shim.
+- `screens/src/home/hero_line_tests.rs` — the anchor test now reserves the plot's lines, and
+  `a_movie_and_a_show_show_their_plot_under_the_identity_band` pins the plot for a movie, a show and
+  an episode, the empty-summary case, and the single-line premise for a collection.
+
+No screen shape, element id or focus group changed, so the replay fingerprints are untouched.
+Focused hero-line tests and `make check-nodef` are green. The upstream `ui/src/CLAUDE.md` sentence
+that said Home only reads metadata or a premise was corrected in place with a `Fork Rofocale11:`
+marker (it is Markdown prose with comment syntax, so the inline marker is enough).
+
+**Player title is the clear logo when one resolves (2026-11-23).** Upstream's HUD package format
+has no logo slot: `hud_format/schema.rs` binds its only image cell to `info.still`, and `title.main`
+is a text cell; there is no `logo` mention anywhere in `hud_format`, `player_hud` or `screens/player`.
+Under the shim the addon's `logo` IS published as the row's `clearLogo`, and `/photo/…/clearLogo`
+resolves it from the show's (or movie's) rating key, so the artwork already exists — it only had no
+place in the player.
+
+- **New fork-owned `appkit/src/player_hud/render/nuvio_logo.rs`** — resolves the playing item's
+  `NowPlaying.detail_rk` (the SHOW for an episode, the movie otherwise) on its current server, fetches
+  the texture through the SHARED `plx_ui::tex::logo_src`, and sizes/places it with the SHARED
+  `hero_logo::{fit, place}` Compact rung. No new art loader, no worker, no global, no
+  `NowPlaying` field, no HUD-format binding or version bump. A pure test pins the show-not-episode
+  key rule.
+- `appkit/src/player_hud/render.rs` — one `mod` line and two marked branches in the private
+  `draw_title`: when a logo is ready the kicker is still drawn through upstream's own
+  `draw_player_title_at` with a null title (which releases the marquee clock), and the logo is
+  painted in the title rung's band. **Every no-logo case, including all plain-Plex playback, keeps
+  the typed title unchanged.** The appkit tests, including the frozen HUD goldens and the classic
+  census, stay green with no fixture changes.
+- **Sizing follow-up (owner, after two device looks):** the Compact rung was too small (~246 px wide
+  for a 5:1 wordmark) and a 3x area was far too big (~740 px). The proportional target is the
+  footprint of the 54 px typed title it replaces (~400-430 px), so the fork-owned `LogoRung::Custom`
+  is now ~1.55x Compact linearly: a 5:1 wordmark lands near 387x77. It stays bottom-anchored on the
+  typed line so it grows UP into the picture, never over the playbar, and the episode kicker is
+  lifted above the painted top so the mark cannot cover `S2 · E4`. A pure test pins the ratio and
+  the typed-title width band.
+
+No screen shape, element id or focus group changed, so replay fingerprints are untouched. A host
+pass cannot prove the texture resolves on the device; the TV still needs a `--guest`/mock capture
+under the lock, and a raw-URL play with no shim row has no logo to show (text fallback remains).

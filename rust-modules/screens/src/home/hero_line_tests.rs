@@ -87,11 +87,15 @@ fn the_ladder_keeps_its_anchor_for_every_line() {
     assert_eq!(home_synopsis(premise(&two)).measure_h(theme::hero::HOME_SYNOPSIS_W), 2.0 * HOME_LABEL_H, "…and the other is elided at two");
     let stack = |hero: &PmsMovie| hero_ladder(hero).0;
     let (s_two, s_one, s_resumed, s_label) = (stack(&two), stack(&one), stack(&resumed), stack(&long_label));
+    // Fork Rofocale11: identity is now TWO lines (the band plus the plot), so the ladder reserves
+    // the extra air and raises the title with it; the block's foot stays pinned at 638.
+    let plot_h = home_synopsis(PREMISE).measure_h(theme::hero::HOME_SYNOPSIS_W);
+    let identity_h = HOME_LABEL_H + theme::space::SM + plot_h;
     for (what, s, h) in [
         ("two-line premise", &s_two, 2.0 * HOME_LABEL_H),
         ("one-line premise", &s_one, HOME_LABEL_H),
-        ("movie identity", &s_resumed, HOME_LABEL_H),
-        ("episode identity", &s_label, HOME_LABEL_H),
+        ("movie identity + plot", &s_resumed, identity_h),
+        ("episode identity + plot", &s_label, identity_h),
     ] {
         let block = s.block.expect(what);
         assert_eq!(block.h, h, "{what}: the block's height");
@@ -141,6 +145,32 @@ fn the_page_draws_episode_show_and_movie_metadata() {
 
 /// **An HDR film says so beside its resolution**; a show (which has no video of its own) and an
 /// SDR film do not.
+/// Fork Rofocale11: the owner wants the plot on Home as well as the identity band. The shim puts
+/// the addon's `description` in `summary`, so this is the catalogue's own copy, not invented text.
+#[test]
+fn a_movie_and_a_show_show_their_plot_under_the_identity_band() {
+    let _guard = plx_base::testlock::serial();
+    let m = &plx_ui::fixture::FixtureMeasure;
+    let drawn = |hero: &PmsMovie| {
+        plx_gfx::text::capture_text_runs_for_test(|| hero_content(hero, Painter::recording(), 0.0, m)).join("\n")
+    };
+    for hero in [
+        movie(),
+        PmsMovie { kind: plx_data::pms::KIND_SHOW, child_count: 2, ..movie() },
+        episode(),
+    ] {
+        let text = drawn(&hero);
+        assert!(text.contains("frozen wastes"), "the plot must be on the hero: {text:?}");
+    }
+    let film = drawn(&movie());
+    assert!(film.contains("Movie"), "the identity band still leads: {film:?}");
+    // No summary: the band stands alone. A kind with no band reads its premise once, not twice.
+    let mute = drawn(&PmsMovie { summary: String::new(), ..movie() });
+    assert!(!mute.contains("frozen wastes"), "{mute:?}");
+    let collection = drawn(&PmsMovie { kind: plx_data::pms::KIND_COLLECTION, ..movie() });
+    assert!(collection.contains("frozen wastes"), "{collection:?}");
+}
+
 #[test]
 fn an_hdr_hero_names_its_dynamic_range_beside_the_resolution() {
     let range = |hero: &PmsMovie| match hero_line(hero) {

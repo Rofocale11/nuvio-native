@@ -73,6 +73,9 @@
 
 use std::ffi::CString;
 
+// Fork Rofocale11: Nuvio's clearLogo takes the title band; the child module owns the artwork path.
+mod nuvio_logo;
+
 use plx_ui::theme;
 use plx_ui::icons::Icon;
 use plx_ui::widgets::{ControlGround, TabPill, TransportButton, TransportFocus, TransportRest};
@@ -746,13 +749,21 @@ fn draw_title(f: &Frame<'_>, row: &mut HudMotion, q: Painter, kicker: Option<Tit
             (words(plx_media::route::ctxline_cptr(f.ps)), words(plx_media::route::title_cptr(f.ps)))
         };
         if let Some(line) = kicker { line.draw(q, &context, f.measure); }
-        if let Some(line) = main { line.draw(q, &title, f.measure); }
+        // Fork Rofocale11: a resolved clearLogo takes the main line's band; every no-logo case
+        // (including plain Plex) keeps the typed title exactly as upstream drew it.
+        let logo = nuvio_logo::resolve(f);
+        if let Some(line) = main {
+            match logo {
+                Some(logo) => logo.paint(q, line.rect, line.size),
+                None => line.draw(q, &title, f.measure),
+            }
+        }
         row.reset_title();
         return;
     }
     let Some(main) = main else { return };
     let classic = TitleLook::default();
-    let look = TitleLook {
+    let mut look = TitleLook {
         x: main.rect.x,
         kicker_y: kicker.map_or(classic.kicker_y, |k| k.rect.y),
         title_y: main.rect.y,
@@ -766,6 +777,35 @@ fn draw_title(f: &Frame<'_>, row: &mut HudMotion, q: Painter, kicker: Option<Tit
     };
     let right = main.rect.x + main.rect.w;
     let paused = f.model.paused;
+    // Fork Rofocale11: a resolved clearLogo takes the main line's band and grows UP into the
+    // picture, so the episode kicker has to stand above its painted top. No logo leaves both the
+    // kicker and the typed title untouched, byte for byte.
+    let logo = nuvio_logo::resolve(f);
+    if let Some(logo) = logo.as_ref() {
+        let logo_top = main.rect.y + main.size as f32 - logo.painted_h(main.rect.w);
+        look.kicker_y = look.kicker_y.min(logo_top - 12.0 - look.kicker_size as f32);
+    }
+    if let Some(logo) = logo {
+        // The kicker is still drawn through upstream's own helper with a null title (which also
+        // releases the marquee clock); only the main line yields to the logo.
+        if let Some(n) = f.meta.now_playing().filter(|n| n.is_real_episode) {
+            let kicker = CString::new(plx_ui::fmt::episode_kicker(n.season, n.index, &n.ep_title)).unwrap_or_default();
+            draw_player_title_at(q, look, Kicker::Episode(kicker.as_ptr()), std::ptr::null(), right, f.measure, paused, &row.title_clock);
+        } else {
+            draw_player_title_at(
+                q,
+                look,
+                Kicker::Context(plx_media::route::ctxline_cptr(f.ps)),
+                std::ptr::null(),
+                right,
+                f.measure,
+                paused,
+                &row.title_clock,
+            );
+        }
+        logo.paint(q, main.rect, main.size);
+        return;
+    }
     if let Some(n) = f.meta.now_playing().filter(|n| n.is_real_episode) {
         let kicker = CString::new(plx_ui::fmt::episode_kicker(n.season, n.index, &n.ep_title)).unwrap_or_default();
         // an interior-NUL title drew nothing before the title was factored out: it still does

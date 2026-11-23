@@ -33,6 +33,7 @@ use plx_ui::linked_heading::{self, LinkedHeading};
 use plx_ui::landing_hero::{
     first_sentence, home_rows, home_shade, home_synopsis, shelf_fade, COL_W as HERO_COL_W, HOME_LABEL_H, SHELF_TOP,
 };
+use plx_ui::vstack::{Anchor, VStack};
 use plx_machine::machine::{
     Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent,
     InputKind, InstanceId, Key, LogicalState, Machine, MachineId, Measure, PressRead, Tick,
@@ -4541,6 +4542,8 @@ fn hero_line(hero: &PmsMovie) -> Option<HeroLine<'_>> {
     // A movie, a show and an episode read their identity band whatever their watch state: the
     // owner expects "Movie • Year • Length" on every one (v0.10.0 rc1 — a watched film showed its
     // plot instead). Only the kinds with no such band (a season, a collection) read a premise.
+    // Fork Rofocale11: that band is no longer the ONLY line — the plot now sits under it (see
+    // `hero_plot`). The identity stays the first line exactly as the owner asked.
     if hero.kind == KIND_MOVIE || is_show || is_episode {
         let identity = match hero.kind {
             KIND_EPISODE => {
@@ -4582,8 +4585,22 @@ fn hero_line(hero: &PmsMovie) -> Option<HeroLine<'_>> {
     Some(first_sentence(&hero.summary)).filter(|s| !s.is_empty()).map(HeroLine::Premise)
 }
 
-/// **Home's hero text** (owner's board CW-13 v2): the title (clearLogo, or its typed fallback) and ONE
-/// metadata block beneath it. The identity band is one line in reading ink. A premise can wrap.
+/// Fork Rofocale11: the plot line Home prints UNDER a movie's / show's / episode's identity band.
+/// The shim publishes the addon's `description` as `summary` (`pmsshim::preview_row`), so this is
+/// the catalogue's own copy. Kinds without an identity band already read their premise as their one
+/// line; giving them a plot too would print the same sentence twice.
+fn hero_plot(hero: &PmsMovie) -> Option<&str> {
+    use plx_data::pms::{KIND_EPISODE, KIND_MOVIE, KIND_SHOW};
+    if !matches!(hero.kind, KIND_MOVIE | KIND_SHOW | KIND_EPISODE) {
+        return None;
+    }
+    let plot = hero.summary.trim();
+    (!plot.is_empty()).then_some(plot)
+}
+
+/// **Home's hero text** (owner's board CW-13 v2): the title (clearLogo, or its typed fallback) and
+/// ONE block beneath it. That block is the identity band in reading ink, with the plot under it
+/// (Fork Rofocale11); a kind with no identity band reads a premise instead, which can wrap.
 fn hero_content(hero: &PmsMovie, p: Painter, dx: f32, measure: &dyn Measure) {
     if !on_axis(
         MARGIN_X + dx,
@@ -4599,8 +4616,23 @@ fn hero_content(hero: &PmsMovie, p: Painter, dx: f32, measure: &dyn Measure) {
     let Some(block) = stack.block else { return };
     match line {
         Some(HeroLine::Metadata { identity, date, length, genres, quality, range, rating }) => {
-            let r = Rect::new(MARGIN_X, block.y, HERO_COL_W, block.h);
+            // Fork Rofocale11: the identity keeps its line and the plot sits under it in the same
+            // block. One shared VStack owns the gap and both spans, so the ladder's bottom anchor
+            // (and the title above it) cannot drift from the height `hero_ladder` reserved.
+            let plot = hero_plot(hero).map(home_synopsis);
+            let items = [
+                Item::new(HOME_LABEL_H),
+                plot.as_ref().map_or(Item::absent(), |tv| {
+                    Item::new(tv.measure_h(theme::hero::HOME_SYNOPSIS_W)).before(theme::space::SM)
+                }),
+            ];
+            let rows = VStack::new(&items, 0.0, Anchor::Top(block.y));
+            let (y, _) = rows.span(0).expect("the identity band is always present");
+            let r = Rect::new(MARGIN_X, y, HERO_COL_W, HOME_LABEL_H);
             plx_ui::widgets::hero_metadata(p, r, &[&identity, &date, &length, &genres], quality.as_deref(), range, rating, measure);
+            if let (Some(tv), Some((plot_y, _))) = (plot.as_ref(), rows.span(1)) {
+                tv.draw(p, Rect::new(MARGIN_X, plot_y, theme::hero::HOME_SYNOPSIS_W, 0.0));
+            }
         }
         Some(HeroLine::Premise(premise)) => {
             home_synopsis(premise).draw(p, Rect::new(MARGIN_X, block.y, theme::hero::HOME_SYNOPSIS_W, 0.0));
@@ -4615,13 +4647,17 @@ fn hero_title(hero: &PmsMovie) -> &str {
 }
 
 /// **Home's hero ladder for one hero** and the line it stands on ([`hero_line`]): the one place the
-/// block's height is decided, which [`hero_content`] draws on. A label
-/// is one [`HOME_LABEL_H`]; a premise is as tall as its lines (one or two), so a one-line premise
-/// brings the title down a line.
+/// block's height is decided, which [`hero_content`] draws on. A label is one [`HOME_LABEL_H`],
+/// plus the plot's lines when the item has one (Fork Rofocale11); a premise is as tall as its own
+/// lines (one or two), so a one-line premise brings the title down a line.
 fn hero_ladder(hero: &PmsMovie) -> (plx_ui::landing_hero::HomeStack, Option<HeroLine<'_>>) {
     let line = hero_line(hero);
     let block_h = match &line {
-        Some(HeroLine::Metadata { .. }) => Some(HOME_LABEL_H),
+        Some(HeroLine::Metadata { .. }) => {
+            let plot_h = hero_plot(hero)
+                .map(|plot| home_synopsis(plot).measure_h(theme::hero::HOME_SYNOPSIS_W));
+            Some(HOME_LABEL_H + plot_h.map_or(0.0, |h| theme::space::SM + h))
+        }
         Some(HeroLine::Premise(premise)) => Some(home_synopsis(premise).measure_h(theme::hero::HOME_SYNOPSIS_W)),
         None => None,
     };
