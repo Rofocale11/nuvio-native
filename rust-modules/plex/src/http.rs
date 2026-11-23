@@ -153,7 +153,10 @@ enum BodyPolicy {
     Api,
     Bulk,
     Probe { max: usize, timeout_s: i32, learn_pin: bool },
-    Deadline { at: std::time::Instant },
+    // Fork Rofocale11: a Nuvio `/decision` can be silent for up to 30 s while the torrent engine
+    // finds peers, so the caller's absolute deadline must be the ONLY timer. `liveness: true`
+    // keeps the ordinary inactivity watchdog for every other deadline-bearing request.
+    Deadline { at: std::time::Instant, liveness: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,7 +230,29 @@ pub fn request_until_outcome(
         path,
         method,
         headers,
-        BodyPolicy::Deadline { at: deadline },
+        BodyPolicy::Deadline { at: deadline, liveness: true },
+        pin,
+    )
+}
+
+/// Fork Rofocale11: the same request with NO inactivity watchdog — only `deadline` may end it.
+/// A Nuvio `/decision` waits on the torrent engine's peer discovery and sends no bytes until it has
+/// a URL, which is exactly the silence the ordinary deadline policy treats as a dead transport.
+#[track_caller]
+pub fn request_until_outcome_deadline_only(
+    origin: &Origin,
+    path: &str,
+    method: Method,
+    headers: &[&str],
+    deadline: std::time::Instant,
+    pin: Option<&ResolvePin>,
+) -> RequestOutcome {
+    request_with(
+        origin,
+        path,
+        method,
+        headers,
+        BodyPolicy::Deadline { at: deadline, liveness: false },
         pin,
     )
 }
@@ -529,7 +554,8 @@ fn plaintext(
     let extra_ptr = extra_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
 
     let mut hs = plx_net::stream::http_stream_boxed();
-    let mut deadline_liveness = matches!(body_policy, BodyPolicy::Deadline { .. }).then(|| {
+    // Fork Rofocale11: only liveness-bearing deadlines start the silence watchdog.
+    let mut deadline_liveness = matches!(body_policy, BodyPolicy::Deadline { liveness: true, .. }).then(|| {
         std::time::Instant::now()
             .checked_add(plx_net::stream::media_stall_budget())
             .unwrap_or_else(std::time::Instant::now)
@@ -545,7 +571,7 @@ fn plaintext(
             method.as_str(),
             timeout_s.saturating_mul(1000),
         ),
-        BodyPolicy::Deadline { at } => {
+        BodyPolicy::Deadline { at, .. } => {
             if std::time::Instant::now() >= at {
                 return RequestOutcome::Deadline;
             }
@@ -593,7 +619,8 @@ fn plaintext(
             method.as_str(),
         ),
     };
-    if opened == 0 && matches!(body_policy, BodyPolicy::Deadline { .. }) {
+    // Fork Rofocale11: a deadline-only request does not restart a silence epoch after the head.
+    if opened == 0 && matches!(body_policy, BodyPolicy::Deadline { liveness: true, .. }) {
         // A complete response head is transport progress. Preserve the caller's reserve instant,
         // but begin a fresh ordinary inactivity epoch for the body just as the HLS path and
         // SO_RCVTIMEO do; connect/header latency cannot silently consume the body's watchdog.
@@ -630,7 +657,7 @@ fn plaintext(
                 BodyPolicy::Api | BodyPolicy::Bulk | BodyPolicy::Deadline { .. } => chunk.len(),
             };
             let (n, read_deadline_owner) = match body_policy {
-                BodyPolicy::Deadline { at } => {
+                BodyPolicy::Deadline { at, .. } => {
                     let (effective, owner) = deadline_liveness
                         .map_or((at, DeadlineOwner::Caller), |liveness| {
                             effective_deadline(at, liveness)
@@ -673,7 +700,8 @@ fn plaintext(
                 break;
             }
             body.extend_from_slice(&chunk[..n as usize]);
-            if matches!(body_policy, BodyPolicy::Deadline { .. }) {
+            // Fork Rofocale11: bytes on a deadline-only request renew only the absolute deadline.
+            if matches!(body_policy, BodyPolicy::Deadline { liveness: true, .. }) {
                 deadline_liveness = Some(
                     std::time::Instant::now()
                         .checked_add(plx_net::stream::media_stall_budget())
@@ -746,7 +774,7 @@ fn tls(
     let (timeouts, max_body, caller_owns_timeout) = match body_policy {
         BodyPolicy::Api => (plx_net::net::API, None, false),
         BodyPolicy::Bulk => (plx_net::net::BULK, None, false),
-        BodyPolicy::Deadline { at } => {
+        BodyPolicy::Deadline { at, .. } => {
             let now = std::time::Instant::now();
             if now >= at {
                 return RequestOutcome::Deadline;

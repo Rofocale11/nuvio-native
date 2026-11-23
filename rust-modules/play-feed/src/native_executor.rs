@@ -22,6 +22,12 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+// Fork Rofocale11: a slow torrent can hold for 20 s with seconds already staged because the hold's
+// only certificate was a byte cap. The time-based release is pure logic in a fork-owned child file;
+// this module only names it at the one place the hold's release is decided.
+#[path = "hold_resume.rs"]
+mod hold_resume;
+
 static VTOT: AtomicI64 = AtomicI64::new(0);
 static ATOT: AtomicI64 = AtomicI64::new(0);
 static VATT: AtomicI64 = AtomicI64::new(0);
@@ -225,6 +231,10 @@ pub struct NativePrepared {
     pub(crate) native_start: NativeSessionStartGuard,
     pub(crate) user_held: bool,
     pub(crate) side_reader: Box<dyn SideReaderPort>,
+    // Fork Rofocale11: the four-profile startup gate's frozen inputs, decided from the route plan
+    // and the armed first seek so a reload cannot silently switch profile mid-session.
+    pub(crate) prime_profile: crate::prime_profile::PrimeProfile,
+    pub(crate) prime_rate_gate: bool,
     /// The route's half of the Dolby Vision landing guard, which the Engine's construction turns into
     /// its [`crate::dv_start::Guard`].
     pub(crate) dv_landing: plx_playback_contract::feed::DvLandingPlan,
@@ -254,6 +264,10 @@ impl NativePrepared {
         Ok(Self {
             open, sample, stream, payload_c, audio_lead, clock_start, native_start,
             user_held, side_reader, dv_landing,
+            // Fork Rofocale11: a direct `arm` caller (the test rig) has no route; it gets the plain
+            // Initial profile. `prepare_native_open` overwrites both from the route's PrimePlan.
+            prime_profile: crate::prime_profile::PrimeProfile::Initial,
+            prime_rate_gate: false,
         })
     }
 
@@ -361,7 +375,8 @@ pub fn launch_native_open(
     hooks: &LaunchHooks,
 ) -> Result<(), ()> {
     let NativePrepared { mut open, sample, stream, payload_c, audio_lead, clock_start, native_start,
-        user_held, mut side_reader, dv_landing } = prepared;
+        // Fork Rofocale11: the prime profile and rate-gate switch travel to the Engine.
+        user_held, mut side_reader, prime_profile, prime_rate_gate, dv_landing } = prepared;
     let shared = feed.shared();
     // fd = -1 (CLOSED) so a teardown before/without http_open doesn't close(0)
     let mut hs = plx_net::stream::http_stream_boxed();
@@ -496,6 +511,12 @@ pub fn launch_native_open(
         feed_pace: FeedPace::default(),
         seek_base_pts: 0,
         prime_play: false,
+        // Fork Rofocale11: the four-profile gate starts its patience here and samples the demuxer's
+        // media tail from here; a landed seek restarts both in Engine::restart_seek_prime.
+        prime_profile,
+        prime_rate_gate,
+        prime_since_ms: crate::shared::vclock_ms(),
+        prime_rate: crate::prime_profile::PrimeRate::new(),
         startup_controlled: true,
         startup_user_held: user_held,
         startup_play_commanded: false,
@@ -938,6 +959,9 @@ pub enum ProgressiveRelease {
     Full,
     /// The demuxer finished: nothing more will arrive.
     Eof,
+    /// Fork Rofocale11: the stream holds three seconds of playable video past the held playhead,
+    /// so resume instead of waiting for a byte cap that high-bitrate media may take 20 s to reach.
+    Time,
 }
 
 impl ProgressiveRelease {
@@ -945,6 +969,7 @@ impl ProgressiveRelease {
         match self {
             Self::Full => "full",
             Self::Eof => "eof",
+            Self::Time => "time",
         }
     }
 }
@@ -964,6 +989,10 @@ impl ProgressiveRelease {
 ///
 /// Both play what there is, so neither waits for `decoder_ready`. The end of the stream is named
 /// first when both hold.
+///
+/// Fork Rofocale11: the caller adds a third arm — three seconds of playable video reserve — so a
+/// slow source cannot hold for twenty seconds with media already staged. This pure function keeps
+/// answering the cap/EOF question on its own; see `hold_resume.rs` for the time condition.
 pub fn progressive_hold_releases(queue_full: bool, producer_done: bool) -> Option<ProgressiveRelease> {
     if producer_done {
         Some(ProgressiveRelease::Eof)
@@ -1294,6 +1323,11 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, transport: &Transport, hooks
     if !eng.prime_play {
         return;
     }
+    // Fork Rofocale11: sample BEFORE deciding, so a ramp that has just crossed the bitrate is
+    // visible on the very tick that releases Play, not one tick later. The demuxer publishes its
+    // media tail for progressive streams too, so this reading exists without any new publisher.
+    let prime_now_ms = crate::shared::vclock_ms();
+    eng.prime_rate.observe(prime_now_ms, shared);
     // A paused reload owns a bounded first-picture preroll, not a viewer Play. The pump
     // re-pauses it after presentation; waiting for the viewer's command here strands that
     // preroll over a blank plane. Every other initial prime still waits for common startup.
@@ -1357,7 +1391,30 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, transport: &Transport, hooks
     // demuxer proved audioless may use the video-only escape; `abuf <= 0` alone is starvation, not
     // evidence that no audio exists.
     let audio_expected = shared.hls_audio_expected.load(Ordering::Acquire) || playable_abuf > 0;
-    let decoder_ready = if audio_expected {
+    // Fork Rofocale11: the old fork's one startup decision, as pure arithmetic in a fork-owned
+    // module. The profile's floors, a >=1.2x rate proof, the rate-blind depth and the wall ceiling
+    // all come from there; decoder readiness below stays an accepted-data condition.
+    let gate = crate::prime_profile::prime_gate_ready(
+        eng.prime_profile,
+        crate::prime_profile::PrimeFacts {
+            video_ns: playable_vbuf,
+            audio_ns: playable_abuf,
+            rate_millis_per_s: eng.prime_rate.millis_per_s(),
+            wall_ms: prime_now_ms,
+            since_ms: eng.prime_since_ms,
+            speed_permille: shared.applied_rate_permille.load(Ordering::Relaxed),
+            rate_gate_enabled: eng.prime_rate_gate,
+            audio_expected,
+        },
+    );
+    let decoder_ready = if eng.prime_profile == crate::prime_profile::PrimeProfile::Preview {
+        // Fork Rofocale11: a trailer starts on its first accepted AU (plus an audio AU when the
+        // stream has one), never on a film's buffer; the video-only escape covers a silent trailer.
+        accepted_vbuf > 0
+            && (accepted_abuf > 0
+                || !audio_expected
+                || accepted_vbuf >= crate::prime_profile::PREVIEW_AUDIO_WAIT_NS)
+    } else if audio_expected {
         accepted_vbuf >= PRIME_NS && accepted_abuf >= PRIME_AUDIO_NS
     } else {
         accepted_vbuf >= PRIME_VIDEO_MAX_NS
@@ -1410,14 +1467,50 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, transport: &Transport, hooks
     let vq = aq::queue_ptr(&mut eng.aq_video);
     let progressive_release = match prime_kind {
         HlsPrimeKind::ProgressiveRebuffer { .. } => {
-            let parked = aq::aq_would_park(vq) || aq::aq_would_park(aq::queue_ptr(&mut eng.aq_audio));
-            progressive_hold_releases(parked, aq::aq_producer_done(vq))
+            let aq_p = aq::queue_ptr(&mut eng.aq_audio);
+            let parked = aq::aq_would_park(vq) || aq::aq_would_park(aq_p);
+            // Fork Rofocale11: the byte cap and EOF stay the FIRST certificate — a remux whose
+            // queues only hold ~2 s must resume at the cap instead of waiting for three seconds
+            // it can never stage. The new time condition is a second, independent arm.
+            match progressive_hold_releases(parked, aq::aq_producer_done(vq)) {
+                Some(release) => Some(release),
+                None => {
+                    let position = shared.pres_fed.load(Ordering::Relaxed);
+                    if position == crate::feed_state::PRES_NONE {
+                        None
+                    } else {
+                        let video = LaneTail {
+                            fed_ns: eng.max_fed_video_pts,
+                            queued_ns: aq::aq_span_ns(vq),
+                        };
+                        let audio = LaneTail {
+                            fed_ns: eng.max_fed_audio_pts,
+                            queued_ns: aq::aq_span_ns(aq_p),
+                        };
+                        let audio_expected = shared.hls_audio_expected.load(Ordering::Acquire)
+                            || audio.queued_ns > 0
+                            || eng.max_fed_audio_pts > eng.seek_base_pts;
+                        // Both tails and the presented position are fed-pts: the difference is the
+                        // playable reserve the held clock can spend before it starves again.
+                        hold_resume::ready(
+                            video.tail_ns().saturating_sub(position),
+                            audio.tail_ns().saturating_sub(position),
+                            audio_expected,
+                        )
+                        .then_some(ProgressiveRelease::Time)
+                    }
+                }
+            }
         }
         _ => None,
     };
     let ready = match prime_kind {
+        // Fork Rofocale11: a stall hold is a recovery, not a startup; its certificate is the
+        // queue-at-cap / EOF proof OR three seconds of playable reserve, and the profile gate does
+        // not apply a second start decision.
         HlsPrimeKind::ProgressiveRebuffer { .. } => progressive_release.is_some(),
-        _ => decoder_ready && boundary_ready,
+        // Fork Rofocale11: the four-profile gate joins the other startup conditions.
+        _ => decoder_ready && boundary_ready && gate,
     };
     if ready && transport.feed_allowed() {
         let Some((play_token, recovery)) =
@@ -1473,10 +1566,14 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, transport: &Transport, hooks
                     ));
                 } else {
                     plx_base::eventlog::log(&format!(
-                        "primed: v={}ms a={}ms runway={}ms -> Play",
+                        "primed: v={}ms a={}ms runway={}ms rate={}ms/s profile={:?} -> Play",
                         playable_vbuf / 1_000_000,
                         playable_abuf / 1_000_000,
                         observed_runway_ns / 1_000_000,
+                        // Fork Rofocale11: the rate reading that released the four-profile gate;
+                        // -9223372036854775808 means no sample (rate gate off or HLS).
+                        eng.prime_rate.millis_per_s(),
+                        eng.prime_profile,
                     ));
                 }
             }
@@ -1707,6 +1804,11 @@ fn feed_stream(mt: &MainThread, eng: &mut Engine, transport: &Transport, hooks: 
                     // fresh Load's pipeline expects a 0-based feed; disp_base carries the offset).
                     shared.pts_shift.store(-pts, Ordering::Relaxed);
                 }
+                // Fork Rofocale11: a landed seek restarts the profile's patience window and its
+                // rate baseline at the new keyframe. A ceiling stamped at Engine construction is
+                // already spent by the reload's 302/TLS round trips, and the demuxer's media-time
+                // counter jumps across the rebase.
+                eng.restart_seek_prime();
                 eng.rebase_pending = false; // releases the AUDIO lane (which holds until this clears)
                 eng.seek_base_pts = pts + shared.pts_shift.load(Ordering::Relaxed); // fed-pts base
                                                                                     // Installing a SEGMENT is not acceptance of the AU which establishes it. Keep
@@ -2144,10 +2246,21 @@ pub fn prepare_native_open(
     session_rate: i32,
     side_reader: Box<dyn SideReaderPort>,
     no_audio: bool,
+    // Fork Rofocale11: the route's four-profile prime facts, carried by the open.
+    prime_plan: plx_playback_contract::prime_plan::PrimePlan,
     dv_landing: plx_playback_contract::feed::DvLandingPlan,
     hooks: &PrepareHooks,
 ) -> Result<NativePrepared, PrepareRefusal> {
     let stream = sample.is_none();
+    // Fork Rofocale11: one read of the armed first seek decides both the first-keyframe rebase and
+    // this session's prime profile. The old fork derived them from the same fact so a reload does
+    // not take a fresh Load's deeper gate.
+    let rebase_pending = shared.seek_to_ns.load(Ordering::Relaxed) >= 0;
+    // Fork Rofocale11: the route's seek marker joins the feed's armed seek. At a reload the target
+    // can still be in the readout (not yet published to the demux mailbox) when the Load is
+    // prepared, and paying the fresh play's 3 s gate there is what makes a scrub look frozen.
+    let prime_profile =
+        crate::prime_profile::PrimeProfile::for_session(prime_plan, prime_plan.seek || rebase_pending);
     // For a streamed direct-play/transcode, pick the Load codecs from the item: video H264 vs
     // H265 (native HEVC direct-play), audio AC3/EAC3/AAC/DTS. (The local sample paths keep their
     // fixed payloads.)
@@ -2326,10 +2439,16 @@ pub fn prepare_native_open(
         ));
     }
 
-    NativePrepared::arm(
+    let mut prepared = NativePrepared::arm(
         shared, open, sample, stream, payload_c, audio_lead,
         user_held, seek_preroll, side_reader, dv_landing,
-    )
+    )?;
+    // Fork Rofocale11: freeze the four-profile decision on the prepared Load. The route plan is
+    // consumed here, after `arm` has taken every other Load fact, so no later route change can move
+    // this session's gate.
+    prepared.prime_profile = prime_profile;
+    prepared.prime_rate_gate = prime_plan.rate_gate;
+    Ok(prepared)
 }
 
 #[cfg(test)]
@@ -2553,5 +2672,8 @@ mod progressive_stall_tests {
             ["full", "eof"],
             "the names the resume line prints and the field checks grep for"
         );
+        // Fork Rofocale11: the time arm's name, so a device log can tell a capped-queue resume from
+        // a three-second reserve resume at a glance.
+        assert_eq!(ProgressiveRelease::Time.name(), "time");
     }
 }

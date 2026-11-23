@@ -185,6 +185,13 @@ pub struct Engine {
     // gap is what makes video "fast-forward" to catch the audio clock on resume). feed_stream
     // fires Play once max_fed_pts reaches PRIME_NS.
     pub prime_play: bool,
+    // Fork Rofocale11: the old fork's four-profile startup gate. One profile per session, a wall
+    // start stamped at construction AND at each landed seek, and a rate sampler over the demuxer's
+    // published media tail. These are per-session fields of the main-thread Engine, not a global.
+    pub prime_profile: crate::prime_profile::PrimeProfile,
+    pub prime_rate_gate: bool,
+    pub prime_since_ms: u32,
+    pub prime_rate: crate::prime_profile::PrimeRate,
     /// Common startup owns the first Play. Later seek/rebuffer primes retain their physical
     /// clock protocol after that command has been admitted.
     pub startup_controlled: bool,
@@ -227,6 +234,15 @@ pub struct Engine {
 impl Engine {
     pub fn uses_stream_queues(&self) -> bool {
         matches!(self.source, Source::Stream)
+    }
+
+    /// Fork Rofocale11: a landed seek starts a new content timeline. The ceiling stamped at
+    /// construction is already spent by the reload's 302/TLS round trips, and the media-time
+    /// counter jumps by minutes, so both the patience window and the rate baseline must restart at
+    /// the landed keyframe.
+    pub fn restart_seek_prime(&mut self) {
+        self.prime_since_ms = crate::shared::vclock_ms();
+        self.prime_rate.reset();
     }
 }
 

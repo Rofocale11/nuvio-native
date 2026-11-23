@@ -175,8 +175,12 @@ fn run_until_held(rig: &mut Rig) {
 /// start the link delivers 80 ms of media per 200 ms pump period (0.4x). Starfish presents at the
 /// delivered rate with an empty queue, so once the six seconds it had run out, the position callbacks
 /// keep arriving with the position crawling at 0.4x: slow motion, which is what the debt detects.
-/// The pump holds within [`DEBT_PERIODS`] periods and the one hold stands while the link goes on
-/// delivering (a hold releases on a full queue or the end of the stream, never on a runway).
+/// The pump holds within [`DEBT_PERIODS`] periods.
+///
+/// Fork Rofocale11: this case used to pin that the single hold STOOD while the link kept delivering
+/// (release only on a byte cap or EOF). The fork now resumes a hold on three seconds of playable
+/// reserve, so a 0.4x link earns short holds repeatedly; what stays invariant is that the first
+/// hold fires before the runaway and its resume is by time, not by a fabricated runway.
 #[test]
 fn a_link_slower_than_the_file_is_held_once_and_the_hold_stands() {
     let _serial = plx_base::testlock::serial();
@@ -205,11 +209,17 @@ fn a_link_slower_than_the_file_is_held_once_and_the_hold_stands() {
         let slow = first_slow_step.unwrap_or_else(|| panic!("PRECONDITION FAILED, not the defect: the reserve never ran out: {}", rig.facts()));
         let held = held_at.unwrap_or_else(|| panic!("a 0.4x link was never held (slow from step {slow}): {}", rig.facts()));
         assert!(held <= slow + 12, "held at step {held}, {} periods after the reserve was spent: slow motion for {} s", held - slow, (held - slow) / 5);
-        assert_eq!(pauses(), 1, "exactly one hold, standing while the link keeps delivering: {}", rig.facts());
-        assert!(FEED_SHARED.hls_rebuffering.load(Relaxed), "still Buffering");
+        // Fork Rofocale11: several short holds are the new policy; at least one is the invariant.
+        assert!(pauses() >= 1, "a 0.4x link was never held: {}", rig.facts());
     });
     assert!(text.contains("progressive rebuffer hold n=1 arm=debt"), "no debt-arm hold line: {text}");
-    assert!(!text.contains("progressive rebuffer hold n=2"), "a second hold began under the first: {text}");
+    // Fork Rofocale11: the first resume must be the three-second reserve arm, and any later hold
+    // must come AFTER that resume (never a second hold stacked on an already-held clock).
+    let first_resume = text.find("progressive rebuffer resume n=1 reason=time")
+        .expect("the hold was not released by the playable-reserve arm");
+    if let Some(second) = text.find("progressive rebuffer hold n=2") {
+        assert!(first_resume < second, "a second hold began before the first resumed: {text}");
+    }
 }
 
 /// A stamp `ago_ms` before `now_ms` on the millisecond clock the silence observation reads. A stamp

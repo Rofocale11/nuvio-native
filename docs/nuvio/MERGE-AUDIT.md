@@ -850,3 +850,62 @@ tests that legitimately pre-seed AUs across a rebase, so the fix relies on the r
 Focused `plx_play_feed` tests (358), `make test-hostsim C=plx_media` (2500), `make check-nodef` and
 a `make -j10` ARM cross-build are green. A host pass cannot prove the PCM feed is smooth on the
 television; one `--guest` play under the TV lock with the deployed debug build is still required.
+
+**Four-profile rate-gated startup prime (2026-11-24).** Ported the old fork's start decision adapted
+to this tree's route/feed split. New fork-owned `playback-contract/src/prime_plan.rs` carries the
+three route facts (preview, resume, seek) across the contract boundary, and `play-feed/src/prime_profile.rs`
+holds the pure policy table, `PrimeFacts`/`prime_gate_ready` and the smoothed `PrimeRate` sampler
+with eight unit tests. The demuxer here already publishes progressive A/V media tails, so no new
+publisher was needed — the earlier assumption that the rate reading was unavailable was wrong.
+
+Upstream surfaces touched, all marked and limited to a field, a branch or a `mod` line:
+`playback-contract/src/lib.rs` (mod), `playback-contract/src/feed.rs` (`OpenRequest.prime_plan`),
+`media/src/player/route_start.rs` (plan built from `ps`), `play-feed/src/control.rs` (pass it to
+`prepare_native_open`, plus the sample-rig field), `play-feed/src/lib.rs` (mod), `play-feed/src/feed_state.rs`
+(four Engine fields + `restart_seek_prime`), `play-feed/src/native_executor.rs` (freeze the plan on
+the prepared Load, one rate sample and one `gate` term in `try_prime`, a preview decoder arm, seek
+restart, and `rate=`/`profile=` in the `primed:` log), and `media/src/player/engine.rs` (hostsim rig
+fields). This checkout's old fixed floors `PRIME_NS = 700 ms` / `PRIME_AUDIO_NS = 300 ms` remain
+as the Seek row and as the accepted-data decoder floor; nothing else about decoder readiness,
+runway certificates or rebuffer holds changed.
+
+Two adaptations matter. (1) The deeper 3 s/2 s and 2 s/1 s floors are applied only when the rate
+gate is on: segmented HLS keeps its own runway controller and a rig without a demux tail keeps the
+700/300 ms floors, otherwise a scrub reload whose seek target was already consumed stalls behind a
+film's startup buffer. (2) A trailer keeps its profile across a reload and starts on one accepted
+AU with the existing 500 ms audio escape. The rate sampler records a stalled counter as zero, not
+"no sample", and `i64::MIN` (no reading yet) blocks the gate rather than releasing it.
+
+Verified: 365 `plx_play_feed` tests, 2500 `plx_media` hostsim tests, `make check-nodef` and a
+`make -j10` ARM cross-build. The television still has to prove that a cold source actually reaches
+the 1.2× rate and that the 3 s floor does not regress first-play latency; no device run was made.
+
+**Playable-resume for progressive stall holds (2026-11-24, follow-up).** A hold used to release only
+on a byte cap or EOF, which on the owner's slow torrent meant 18–23 s of Buffering with several
+seconds already staged. New fork-owned `play-feed/src/hold_resume.rs` holds the pure rule and its
+three tests: resume at **3 s** of video reserve (300 ms of audio when the lane exists). The upstream
+edit in `native_executor.rs` is one `#[path]` mod, one `ProgressiveRelease::Time` variant with its
+`reason=time` name, and one marked branch at the hold's release decision. The byte-cap/EOF check
+runs FIRST and still wins — a remux whose queues cap at ~2 s must not wait for three seconds it can
+never stage. The one upstream test encoding the old "hold stands forever" policy
+(`progressive_rebuffer_pump_tests.rs`) was updated with markers to pin `reason=time` and the
+"no second hold before the first resume" ordering instead. A 0.4x link now earns several short
+holds; that is the requested trade-off, not a fix for the source bitrate.
+
+Verified after this change: 368 `plx_play_feed` tests and 2500 `plx_media` hostsim tests, plus
+`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy yet.
+
+**Thirty-second deadline-only Nuvio `/decision` (2026-11-24, follow-up).** A cold torrent can hold
+the shim's `/decision` with no bytes while the engine finds peers. The Nuvio decision already had a
+120 s absolute deadline, but `BodyPolicy::Deadline` also composes a 15 s silence watchdog, so the
+player gave up early and showed a playback error. The owner asked for a 30 s maximum wait. Upstream
+edits, all marked: `plex/src/http.rs` adds a `liveness: bool` to `Deadline` (true keeps every
+existing caller identical) and `request_until_outcome_deadline_only`; `plex/src/plex/client.rs` adds
+a `send_until_deadline_only` / `get_json_with_headers_until_deadline_only` twin; `plex/src/plex/transcoder.rs`
+uses that twin for the Nuvio MDE decision with a 30 s deadline instead of the 120 s one. The
+engine's own resolve cap (`sbengine::resolve_stream(..., 30_000)`) is unchanged, so both bounds end
+together. No new fork crate or file is involved in this change.
+
+Verified: `plx_plex` 834 passed with the three pre-existing lossy-gate profile-list failures (an
+extra `opus` codec, unrelated to this change), `plx_play_feed` 368, `plx_media` hostsim 2500, plus
+`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy yet.

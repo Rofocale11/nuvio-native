@@ -14,6 +14,10 @@ pub mod feed_state;
 #[cfg(feature = "hostsim")]
 pub mod ffi_host;
 pub mod ff_pcm;
+// Fork Rofocale11: the four-profile startup prime and its rate sampler. Pure logic in a fork-owned
+// file; upstream modules only carry one marked gate term and the per-session state it reads. Public
+// because media's hostsim rigs construct Engines and need the same types.
+pub mod prime_profile;
 mod ff;
 pub use ff::{boot, demux, pushed_any, set_feed_audio, set_pcm_out, DemuxTransport};
 pub use ff::native_audio;

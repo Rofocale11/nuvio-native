@@ -468,6 +468,18 @@ fn start_bufferfeed_prepared(
         super::commit_paused(ps, pa, start_paused);
     }
     let trace_generation = crate::route::playback_trace_generation();
+    // Fork Rofocale11: the old fork's startup gate chose one of four profiles from these facts at
+    // Engine construction. Compute them here, where `ps` exists, so the feed never reads route
+    // state; a preview wins, a cold resume gets its own floors, and segmented HLS keeps its own
+    // controller's start decision (rate gate off).
+    let prime_plan = plx_playback_contract::prime_plan::PrimePlan {
+        preview: crate::route::preview_request(ps),
+        resume: crate::route::unpresented_resume_ns(ps) > 0,
+        // A scrub reload's new Load lands on a seek, not a fresh play: it must keep the shallow
+        // reopen floors. This is the same unconfirmed-seek fact `reload_at` reads below.
+        seek: ps.readout().unconfirmed_seek_target().is_some(),
+        rate_gate: !crate::route::is_segmented_hls(ps),
+    };
     // A native refusal is mapped here, by the common owner: the executor logs why, and the route
     // only learns that the start failed.
     let native_epoch = pa.open_prepare(plx_playback_contract::feed::OpenRequest {
@@ -480,6 +492,7 @@ fn start_bufferfeed_prepared(
         requested_rate: super::play_rate_permille(ps),
         no_audio: super::no_audio_armed(),
         side_reader,
+        prime_plan, // Fork Rofocale11: see the four-profile plan built above.
         // A local sample's static payload carries no node, so only a stream arms the guard.
         dv_landing: if stream {
             super::feed_open::dv_landing_plan(ps)

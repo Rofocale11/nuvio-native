@@ -1266,6 +1266,13 @@ mod prime_livelock_tests {
             feed_pace: FeedPace::default(),
             seek_base_pts: 0,
             prime_play: true,
+            // Fork Rofocale11: this rig feeds the original 700/300 ms prime floors, so it uses the
+            // Seek row of the profile table with the rate gate off; the four rows are graded by the
+            // profile module's own pure tests.
+            prime_profile: plx_play_feed::prime_profile::PrimeProfile::Seek,
+            prime_rate_gate: false,
+            prime_since_ms: 0,
+            prime_rate: plx_play_feed::prime_profile::PrimeRate::new(),
             startup_controlled: false,
             startup_user_held: false,
             startup_play_commanded: false,

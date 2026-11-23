@@ -533,6 +533,29 @@ impl Client {
         )
     }
 
+    /// Fork Rofocale11: [`Self::send_until`] with no silence watchdog, for a Nuvio `/decision`
+    /// waiting on the torrent engine. Only `deadline` may end it.
+    #[track_caller]
+    fn send_until_deadline_only(
+        &self,
+        path_no_token: &str,
+        method: Method,
+        headers: &[&str],
+        deadline: std::time::Instant,
+    ) -> http::RequestOutcome {
+        if !self.may_send() { return http::RequestOutcome::Transport(None); }
+        let owned = self.pms_headers(headers);
+        let headers: Vec<&str> = owned.iter().map(String::as_str).collect();
+        http::request_until_outcome_deadline_only(
+            &self.origin,
+            &self.with_token(path_no_token),
+            method,
+            &headers,
+            deadline,
+            self.resolve_pin.as_ref(),
+        )
+    }
+
     /// A 2xx response body, or `None` — the fold the raw socket used to apply for every caller,
     /// written once here now that the transport no longer does it. Every read below wants exactly
     /// this: a non-2xx PMS answer is not a container, and `http_open` has already logged the
@@ -653,6 +676,43 @@ impl Client {
         request_headers.push(ACCEPT_JSON);
         request_headers.extend_from_slice(headers);
         match self.send_until(path_no_token, Method::Get, &request_headers, deadline) {
+            http::RequestOutcome::Response(reply) => {
+                let parsed = if reply.ok() {
+                    match serde_json::from_slice::<Envelope>(&reply.body) {
+                        Ok(envelope) => Some(envelope.media_container),
+                        Err(error) => {
+                            plx_base::eventlog::log(&format!(
+                                "pms: GET {} answered {} bytes that will not parse — {error}",
+                                path_no_token.split('?').next().unwrap_or(path_no_token),
+                                reply.body.len()
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                JsonDeadlineOutcome::Response { reply, parsed }
+            }
+            http::RequestOutcome::Deadline => JsonDeadlineOutcome::Deadline,
+            http::RequestOutcome::Transport(_) => JsonDeadlineOutcome::Transport,
+        }
+    }
+
+    /// Fork Rofocale11: the deadline-only twin for a Nuvio `/decision` that may stay silent while
+    /// the torrent engine discovers peers. Same parsing, only the transport's silence watchdog is
+    /// removed; `deadline` is the single bound.
+    #[track_caller]
+    pub(super) fn get_json_with_headers_until_deadline_only(
+        &self,
+        path_no_token: &str,
+        headers: &[&str],
+        deadline: std::time::Instant,
+    ) -> JsonDeadlineOutcome {
+        let mut request_headers = Vec::with_capacity(headers.len() + 1);
+        request_headers.push(ACCEPT_JSON);
+        request_headers.extend_from_slice(headers);
+        match self.send_until_deadline_only(path_no_token, Method::Get, &request_headers, deadline) {
             http::RequestOutcome::Response(reply) => {
                 let parsed = if reply.ok() {
                     match serde_json::from_slice::<Envelope>(&reply.body) {

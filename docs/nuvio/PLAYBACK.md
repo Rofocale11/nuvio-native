@@ -75,6 +75,49 @@ C engine's `warm` opens the torrent to restore its kept swarm state without prep
 and `resolve_stream` waits for metadata plus a bounded prebuffer before handing back the URL;
 probing at decision time (generous deadline) means the player's own open hits a warmed torrent.
 
+Fork Rofocale11: the Nuvio `/decision` is sent with a **30-second deadline and no silence watchdog**.
+The shim may be waiting on the torrent engine to find peers and hand back a URL, during which it
+sends no bytes; the ordinary deadline policy layered a 15-second inactivity timer on top of the
+absolute deadline and threw a playback error before a cold source could answer. The deadline-only
+transport removes that inactivity timer, so a cold engine has the full 30 s to answer. All other
+deadline-bearing requests keep the watchdog. The engine's own resolve cap is also 30 s, so a
+resolve that uses its whole budget and the player's wait end together.
+
+### Startup prime (Fork Rofocale11)
+
+The first Play follows one of four profiles, fixed at Engine construction and carried through a
+reload by the route's `PrimePlan`. The policy table and the rate sampler are pure, host-tested code
+in `play-feed/src/prime_profile.rs`; the only upstream player edit is one marked gate term in
+`native_executor::try_prime`.
+
+| profile | when | playable floor | pipe must fill | ceiling |
+|---|---|---|---|---|
+| `Initial` | fresh foreground Load | 3 s video / 2 s audio | ≥ 1.2× realtime | 12 s |
+| `Resume` | cold resume at a saved offset | 2 s / 1 s | ≥ 1.2× | 8 s |
+| `Seek` | seek, reload, in-place rebase | 0.7 s / 0.3 s | ≥ 1.2× | 3 s |
+| `Preview` | hero trailer | one accepted AU | none | none |
+
+The rate is sampled every 250 ms from the demuxer's published media tail (progressive streams
+publish it too), as media milliseconds per wall second: 1200 means a 20 % faster-than-realtime
+pipe, scaled by playback speed. A playable buffer of ≥ 8 s is proof on its own (the counter goes
+blind when the app queue is full), and at the ceiling the floors drop to the seek floors so a
+source that never ramps still shows a picture. Both lanes are required unless the demuxer proved
+the file audioless. **Where there is no rate controller — segmented HLS, which keeps its own
+runway certificate, and rigs with no demux tail — the deeper floors are not applied; the accepted
+700/300 ms floors are the start decision**, so a scrub reload cannot stall behind a film's 3 s
+gate. A landed seek restarts both the ceiling and the rate baseline at its keyframe. The
+`primed: … rate=<n>ms/s profile=<…> -> Play` event-log line records what released the gate;
+`-9223372036854775808` means no rate sample (not a fast pipe).
+
+A mid-play stall on a progressive stream is a separate, older mechanism: the clock-debt/dead-link
+watch pauses the sink and holds until it has a certificate. Fork Rofocale11 adds a second
+certificate to the existing byte-cap and EOF ones: **three seconds of playable video ahead of the
+held playhead** (with 300 ms of audio when the stream has an audio lane) resumes the hold. The byte
+cap is still checked FIRST, so a remux whose queues only hold ~2 s still resumes at the cap; a
+slow source that can stage more now gets short holds instead of one 20 s hold. The resume line
+prints `reason=time`, `reason=full` or `reason=eof`. On a link slower than the file this repeats
+with duty `1 - delivered/required` — nothing here makes a slow source fast.
+
 ### Audio
 
 Initial selection prefers a decodable English dialogue track (`en`, `eng`, including

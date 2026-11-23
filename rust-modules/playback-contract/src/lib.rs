@@ -9,6 +9,9 @@ mod time;
 pub use time::MediaTimeMs;
 pub mod adaptive;
 pub mod clock_debt;
+// Fork Rofocale11: the four-profile startup prime's route facts travel across this boundary in a
+// fork-owned file so OpenRequest itself stays a neutral contract; see prime_plan.rs.
+pub mod prime_plan;
 pub mod subtitle;
 pub mod readout;
 pub mod tracks;

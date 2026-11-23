@@ -201,6 +201,8 @@ impl FeedOpen for FeedBackend {
             mt, self.resources.shared(), request.start_paused, request.seek_preroll,
             request.stream.map(PhysicalOpen::from), request.sample, request.is_h265,
             request.session_rate, side_reader, request.no_audio,
+            // Fork Rofocale11: the four-profile prime's route facts travel with the open.
+            request.prime_plan,
             request.dv_landing, hooks,
         ).map_err(|refusal| match refusal {
             PrepareRefusal::ClockBusy | PrepareRefusal::NativeBusy => Failure::Busy,
@@ -902,6 +904,7 @@ pub(crate) mod tests {
             sample: Some(Box::new(crate::feed_state::SampleBuf::new(Vec::new(), Vec::new()))),
             is_h265: false, session_rate: crate::shared::RATE_NORMAL, requested_rate: 1000,
             no_audio: true, side_reader: Default::default(),
+            prime_plan: Default::default(), // Fork Rofocale11: no route on a local sample.
             dv_landing: plx_playback_contract::feed::DvLandingPlan::INERT,
         }
     }

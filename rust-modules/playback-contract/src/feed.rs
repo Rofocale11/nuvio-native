@@ -240,6 +240,10 @@ pub struct OpenRequest {
     pub requested_rate: i32,
     pub no_audio: bool,
     pub side_reader: SideReaderRequest,
+    // Fork Rofocale11: the old fork's four-profile startup prime needs the route's preview/resume
+    // facts here; a neutral plan keeps this contract free of route types. Default keeps existing
+    // constructors (local samples and rigs) on the plain Initial profile.
+    pub prime_plan: crate::prime_plan::PrimePlan,
     /// The Dolby Vision landing guard this open's Engine starts with ([`DvLandingPlan::INERT`] for a
     /// sample, which carries no node).
     pub dv_landing: DvLandingPlan,

@@ -603,10 +603,13 @@ impl Client {
                 &if forced { forced_direct_profile_for(caps) } else { profile_for(caps) },
             );
         if self.is_nuvio() {
-            // Addon discovery and a bounded FFmpeg probe precede the response. The ordinary
-            // bulk transport's 30-second silence limit is too short for a cold source.
-            match self.get_json_with_headers_until(&q.build(), &[],
-                std::time::Instant::now() + std::time::Duration::from_secs(120)) {
+            // Fork Rofocale11: the shim's `/decision` waits for the torrent engine to discover
+            // peers and hand back a URL, sending no bytes while it waits. The ordinary deadline
+            // policy adds a 15 s silence watchdog on top of the 120 s absolute deadline, which
+            // threw a playback error before a cold source could answer. The deadline-only path
+            // removes that watchdog; the owner's maximum wait is 30 s.
+            match self.get_json_with_headers_until_deadline_only(&q.build(), &[],
+                std::time::Instant::now() + std::time::Duration::from_secs(30)) {
                 super::client::JsonDeadlineOutcome::Response { parsed, .. } => parsed,
                 _ => None,
             }
