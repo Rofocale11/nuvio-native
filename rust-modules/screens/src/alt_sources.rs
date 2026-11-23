@@ -94,9 +94,9 @@ use plx_machine::machine::{
     InstanceId, Key, LogicalState, Machine, MachineId, NavOp, RequestId,
 };
 use plx_ui::screen::{
-    Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, FocusSource, Focusable, GroupKind,
-    GroupSpec, Hover, HitSource, Placed, RenderStrategy, Screen, ScreenEvent, Scrim, Seat, Step,
-    Stop,
+    Activate, At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, Enter, FocusSource, FocusTarget,
+    Focusable, GroupKind, GroupSpec, Hover, HitSource, Placed, RenderStrategy, Screen, ScreenEvent,
+    Scrim, Seat, Step, Stop,
 };
 use plx_ui::form::{Form, FormSection, FormTable, RowKey, RowKind};
 // Fork Rofocale11: the two-level Streams picker stands on the same drill-in machinery the player's
@@ -692,7 +692,26 @@ impl<H: AppLike<Memory = PageMemory> + crate::registry::MetadataLike> Machine<H>
                     // the shim says `complete`; `request_streams` re-arms the pending caption.
                     if !list.complete { self.request_streams(fx); }
                 }
+                // Fork Rofocale11: the panel opens BEFORE the shim answers, so its one focus group
+                // was empty at `Enter` and the engine refused to seat a cursor (`resolve_group`
+                // rejects a `len == 0` group). On the landing that first fills the addon list, ask
+                // the engine to seat focus on the opening row. Without this the first DOWN is spent
+                // on the engine's "no focus yet" fallback (which seats row 0) and the viewer has to
+                // press DOWN twice to reach the second addon. Later polls and page pops already
+                // hold a cursor, so they leave focus alone — `preferences.rs`'s empty-table rule.
+                let had_rows = self.form.focusable_len() > 0;
                 self.rebuild(Sel::Keep, H::metadata(cx));
+                if !had_rows
+                    && self.stream_page.is_none()
+                    && self.form.focusable_len() > 0
+                    && cx.focus.current.is_none()
+                {
+                    let elem = self.form.selected_key().or_else(|| self.form.opening_key()).map_or(0, |k| k.0);
+                    let from = fx.from();
+                    fx.push(Fx::Deliver(from, Delivery::Screen(ScreenEvent::Enter(
+                        Enter::Fresh { focus: FocusTarget::Elem(FocusKey { entry: self.entry, elem }) },
+                    ))));
+                }
                 fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
                 Handled::Yes
             }

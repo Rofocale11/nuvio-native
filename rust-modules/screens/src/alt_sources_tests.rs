@@ -1147,6 +1147,84 @@ fn streams_menu_keeps_polling_while_addons_are_still_answering() {
     assert!(p.stream_pending, "the loading caption stays until addons finish");
     assert!(p.stream_choices.is_empty(), "premise: nothing to show yet");
 }
+
+/// Fork Rofocale11: the panel opens before the shim answers, so its one focus group is empty at
+/// `Enter` and the engine refuses to seat a cursor. When the answer first fills the addon list the
+/// panel must ask the engine to seat focus on the opening row — otherwise the first DOWN is spent
+/// seating row 0 and the viewer has to press DOWN twice to reach the second addon (owner report).
+#[test]
+fn the_first_addon_landing_seats_focus_on_the_opening_row() {
+    let _guard = plx_base::testlock::serial();
+    let mut p = AltSourcesScreen::new(
+        EntryId(7),
+        AltSourcesArg {
+            host: InstanceId(1), sid: sid(1), rk: "10012".into(),
+            anchor: [0.0f32, 0.0, 100.0, 40.0].map(f32::to_bits), nuvio: true,
+        },
+        test_store().view(),
+    );
+    let cx = fixture_cx(None); // a fresh surface: the engine never seated the empty group
+    let mut present = plx_machine::present::Present::default();
+    let is_seat = |s: &plx_machine::machine::Stamped<HostFixture>| matches!(
+        &s.fx,
+        plx_machine::machine::Fx::Deliver(_, plx_machine::machine::Delivery::Screen(ScreenEvent::Enter(
+            plx_ui::screen::Enter::Fresh { focus: plx_ui::screen::FocusTarget::Elem(_) }
+        )))
+    );
+
+    // Mount while the group is empty: no row, so no seat.
+    {
+        let mut buf = Vec::new();
+        let mut fx = plx_machine::machine::Effects::new(&mut buf, plx_machine::machine::MachineId::Input, &mut present);
+        assert_eq!(Machine::step(&mut p, &ScreenEvent::Mount, &cx, &mut fx), Handled::Yes);
+        assert!(buf.iter().all(|s| !is_seat(s)), "nothing to seat before the addons land");
+    }
+
+    // The answer that first fills the list.
+    let choice = |index: usize, label: &str, addon: &str| plx_plex::plex::nuvio::StreamChoice {
+        index, label: label.into(), addon: Some(addon.into()), ..Default::default()
+    };
+    let mut buf = Vec::new();
+    {
+        let mut fx = plx_machine::machine::Effects::new(&mut buf, plx_machine::machine::MachineId::Input, &mut present);
+        let answer = NuvioResult::Streams(Some(plx_plex::plex::nuvio::StreamList {
+            complete: true,
+            streams: vec![choice(3, "4k DV", "Torrentio"), choice(5, "1080p", "Sootio")],
+        }));
+        let ev = ScreenEvent::Async(plx_machine::machine::RequestId(1), AppMsg::Nuvio(answer));
+        assert_eq!(Machine::step(&mut p, &ev, &cx, &mut fx), Handled::Yes);
+    }
+    let seat = buf.iter().find_map(|s| match &s.fx {
+        plx_machine::machine::Fx::Deliver(_, plx_machine::machine::Delivery::Screen(ScreenEvent::Enter(
+            plx_ui::screen::Enter::Fresh { focus: plx_ui::screen::FocusTarget::Elem(key) }
+        ))) => Some(*key),
+        _ => None,
+    }).expect("the landing seats focus on the opening row");
+    assert_eq!(seat.entry, p.entry);
+    assert_eq!(seat.elem, p.form.selected_key().unwrap().0, "row 0 is the opening addon");
+
+    assert_eq!(buf.iter().filter(|s| is_seat(s)).count(), 1, "exactly one seat on the first landing");
+
+    // A later poll (rows already present) must not re-seat and yank the cursor off the addon the
+    // viewer is on. Re-arm the fence through Mount, then deliver another answer.
+    let req2 = {
+        let mut buf2 = Vec::new();
+        let mut fx = plx_machine::machine::Effects::new(&mut buf2, plx_machine::machine::MachineId::Input, &mut present);
+        Machine::step(&mut p, &ScreenEvent::Mount, &cx, &mut fx);
+        p.stream_req
+    };
+    let mut buf3 = Vec::new();
+    {
+        let mut fx = plx_machine::machine::Effects::new(&mut buf3, plx_machine::machine::MachineId::Input, &mut present);
+        let answer = NuvioResult::Streams(Some(plx_plex::plex::nuvio::StreamList {
+            complete: true,
+            streams: vec![choice(3, "4k DV", "Torrentio"), choice(5, "1080p", "Sootio")],
+        }));
+        let ev = ScreenEvent::Async(plx_machine::machine::RequestId(req2), AppMsg::Nuvio(answer));
+        Machine::step(&mut p, &ev, &cx, &mut fx);
+    }
+    assert!(buf3.iter().all(|s| !is_seat(s)), "a later poll must not re-seat");
+}
 }
 
 // Fork Rofocale11: the two-level Streams picker. All of this is pure over the captured

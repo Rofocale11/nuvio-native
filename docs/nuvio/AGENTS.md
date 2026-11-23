@@ -28,6 +28,24 @@ demux needs the Feed's AVIO and packet-framing machinery — put it in a NEW fil
 module of the upstream file (`play-feed/src/dash.rs` under `ff`), so the diff to the upstream file
 is only a `mod` declaration and a routing branch. `MERGE-AUDIT.md` records the exact surface.
 
+## Every feature lives in its own fork crate or file when it can
+
+Put each new fork feature in a fork-owned crate (`plx_nuvio_probe`, `plx_nuvio_store`,
+`plx_nuvio_dash`, …) or, when it genuinely needs an upstream crate's private helpers, in a NEW
+fork-owned file that is a child module of the upstream file (`appkit/src/more_menu/nuvio_streams.rs`
+under `more_menu.rs`, `play-feed/src/dash.rs` under `ff`, `src/app/nuvio_more.rs` under `app`). The
+upstream file then changes by only a `mod` declaration and one or two small, marked routing
+branches.
+
+This is not tidiness, it is the cost of merging. Every line we edit in an upstream file is a line
+someone has to reconcile the next time `upstream/main` moves that file; a fork-owned file never
+conflicts, no matter how much upstream changes around it. Before writing a feature, ask "can this
+be a new file?" and only touch upstream code when the answer is no. When it is no, keep the edit to
+the minimum (a `mod`, a variant, a branch) with a `Fork Rofocale11:` marker and a record in
+`MERGE-AUDIT.md`. Deleting an upstream feature outright is the expensive way to "remove" it: the
+code stays and is simply not offered on fork content, as with the player's quality ladder and the
+Nuvio Streams picker.
+
 ## One durable store
 
 Every Nuvio Native record lives in a single `nuvio.redb` under `<data>/shim/`: canonical session

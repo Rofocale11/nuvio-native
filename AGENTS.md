@@ -1,3 +1,5 @@
+> **Read [`docs/nuvio/AGENTS.md`](docs/nuvio/AGENTS.md) first.** This checkout is the Nuvio Native fork, not a Plex client; that file overrides the upstream guidance below wherever the two disagree.
+
 # Project instructions
 
 ## Project
