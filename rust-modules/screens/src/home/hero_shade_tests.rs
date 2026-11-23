@@ -90,7 +90,7 @@ fn the_home_shade_is_anchored_to_the_edges_and_joins_without_a_dark_band() {
 /// action row alike; the dots and chevron were drawn once, untranslated, so they stayed fixed while
 /// the page slid under them and then jumped to the next hero's row.
 #[test]
-fn the_pager_slides_with_the_page_it_belongs_to() {
+fn the_pager_drifts_with_the_page_it_belongs_to() {
     let _guard = plx_base::testlock::serial();
     let mut state = plx_data::pms::PmsState::default();
     let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
@@ -114,10 +114,12 @@ fn the_pager_slides_with_the_page_it_belongs_to() {
     assert!(s.flip(view, 1, &plx_machine::machine::PressRead::default()));
     for slide in [0.25, 0.5, 0.75] {
         s.hero_slide.jump(slide);
-        let (out_x, in_x) = s.slide_offsets().unwrap();
+        // Fork Rofocale11: the old fork's dissolve gives each page a small drift and alpha,
+        // not a full-screen slide, so the pager test reads flip_faces.
+        let ((out_dx, _), (in_dx, _)) = s.flip_faces().unwrap();
         let mut got: Vec<f32> = chevrons(&s).iter().map(|r| r.x - rest[0].x).collect();
         got.sort_by(f32::total_cmp);
-        let mut want = [out_x, in_x];
+        let mut want = [out_dx, in_dx];
         want.sort_by(f32::total_cmp);
         assert_eq!(got.len(), 2, "slide {slide}: each page draws its own pager");
         for (got, want) in got.iter().zip(want) {

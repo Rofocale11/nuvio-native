@@ -3998,6 +3998,14 @@ impl AmbientWash {
     /// [`theme::SURFACE_APP`] is snapped to exact codes for the `GL_DITHER` reason in its own doc,
     /// so that is the unit this value is reasoned in.) Its own method because the corner springs are
     /// private.
+    // Fork Rofocale11: restore the old fork's multicolour ground under the Home grid — flatten
+    // only when all four corners really are one colour, not merely past the grid cull.
+    /// Are the four corners the SAME colour, within `eps`? Only then is a flat clear the same
+    /// picture as the gradient it replaces.
+    pub fn is_uniform(&self, eps: f32) -> bool {
+        let c = self.drawn_corners();
+        c[1..].iter().all(|q| q.iter().zip(c[0]).all(|(a, b)| (a - b).abs() <= eps))
+    }
     pub fn is_flat(&self, c: [f32; 4], eps: f32) -> bool {
         self.corners
             .iter()

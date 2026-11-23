@@ -120,6 +120,10 @@ const HERO_AUTO_S: f32 = 8.0;
 const HINT_REST_PX: f32 = 0.5;
 const K_SLIDE: f32 = 130.0;
 const HERO_SLIDE_REST_PX: f32 = 0.5;
+// Fork Rofocale11: old fork's dissolve needs a small copy drift and a spring span before the
+// artwork is taken for exchanged; the newer slide constants are no longer used for the flip.
+const HERO_FLIP_DRIFT: f32 = 32.0;
+const HERO_FLIP_SPAN: f32 = 0.92;
 /// How near its target the snap dive has to be, in snap units (0 = hero, 1 = grid), before this
 /// page calls the dive over — **together with [`SNAP_REST_VEL`], never alone.** `K_SNAP` is
 /// critically damped, so the dive spends its last dozen frames inside any position threshold worth
@@ -588,28 +592,29 @@ impl Backdrop {
     /// (TV, 2026-11-09, `grid-pong`: the ground's `grad` + `image` draw classes were 2.6M of the
     /// frame's 9.5M GPU cycles). While anything moves the backdrop has no name and is drawn live,
     /// exactly as before.
+    // Fork Rofocale11: port old fork's dissolve hero flip (fade-in) and full-panel dive.
     fn draw(
         &self,
         p: Painter,
         env: &Env,
-        slide: Option<(f32, f32)>,
+        flip: Option<f32>,
         scrim: Option<plx_ui::widgets::WashScrim>,
         rests: bool,
     ) {
         if !self.pending_art.is_empty() && env.hero_a > 0.01 && env.sp < HERO_ART_CULL {
             plx_ui::placeholder::note(p, plx_ui::placeholder::Reason::HomeBackdrop, &self.pending_art);
         }
-        // Past the cull the page stands on one flat colour, which the renderer already draws as a
-        // clear: nothing to cache, and no ask, so the texture goes back (`gfx::region_frame_end`).
+        // Past the cull the page may still stand on the poster's four-corner gradient (old fork's
+        // behaviour); a wash that is one colour is drawn as a clear and asks for no texture.
         if env.sp >= HERO_ART_CULL {
-            self.paint(p, env, slide, scrim);
+            self.paint(p, env, flip, scrim);
             return;
         }
         p.cached_ground(
-            self.ground_key(env, slide, scrim, rests),
+            self.ground_key(env, flip, scrim, rests),
             &[self.tex.0, self.outgoing_tex.0],
             Rect::FULL,
-            |q| self.paint(q, env, slide, scrim),
+            |q| self.paint(q, env, flip, scrim),
         );
     }
 
@@ -622,8 +627,8 @@ impl Backdrop {
     /// dive (`env.sp`, from which the art's offset and fade and the hero's own alpha follow) and the
     /// shared side and shelf shade over it (`scrim`, by value: its ink and every uniform the shader
     /// is given, [`plx_ui::widgets::WashScrim::paint_bits`]; the shelf ramp rides the first shelf's
-    /// live top, so it names where the shelf stands as well as how far the hero has faded). There is
-    /// no slide: a slide has no name.
+    /// live top, so it names where the shelf stands as well as how far the hero has faded). A flip
+    /// in flight has no name: a dissolve has no single picture to cache.
     ///
     /// **The renderer's own state is not read here.** A texture re-specified under the same name is
     /// another picture, and the ground's paths depend on which programs linked; both live in the
@@ -643,16 +648,17 @@ impl Backdrop {
     /// enough, because `bind` leaves a spring at velocity 0 where it `jump`s (a replacement, at the
     /// draw) and where art that was not resident arrives (parked at 0.0), a frame before `update`
     /// steps it. A layer with no texture draws nothing, so its reveal spring says nothing.
+    // Fork Rofocale11: a flip alpha names a moving backdrop just as the old slide did.
     fn ground_key(
         &self,
         env: &Env,
-        slide: Option<(f32, f32)>,
+        flip: Option<f32>,
         scrim: Option<plx_ui::widgets::WashScrim>,
         rests: bool,
     ) -> Option<u64> {
         use std::hash::{Hash, Hasher};
         let landed = |tex: (u32, f32, f32), art: &Spring| tex.0 == 0 || (art.pos == 1.0 && art.vel == 0.0);
-        if slide.is_some()
+        if flip.is_some()
             || !rests
             || !self.wash.at_rest()
             || !landed(self.tex, &self.art)
@@ -675,21 +681,24 @@ impl Backdrop {
         &self,
         p: Painter,
         env: &Env,
-        slide: Option<(f32, f32)>,
+        flip: Option<f32>,
         scrim: Option<plx_ui::widgets::WashScrim>,
     ) {
-        let incoming_a = reveal(self.tex.0, &self.art);
+        let flipping = flip.is_some();
+        let incoming_a = reveal(self.tex.0, &self.art) * flip.unwrap_or(1.0);
         let outgoing_a = reveal(self.outgoing_tex.0, &self.outgoing_art);
-        // Art held beneath a replaced hero (`held`) is the un-sliding outgoing layer: the new art
+        // Art held beneath a replaced hero (`held`) is the un-faded outgoing layer: the new art
         // dissolves in over it, so the two cannot ride the ground's single art layer.
-        let held = slide.is_none() && self.outgoing_tex.0 != 0;
+        let held = !flipping && self.outgoing_tex.0 != 0;
         let art_a = if held { incoming_a.max(outgoing_a) } else { incoming_a };
-        let wash = !wash_hidden(env.sp, art_a, slide.map(|_| outgoing_a))
+        let wash = !wash_hidden(env.sp, art_a, flipping.then_some(outgoing_a))
             && !self.wash.is_flat(theme::SURFACE_APP, AmbientWash::FLAT_EPS);
-        let art_in_ground = wash && slide.is_none() && !held && env.sp < HERO_ART_CULL;
-        // Once the hero is culled the grid stands on a flat wash alone.
+        let art_in_ground = wash && !flipping && !held && env.sp < HERO_ART_CULL;
+        // Fork Rofocale11: keep the old fork's four-corner gradient under the Home shelves —
+        // flatten only when all corners really are one colour, not merely past the grid cull.
+        let flat = env.sp >= HERO_ART_CULL && self.wash.is_uniform(AmbientWash::FLAT_EPS);
         let ink_in_ground = wash
-            && if env.sp >= HERO_ART_CULL {
+            && if flat {
                 self.wash.draw_flat_ground(p, Rect::FULL);
                 false
             } else {
@@ -697,18 +706,17 @@ impl Backdrop {
                     p,
                     Rect::FULL,
                     art_in_ground.then(|| hero_art(self.tex, env.sp, incoming_a)),
-                    // the fade and the shade ride the ground only when the ground carries the art
-                    // too: layers painted over it (a slide's two, the held art under a replacement)
-                    // would cover them
+                    // the fade and the shade ride the ground only when the ground carries the art;
+                    // layers painted over it (a flip's two, held art under a replacement) cover them
                     None,
                     scrim.filter(|_| art_in_ground),
                 )
             };
 
         if !art_in_ground && env.sp < HERO_ART_CULL {
-            if let Some((out_x, in_x)) = slide {
-                backdrop_art(p, self.outgoing_tex, env.sp, out_x, outgoing_a);
-                backdrop_art(p, self.tex, env.sp, in_x, incoming_a);
+            if flipping {
+                backdrop_art(p, self.outgoing_tex, env.sp, 0.0, outgoing_a);
+                backdrop_art(p, self.tex, env.sp, 0.0, incoming_a);
             } else {
                 if held {
                     backdrop_art(p, self.outgoing_tex, env.sp, 0.0, outgoing_a);
@@ -1702,11 +1710,24 @@ impl HomeScreen {
         true
     }
 
-    fn slide_offsets(&self) -> Option<(f32, f32)> {
+    // Fork Rofocale11: ported from old fork.
+    /// A flip in flight, as the DISSOLVE reads it: 0 at the press, 1 once the picture is exchanged.
+    fn flip_progress(&self) -> Option<f32> {
         self.outgoing.as_ref()?;
+        Some((self.hero_slide.pos / HERO_FLIP_SPAN).clamp(0.0, 1.0))
+    }
+
+    /// The background's half of the flip: the incoming picture's alpha over the outgoing one.
+    fn flip_art(&self) -> Option<f32> {
+        self.flip_progress().map(flip_ease)
+    }
+
+    /// The hero copy's half of the flip: `(outgoing, incoming)`, each `(dx, alpha)`.
+    fn flip_faces(&self) -> Option<((f32, f32), (f32, f32))> {
+        let p = self.flip_progress()?;
         Some((
-            -self.hero_dir * self.hero_slide.pos * SCR_W,
-            self.hero_dir * (1.0 - self.hero_slide.pos) * SCR_W,
+            (-self.hero_dir * HERO_FLIP_DRIFT * p, 1.0 - flip_ease(2.0 * p)),
+            (self.hero_dir * HERO_FLIP_DRIFT * (1.0 - p), flip_ease(2.0 * p - 0.9)),
         ))
     }
 
@@ -2508,8 +2529,9 @@ impl HomeScreen {
         let env = self.env(0.0);
         let focus = self.focused_loc(visible_focus);
         let p = f.painter.alpha(f.page_alpha);
-        let slide = self.slide_offsets();
-        // Re-bind the art to the heroes `slide` is about: an event delivered after this frame's
+        // Fork Rofocale11: pass a dissolve alpha to the backdrop, not slide offsets.
+        let flip = self.flip_art();
+        // Re-bind the art to the heroes `flip` is about: an event delivered after this frame's
         // `Tick` (a manual flip) has changed them since `update` ran (`Backdrop::bind`).
         self.backdrop.bind(
             self.selected_hero(view),
@@ -2519,7 +2541,7 @@ impl HomeScreen {
         );
         let shade = self.backdrop_shade(&env);
         plx_ui::profile::phase("hm.backdrop", || {
-            self.backdrop.draw(p, &env, slide, shade, self.dive_rests())
+            self.backdrop.draw(p, &env, flip, shade, self.dive_rests())
         });
         if env.hero_a > 0.01 {
             plx_ui::profile::phase("hm.hero", || {
@@ -2580,15 +2602,16 @@ impl HomeScreen {
         let Some(hero) = self.selected_hero(view) else {
             return;
         };
-        if let Some((out_x, in_x)) = self.slide_offsets() {
+        // Fork Rofocale11: the old fork cross-fades the two hero copies instead of sliding them.
+        if let Some(((out_dx, out_a), (in_dx, in_a))) = self.flip_faces() {
             if let Some(old) = self.outgoing_hero(view) {
-                let po = p.translate(out_x, 0.0);
-                hero_content(old.item, po, out_x, measure);
-                self.draw_hero_actions(old.item, env, po, out_x, false, page_alpha, focus, measure, press_scale);
+                let po = p.translate(out_dx, 0.0).alpha(out_a);
+                hero_content(old.item, po, out_dx, measure);
+                self.draw_hero_actions(old.item, env, po, out_dx, false, page_alpha, focus, measure, press_scale);
             }
-            let pi = p.translate(in_x, 0.0);
-            hero_content(hero.item, pi, in_x, measure);
-            self.draw_hero_actions(hero.item, env, pi, in_x, true, page_alpha, focus, measure, press_scale);
+            let pi = p.translate(in_dx, 0.0).alpha(in_a);
+            hero_content(hero.item, pi, in_dx, measure);
+            self.draw_hero_actions(hero.item, env, pi, in_dx, true, page_alpha, focus, measure, press_scale);
         } else {
             hero_content(hero.item, p, 0.0, measure);
             self.draw_hero_actions(hero.item, env, p, 0.0, true, page_alpha, focus, measure, press_scale);
@@ -2615,11 +2638,12 @@ impl HomeScreen {
                 plx_ui::icons::draw(p, Icon::Chevron, pager.chevron, theme::TEXT_SECONDARY);
             }
         };
-        if let Some((out_x, in_x)) = self.slide_offsets() {
+        // Fork Rofocale11: pagers follow their page's drift in the dissolve, not a slide.
+        if let Some(((out_dx, _), (in_dx, _))) = self.flip_faces() {
             if let Some(old) = self.outgoing_hero(view) {
-                draw(old.item, Self::index_of(view, self.outgoing.as_ref()), p.translate(out_x, 0.0));
+                draw(old.item, Self::index_of(view, self.outgoing.as_ref()), p.translate(out_dx, 0.0));
             }
-            draw(hero, self.carousel_index(view), p.translate(in_x, 0.0));
+            draw(hero, self.carousel_index(view), p.translate(in_dx, 0.0));
         } else {
             draw(hero, self.carousel_index(view), p);
         }
@@ -3214,7 +3238,9 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
                         index: Some(index as u32) });
                 }
                 if matches!(at, At::Drawn) {
-                    base.x += self.slide_offsets().map_or(0.0, |(_, incoming)| incoming);
+                    // Fork Rofocale11: place the hit rect where the dissolving control is drawn.
+                    let dx = self.flip_faces().map_or(0.0, |(_, (incoming_dx, _))| incoming_dx);
+                    base.x += dx;
                 }
                 let scale = match at {
                     At::Drawn => self.hero_pop.scale_with(index, cx.press),
@@ -4446,8 +4472,15 @@ fn reveal(tex: u32, spring: &Spring) -> f32 {
         spring.pos
     }
 }
-fn art_rect(tex: (u32, f32, f32), snap: f32, dx: f32) -> Rect {
-    Rect::new(dx, -snap * (SCR_H - 120.0), SCR_W, SCR_H).cover(tex.1, tex.2)
+// Fork Rofocale11: match the old fork's full-panel dissolve — the hero art never translates
+// vertically; the dive only fades it via (1.0 - snap) in backdrop_art/hero_art below.
+fn art_rect(tex: (u32, f32, f32), dx: f32) -> Rect {
+    Rect::new(dx, 0.0, SCR_W, SCR_H).cover(tex.1, tex.2)
+}
+// Fork Rofocale11: smoothstepped flip ramps from the old fork so a dissolve has no faint residue.
+fn flip_ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 fn backdrop_art(p: Painter, tex: (u32, f32, f32), snap: f32, dx: f32, alpha: f32) {
     if tex.0 == 0 || alpha <= 0.01 || !on_axis(dx, SCR_W, SCR_W, 0.0) {
@@ -4455,7 +4488,7 @@ fn backdrop_art(p: Painter, tex: (u32, f32, f32), snap: f32, dx: f32, alpha: f32
     }
     p.tex(
         tex.0,
-        art_rect(tex, snap, dx),
+        art_rect(tex, dx),
         0.0,
         theme::with_a(theme::TINT_WHITE, alpha * (1.0 - snap)),
     );
@@ -4465,7 +4498,7 @@ fn backdrop_art(p: Painter, tex: (u32, f32, f32), snap: f32, dx: f32, alpha: f32
 fn hero_art(tex: (u32, f32, f32), snap: f32, alpha: f32) -> plx_ui::widgets::WashArt {
     plx_ui::widgets::WashArt {
         tex: if alpha <= 0.01 { 0 } else { tex.0 },
-        rect: art_rect(tex, snap, 0.0),
+        rect: art_rect(tex, 0.0),
         uv: plx_gfx::gfx::UV_FULL,
         tint: theme::with_a(theme::TINT_WHITE, alpha * (1.0 - snap)),
     }

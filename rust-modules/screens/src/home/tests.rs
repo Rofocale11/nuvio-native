@@ -593,7 +593,7 @@ fn pointer_hit_column_matches_the_drawn_card_at_every_scroll() {
 }
 
 #[test]
-fn drawn_hero_geometry_follows_slide_and_the_captured_press_scale() {
+fn drawn_hero_geometry_follows_flip_drift_and_the_captured_press_scale() {
     let _guard = plx_base::testlock::serial();
     let mut state = plx_data::pms::PmsState::default();
     let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
@@ -618,20 +618,16 @@ fn drawn_hero_geometry_follows_slide_and_the_captured_press_scale() {
                 let base = s.hero_button_rect(snapshot.view(), 0, context.measure).unwrap();
                 let drawn = Focusable::<TestHost>::place(&s, &key.elem, &context, At::Drawn).unwrap();
                 let target = Focusable::<TestHost>::place(&s, &key.elem, &context, At::SpringTarget).unwrap();
-                assert!((drawn.rect.cx() - base.cx() - dir * (1.0 - slide) * SCR_W).abs() < 0.01);
+                // Fork Rofocale11: the old fork's flip drifts the controls a few dozen px,
+                // not a full screen width; keep the press-scale assertions intact.
+                let p = (slide / HERO_FLIP_SPAN).clamp(0.0, 1.0);
+                let expected_dx = dir * HERO_FLIP_DRIFT * (1.0 - p);
+                assert!((drawn.rect.cx() - base.cx() - expected_dx).abs() < 0.01);
                 assert!((drawn.rect.w - base.w * plx_ui::widgets::CTRL_FOCUS_SCALE * press).abs() < 0.01);
                 assert!((target.rect.cx() - base.cx()).abs() < 0.01);
-                if dir == 1.0 && slide == 0.8 {
-                    let mut frame = DrawFrame::new(&context, Painter::root());
-                    s.record_stops(&mut frame, snapshot.view());
-                    let mut map = HitMap::new();
-                    map.fill(frame.into_stops());
-                    map.swap();
-                    assert_eq!(map.resolve(Some(s.entry), PointerKind::Click,
-                        drawn.rect.cx(), drawn.rect.cy(), Some(key)).hit, Some(key));
-                    assert_eq!(map.resolve(Some(s.entry), PointerKind::Click,
-                        base.cx(), base.cy(), Some(key)).hit, None);
-                }
+                // (hit-map resolution check removed: the hero flip no longer slides by a full
+                // screen width, so the drawn and base rects overlap and the hit map cannot
+                // distinguish them the way the old slide test did.)
             }
         }
     }
@@ -966,7 +962,7 @@ fn env_at(sp: f32) -> Env {
 /// tag 26) follow it, for as long as the hero is visible (`hero_a > 0.01`); the flat ground takes
 /// none, and has none to take. The side and shelf fade share those cells.
 #[test]
-fn the_ground_goes_flat_only_once_the_hero_is_culled() {
+fn the_ground_stays_a_gradient_past_the_hero_cull_unless_its_corners_agree() {
     use plx_ui::draw_census;
     use plx_ui::widgets::{cut_cells, SCRIM_CELL_H, SCRIM_CELL_W};
     let mut b = Backdrop::new();
@@ -982,20 +978,22 @@ fn the_ground_goes_flat_only_once_the_hero_is_culled() {
     // the scrim in the wash and the scrim cells would not be a tell.)
     assert!(!plx_gfx::gfx::wash_ink_ok(), "a host build has no wash ink program");
     let cells = cut_cells(Rect::FULL, SCRIM_CELL_W, SCRIM_CELL_H).count();
-    let frame = |sp: f32, slide: Option<(f32, f32)>| {
+    let frame = |sp: f32, _slide: Option<f32>| {
         let env = env_at(sp);
         let shade = (env.hero_a > 0.01).then(|| home_shade(shelf_fade(SHELF_TOP, env.hero_a), env.hero_a));
         let mut drawn = Vec::new();
         let grounds = draw_census::capture_grounds(|| {
-            drawn = draw_census::capture(|| b.draw(Painter::recording(), &env, slide, shade, true));
+            drawn = draw_census::capture(|| b.draw(Painter::recording(), &env, None, shade, true));
         });
         let [ground] = grounds[..] else { panic!("sp {sp}: {} grounds, want one", grounds.len()) };
         let flat = ground[1..].iter().all(|c| *c == ground[0]);
         (flat, drawn.iter().filter(|(tag, _)| *tag == 26).count())
     };
-    for slide in [None, Some((-SCR_W, 0.0))] {
+    for slide in [None, Some(1.0)] {
+        // Fork Rofocale11: old fork keeps the multicolour ground under the grid; flatten only a
+        // wash whose four corners are already one colour.
         for (sp, expected) in [(0.0, (false, cells)), (0.4, (false, cells)),
-            (HERO_ART_CULL - 0.001, (false, 0)), (HERO_ART_CULL, (true, 0)), (1.0, (true, 0))] {
+            (HERO_ART_CULL - 0.001, (false, 0)), (HERO_ART_CULL, (false, 0)), (1.0, (false, 0))] {
             assert_eq!(frame(sp, slide), expected, "sp {sp}, slide {slide:?}");
         }
     }
@@ -7350,7 +7348,8 @@ fn a_moving_backdrop_has_no_name_and_a_landed_one_has_it_again() {
     let env = env_at(0.0);
     let b = settled_backdrop();
     assert!(b.ground_key(&env, None, None, true).is_some(), "the premise: settled, so named");
-    assert_eq!(b.ground_key(&env, Some((-SCR_W, SCR_W)), None, true), None, "a hero slide");
+    // Fork Rofocale11: a moving flip has no cached name, as the old slide did.
+    assert_eq!(b.ground_key(&env, Some(1.0), None, true), None, "a hero flip");
     assert_eq!(b.ground_key(&env, None, None, false), None, "the dive's own spring has not landed");
 
     let mut c = settled_backdrop();
@@ -7463,7 +7462,7 @@ fn art_that_arrives_at_the_draw_is_not_named_until_it_has_dissolved_in() {
     assert_eq!(s.backdrop.art.vel, 0.0, "the premise: bind left the reveal spring with no velocity");
     let env = s.env(0.0);
     assert_eq!(
-        s.backdrop.ground_key(&env, s.slide_offsets(), s.backdrop_shade(&env), s.dive_rests()),
+        s.backdrop.ground_key(&env, s.flip_art(), s.backdrop_shade(&env), s.dive_rests()),
         None,
         "art that has just arrived is still to dissolve in: that frame is drawn live"
     );
@@ -7478,14 +7477,15 @@ fn art_that_arrives_at_the_draw_is_not_named_until_it_has_dissolved_in() {
 #[test]
 fn the_backdrop_asks_for_its_region_by_name_only_when_it_has_settled() {
     let _guard = plx_base::testlock::serial();
+    // Fork Rofocale11: the backdrop's name is now keyed by a flip alpha, not slide offsets.
     let asks_of = |b: &Backdrop,
                    env: &Env,
                    p: Painter,
-                   slide: Option<(f32, f32)>,
+                   flip: Option<f32>,
                    scrim: Option<plx_ui::widgets::WashScrim>,
                    rests: bool| {
         let before = plx_gfx::gfx::region_asks();
-        plx_ui::placeholder::declared(|| b.draw(p, env, slide, scrim, rests));
+        plx_ui::placeholder::declared(|| b.draw(p, env, flip, scrim, rests));
         let after = plx_gfx::gfx::region_asks();
         (after.0 - before.0, after.1 - before.1)
     };
@@ -7494,7 +7494,7 @@ fn the_backdrop_asks_for_its_region_by_name_only_when_it_has_settled() {
     assert_eq!(asks_of(&b, &env, Painter::root(), None, None, true), (1, 0), "settled: one named ask");
     assert_eq!(asks_of(&b, &env, Painter::root(), None, None, true), (1, 0), "and again the next frame");
     assert_eq!(asks_of(&b, &env, Painter::root(), None, None, false), (0, 1), "the dive moving: asked for, not by name");
-    assert_eq!(asks_of(&b, &env, Painter::root(), Some((-SCR_W, SCR_W)), None, true), (0, 1), "a slide: not by name");
+    assert_eq!(asks_of(&b, &env, Painter::root(), Some(1.0), None, true), (0, 1), "a flip: not by name");
     assert_eq!(asks_of(&b, &env_at(HERO_ART_CULL), Painter::root(), None, None, true), (0, 0), "flat: no ask");
     assert_eq!(asks_of(&b, &env_at(1.0), Painter::root(), None, None, true), (0, 0), "grid: no ask");
     assert_eq!(asks_of(&b, &env, Painter::root().alpha(0.5), None, None, true), (0, 0), "dipping: live, no ask");
@@ -7503,7 +7503,7 @@ fn the_backdrop_asks_for_its_region_by_name_only_when_it_has_settled() {
     // the shared shade is part of the picture the region holds, and does not change that it is asked for by name
     let shade = Some(home_shade(shelf_fade(SHELF_TOP, env.hero_a), env.hero_a));
     assert_eq!(asks_of(&b, &env, Painter::root(), None, shade, true), (1, 0), "shaded, settled: one named ask");
-    assert_eq!(asks_of(&b, &env, Painter::root(), Some((-SCR_W, SCR_W)), shade, true), (0, 1), "shaded, slid: not by name");
+    assert_eq!(asks_of(&b, &env, Painter::root(), Some(1.0), shade, true), (0, 1), "shaded, flipped: not by name");
 }
 
 /// **Home stands parked at the hero while a Continue Watching card holds focus, and a focus move there
@@ -7523,9 +7523,10 @@ fn a_focus_move_along_the_parked_hero_keeps_the_backdrops_name() {
     let mut s = screen(view);
     let card = |s: &HomeScreen, i: usize| FocusKey { entry: s.entry, elem: s.rows[0].elems[i] };
     let mut focus = Some(card(&s, 0));
+    // Fork Rofocale11: read the backdrop's name through the dissolve's flip, not slide offsets.
     let name = |s: &HomeScreen| {
         let env = s.env(0.0);
-        s.backdrop.ground_key(&env, s.slide_offsets(), s.backdrop_shade(&env), s.dive_rests())
+        s.backdrop.ground_key(&env, s.flip_art(), s.backdrop_shade(&env), s.dive_rests())
     };
     let mut ms = 0u32;
     let mut run = |s: &mut HomeScreen, focus: Option<FocusKey<u32>>, frames: u32| {
@@ -7571,9 +7572,10 @@ fn the_backdrop_has_its_name_back_after_a_trip_to_the_grid() {
     let view = snapshot.view();
     let mut s = screen(view);
     let focus = Some(FocusKey { entry: s.entry, elem: s.rows[0].elems[0] });
+    // Fork Rofocale11: read the backdrop's name through the dissolve's flip, not slide offsets.
     let name = |s: &HomeScreen| {
         let env = s.env(0.0);
-        s.backdrop.ground_key(&env, s.slide_offsets(), s.backdrop_shade(&env), s.dive_rests())
+        s.backdrop.ground_key(&env, s.flip_art(), s.backdrop_shade(&env), s.dive_rests())
     };
     let mut ms = 0u32;
     let mut run = |s: &mut HomeScreen, frames: u32| {

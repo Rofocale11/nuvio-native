@@ -983,3 +983,37 @@ carries `libsbengine.so`, `libswresample-plx.so.7` and an Opus-enabled `libavcod
 `ipk.sha256` matches the package. The run log shows `TMDB_API_KEY: ***` and no key-shaped strings.
 Release-only gates (ELF, size budget, font hinting, webosbrew, firmware matrix and the release
 attach) are skipped by design on `workflow_dispatch`; they still need a pushed `v*` tag run.
+
+## Home hero dissolve port (Fork Rofocale11)
+
+Ported the old fork's home big-hero animation: hero flip is now a fade/dissolve (incoming art fades
+in over a stationary outgoing art; hero copies cross-fade) instead of a horizontal slide, and the
+dive-to-grid art uses the old fork's full-panel fade (no vertical translation).
+
+- `rust-modules/screens/src/home/mod.rs` (upstream): `Backdrop::draw`/`paint`/`ground_key` now take
+  `flip: Option<f32>` instead of `slide: Option<(f32,f32)>`; `art_rect` no longer translates
+  vertically; added `flip_progress`, `flip_art`, `flip_faces`, `flip_ease`; hero copy and pagers use
+  `flip_faces`. Marked with `Fork Rofocale11:` comments.
+- `rust-modules/screens/src/home/tests.rs`, `hero_shade_tests.rs`: updated to the new flip API.
+
+## Multicolour ground under Home grid (Fork Rofocale11)
+
+The current tree flattened the Home ground to the mean of its corners at the hero-to-grid cull, so
+focusing a poster changed one flat colour instead of showing the poster's four-corner gradient.
+
+- `rust-modules/ui/src/widgets.rs` (upstream): restored `AmbientWash::is_uniform`, marked
+  `Fork Rofocale11:` — a flat clear is only the same picture when all four corners are one colour.
+- `rust-modules/screens/src/home/mod.rs`: `Backdrop::paint` flattens only when `is_uniform`, so the
+  item-keyed bilinear gradient stays under the shelves. Marked.
+- `rust-modules/screens/src/home/tests.rs`: expectation updated and marked.
+
+`cargo test -p plx_screens` passes (2343 tests).
+
+### Why these edits are in upstream files
+
+The dissolve is a change to the rendering of existing upstream screens, not a new feature with its
+own state or store. The helpers (`flip_*`) could move to a fork-owned child module, but the art and
+copy drawing they drive lives in `Backdrop::draw`/`paint` and `HomeScreen::draw_hero`, so the
+upstream file must change anyway; splitting only the helpers would leave the same conflict surface
+plus an indirection. No new persisted state or new crate is involved. Every upstream edit above
+carries a `Fork Rofocale11:` comment and is listed here.
