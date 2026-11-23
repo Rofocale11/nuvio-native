@@ -818,3 +818,35 @@ place in the player.
 No screen shape, element id or focus group changed, so replay fingerprints are untouched. A host
 pass cannot prove the texture resolves on the device; the TV still needs a `--guest`/mock capture
 under the lock, and a raw-URL play with no shim row has no logo to show (text fallback remains).
+
+**Continuous AU clock for app-decoded multichannel Opus (2026-11-23).** The addon files' Opus
+packets carry 20 ms of audio stamped 160 ms apart. `PcmConverter`'s clock and `ff_pcm::AuBatcher`
+both re-anchor on an `AU_GAP_TOLERANCE_NS` (20 ms) gap, so each 20 ms decoded block inherits the
+160 ms spacing and the TV plays 20 ms then waits 140 ms — the stutter. Upstream never sees it
+(`OPUS_AUTO_MAX_CHANNELS = 2` makes PMS convert the track to a continuous stereo stream); the fork
+has no transcoder. No encoder code is involved.
+
+- **New fork-owned `play-feed/src/opus_reframe.rs`** — a pure `OpusReframe` clock: the first decoded
+  block anchors at the packet's pts (keeping the demuxer's `FirstAudioPts` and first-AU logic valid),
+  later blocks are stamped at `previous + the bytes' own duration`. Four pure tests pin the anchor,
+  the 160 ms → 20 ms clock, partial blocks and seek re-anchoring.
+- `play-feed/src/ff.rs` — one `#[path]` `mod` line and three marked lines (setup, seek reset, stamp).
+  Gated on `app_decoded == "opus"`; DTS, MP3, Vorbis, TrueHD, FLAC/ALAC/LPCM and all native codecs
+  keep their existing timestamps.
+- `ci/build-ffmpeg.sh` — `--disable-swresample` became `--enable-swresample` (marked). FFmpeg 9.0.2
+  declares `opus_decoder_deps="swresample"`; without it configure silently sets
+  `CONFIG_OPUS_DECODER=0` despite `--enable-decoder=opus` and `avcodec_find_decoder` refuses the
+  track. The rebuilt library carries `libavcodec/opus/dec.o`.
+- `media-codecs/src/ffi.rs` and `media/src/ff.rs` — a `swresample` dynlib table and one extra item in
+  the dependency-ordered `load_libraries()` loop, before `avcodec`. The new `libavcodec` carries
+  `NEEDED libswresample-plx.so.7`; without opening it first with RTLD_GLOBAL, `dlopen(RTLD_NOW)`
+  failed and the existing loader reported it misleadingly as "avcodec is MISSING from the app
+  directory" — every play refused at boot. Both loaders are device-only; the host test loader is
+  unchanged.
+
+A blind `drain_aq` at the reload rebase was tried and reverted: it broke six hostsim seek/lead
+tests that legitimately pre-seed AUs across a rebase, so the fix relies on the re-stamp alone.
+
+Focused `plx_play_feed` tests (358), `make test-hostsim C=plx_media` (2500), `make check-nodef` and
+a `make -j10` ARM cross-build are green. A host pass cannot prove the PCM feed is smooth on the
+television; one `--guest` play under the TV lock with the deployed debug build is still required.

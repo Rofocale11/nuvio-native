@@ -350,6 +350,16 @@ plx_base::dynlib! {
         flags: c_int,
     ) -> *const AVDictionaryEntry;
 }}
+// Fork Rofocale11: FFmpeg 9's libavcodec NEEDs libswresample by SONAME once its native Opus
+// decoder is enabled. Open it FIRST with RTLD_GLOBAL so that NEEDED resolves to our staged copy.
+plx_base::dynlib! {
+    swresample: [
+        "libswresample-plx.so.7",
+        "libswresample-plx.7.dylib",
+        "libswresample-plx-host.so.7",
+    ] {
+    fn swresample_version() -> c_uint;
+}}
 plx_base::dynlib! {
     swscale: [
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
@@ -1158,6 +1168,7 @@ fn load_libraries() -> bool {
     // finding the TV's. Open libavformat first and that guarantee is gone.
     let mut ok = true;
     for (what, verdict) in [
+        ("swresample", swresample::load(dir)), // Fork Rofocale11: before avcodec — its NEEDED depends on this
         ("avutil", avutil::load(dir)),
         ("avcodec", avcodec::load(dir)),
         ("avformat", avformat::load(dir)),

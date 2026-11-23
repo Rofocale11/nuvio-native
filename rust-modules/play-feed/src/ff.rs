@@ -699,6 +699,10 @@ pub mod native_audio;
 // lives in the fork-owned crate `plx_nuvio_dash`.
 #[path = "dash.rs"]
 mod dash;
+// Fork Rofocale11: independent AU clock for app-decoded multichannel Opus. A child of `ff` so it is
+// applied where the decoded bytes are; its pure arithmetic and tests live in its own file.
+#[path = "opus_reframe.rs"]
+mod opus_reframe;
 use plx_playback_contract::subtitle as subside;
 use subs::SubTracks;
 use acquisition::{AcquisitionRuntime, Phase, SegmentAcquisition};
@@ -6568,6 +6572,12 @@ pub fn demux(
                 // Decoded blocks shorter than 10 ms (TrueHD's 1/1200 s access units) go to the lane
                 // gathered into AUs of about that length (`ff_pcm::AuBatcher`).
                 let mut pcm_batch = pcm_dec.as_ref().map(|d| d.au_batcher());
+                // Fork Rofocale11: app-decoded Opus carries sparse source timestamps (20 ms of audio
+                // stamped 160 ms apart). Both the converter clock and AuBatcher re-anchor on a >20 ms
+                // gap, so the PCM feed gets 160 ms-spaced AUs and stutters. Re-stamp this lane from a
+                // continuous clock; every other app-decoded codec keeps its source-derived pts.
+                let reframe_opus_pcm = app_decoded.as_deref() == Some("opus");
+                let mut opus_clock = opus_reframe::OpusReframe::new();
                 if let Some((fi, ch)) = aac_adts {
                     session.media().record(&format!(
                         "ff: AAC → ADTS reframing on (freq_idx={fi} ch={ch})"
@@ -6939,6 +6949,9 @@ pub fn demux(
                         if let Some(batch) = pcm_batch.as_mut() {
                             batch.clear();
                         }
+                        // Fork Rofocale11: a seek starts a new content timeline; the Opus AU clock
+                        // must re-anchor at the next decoded block, not continue the old count.
+                        opus_clock.reset();
                         session.media().publish(DemuxEffect::FirstAudioPts(i64::MIN));
                     }
                     let r = av_read_frame(fmt, pkt);
@@ -7155,7 +7168,7 @@ pub fn demux(
                                 || state.drain_wire(),
                             )
                         } else if let Some(dec) = pcm_dec.as_mut() {
-                            let (pcm_pts, pcm) = match dec.decode(pkt, pts) {
+                            let (mut pcm_pts, pcm) = match dec.decode(pkt, pts) {
                                 Ok(decoded) => decoded,
                                 Err(why) => {
                                     session.media().record(&format!(
@@ -7168,6 +7181,15 @@ pub fn demux(
                                     break;
                                 }
                             };
+                            // Fork Rofocale11: replace the sparse source-derived stamp with a
+                            // continuous one for Opus only. Duration comes from the bytes actually
+                            // decoded, so a partial packet cannot leave a hole either.
+                            if reframe_opus_pcm && !pcm.is_empty() {
+                                let shape = pcm_out();
+                                let rate = shape.map_or(48_000, |o| o.rate);
+                                let frame_bytes = shape.map_or(4, |o| (o.bits / 8) * o.channels);
+                                pcm_pts = opus_clock.stamp(pts, pcm.len(), rate, frame_bytes);
+                            }
                             match pcm_batch.as_mut().and_then(|b| b.push(pcm_pts, pcm)) {
                                 None => 0,
                                 Some((au_pts, au)) => crate::aq::aq_push_gated(

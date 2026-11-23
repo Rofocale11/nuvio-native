@@ -216,12 +216,15 @@ else
     --arch=arm --cpu=cortex-a9 --target-os=linux --sysroot="$SYSROOT" \
     --extra-ldflags='-Wl,--build-id=sha1'
 fi
+# Fork Rofocale11: FFmpeg 9.0 makes the native Opus decoder depend on swresample
+# (opus_decoder_deps="swresample"). With swresample disabled, configure silently sets
+# CONFIG_OPUS_DECODER=0 despite --enable-decoder=opus and app-decoded Opus cannot load.
 set -- "$@" \
   --build-suffix=-plx \
   --enable-shared --disable-static --enable-pic \
   --extra-cflags='-Dstatic_assert=_Static_assert' \
   --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
-  --disable-network --disable-swresample \
+  --disable-network --enable-swresample \
   --disable-debug --enable-small \
   --disable-everything \
   --disable-autodetect \
