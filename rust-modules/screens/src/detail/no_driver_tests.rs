@@ -86,7 +86,6 @@ fn only_the_controls_that_play_lose_their_stop_and_the_row_is_never_empty() {
             // Fork Rofocale11: NuvioNative's HeroSet carries an extra My List field for the
             // account-backed `nuvio://` toggle; upstream's no-driver sweep needs it initialised.
             let set = hero::HeroSet {
-                list: false,
                 watchlist: bits & 1 != 0, go_show: bits & 2 != 0, version: bits & 4 != 0, restart: bits & 8 != 0,
                 trailer: bits & 16 != 0, alt: bits & 32 != 0, more: bits & 3 == 0, mark,
             };

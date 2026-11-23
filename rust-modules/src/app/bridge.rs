@@ -2616,8 +2616,20 @@ fn start_jobs(&mut self, jobs: Vec<plx_data::stores::StoreJob>) -> usize {
     /// reads the registry (the legacy-owner fallback), so it is called here and nowhere in `data/`.
     pub(crate) fn watchlist_input() -> plx_data::watchlist::WatchlistInput {
         let profile = Self::seated_profile();
-        let credential = profile.user.as_ref().and_then(plx_plex::plex::session::plex_tv_credential);
-        let client_id = plx_plex::plex::session::peek().client_id.clone();
+        let mut credential = profile.user.as_ref().and_then(plx_plex::plex::session::plex_tv_credential);
+        let mut client_id = plx_plex::plex::session::peek().client_id.clone();
+        // Fork Rofocale11: this fork has no plex.tv token, so the store would stop at NoAccount
+        // before the shim-backed Watchlist IO could read anything. A signed-in Nuvio shim is the
+        // account; seat a local identity for it. The shim IO ignores these fields — no request is
+        // built with them — and the catalog page keeps its own upstream read-out.
+        if credential.is_none()
+            && super::nuvio::handle().is_some_and(|h| h.shim.account.signed_in())
+        {
+            credential = Some("nuvio".into());
+            if client_id.is_empty() {
+                client_id = "nuvio".into();
+            }
+        }
         plx_data::watchlist::WatchlistInput::new(profile, credential, &client_id)
     }
 
@@ -3630,6 +3642,7 @@ impl Bridge<'_> {
                 let ok = plx_plex::plex::client_for(sid).is_some_and(|c| c.nuvio_select(&rk, index));
                 emit(NuvioResult::Selected(ok));
             }),
+            // Fork Rofocale11: legacy Detail replay-state read; no UI control asks for it now.
             NuvioReq::MyList { sid, rk, saved, .. } => plx_base::task::spawn("nuvio-my-list", move || {
                 let state = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_library(&rk, saved));
                 emit(NuvioResult::MyList(state));

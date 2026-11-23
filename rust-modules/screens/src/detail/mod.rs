@@ -180,6 +180,11 @@ pub struct DetailScreen {
     /// Derived frame input, shared by shelf captions and live/target section geometry.
     caption_policy: plx_ui::caption_policy::CaptionPolicy,
     entry: EntryId,
+    // Fork Rofocale11: legacy replay-state fields. The old named My List BUTTON is gone — My List
+    // is driven only by the Watchlist disc/store now — but these fields are named in SHAPE below,
+    // and `state_fp()` hashes every screen SHAPE into the pinned replay fingerprints. Removing
+    // them requires re-recording the replay fixtures, not just deleting the UI. They are written
+    // only by `request_list`/its landing and read only by `write_state`; nothing draws them.
     list_state: Option<plx_plex::plex::nuvio::LibraryState>,
     list_pending: bool,
     list_error: bool,
@@ -3400,10 +3405,6 @@ impl DetailScreen {
                 .ground(ground)
                 .scale(scale)
                 .draw(&Env::inert(), p),
-                hero::HeroCtl::MyList => {
-                    Button::new(self.list_label().as_ptr(), theme::size::BODY, rect)
-                        .focus_mix(fill).palette(palette).ground(ground).scale(scale).draw(&Env::inert(), p)
-                }
                 hero::HeroCtl::Alt => {
                     Button::new(hero::alt_label().as_ptr(), theme::size::BODY, rect)
                         .trailing_icon(hero::ALT_ICON)
@@ -4144,7 +4145,10 @@ impl DetailScreen {
         };
         // The bookmark disc's flip, and the identity the app's feed reads. Decorative: it moves
         // no layout, so it never holds a page image.
-        self.watchlist_hex = self.detail(meta).and_then(|d| plx_plex::plex::catalog_hex_of_guid(&d.guid));
+        // Fork Rofocale11: a shim row carries `nuvio://...`, which `catalog_hex_of_guid` refuses;
+        // use the item's ratingKey fallback so the disc and its menu rows name the same My List
+        // title the Watchlist page shows.
+        self.watchlist_hex = self.detail(meta).and_then(|d| plx_plex::plex::catalog_hex_of_item(&d.guid, &d.rk));
         let watchlist_moving = self.watchlist.step(dt);
         for (i, spring) in self.disc_unfurl.iter_mut().enumerate() {
             spring.step(
@@ -4648,19 +4652,11 @@ impl DetailScreen {
         true
     }
 
-    fn list_label(&self) -> &'static std::ffi::CStr {
-        // Fork Rofocale11: the My List button's translated labels (Add/Remove/Saving/Retry/Sign in)
-        // are the Nuvio account-list vocabulary; ported to upstream's renamed `plx_os` i18n crate.
-        use plx_os::i18n::msg;
-        if self.list_pending { msg::browse_list_saving_c() }
-        else if self.list_error { msg::browse_list_retry_c() }
-        else if self.list_state.is_some_and(|s| !s.signed_in) { msg::browse_list_signin_c() }
-        else if self.list_state.is_some_and(|s| s.saved) { msg::browse_list_remove_c() }
-        else { msg::browse_list_add_c() }
-    }
-
     fn request_list<H: ContentLike>(&mut self, saved: Option<bool>, fx: &mut Effects<'_, H>) {
-        // Fork Rofocale11: the capability check and the HTTP call both move to the application's
+        // Fork Rofocale11: legacy replay-state read. No control draws or presses this any more —
+        // My List is driven only by the Watchlist disc/store — but the fields it fills are named
+        // in SHAPE, which state_fp() pins, so the read and its landing stay.
+        // The capability check and the HTTP call both move to the application's
         // Nuvio worker (which reads the registry on a non-frame thread). The machine only gates on
         // its own pending bit and emits a typed effect; the answer returns as an addressed event.
         if self.list_pending { return; }
@@ -4696,7 +4692,6 @@ impl DetailScreen {
             // Nuvio's addon sources belong in the Streams menu, NOT in Play Version: without this
             // guard the same ranked list appears twice and Streams is left empty when the addon
             // fetch is still in flight while the cached `Media[]` already fills Play Version.
-            list: self.detail(meta).is_some_and(|d| Self::is_nuvio_item(d)),
             more: self.detail(meta).is_some_and(|d| hero::hero_episode(d).is_some()),
             version: self.detail(meta).is_some_and(|d| !Self::is_nuvio_item(d) && hero_versions(d).len() >= 2),
             go_show: self.detail(meta).is_some_and(|d| hero::go_to_show_target(d).is_some()),
@@ -4704,7 +4699,9 @@ impl DetailScreen {
             trailer: false,
             alt: self.alt_available(meta),
             mark,
-            watchlist: self.detail(meta).is_some_and(|d| plx_plex::plex::catalog_hex_of_guid(&d.guid).is_some()),
+            // Fork Rofocale11: shim rows are a `nuvio://` guid, so the plex-only decoder here left
+            // every Nuvio Detail without a disc even after the Watchlist IO was ported.
+            watchlist: self.detail(meta).is_some_and(|d| plx_plex::plex::catalog_hex_of_item(&d.guid, &d.rk).is_some()),
         }
     }
 
@@ -4857,17 +4854,6 @@ impl DetailScreen {
         // by-id press, a stale click) does nothing.
         if ctl.starts_playback() && !H::screen_inputs(cx).can_play() { return; }
         match ctl {
-            hero::HeroCtl::MyList => {
-                if self.list_state.is_some_and(|s| !s.signed_in) && !self.list_pending {
-                    fx.push(Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)));
-                } else if !self.list_pending {
-                    let saved = self.list_state.filter(|s| s.signed_in).map(|s| !s.saved);
-                    // Fork Rofocale11: a My List write goes through the same addressed effect; the
-                    // signed-in/known-row guards above are unchanged, so no real account is written
-                    // without the viewer's press and a signed-in state.
-                    self.request_list(if self.list_error { None } else { saved }, fx);
-                }
-            }
             hero::HeroCtl::Play => {
                 self.play_hero(false, None, fx, meta);
             }
@@ -4937,11 +4923,22 @@ impl DetailScreen {
             }
             // The bookmark disc: the press is the item menu's own write (`Action::WatchlistAdd` /
             // `WatchlistRemove`), identity captured here. The app queues it on the Watchlist store,
-            // which flips the face at once through the intent ledger and reverts it if plex.tv
-            // refuses. An item with no `plex://movie|show` guid (an episode) presses nothing.
+            // which flips the face at once through the intent ledger and reverts it if the write
+            // refuses. An item with no portable id (an episode) presses nothing.
             hero::HeroCtl::Watchlist => {
                 if let Some(d) = self.detail(meta) {
-                    if let Some(act) = hero::press(&d.guid, self.watchlist.membership()).filter(|_| self.watchlist_hex.is_some()) {
+                    // Fork Rofocale11: `d.guid` is `nuvio://...`, whose tail is not a catalog id.
+                    // Key the press by the resolved NVIO hex, the same identity the Watchlist page
+                    // and the store's write use; otherwise the disc appears but does nothing.
+                    let guid = self.watchlist_hex.map(|hex| {
+                        let kind = if d.kind == "show" || d.kind == "series" {
+                            plx_data::watchlist::model::Kind::Show
+                        } else {
+                            plx_data::watchlist::model::Kind::Movie
+                        };
+                        plx_data::watchlist::guid_of(kind, &hex)
+                    });
+                    if let Some(act) = guid.as_deref().and_then(|g| hero::press(g, self.watchlist.membership())) {
                         self.watchlist.press();
                         fx.push(Fx::App(AppFx::ItemMenu(crate::registry::ItemMenuReq {
                             act, sid: d.sid, item: None, season: None, loaded_episode: false, from_home: false,
@@ -5131,9 +5128,7 @@ pub(crate) fn hero_control_subject<'a>(
         }),
         HeroCtl::MarkWatched | HeroCtl::MarkUnwatched => Some(hero::hero_episode(d).map_or(d.rk.as_str(), |ep| ep.rk.as_str())),
         HeroCtl::Watchlist | HeroCtl::Trailer => Some(d.rk.as_str()),
-        // Fork Rofocale11: My List acts on the Nuvio account's `nuvio://` item, not a Plex
-        // ratingKey, so upstream's subject helper has no identity to hand back for it.
-        HeroCtl::GoToShow | HeroCtl::Alt | HeroCtl::Version | HeroCtl::More | HeroCtl::MyList => None,
+        HeroCtl::GoToShow | HeroCtl::Alt | HeroCtl::Version | HeroCtl::More => None,
     }
 }
 

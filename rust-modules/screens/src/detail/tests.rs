@@ -1415,7 +1415,7 @@ fn hero_focus_follows_its_control_when_the_set_grows_under_it() {
 
 #[test]
 fn hero_focus_stays_in_place_when_also_available_lands() {
-    let before = hero::HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+    let before = hero::HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
         watchlist: true,
         go_show: false,
         version: false,
@@ -1424,7 +1424,7 @@ fn hero_focus_stays_in_place_when_also_available_lands() {
         alt: false,
         mark: PosterMark::None,
     };
-    let after = hero::HeroSet { list: false, // Fork Rofocale11: plex item, no My List.
+    let after = hero::HeroSet { // Fork Rofocale11: plex item, no My List.
         watchlist: true,
         go_show: false,
         version: false,
@@ -1584,7 +1584,7 @@ fn a_landed_view_state_refresh_puts_the_browsed_season_back_and_never_steers_ano
 #[test]
 fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     let y = 812.0;
-    let set = hero::HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+    let set = hero::HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
         watchlist: true,
         go_show: false,
         version: false,
@@ -1598,7 +1598,6 @@ fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
     for unfurl in [0.2, 0.6, 1.0] {
         let disc = hero::disc_caps_at(set, 230.0, 0.0, [0.0, 0.0, unfurl, 0.0, 0.0], [201.0, 0.0, 267.0, 0.0, 0.0]);
         let widths = hero::HeroWidths {
-            list: 0.0,
             pill: 230.0,
             alt: 0.0,
             disc,
@@ -4401,35 +4400,6 @@ fn the_hold_hint_stands_on_a_resting_related_card_once_per_install() {
     clear();
 }
 
-// Fork Rofocale11: My List is owned by the Nuvio account backend (not the plex.tv Watchlist),
-// so the detail page offers it only for `nuvio://` items and a failed sync reply must never be
-// reported as a successful save. Upstream's hold-hint and other tests below are kept.
-#[test]
-fn my_list_is_nuvio_only_and_failed_sync_does_not_claim_success() {
-    let sid = ServerId::UNSET;
-    let guard = install(Detail { sid, rk:"list-test".into(), guid:"nuvio://movie/tt0133093".into(), ..Default::default() });
-    let mut screen = bare(&guard,sid,"list-test");
-    assert!(screen.hero_set(test_store().view()).list);
-    screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:false });
-    screen.list_pending = true;
-    screen.list_req = 1;
-    step(&mut screen,&ScreenEvent::Async(RequestId(1), AppMsg::Nuvio(NuvioResult::MyList(None))),None);
-    assert!(screen.list_error);
-    assert!(!screen.list_pending);
-    assert_eq!(screen.list_label(),plx_os::i18n::msg::browse_list_retry_c());
-    screen.list_req = 2;
-    let (_,effects) = step(&mut screen,&ScreenEvent::Async(RequestId(2),
-        AppMsg::Nuvio(NuvioResult::MyList(Some(plx_plex::plex::nuvio::LibraryState { signed_in:true,saved:true })))),None);
-    assert_eq!(screen.list_label(),plx_os::i18n::msg::browse_list_remove_c());
-    assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Store(StoreId::Hubs,StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::RefetchHubs))))));
-    screen.list_state = Some(plx_plex::plex::nuvio::LibraryState { signed_in:false,saved:false });
-    let (_,effects) = step(&mut screen,&ScreenEvent::Activate(hero::ELEM_MY_LIST),None);
-    assert!(effects.iter().any(|e| matches!(e.fx,Fx::App(AppFx::Loop(crate::registry::LoopReq::AccountSignIn)))));
-    plx_data::metadata::set_current_for_test(test_store().state_mut(),Some(Detail { sid,rk:"list-test".into(),guid:"plex://movie/test".into(),..Default::default() }));
-    assert!(!screen.hero_set(test_store().view()).list);
-    clear();
-}
-
 /// The hold hint on a season tab (`hold_hint::Surface::SeasonPill`): a held OK there opens the
 /// season's item menu, so the pill teaches it, after the shorter pill dwell (well before the card
 /// dwell would have), once per install on its own latch (the Card latch stays unspent).
@@ -5262,6 +5232,28 @@ fn the_bookmark_disc_press_emits_the_item_menu_write() {
     assert_eq!(item_menu_acts(&fx), vec![crate::registry::ItemMenuAction::WatchlistRemove(WL_GUID.into())]);
 }
 
+// Fork Rofocale11: a shim row is a `nuvio://` guid with a numeric ratingKey. It must get the same
+// bookmark disc and the same Add/Remove writes as a plex item, and the older named My List button
+// must stand down once the disc exists (the old fork had one control, not two).
+#[test]
+fn a_shim_movie_gets_the_watchlist_disc_and_a_working_press() {
+    let mut detail = movie_with_guid("nuvio://movie/tt0133093");
+    detail.rk = "10069".into();
+    let hex = plx_plex::plex::hex_of_rating_key(10_069);
+    let guid = plx_data::watchlist::guid_of(plx_data::watchlist::model::Kind::Movie, &hex);
+    let guard = install(detail);
+    let mut screen = bare(&guard, ServerId::UNSET, "10069");
+    let set = screen.hero_set(test_store().view());
+    assert!(set.watchlist, "a shim row has a portable NVIO catalog id");
+    tick_page(&mut screen, None, 16);
+    assert_eq!(screen.watchlist_hex(), Some(hex));
+    let (_, fx) = step(&mut screen, &ScreenEvent::Activate(hero::ELEM_WATCHLIST), Some(hero::ELEM_WATCHLIST));
+    assert_eq!(item_menu_acts(&fx), vec![crate::registry::ItemMenuAction::WatchlistAdd { hex }]);
+    screen.set_watchlist(plx_data::catalog::Membership::On);
+    let (_, fx) = step(&mut screen, &ScreenEvent::Activate(hero::ELEM_WATCHLIST), Some(hero::ELEM_WATCHLIST));
+    assert_eq!(item_menu_acts(&fx), vec![crate::registry::ItemMenuAction::WatchlistRemove(guid)]);
+}
+
 /// The first membership answer is the disc's rest face: no fill/ribbon flip plays on open. A later
 /// change from a known face does animate.
 #[test]
@@ -5825,23 +5817,6 @@ fn a_show_page_offers_and_plays_its_hero_episodes_versions() {
     clear();
 }
 
-// Fork Rofocale11: the Nuvio My List button carries longer translated labels (Add/Remove from My
-// List) than the Also available pill; this pins that the widest translated state never pushes the
-// row into the People column. Upstream's on-deck watched-action test below is kept.
-#[test]
-fn my_list_button_fits_beside_streams_in_every_language() {
-    let measure = plx_ui::fixture::FixtureMeasure;
-    for language in plx_os::i18n::SHIPPED {
-        let _guard = plx_os::i18n::language_on_this_thread_for_test(language);
-        for restart in [false,true] {
-            let set = hero::HeroSet { list:true,restart,alt:true,..Default::default() };
-            let widths = hero::hero_widths(&measure,set,restart,[1.0;hero::DISCS],false);
-            let (_,n) = hero::hero_ctls(set);
-            let last = hero::hero_btn_rect_at(set,n-1,0.0,widths);
-            assert!(last.x+last.w < plx_ui::consts::SCR_W-plx_ui::consts::MARGIN_X-plx_ui::detail_layout::PEOPLE_W,"{} My List overlaps people: end={} list={} play={} streams={}",language.tag(),last.x+last.w,widths.list,widths.pill,widths.alt);
-        }
-    }
-}
 #[test]
 fn pdf_proposal_on_deck_watched_action_targets_one_episode() {
     let _guard = plx_base::testlock::serial();
@@ -6241,7 +6216,6 @@ fn a_nuvio_item_keeps_its_sources_out_of_play_version() {
     let guard = install(d);
     let screen = bare(&guard, ServerId::UNSET, "leaf");
     let set = screen.hero_set(test_store().view());
-    assert!(set.list, "premise: a nuvio:// guid is a Nuvio item");
     assert!(!set.version, "addon sources are in Streams, not Play Version");
 }
 

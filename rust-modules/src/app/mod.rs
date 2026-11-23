@@ -84,6 +84,9 @@ pub use exit::{Exit, Release};
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod nuvio;
+// Fork Rofocale11: the Watchlist page reads the Nuvio account's My List through the shim, not
+// plex.tv; this is the fork-owned I/O seam that makes that translation.
+mod watchlist_io;
 pub(crate) mod playback;
 mod preferences;
 pub(crate) mod input;

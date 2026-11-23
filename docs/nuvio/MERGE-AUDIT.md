@@ -633,3 +633,67 @@ the demux borrows the private AVIO helpers (`packet_to_annexb`, `parse_extradata
 `HlsInput`, `read_cb`…) without making any of them `pub`, so an upstream rewrite of `ff.rs` cannot
 drag fork code into the merge. The generator/parser contract is pinned by a test that feeds the
 MPD `shim_pms::dash_manifest` actually emits to `plx_nuvio_dash::parse_manifest`.
+
+## Sixteenth pass — the Watchlist page reads My List (2026-11-23)
+
+Clicking the Watchlist pill read "Can't reach your Watchlist" because the page still used upstream's
+`LiveWatchlistIo` → `discover.provider.plex.tv/library/sections/watchlist/all` with a Nuvio token
+(HTTP 401). **This is not the account watch-progress feature recorded above**: that is Continue
+Watching (`/:timeline` → `sync_*_watch_progress`), which was ported earlier. My List itself is
+**not in redb** — `plx_stremio::nuvio::saved_library` pages the Nuvio backend's `sync_pull_library`
+RPC and the shim keeps a 60-second in-memory cache. redb holds the session, preferences, watch
+state, key table and metadata caches; the shim's `my_list_entries` / `set_my_list_saved` are the
+existing door to My List.
+
+Ported the old fork's 2026-11-02 tier-C fix (`UPSTREAM-LOG.md` there), adapted to this tree's
+Sans-IO job design:
+
+- **New fork-owned `rust-modules/src/app/watchlist_io.rs`** — `MyListIo` implements this tree's
+  `WatchlistIo` (`page`, `released`, `write`, `find`, generations) from `Shim::my_list_entries` /
+  `set_my_list_saved`. Page 0 refreshes the account cache; every row is reported as held by the
+  shim, so a tile is playable and opens the shim-backed Detail; writes map the 12-byte id back to
+  a shim ratingKey. Three host tests pin the identity, guid form and series/movie kind.
+- `rust-modules/src/app/adapters/stores.rs` — the one production IO construction now builds
+  `MyListIo` with the captured snapshot instead of `LiveWatchlistIo`. Fork marker inline.
+- `rust-modules/src/app/bridge.rs` — `watchlist_input` seats a local identity when no plex.tv
+  token exists but the Nuvio shim is signed in; otherwise `WatchlistStore::open` stops at
+  `NoAccount` before any read. The shim IO ignores those credential fields; no request is built
+  from them. Fork marker inline.
+- `rust-modules/src/app/mod.rs` — new `mod watchlist_io;` (fork marker inline).
+- `rust-modules/plex/src/plex/models.rs` — restored `NUVIO_HEX_MARK`, `hex_of_rating_key`,
+  `rating_key_of_hex` and `catalog_hex_of_item`, and routed `guid_hex` / `show_guid_hex` through
+  the latter so shim rows carry the same `NVIO`+ratingKey id as Watchlist tiles; without it the
+  Detail/Home disc and the hold-menu rows cannot agree with the page. Fork markers inline.
+
+Upstream file surface on the next merge: the four inline edits above plus the new fork-owned file.
+The Discover catalog page (a list title with no server copy) still uses upstream's plex.tv read in
+both forks and is not part of this port. Verification: full nextest 1495/1495, `make check-nodef`,
+module layers, `check-deps` and ledger ratchet all green. No device verification yet.
+
+**Device follow-up — the Detail disc was still gated on a plex guid.** The Watchlist page worked on
+the set, but Detail showed the older named "Add/Remove My List" button instead of the bookmark disc,
+and no menu Add/Remove row. Two gates in `screens/src/detail/mod.rs` still used
+`catalog_hex_of_guid(&d.guid)`, which refuses a shim's `nuvio://...` guid: the cached
+`watchlist_hex` the app feeds the disc, and `HeroSet::watchlist`. Both now use
+`catalog_hex_of_item(&d.guid, &d.rk)` (fork markers inline), and `HeroSet::list` stands down when
+the disc exists — the old fork had ONE My List control, not two. The disc's press also had to be
+keyed by the resolved NVIO hex (`hero::press` decodes a `plex://` guid tail, which a `nuvio://`
+guid does not carry); its Add/Remove actions now name the same id as the Watchlist store's writes.
+Regression test `a_shim_movie_gets_the_watchlist_disc_and_a_working_press` pins all three.
+
+A workspace-wide `--workspace --lib` run has six failures that are NOT from this change: four
+(`the_feed_counts_a_gap_only_between_two_stamped_callbacks` and the three transcoder lossy-gate
+tests) reproduce unchanged on a detached worktree at `b26d45dd`; the other two are order-dependent
+and pass in isolation. The project's default nextest scope is green.
+
+**Retiring the old named My List UI once the disc worked.** With the disc now the only My List
+control, the fork's earlier `HeroCtl::MyList` / `ELEM_MY_LIST` / `HeroSet::list` / `HeroWidths::list`
+button was removed from `screens/src/detail/hero.rs` and `detail/mod.rs`: no variant, element id,
+focus stop, measured width, label (`list_label`), draw arm, press arm or a11y entry. Its two UI
+tests were removed and the remaining `HeroSet` literals in detail tests no longer initialise a
+`list` bit. This is a UI-only removal: `DetailScreen::SHAPE` still names `list_state`,
+`list_pending` and `list_error`, and `state_fp()` hashes every screen SHAPE into the pinned replay
+fingerprints, so those fields, their addressed `NuvioReq::MyList` read, its landing and the
+`browse.list.*` locale data stay. They are marked in code as legacy replay state, never as a second
+Watchlist implementation. Removing them properly means re-recording the V13 anchor and historical
+replay profiles, which is a separate change.

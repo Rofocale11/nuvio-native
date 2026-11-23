@@ -113,6 +113,8 @@ pub enum NuvioReq {
     /// `GET`/`POST /nuvio/library`: read (or set) the seated profile's My List state for a
     /// `nuvio://` item. `Some(saved)` is a write to the account and is only ever sent after the
     /// screen has confirmed the viewer's press and a signed-in state, as the old worker was.
+    // Fork Rofocale11: legacy Detail replay-state read; no UI control uses it. My List is now
+    // written through the Watchlist store's disc/menu actions.
     MyList { sid: plx_plex::plex::ServerId, rk: String, saved: Option<bool>, reply: NuvioReply },
 }
 
@@ -122,6 +124,7 @@ pub enum NuvioReq {
 pub enum NuvioResult {
     Streams(Option<plx_plex::plex::nuvio::StreamList>),
     Selected(bool),
+    // Fork Rofocale11: legacy Detail replay-state answer, not a Watchlist source.
     MyList(Option<plx_plex::plex::nuvio::LibraryState>),
 }
 

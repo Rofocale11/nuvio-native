@@ -43,12 +43,6 @@ pub const ELEM_ALT: u32 = 2;
 pub const ELEM_MARK_WATCHED: u32 = 3;
 pub const ELEM_MARK_UNWATCHED: u32 = 4;
 pub const ELEM_TRAILER: u32 = 5;
-// Fork Rofocale11: the My List button is the Nuvio account-backed list toggle (Add/Remove from My
-// List), not upstream's plex.tv Watchlist. The two controls are mutually exclusive on one item
-// because a Nuvio `nuvio://` guid never passes `catalog_hex_of_guid` (which needs `plex://`), but
-// element IDs must still be distinct: `HeroCtl::of_elem` matches them in one table and a shared
-// value makes the Watchlist arm unreachable. Use 10, the first free hero ID after upstream's 9.
-pub const ELEM_MY_LIST: u32 = 10;
 /// The bookmark disc — the Watchlist toggle. ONE identity for both faces (outline / filled): the
 /// face is membership, not a different control, so focus rides straight through a flip.
 pub const ELEM_WATCHLIST: u32 = 6;
@@ -110,8 +104,6 @@ pub const GO_TO_SHOW_ICON: plx_ui::icons::Icon = plx_ui::icons::Icon::Show;
 /// `ui/detail.rs::HeroCtl`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeroCtl {
-    /// Save/remove this Nuvio title in the active account profile.
-    MyList,
     /// the Play/Resume pill — always present, always first
     Play,
     /// the ↺ disc, present only while there is a resume point for it to ignore
@@ -143,7 +135,6 @@ impl HeroCtl {
     /// This control's fixed `u32` identity (never its position — see the module doc).
     pub const fn elem(self) -> u32 {
         match self {
-            HeroCtl::MyList => ELEM_MY_LIST,
             HeroCtl::Play => ELEM_PLAY,
             HeroCtl::Restart => ELEM_RESTART,
             HeroCtl::Trailer => ELEM_TRAILER,
@@ -161,7 +152,6 @@ impl HeroCtl {
     /// their own disjoint range, per the module doc).
     pub fn of_elem(e: u32) -> Option<Self> {
         match e {
-            ELEM_MY_LIST => Some(HeroCtl::MyList),
             ELEM_PLAY => Some(HeroCtl::Play),
             ELEM_RESTART => Some(HeroCtl::Restart),
             ELEM_TRAILER => Some(HeroCtl::Trailer),
@@ -196,19 +186,13 @@ impl HeroCtl {
     /// own seat, which every frame moves to `DetailScreen::default_elem` until the viewer acts at it
     /// (`DetailScreen::provisional` lists the acts).
     pub const fn writes_account(self) -> bool {
-        // Fork Rofocale11: My List writes to the Nuvio account's library via sync_push/delete, so it
-        // must be treated as an account-writing stop (never the page's default seat) just like
-        // upstream's Watchlist and the watched toggle.
-        matches!(self, HeroCtl::MyList | HeroCtl::Watchlist | HeroCtl::MarkWatched | HeroCtl::MarkUnwatched)
+        matches!(self, HeroCtl::Watchlist | HeroCtl::MarkWatched | HeroCtl::MarkUnwatched)
     }
     /// **The control's accessibility word** (`detail.hero.<word>`): one static word per variant, never
     /// derived from the label, which changes with the item (Play wears "Resume" mid-title: both are
     /// `play`) and the language. The watched toggle's two faces are two words, for what pressing each does.
     pub const fn a11y_name(self) -> &'static str {
         match self {
-            // Fork Rofocale11: the My List control needs its own accessibility word; upstream's
-            // a11y vocabulary did not know about the Nuvio list toggle.
-            HeroCtl::MyList => "my_list",
             HeroCtl::Play => "play",
             HeroCtl::Restart => "restart",
             HeroCtl::Trailer => "trailer",
@@ -224,9 +208,7 @@ impl HeroCtl {
     /// The inverse of [`a11y_name`](Self::a11y_name): the control a word names, whether the row
     /// shows it or not (the caller checks that).
     pub fn of_a11y_name(word: &str) -> Option<Self> {
-        // Fork Rofocale11: My List joins upstream's ten controls in the a11y-name lookup.
-        const ALL: [HeroCtl; 11] = [
-            HeroCtl::MyList,
+        const ALL: [HeroCtl; 10] = [
             HeroCtl::Play,
             HeroCtl::Restart,
             HeroCtl::Trailer,
@@ -247,9 +229,6 @@ impl HeroCtl {
 /// decides which FACE the watched toggle wears.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct HeroSet {
-    // Fork Rofocale11: `list` is the Nuvio My List toggle, shown only for `nuvio://` items; it coexists
-    // with upstream's Watchlist / Go to Show / Play Version bits.
-    pub list: bool,
     /// the item carries a `plex://movie|show` guid the Watchlist takes — the bookmark disc exists only then
     pub watchlist: bool,
     /// this is an EPISODE's own page and it names its show — the Go to Show disc exists only then
@@ -270,8 +249,6 @@ pub struct HeroSet {
 /// page the episode belongs to, which is navigation rather than an action on the item. The Play
 /// Version disc follows the watched toggle, then More. Also available is the trailing pill when
 /// present, so it leaves the disc positions intact as its result lands.
-// Fork Rofocale11: the My List button (only when `set.list`, for Nuvio items) also joins the row,
-// after Also available; the array uses upstream's MAX_CTLS so all controls fit.
 pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; MAX_CTLS], usize) {
     let mut v = [HeroCtl::Play; MAX_CTLS];
     let mut n = 1;
@@ -306,9 +283,6 @@ pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; MAX_CTLS], usize) {
         v[n] = HeroCtl::Alt;
         n += 1;
     }
-    // Fork Rofocale11: the My List button trails the row as a wide pill, after upstream's Also
-    // available pill, so its translated Add/Remove labels never shift the disc positions.
-    if set.list { v[n] = HeroCtl::MyList; n += 1; }
     (v, n)
 }
 
@@ -572,12 +546,8 @@ pub fn alt_pill_w(measure: &dyn Measure) -> f32 {
     plx_appkit::hero_layout::pill_w(measure, alt_label(), theme::size::BODY, false, Some(ALT_ICON))
 }
 
-// Fork Rofocale11: HeroWidths carries the My List pill's width (`list`) alongside upstream's
-// pill/alt/disc widths; the Nuvio Add/Remove/Saving labels are measured, never approximated from
-// the Also available pill. The disc array uses upstream's DISCS size.
 #[derive(Clone, Copy, Debug)]
 pub struct HeroWidths {
-    pub list: f32,
     pub pill: f32,
     pub alt: f32,
     /// the unfurling discs, in the page's disc slot order, each already unfurled
@@ -590,8 +560,6 @@ fn control_widths(set: HeroSet, cw: HeroWidths) -> ([f32; MAX_CTLS], usize) {
     let mut widths = [0.0f32; MAX_CTLS];
     for (slot, c) in widths.iter_mut().zip(&v[..n]) {
         *slot = match c {
-            // Fork Rofocale11: My List is a measured wide pill, not a disc.
-            HeroCtl::MyList => cw.list,
             HeroCtl::Play => cw.pill,
             HeroCtl::Alt => cw.alt,
             HeroCtl::Restart => cw.disc[0],
@@ -659,9 +627,7 @@ pub(super) fn disc_caps_at(
     label_w: [f32; DISCS],
 ) -> [f32; DISCS] {
     plx_appkit::hero_layout::disc_caps_with(unfurl, label_w, |disc| {
-        // Fork Rofocale11: list width is zero here — when My List is present the page keeps every
-        // disc closed (see `hero_widths`), so the unfurl budget needs only the shared widths.
-        let (widths, n) = control_widths(set, HeroWidths { list: 0.0, pill, alt, disc });
+        let (widths, n) = control_widths(set, HeroWidths { pill, alt, disc });
         plx_appkit::hero_layout::row_right(&widths[..n])
     })
 }
@@ -678,24 +644,8 @@ pub fn hero_widths(
 ) -> HeroWidths {
     let pill = hero_pill_w(measure, has_restart);
     let alt = alt_pill_w(measure);
-    // Fork Rofocale11: with the wide My List button present the discs stay closed so the row
-    // never runs into the People column; upstream's named-episode unfurl is used otherwise.
-    let disc = if set.list { [CD; DISCS] } else { disc_caps(measure, set, unfurl, named_episode) };
-    // Fork Rofocale11: the widest translated Add/Remove/Saving label must not push My List into
-    // the People column. The discs are already closed above; cap the measured pill to the room
-    // that is left after Play, the Also available pill and every other disc plus their gaps, so
-    // the last control's right edge stays short of the People column in every shipped language.
-    // The control itself is still drawn with the same measured label — only its box is clamped.
-    let list = if set.list {
-        let (_, n) = hero_ctls(set);
-        let (others, _) = control_widths(set, HeroWidths { list: 0.0, pill, alt, disc });
-        let before: f32 = others[..n].iter().sum();
-        let right_without_list = plx_ui::consts::MARGIN_X + before
-            + plx_appkit::hero_layout::CGAP * n.saturating_sub(1) as f32;
-        let people_left = plx_ui::consts::SCR_W - plx_ui::consts::MARGIN_X - plx_ui::detail_layout::PEOPLE_W;
-        my_list_width(measure).min((people_left - right_without_list - 1.0).max(0.0))
-    } else { 0.0 };
-    HeroWidths { list, pill, alt, disc }
+    let disc = disc_caps(measure, set, unfurl, named_episode);
+    HeroWidths { pill, alt, disc }
 }
 
 pub fn hero_credit(d: &Detail) -> Option<(&'static str, Vec<&str>)> {
@@ -1137,8 +1087,7 @@ mod tests {
     }
 
     fn set_full(restart: bool, alt: bool, mark: PosterMark, trailer: bool) -> HeroSet {
-        HeroSet {
-            list: false, // Fork Rofocale11: this fixture is a plex item, so My List is absent.
+        HeroSet { // Fork Rofocale11: this fixture is a plex item, so My List is absent.
             more: false,
             watchlist: true,
             go_show: false,
@@ -1326,7 +1275,6 @@ mod tests {
     #[test]
     fn the_row_s_controls_never_overlap_at_any_set_size() {
         let cw = HeroWidths {
-            list: 0.0,
             pill: 200.0,
             alt: 260.0,
             disc: [CD; DISCS],
@@ -1353,7 +1301,7 @@ mod tests {
     /// the unfurl budget. A set's logical order and its measured width order must agree.
     #[test]
     fn the_row_geometry_uses_shared_spacing_for_every_control_set() {
-        let cw = HeroWidths { list: 0.0, pill: 211.0, alt: 263.0, disc: [57.0, 61.0, 67.0, 71.0, 73.0] };
+        let cw = HeroWidths { pill: 211.0, alt: 263.0, disc: [57.0, 61.0, 67.0, 71.0, 73.0] };
         for restart in [false, true] {
             for alt in [false, true] {
                 for trailer in [false, true] {
@@ -1362,7 +1310,6 @@ mod tests {
                         let (controls, n) = hero_ctls(set);
                         let widths: Vec<f32> = controls[..n].iter().map(|ctl| match ctl {
                             // Fork Rofocale11: My List is a measured pill in the row too.
-                            HeroCtl::MyList => cw.list,
                             HeroCtl::Play => cw.pill,
                             HeroCtl::Alt => cw.alt,
                             HeroCtl::Restart => cw.disc[0],
@@ -1630,7 +1577,7 @@ mod tests {
 
     #[test]
     fn restart_and_the_watch_tail_are_independent() {
-        let set = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let set = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -1649,7 +1596,7 @@ mod tests {
     #[test]
     fn the_actions_row_grows_an_also_available_control_only_for_a_second_source() {
         // Fork Rofocale11: this fixture is a plex item, so My List is absent.
-        let without = HeroSet { list: false, more: false,
+        let without = HeroSet { more: false,
             watchlist: true,
             go_show: false,
             version: false,
@@ -1658,7 +1605,7 @@ mod tests {
             alt: false,
             mark: PosterMark::None,
         };
-        let with = HeroSet { list: false, // Fork Rofocale11: plex item, no My List.
+        let with = HeroSet { // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -1673,7 +1620,7 @@ mod tests {
     fn the_hero_row_carries_no_track_information_disc() {
         for alt in [false, true] {
             for trailer in [false, true] {
-                let set = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+                let set = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
                     watchlist: true,
                     go_show: false,
                     version: false,
@@ -1808,7 +1755,7 @@ mod tests {
 
     #[test]
     fn hero_indices_mean_different_actions_in_the_two_control_sets() {
-        let compact = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let compact = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -1817,7 +1764,7 @@ mod tests {
             alt: false,
             mark: PosterMark::None,
         };
-        let wide = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let wide = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -1836,7 +1783,7 @@ mod tests {
 
     #[test]
     fn the_actions_row_accumulates_around_a_variable_width_control() {
-        let set = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let set = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -1846,7 +1793,6 @@ mod tests {
             mark: PosterMark::None,
         };
         let widths = HeroWidths {
-            list: 0.0,
             pill: 210.0,
             alt: 300.0,
             disc: [90.0, 120.0, 120.0, 150.0, 160.0],
@@ -1899,7 +1845,7 @@ mod tests {
                                             set,
                                             n - 1,
                                             0.0,
-                                            HeroWidths { list: 0.0, pill: PW + 62.0, alt: 340.0, disc },
+                                            HeroWidths { pill: PW + 62.0, alt: 340.0, disc },
                                         );
                                         assert!(last.x + last.w <= FACTS_R + 0.01, "{set:?} {labels:?} {unfurl:?}");
                                         opened |= disc.iter().any(|width| *width > CD);
@@ -1922,7 +1868,7 @@ mod tests {
         use plx_os::i18n::{language_on_this_thread_for_test, SHIPPED};
         let measure = plx_base::fontcov::advances::ShippedMeasure;
         // Go to Show belongs to an episode page; the on-deck More disc is absent there.
-        let wide = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let wide = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: true,
             version: true,
@@ -1943,7 +1889,7 @@ mod tests {
                         wide,
                         n - 1,
                         0.0,
-                        HeroWidths { list: 0.0, pill: hero_pill_w(&measure, true), alt: alt_pill_w(&measure), disc: caps },
+                        HeroWidths { pill: hero_pill_w(&measure, true), alt: alt_pill_w(&measure), disc: caps },
                     );
                     assert!(last.x + last.w <= FACTS_R + 0.01, "{} slot {focus}", language.tag());
                 }
@@ -1954,7 +1900,7 @@ mod tests {
     #[test]
     fn the_real_verbs_all_fit_the_widest_row() {
         let measure = plx_ui::fixture::FixtureMeasure;
-        let wide = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let wide = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -1970,7 +1916,6 @@ mod tests {
             n - 1,
             0.0,
             HeroWidths {
-                list: 0.0,
                 pill: hero_pill_w(&measure, true),
                 alt: alt_pill_w(&measure),
                 disc: caps,
@@ -1981,7 +1926,7 @@ mod tests {
             "the 5-control row collapses rather than crossing People"
         );
 
-        let roomy = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let roomy = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -2010,7 +1955,7 @@ mod tests {
 
     #[test]
     fn a_verb_that_does_not_fit_is_dropped_whole() {
-        let set = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let set = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -2052,7 +1997,7 @@ mod tests {
 
     #[test]
     fn the_widest_action_row_clears_the_people_column() {
-        let set = HeroSet { list: false, more: false, // Fork Rofocale11: plex item, no My List.
+        let set = HeroSet { more: false, // Fork Rofocale11: plex item, no My List.
             watchlist: true,
             go_show: false,
             version: false,
@@ -2067,7 +2012,6 @@ mod tests {
             n - 1,
             0.0,
             HeroWidths {
-                list: 0.0,
                 pill: PW + 62.0,
                 alt: 340.0,
                 disc: [CD; DISCS],
@@ -2359,7 +2303,7 @@ mod tests {
         for restart in [false, true] {
             for version in [false, true] {
                 for mark in [PosterMark::None, PosterMark::InProgress, PosterMark::Watched] {
-                    let set = HeroSet { list: false, more: false, watchlist: false, version, restart, trailer: false, alt: false, mark, go_show: true };
+                    let set = HeroSet { more: false, watchlist: false, version, restart, trailer: false, alt: false, mark, go_show: true };
                     for language in SHIPPED {
                         let _guard = language_on_this_thread_for_test(language);
                         let mut unfurl = [0.0; DISCS];
@@ -2403,15 +2347,4 @@ mod tests {
         assert!(!ScreenInputs::default().same_facts(&ScreenInputs { backends: BackendSet::NONE, ..Default::default() }),
             "the set is a screen-visible fact, so a change of it presents");
     }
-}
-
-
-/// Reserve the widest translated state, so an asynchronous list reply never shifts other buttons.
-// Fork Rofocale11: the My List button measures the Nuvio Add/Remove/Saving/Retry/Sign-in labels so
-// an async account reply never shifts the other hero controls. Updated to the renamed `plx_os`
-// i18n crate and the shared `appkit::hero_layout::pill_w` (upstream's refactor).
-pub fn my_list_width(measure: &dyn Measure) -> f32 {
-    use plx_os::i18n::msg;
-    [msg::browse_list_add_c(),msg::browse_list_remove_c(),msg::browse_list_saving_c(),msg::browse_list_retry_c(),msg::browse_list_signin_c()]
-        .into_iter().map(|label| plx_appkit::hero_layout::pill_w(measure,label,theme::size::BODY,false,None)).fold(0.0,f32::max)
 }

@@ -121,15 +121,12 @@ fn watchlist_day() -> Option<i64> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     Some((secs / 86_400) as i64)
 }
-fn watchlist_auth_current(auth: &plx_data::watchlist::WatchlistAuth) -> bool {
-    let profile = plx_plex::plex::session::current_snapshot();
-    let credential = profile.user.as_ref().and_then(plx_plex::plex::session::plex_tv_credential);
-    auth.matches_lease(&profile, credential.as_deref())
-}
 fn watchlist_io(input: plx_data::stores::watchlist_job::Snapshot) -> std::sync::Arc<dyn plx_data::watchlist::WatchlistIo> {
-    std::sync::Arc::new(plx_data::stores::watchlist_job::ports::LiveWatchlistIo {
-        input, lookup: plx_plex::plex::client_for, lease: watchlist_auth_current,
-    })
+    // Fork Rofocale11: upstream's LiveWatchlistIo asks plex.tv for a Watchlist with a credential
+    // this fork does not have (HTTP 401 -> "Can't reach your Watchlist"). The Watchlist's list is
+    // the Nuvio account's My List, which the in-process shim already reads and writes; keep the
+    // captured snapshot for reachability facts and swap only the transport.
+    std::sync::Arc::new(crate::app::watchlist_io::MyListIo::new(input))
 }
 fn launch_watchlist_stream_with(job: StoreJob, scripted: Option<std::sync::Arc<dyn plx_data::watchlist::WatchlistIo>>,
     spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> bool) {
