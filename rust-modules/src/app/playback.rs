@@ -111,6 +111,11 @@ pub(crate) fn is_started(ps: &plx_media::route::PlaybackSession) -> Option<bool>
 pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: &mut plx_media::player::adapter::PlayerAdapter, bridge: &mut super::bridge::Bridge, a: plx_appkit::more_menu::Action, present: &mut plx_machine::present::Present) {
     match a {
         plx_appkit::more_menu::Action::ToggleStats => crate::app::diagnostics::toggle(),
+        // Fork Rofocale11: a player Streams pick. The shim owns this item's stream list, so the
+        // pick is a `/nuvio/select` write followed by a fresh resolve — never a quality rung.
+        plx_appkit::more_menu::Action::NuvioStream(index) => {
+            crate::app::nuvio_more::apply_stream_pick(ps, pa, bridge, present, index);
+        }
         // A rung of the playback-quality ladder — a routing POLICY, not a number handed to a
         // running stream. Not deferred either: `route::set_quality` re-asks the routing question
         // for the playback on screen and reloads only when the answer changed.

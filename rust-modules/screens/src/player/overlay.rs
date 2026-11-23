@@ -42,12 +42,12 @@
 use std::borrow::Cow;
 use std::os::raw::c_int;
 
-use crate::registry::{AppFx, AppLike, PlayerReq};
+use crate::registry::{AppFx, AppLike, NuvioReply, NuvioReq, NuvioResult, PlayerReq};
 use plx_ui::consts;
 use plx_ui::frame::Budget;
 use plx_machine::machine::{
     Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputKind, LogicalState,
-    Machine, NavOp,
+    Machine, NavOp, RequestId,
 };
 use plx_appkit::more_menu::{MoreMenuPart, MoreOk};
 use plx_ui::screen::{
@@ -199,6 +199,10 @@ impl LogicalState for PlayerOverlayArg {
                     None => 0,
                     Some(plx_appkit::more_menu::MorePage::Quality) => 1,
                     Some(plx_appkit::more_menu::MorePage::Speed) => 2,
+                    // Fork Rofocale11: the Streams pages' own canon codes, appended after the
+                    // upstream pages so older replays keep their numbers.
+                    Some(plx_appkit::more_menu::MorePage::Streams) => 3,
+                    Some(plx_appkit::more_menu::MorePage::Addon(_)) => 4,
                 });
             }
             OverlayKind::Timing => {}
@@ -490,6 +494,28 @@ impl PlayerOverlayScreen {
         fx.push(Fx::App(AppFx::Player(req)));
     }
 
+    // Fork Rofocale11: the player's `…` menu asks the shim for the playing item's ranked streams.
+    // The screen is a machine: it emits one typed effect and later consumes one addressed answer;
+    // the shim's HTTP call and any retry sleep live on the application's worker. A plain Plex play
+    // answers `None` and the upstream Quality row keeps its place.
+    fn request_nuvio_streams<H: AppLike>(
+        &mut self,
+        ps: &plx_media::route::PlaybackSession,
+        fx: &mut Effects<'_, H>,
+    ) {
+        let Panel::More(p) = &mut self.panel else { return };
+        if !p.nuvio_should_request() { return; }
+        let rk = plx_media::route::cur_rk(ps);
+        if rk.is_empty() { return; }
+        let (sid, rk, delay_ms, req) = p.nuvio_arm_request(plx_media::route::cur_sid(ps), &rk);
+        fx.push(Fx::App(AppFx::Nuvio(NuvioReq::Streams {
+            sid,
+            rk,
+            delay_ms,
+            reply: NuvioReply { to: fx.from(), request: req },
+        })));
+    }
+
     fn dismiss<H: AppLike>(&self, fx: &mut Effects<'_, H>) {
         fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
     }
@@ -766,6 +792,24 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                 self.retarget(ps, H::metadata(cx), *kind);
                 Handled::Yes
             }
+            // Fork Rofocale11: the addressed stream-list answer. The request id is the fence: a
+            // late reply to a fetch this panel no longer owns is dropped, exactly as the Detail
+            // picker drops a stale mailbox write.
+            ScreenEvent::Async(RequestId(req), crate::registry::AppMsg::Nuvio(NuvioResult::Streams(list)))
+                if matches!(&self.panel, Panel::More(p) if p.nuvio_request_id() == *req) =>
+            {
+                let changed = match &mut self.panel {
+                    Panel::More(p) => p.nuvio_land(ps, list.clone()),
+                    _ => false,
+                };
+                if changed {
+                    fx.invalidate(plx_machine::present::Provenance::Landing(fx.from()));
+                }
+                // A partial answer is polled until the shim says its addons are done; the delay
+                // is applied by the worker, never by this frame.
+                self.request_nuvio_streams(ps, fx);
+                Handled::Yes
+            }
             ScreenEvent::Input(input) => {
                 // The dispatcher's `machine::Key` is the four directions plus OK/BACK; the
                 // transport alphabet this ladder turns on lives in `consts::Key`. Preserve the
@@ -845,6 +889,9 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                 Handled::No
             }
             ScreenEvent::Tick(tick) => {
+                // Fork Rofocale11: the first tick after the `…` menu mounts asks for the streams;
+                // later ticks only re-arm when a partial answer asked for a poll.
+                self.request_nuvio_streams(ps, fx);
                 let dt = tick.dt();
                 let mut installed = false;
                 match &mut self.panel {
@@ -1010,6 +1057,9 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Focusable<H
                 let subject = match part.action_at(key) {
                     Some(Action::Hud(command)) => command.plays_rk(ps),
                     Some(Action::SetQuality(_)) => super::quality_pick_subject(ps),
+                    // Fork Rofocale11: a stream pick re-resolves the PLAYING item, whose key the
+                    // a11y subject already names; no extra subject is needed on the row.
+                    Some(Action::NuvioStream(_)) => None,
                     // exhaustive, so a new action cannot reach here without deciding whether it acts on a title
                     Some(Action::None | Action::ToggleStats | Action::SetSpeed(_) | Action::SendDiagnostics) | None => None,
                 };

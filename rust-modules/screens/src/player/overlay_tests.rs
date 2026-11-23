@@ -1531,3 +1531,93 @@ fn menu_anchor_of(page: &PlayerOverlayScreen, name: &str) -> plx_ui::Rect {
         _ => panic!("{name}: a menu"),
     }
 }
+
+/// Fork Rofocale11: the player's `…` menu asks for the playing item's shim streams through a typed
+/// effect (no registry read, no worker on the frame), and when the addressed answer lands the
+/// Streams drill-in REPLACES the upstream Quality row. Picking a stream reports the shim index as
+/// an ordinary `PlayerReq::More` action for the app to perform.
+#[test]
+fn the_more_menu_asks_for_streams_and_swaps_its_quality_row_when_they_land() {
+    use crate::registry::{NuvioReply, NuvioReq, NuvioResult};
+    use plx_machine::machine::RequestId;
+
+    let mut ps = plx_media::route::PlaybackSession::default();
+    plx_media::route::seed_queue_for_test(&mut ps, "nuvio-item", Vec::new(), None);
+    let meta = plx_data::stores::metadata::MetadataStore::default();
+    let mut page = PlayerOverlayScreen::new(&ps, meta.view(), ENTRY, OverlayKind::More { page: None });
+    let cx = Cx {
+        views: &ps,
+        tick: Tick::default(),
+        measure: &FixtureMeasure,
+        focus: Default::default(),
+        press: Default::default(),
+        modal: Default::default(),
+        page_image: Default::default(),
+        hold_hint: Default::default(),
+        owner: InputOwner::Entry(ENTRY),
+    };
+    let step = |page: &mut PlayerOverlayScreen, ev: ScreenEvent<TestHost>| {
+        let mut out = Vec::new();
+        let mut present = plx_machine::present::Present::new();
+        let handled = page.step(&ev, &cx, &mut Effects::new(&mut out, MachineId::Instance(INST), &mut present));
+        (handled, out)
+    };
+
+    let (_, out) = step(&mut page, ScreenEvent::Tick(Tick::default()));
+    let ask = out.iter().find_map(|e| match &e.fx {
+        Fx::App(AppFx::Nuvio(NuvioReq::Streams { rk, delay_ms, reply, .. })) => {
+            Some((rk.clone(), *delay_ms, reply.request))
+        }
+        _ => None,
+    })
+    .expect("the first tick asks the shim for streams");
+    assert_eq!(ask.0, "nuvio-item");
+    assert_eq!(ask.1, 0, "the first ask is immediate");
+    let _ = NuvioReply { to: MachineId::Instance(INST), request: ask.2 };
+
+    let list = plx_plex::plex::nuvio::StreamList {
+        complete: true,
+        streams: vec![
+            plx_plex::plex::nuvio::StreamChoice {
+                index: 3,
+                label: "4k DV".into(),
+                addon: Some("Torrentio".into()),
+                ..Default::default()
+            },
+            plx_plex::plex::nuvio::StreamChoice {
+                index: 7,
+                label: "720p".into(),
+                addon: Some("Torrentio".into()),
+                ..Default::default()
+            },
+        ],
+    };
+    let _ = step(
+        &mut page,
+        ScreenEvent::Async(RequestId(ask.2), AppMsg::Nuvio(NuvioResult::Streams(Some(list)))),
+    );
+
+    let keys = match page.panel() {
+        Panel::More(p) => p.keys(),
+        _ => panic!("the More panel is still up"),
+    };
+    assert!(keys.contains(&MoreRow::OpenStreams.key().0), "the Streams row is offered");
+    assert!(!keys.contains(&MoreRow::OpenQuality.key().0), "no contradictory Quality row");
+
+    // Both levels are reached by the engine's Activate, exactly as a viewer's OK/click is.
+    let _ = step(&mut page, ScreenEvent::Activate(MoreRow::OpenStreams.key().0));
+    assert_eq!(
+        match page.panel() { Panel::More(p) => p.page(), _ => None },
+        Some(MorePage::Streams)
+    );
+    let _ = step(&mut page, ScreenEvent::Activate(MoreRow::OpenAddon(0).key().0));
+    assert_eq!(
+        match page.panel() { Panel::More(p) => p.page(), _ => None },
+        Some(MorePage::Addon(0))
+    );
+    let (_, out) = step(&mut page, ScreenEvent::Activate(MoreAction::NuvioStream(3).key().0));
+    assert!(out.iter().any(|e| matches!(
+        &e.fx,
+        Fx::App(AppFx::Player(PlayerReq::More(MoreAction::NuvioStream(3))))
+    )), "a stream pick is reported to the app, never performed by the screen");
+}

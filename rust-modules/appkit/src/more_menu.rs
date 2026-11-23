@@ -78,6 +78,10 @@
 //! the picture already satisfies does nothing at all. That is a user-initiated switch and not an
 //! adaptive one — nothing measures a link or moves a rung on its own.
 #![allow(non_upper_case_globals)]
+// Fork Rofocale11: the player's Streams drill-in lives in a child module so an upstream merge
+// only ever has to reconcile the marked branches in this file, not a second copy of the menu.
+mod nuvio_streams;
+
 use plx_ui::a11y::{A11y, A11yPath};
 use plx_ui::frame::Budget;
 use plx_ui::geom::IndexElem;
@@ -99,6 +103,9 @@ pub enum Action {
     None,
     /// flip `crate::app::diagnostics`'s overlay on/off
     ToggleStats,
+    /// Fork Rofocale11: pick the shim stream at this ranked index. The app performs the
+    /// `/nuvio/select` write and re-resolves the playing item; this menu never does IO.
+    NuvioStream(usize),
     /// select a rung of the playback-quality ladder ([`plx_media::route::set_quality`])
     SetQuality(plx_media::route::Quality),
     /// select a playback speed, in thousandths (one of [`plx_media::player::PLAY_RATES`];
@@ -165,6 +172,10 @@ pub enum MorePage {
     /// The playback speeds, slowest first, Normal checked by default ([`MoreRow::Act`] of a
     /// [`Action::SetSpeed`]).
     Speed,
+    // Fork Rofocale11: the Nuvio Streams drill-in — the addons that answered, then one addon's
+    // ranked streams. Addressed by the addon's position so a re-ranked list cannot re-key a page.
+    Streams,
+    Addon(usize),
 }
 
 impl MorePage {
@@ -173,6 +184,8 @@ impl MorePage {
         match self {
             Self::Quality => plx_os::i18n::msg::widgets_menu_quality().to_string(),
             Self::Speed => plx_os::i18n::msg::widgets_menu_speed().to_string(),
+            // Fork Rofocale11: the picker's own bands come from the fork module.
+            Self::Streams | Self::Addon(_) => String::new(),
         }
     }
 
@@ -181,6 +194,10 @@ impl MorePage {
         match self {
             Self::Quality => 1,
             Self::Speed => 2,
+            // Fork Rofocale11: clear of the upstream pages' codes; append-only so recordings of
+            // the older pages keep their numbers.
+            Self::Streams => 0x4000,
+            Self::Addon(i) => 0x4100 + i as u32,
         }
     }
 }
@@ -193,6 +210,9 @@ pub enum MoreRow {
     OpenQuality,
     /// The root's Playback speed row ([`MorePage::Speed`]): reads out the current speed.
     OpenSpeed,
+    // Fork Rofocale11: the Streams drill-in and one addon on its first page.
+    OpenStreams,
+    OpenAddon(usize),
     Act(Action),
 }
 
@@ -245,6 +265,12 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
+    // Fork Rofocale11: the Nuvio stream list and its request bookkeeping. Kept here, built and
+    // rebuilt only by the child module; the upstream code below just threads it through the form
+    // builders. Unhashed: the picker's replay canon is its page path, as the track menu's is.
+    nuvio: nuvio_streams::StreamMenu,
+    /// The revision `nuvio` had when the form was last built; a live re-rank rebuilds the page.
+    nuvio_rev: u32,
     /// The opener's rect, handed in when the menu opened ([`Self::with_anchor`]) and never read from
     /// anywhere again: a stand-in taking the HUD row cannot move an open panel.
     anchor: Rect,
@@ -303,6 +329,9 @@ impl FormId for Action {
             Action::None => 0,
             Action::ToggleStats => 1,
             Action::SendDiagnostics => 2,
+            // Fork Rofocale11: 0x3000 up — clear of the upstream's speeds (20..=29), folded
+            // commands (30..=43) and rungs (10..=16), and of the addon drill-ins (0x1000 + i).
+            Action::NuvioStream(i) => 0x3000 + *i as u32,
             // 30..=43: the folded commands, one key each (the four a package can never fold are listed so a
             // new command cannot compile without claiming one)
             Action::Hud(command) => match command {
@@ -339,6 +368,9 @@ impl FormId for MoreRow {
             // free in `Action`'s key space (0..=2, 10..=16 and 20..=29)
             MoreRow::OpenQuality => RowKey(3),
             MoreRow::OpenSpeed => RowKey(4),
+            // Fork Rofocale11: 5 and 0x1000 + i, disjoint from every action's key.
+            MoreRow::OpenStreams => RowKey(5),
+            MoreRow::OpenAddon(i) => RowKey(0x1000 + *i as u32),
             MoreRow::Act(a) => a.key(),
         }
     }
@@ -358,10 +390,14 @@ impl MoreRow {
         match self {
             MoreRow::OpenQuality => path.name("quality"),
             MoreRow::OpenSpeed => path.name("speed"),
+            // Fork Rofocale11: identity-based ids, like the rest of this menu.
+            MoreRow::OpenStreams => path.name("streams"),
+            MoreRow::OpenAddon(i) => path.name("addon").index(*i),
             MoreRow::Act(action) => match action {
                 Action::None => path.name("none"),
                 Action::ToggleStats => path.name("stats"),
                 Action::SendDiagnostics => path.name("diagnostics"),
+                Action::NuvioStream(i) => path.name("stream").index(*i),
                 Action::SetQuality(quality) => path.name("rung").name(match quality {
                     Quality::Auto => "auto",
                     Quality::Original => "original",
@@ -400,6 +436,9 @@ fn quality_offered(rows: &[Action], forced: bool) -> bool {
 /// The ROOT as a pure form: the Quality and Playback speed drill-ins (headerless, like the
 /// Subtitles root's Style — each reads out its current choice as its value, Quality also what is
 /// playing), then Options.
+///
+/// Fork Rofocale11: when `nuvio` has streams for the playing item its Streams drill-in takes the
+/// Quality row's place — one answer to "what quality is this", never two.
 fn root_form(
     ps: &plx_media::route::PlaybackSession,
     rows: &[Action],
@@ -408,13 +447,16 @@ fn root_form(
     speed: i32,
     speeds: &[i32],
     folded: &[FoldedRow],
+    nuvio: &nuvio_streams::StreamMenu,
 ) -> MoreForm {
     let mut options = FormSection::new(plx_os::i18n::msg::widgets_menu_options());
     for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetQuality(_))) {
         options = options.item(MoreRow::Act(a), RowKind::Button, a, row_for(ps, a));
     }
-    let quality = FormSection::new("").item_if(
-        quality_offered(rows, forced),
+    // Fork Rofocale11: while the shim has streams for the playing item the Streams drill-in takes
+    // the Quality row's lead. The two are answers to the same question, so only one is offered.
+    let quality = nuvio_streams::root_section(nuvio).item_if(
+        !nuvio.offered() && quality_offered(rows, forced),
         MoreRow::OpenQuality,
         RowKind::Nav(MorePage::Quality),
         Action::None,
@@ -518,10 +560,13 @@ impl MoreMenuState {
 
         let speed = plx_media::player::selected_rate(ps).unwrap_or(plx_media::player::RATE_NORMAL);
         let speeds = plx_media::player::speed_offer(ps);
+        // Fork Rofocale11: the stream list is EMPTY at mount — the owning screen asks for it from
+        // `step` and lands the answer into this state. A menu never starts work in a constructor.
+        let nuvio = nuvio_streams::StreamMenu::default();
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true; // a short action list — BODY labels, like the profile menu
         form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
-        form.set_or_open(root_form(ps, &rows, forced, current, speed, &speeds, &folded), None);
+        form.set_or_open(root_form(ps, &rows, forced, current, speed, &speeds, &folded, &nuvio), None);
         let mut st = MoreMenuState {
             form,
             rows,
@@ -530,6 +575,8 @@ impl MoreMenuState {
             speed,
             speeds,
             folded,
+            nuvio,
+            nuvio_rev: 0,
             pages: PageStack::new(),
             motion: PanelMotion::new(),
             anchor: crate::player_hud::classic::ctrl_row_hit_rect(),
@@ -543,6 +590,9 @@ impl MoreMenuState {
             None => false,
             Some(MorePage::Quality) => quality_offered(&st.rows, st.forced),
             Some(MorePage::Speed) => st.speeds.len() > 1,
+            // Fork Rofocale11: a stream page cannot be opened at construction — the list arrives
+            // from the shim later, and the screen pushes it from the Streams row.
+            Some(MorePage::Streams | MorePage::Addon(_)) => false,
         };
         if let Some(page) = page.filter(|_| offered) {
             // the page is pushed from its opener's row, so BACK lands where a viewer would have
@@ -573,6 +623,17 @@ impl MoreMenuState {
         match page {
             MorePage::Quality => quality_form(ps, &self.rows, self.current),
             MorePage::Speed => speed_form(ps, self.speed, &self.speeds),
+            // Fork Rofocale11: the two-level Streams picker, built only from the captured list.
+            MorePage::Streams | MorePage::Addon(_) => nuvio_streams::page_form(page, &self.nuvio),
+        }
+    }
+
+    /// A page's title band: upstream pages name themselves, the fork's pages are titled from the
+    /// captured addon list.
+    fn title(&self, page: MorePage) -> String {
+        match page {
+            MorePage::Streams | MorePage::Addon(_) => nuvio_streams::page_title(page, &self.nuvio),
+            _ => page.title(),
         }
     }
 
@@ -582,6 +643,8 @@ impl MoreMenuState {
         match page {
             MorePage::Quality => Some(MoreRow::Act(Action::SetQuality(self.current))),
             MorePage::Speed => Some(MoreRow::Act(Action::SetSpeed(self.speed))),
+            // Fork Rofocale11: start on the first real row — an inert waiting note is no seat.
+            MorePage::Streams | MorePage::Addon(_) => nuvio_streams::page_initial(page, &self.nuvio),
         }
     }
 
@@ -595,19 +658,32 @@ impl MoreMenuState {
         let form = self.page_form(ps, page);
         self.form.open(form, self.page_initial(page).as_ref());
         // after the sections: the band moves every row, so the pill is re-jumped onto the focused one
-        self.form.table.set_title(Some(page.title()));
+        let title = self.title(page);
+        self.form.table.set_title(Some(title));
         self.motion.begin_slide(leaving, 1.0);
     }
 
-    /// Pop the top page: the root comes back exactly as it was left — the opener focused by id, the
-    /// scroll reinstated ([`FormTable::restore`]). `false` at the root (nothing popped).
+    /// Pop the top page: the page beneath comes back exactly as it was left — the opener focused
+    /// by id, the scroll reinstated ([`FormTable::restore`]). `false` at the root (nothing popped).
     pub fn pop(&mut self, ps: &plx_media::route::PlaybackSession) -> bool {
         let Some(saved) = self.pages.pop() else { return false };
         let leaving = page_stack::leave_page(&mut self.form);
         self.motion.begin_slide(leaving, -1.0);
-        let form = root_form(ps, &self.rows, self.forced, self.current, self.speed, &self.speeds, &self.folded);
-        self.form.restore(form, Some(&saved.return_id), saved.scroll);
-        self.form.table.set_title(None);
+        // Fork Rofocale11: popping an addon page returns to the Streams page (with its band), not
+        // straight to the root — the two levels are a real stack, like the track menu's tabs.
+        let (form, title) = match self.pages.top() {
+            Some(page) => (self.page_form(ps, page), Some(self.title(page))),
+            None => (root_form(ps, &self.rows, self.forced, self.current, self.speed, &self.speeds, &self.folded, &self.nuvio), None),
+        };
+        // A re-rank can drop the opener; land on the first real row rather than the table's own
+        // opening slot (which can be an inert note).
+        let landing = if form.contains(&saved.return_id) {
+            Some(saved.return_id)
+        } else {
+            form.slots().into_iter().flatten().next().map(|binding| binding.id)
+        };
+        self.form.restore(form, landing.as_ref(), saved.scroll);
+        self.form.table.set_title(title);
         true
     }
 
@@ -646,6 +722,7 @@ impl MoreMenuState {
 
     pub fn refresh_with_quality(&mut self, ps: &plx_media::route::PlaybackSession, current: plx_media::route::Quality) -> bool {
         let forced = plx_media::route::forced_direct_play(ps);
+        let nuvio_rev = self.nuvio.rev;
         self.refresh_to(
             ps,
             forced,
@@ -653,6 +730,7 @@ impl MoreMenuState {
             current,
             plx_media::player::selected_rate(ps).unwrap_or(plx_media::player::RATE_NORMAL),
             plx_media::player::speed_offer(ps),
+            nuvio_rev,
         )
     }
 
@@ -666,12 +744,14 @@ impl MoreMenuState {
         current: plx_media::route::Quality,
         speed: i32,
         speeds: Vec<i32>,
+        nuvio_rev: u32,
     ) -> bool {
         if forced == self.forced
             && rows == self.rows
             && current == self.current
             && speed == self.speed
             && speeds == self.speeds
+            && nuvio_rev == self.nuvio_rev
         {
             return false;
         }
@@ -680,29 +760,47 @@ impl MoreMenuState {
         self.forced = forced;
         self.current = current;
         self.speed = speed;
+        self.nuvio_rev = nuvio_rev;
         if let Some(first) = self.pages.first().copied() {
             // either page can vanish under the viewer: Quality with its ladder, Speed with its offer
             let still_offered = match first.page {
                 MorePage::Speed => self.speeds.len() > 1,
-                MorePage::Quality => quality_offered(&self.rows, self.forced),
+                // Fork Rofocale11: a Nuvio failure screen's Quality entry pops to the Streams row
+                // once the shim answers — there is no ladder to repair with a bitrate cap.
+                MorePage::Quality => !self.nuvio.offered() && quality_offered(&self.rows, self.forced),
+                // Fork Rofocale11: an addon page is addressed by its position; a re-rank that
+                // removes that addon goes back one level instead of naming somebody else's list.
+                MorePage::Streams | MorePage::Addon(_) => self.nuvio.offered(),
             };
             if still_offered {
-                let page = self.pages.top().unwrap_or(first.page);
+                let mut page = self.pages.top().unwrap_or(first.page);
+                if matches!(page, MorePage::Addon(i) if i >= crate::source_list::addon_pages(&self.nuvio.choices).len()) {
+                    let saved = self.pages.pop();
+                    page = MorePage::Streams;
+                    let form = self.page_form(ps, page);
+                    let title = self.title(page);
+                    self.form.restore(form, saved.as_ref().map(|s| &s.return_id), saved.map_or(0.0, |s| s.scroll));
+                    self.form.table.set_title(Some(title));
+                    self.motion.cancel_slide();
+                    return true;
+                }
                 let fallback = self.page_initial(page);
                 let form = self.page_form(ps, page);
                 self.form.refresh_with(form, None, fallback.as_ref());
+                let title = self.title(page);
+                self.form.table.set_title(Some(title));
             } else {
                 // the ladder is gone under the viewer: back to the root, restoring the opener and
                 // scroll the stack saved at its first push
                 self.pages.clear();
-                let form = root_form(ps, &self.rows, self.forced, self.current, self.speed, &self.speeds, &self.folded);
+                let form = root_form(ps, &self.rows, self.forced, self.current, self.speed, &self.speeds, &self.folded, &self.nuvio);
                 self.form.restore(form, Some(&first.return_id), first.scroll);
                 self.form.table.set_title(None);
                 self.motion.cancel_slide();
             }
         } else {
             let keep = self.form.selected_id().copied();
-            self.form.set_or_open(root_form(ps, &self.rows, self.forced, self.current, self.speed, &self.speeds, &self.folded), keep.as_ref());
+            self.form.set_or_open(root_form(ps, &self.rows, self.forced, self.current, self.speed, &self.speeds, &self.folded, &self.nuvio), keep.as_ref());
         }
         true
     }
@@ -953,6 +1051,8 @@ impl MoreMenuPart<'_> {
         match form.binding_at(form.index_of_key(RowKey(key.index()?))?)?.id {
             MoreRow::Act(action) => Some(action),
             MoreRow::OpenQuality | MoreRow::OpenSpeed => None,
+            // Fork Rofocale11: a drill-in names a page, not an action for the HUD to perform.
+            MoreRow::OpenStreams | MoreRow::OpenAddon(_) => None,
         }
     }
 }
@@ -1007,6 +1107,9 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         // the picker's leading mark (see this module's doc)
         Action::SetQuality(q) => q.label().into(),
         Action::SetSpeed(r) => speed_label(r).into(),
+        // Fork Rofocale11: a stream row is built from the captured choice on its addon page; this
+        // fallback only names an action whose choice is no longer in the list.
+        Action::NuvioStream(i) => format!("Stream #{i}").into(),
         Action::SendDiagnostics => plx_os::i18n::msg::widgets_menu_diagnostics().into(),
         Action::None => "".into(),
         // a folded row is labelled by its `FoldedRow`, which knows the content
@@ -1041,7 +1144,9 @@ fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
         // a rung is not a switch — see `row_for`, which gives it the leading mark instead
-        Action::SetQuality(_) | Action::SetSpeed(_) | Action::SendDiagnostics | Action::Hud(_) | Action::None => false,
+        Action::SetQuality(_) | Action::SetSpeed(_) | Action::SendDiagnostics | Action::Hud(_) | Action::None
+        // Fork Rofocale11: a stream is a choice, not a switch — no trailing On/Off.
+        | Action::NuvioStream(_) => false,
     }
 }
 
@@ -1084,6 +1189,9 @@ fn row_for(ps: &plx_media::route::PlaybackSession, a: Action) -> Row {
         Action::SetQuality(q) => Row::new(label(a)).detail(quality_detail(q, plx_media::route::source_decodable(ps))),
         // a picker row like a rung: the leading mark comes from the page's `choice`
         Action::SetSpeed(_) => Row::new(label(a)),
+        // Fork Rofocale11: the addon page builds its own rows from the captured choice, so this
+        // arm is only a fallback for a choice that has since left the list.
+        Action::NuvioStream(_) => Row::new(label(a)),
         _ => Row::new(label(a)).toggle(is_on(a)),
     }
 }
@@ -1193,8 +1301,8 @@ mod tests {
         let rows = rows_for(forced);
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true;
-        form.set_or_open(root_form(&ps, &rows, forced, current, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &[]), None);
-        MoreMenuState { form, rows, forced, current, speed: plx_media::player::RATE_NORMAL, speeds: plx_media::player::PLAY_RATES.to_vec(), folded: Vec::new(), pages: PageStack::new(), motion: PanelMotion::new(), anchor: crate::player_hud::classic::ctrl_row_hit_rect(), side: std::cell::Cell::new(plx_ui::popover::Side::Above) }
+        form.set_or_open(root_form(&ps, &rows, forced, current, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &[], &nuvio_streams::StreamMenu::default()), None);
+        MoreMenuState { form, rows, forced, current, speed: plx_media::player::RATE_NORMAL, speeds: plx_media::player::PLAY_RATES.to_vec(), folded: Vec::new(), nuvio: nuvio_streams::StreamMenu::default(), nuvio_rev: 0, pages: PageStack::new(), motion: PanelMotion::new(), anchor: crate::player_hud::classic::ctrl_row_hit_rect(), side: std::cell::Cell::new(plx_ui::popover::Side::Above) }
     }
 
     /// The same menu with the Quality page pushed (and its slide skipped).
@@ -1373,7 +1481,7 @@ mod tests {
         let ps = plx_media::route::PlaybackSession::default();
         for forced in [false, true] {
             let mut root = MoreMenuState::new(&ps);
-            let form = root_form(&ps, &rows_for(forced), forced, plx_media::route::Quality::Auto, 1000, &plx_media::player::PLAY_RATES, &[]);
+            let form = root_form(&ps, &rows_for(forced), forced, plx_media::route::Quality::Auto, 1000, &plx_media::player::PLAY_RATES, &[], &nuvio_streams::StreamMenu::default());
             root.form.set(form, None);
             assert!(
                 root.form.index_of(&MoreRow::OpenSpeed).is_some(),
@@ -1437,7 +1545,7 @@ mod tests {
         let rows = rows_for(false);
         for offer in [vec![], vec![1000]] {
             let mut root = MoreMenuState::new(&ps);
-            root.form.set(root_form(&ps, &rows, false, Quality::Auto, 1000, &offer, &[]), None);
+            root.form.set(root_form(&ps, &rows, false, Quality::Auto, 1000, &offer, &[], &nuvio_streams::StreamMenu::default()), None);
             assert!(root.form.index_of(&MoreRow::OpenSpeed).is_none(), "offer {offer:?}");
         }
         let mut st = MoreMenuState::new(&ps);
@@ -1445,7 +1553,7 @@ mod tests {
         st.push(&ps, MorePage::Speed);
         assert_eq!(st.page(), Some(MorePage::Speed));
         let (forced, rows, q) = (st.forced, st.rows.clone(), st.current);
-        assert!(st.refresh_to(&ps, forced, rows, q, 1000, Vec::new()));
+        assert!(st.refresh_to(&ps, forced, rows, q, 1000, Vec::new(), 0));
         assert_eq!(st.page(), None, "the page went with its offer");
         assert!(st.form.index_of(&MoreRow::OpenSpeed).is_none());
     }
@@ -1491,6 +1599,8 @@ mod tests {
             speed: plx_media::player::RATE_NORMAL,
             speeds: plx_media::player::PLAY_RATES.to_vec(),
             folded: Vec::new(),
+            nuvio: nuvio_streams::StreamMenu::default(),
+            nuvio_rev: 0,
             pages: PageStack::new(),
             motion: PanelMotion::new(),
             anchor: crate::player_hud::classic::ctrl_row_hit_rect(),
@@ -1578,8 +1688,8 @@ mod tests {
         let before = st.form.table.sel;
         // the current rung moves: the check follows, focus stays on the row the viewer was on
         let rows = st.rows.clone();
-        assert!(st.refresh_to(&ps, false, rows.clone(), Quality::P480, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec()));
-        assert!(!st.refresh_to(&ps, false, rows.clone(), Quality::P480, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec()), "and only once");
+        assert!(st.refresh_to(&ps, false, rows.clone(), Quality::P480, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec(), 0));
+        assert!(!st.refresh_to(&ps, false, rows.clone(), Quality::P480, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec(), 0), "and only once");
         assert_eq!(st.page(), Some(MorePage::Quality), "still on the page");
         assert_eq!(st.form.table.title(), Some("Quality"), "the title band stays");
         assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::SetQuality(Quality::P720))));
@@ -1588,7 +1698,7 @@ mod tests {
         assert!(!checked(&mut st, MoreRow::Act(Action::SetQuality(Quality::P1080))));
         // the focused rung leaves the ladder: focus falls back to the checked rung, page stays
         let without: Vec<Action> = rows.iter().copied().filter(|a| *a != Action::SetQuality(Quality::P720)).collect();
-        assert!(st.refresh_to(&ps, false, without, Quality::P480, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec()));
+        assert!(st.refresh_to(&ps, false, without, Quality::P480, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec(), 0));
         assert!(st.form.index_of(&MoreRow::Act(Action::SetQuality(Quality::P720))).is_none());
         assert_eq!(st.page(), Some(MorePage::Quality));
         assert_eq!(st.form.selected_id(), Some(&MoreRow::Act(Action::SetQuality(Quality::P480))));
@@ -1602,7 +1712,7 @@ mod tests {
         plx_media::speed_audio::force_speed_decoder_for_test(true); // a host test loads no FFmpeg
         let ps = plx_media::route::PlaybackSession::default();
         let mut st = quality_page(Quality::P1080);
-        assert!(st.refresh_to(&ps, true, rows_for(true), Quality::P1080, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec()));
+        assert!(st.refresh_to(&ps, true, rows_for(true), Quality::P1080, plx_media::player::RATE_NORMAL, plx_media::player::PLAY_RATES.to_vec(), 0));
         assert_eq!(st.page(), None);
         assert_eq!(st.form.table.title(), None);
         assert!(!st.transitioning(), "a page that vanished does not slide away");
@@ -1803,6 +1913,8 @@ mod focus_tests {
             speed: plx_media::player::RATE_NORMAL,
             speeds: plx_media::player::PLAY_RATES.to_vec(),
             folded: Vec::new(),
+            nuvio: nuvio_streams::StreamMenu::default(),
+            nuvio_rev: 0,
             pages: PageStack::new(),
             motion: PanelMotion::new(),
             anchor: crate::player_hud::classic::ctrl_row_hit_rect(),
@@ -1884,7 +1996,7 @@ mod focus_tests {
         let rate = plx_media::player::RATE_NORMAL;
         let speeds = plx_media::player::PLAY_RATES;
 
-        let root = projected(root_form(&ps, &rows, false, Quality::Auto, rate, &speeds, &folded));
+        let root = projected(root_form(&ps, &rows, false, Quality::Auto, rate, &speeds, &folded, &nuvio_streams::StreamMenu::default()));
         let ids: Vec<&str> = root.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["quality", "speed", "fold.previous", "stats"]);
         assert_eq!(root[0].1, Role::Row, "a drill-in");
@@ -1995,7 +2107,7 @@ mod focus_tests {
             let _guard = language_on_this_thread_for_test(language);
             for q in plx_media::route::QUALITY_LADDER {
                 let mut root = MoreMenuState::new(&ps);
-                root.form.set(root_form(&ps, &rows, false, q, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &[]), None);
+                root.form.set(root_form(&ps, &rows, false, q, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &[], &nuvio_streams::StreamMenu::default()), None);
                 check(language.tag(), &root.form);
                 let mut page = MoreMenuState::new(&ps);
                 page.current = q;
@@ -2010,7 +2122,7 @@ mod focus_tests {
             // the Speed page, and the root reading out the longest speed name
             for r in plx_media::player::PLAY_RATES {
                 let mut root = MoreMenuState::new(&ps);
-                root.form.set(root_form(&ps, &rows, false, plx_media::route::Quality::Auto, r, &plx_media::player::PLAY_RATES, &[]), None);
+                root.form.set(root_form(&ps, &rows, false, plx_media::route::Quality::Auto, r, &plx_media::player::PLAY_RATES, &[], &nuvio_streams::StreamMenu::default()), None);
                 check(language.tag(), &root.form);
             }
             let mut page = MoreMenuState::new(&ps);
@@ -2042,7 +2154,7 @@ mod focus_tests {
                 folded[6].label = go;
                 for q in plx_media::route::QUALITY_LADDER {
                     let mut root = MoreMenuState::new(&ps);
-                    root.form.set(root_form(&ps, &rows, false, q, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &folded), None);
+                    root.form.set(root_form(&ps, &rows, false, q, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &folded, &nuvio_streams::StreamMenu::default()), None);
                     check(language.tag(), &root.form);
                 }
             }
@@ -2488,7 +2600,7 @@ mod folded_tests {
             let folded: Vec<FoldedRow> = all[..n].iter().map(|&command| FoldedRow { command, label: "Previous Episode" }).collect();
             let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
             form.table.compact = true;
-            let root = root_form(&ps, &rows, false, plx_media::route::Quality::Auto, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &folded);
+            let root = root_form(&ps, &rows, false, plx_media::route::Quality::Auto, plx_media::player::RATE_NORMAL, &plx_media::player::PLAY_RATES, &folded, &nuvio_streams::StreamMenu::default());
             form.set_or_open(root, None);
             let formula = if n == 0 { ROOT_BASE_H } else { ROOT_BASE_H + FOLDED_SECTION_H + FOLDED_ROW_H * n as f32 };
             assert_eq!(form.table.measured_height(), formula, "{n} folded rows");

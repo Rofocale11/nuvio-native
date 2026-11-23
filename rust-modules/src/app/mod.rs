@@ -84,6 +84,9 @@ pub use exit::{Exit, Release};
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod nuvio;
+// Fork Rofocale11: the player's Streams pick — shim select + fresh resolve — in a fork-owned file
+// so `playback.rs` keeps only one marked match arm.
+mod nuvio_more;
 // Fork Rofocale11: the Watchlist page reads the Nuvio account's My List through the shim, not
 // plex.tv; this is the fork-owned I/O seam that makes that translation.
 mod watchlist_io;

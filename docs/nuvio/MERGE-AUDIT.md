@@ -742,3 +742,28 @@ show BOTH episode rows — the still (`episodes::Action::Play`) and the title
 The Nuvio gate is the pure `is_nuvio_item(d)` guid check, not the old fork's `client_for` in a
 screen step. Plain Plex episodes keep direct play and their detail page. Three tests pin the two
 rows, the latch and the hero fallback; full nextest, `check-nodef` and `check-deps` are green.
+
+**Player `…` → Streams picker (2026-11-23).** The old fork's player overflow menu replaced the
+playback-quality ladder with a two-level addon stream picker. Replacing the whole upstream
+`appkit/more_menu.rs` is exactly what makes an upstream merge painful, so this port does the
+opposite: the Nuvio menu lives in a NEW fork-owned child module,
+`appkit/src/more_menu/nuvio_streams.rs`, and the upstream file carries only marked routing
+branches (two enum variants per type, key/title/a11y/label arms, a `root_form` parameter and a
+`refresh_to` revision). **The quality ladder's upstream code is kept intact, not deleted** — it is
+simply not offered while the shim has streams for the playing item, because under the shim a
+stream IS the quality. Plain Plex playback keeps the upstream menu byte-for-byte. That is the
+"whatever makes merges easy" choice: an upstream change to the ladder lands without touching a
+single fork branch; the only recurring conflict surface is the small marked seam.
+
+The data path is this fork's typed effect boundary, not the old fork's `AVAILABLE_STREAMS` global:
+the player overlay emits `NuvioReq::Streams { sid, rk, delay_ms }` from `step` (first tick, then
+poll while the shim says `complete: false`), consumes the addressed `NuvioResult::Streams` behind a
+`RequestId` fence and lands it in the panel's captured state. A stream row reports
+`Action::NuvioStream(index)` through the ordinary `PlayerReq::More` path; `app/nuvio_more.rs`
+(fork-owned, one marked match arm in `app/playback.rs`) performs `/nuvio/select` and the same
+real stop + fresh resolve the old fork's `SetStream` used. Both levels use the shared
+`source_list::addon_pages` / `stream_row_with`, so the P2P seeder count reaches the player too.
+`StreamList` gained `Clone` (fork-owned `plex/nuvio.rs`) so an addressed answer can be taken by
+value. Five module tests and one overlay effect/answer test pin the pages, the seeder fact, the
+polling and the replacement of the Quality row; full default nextest, `check-nodef`, layers,
+deps and ledger are green. The six workspace-wide failures are the known baseline.

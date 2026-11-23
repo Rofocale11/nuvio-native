@@ -21,7 +21,7 @@ pub struct StreamChoice {
     pub seeders: Option<u32>,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 pub struct StreamList {
     #[serde(default)]
     pub complete: bool,
