@@ -166,6 +166,25 @@ impl Store {
     }
 }
 
+/// Fork Rofocale11: drop every row of a table. The addon-set change invalidates the meta and
+/// enrichment caches wholesale; this keeps that operation inside the one store.
+pub fn clear_table(table: Table) {
+    let Some(store) = get() else { return };
+    let Ok(write) = store.db.begin_write() else { return };
+    {
+        if let Ok(mut t) = write.open_table(table.def()) {
+            let keys: Vec<String> = match t.iter() {
+                Ok(iter) => iter.flatten().map(|(k, _)| k.value().to_string()).collect(),
+                Err(_) => Vec::new(),
+            };
+            for k in keys {
+                let _ = t.remove(k.as_str());
+            }
+        }
+    }
+    let _ = write.commit();
+}
+
 /// The process-wide handle, installed once before any persistence call. Host tests that do not
 /// boot the app use `open_at` directly and leave this empty.
 static STORE: OnceLock<Arc<Store>> = OnceLock::new();

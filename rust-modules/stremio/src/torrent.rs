@@ -139,18 +139,16 @@ pub fn playable_url(stream: &Stream, streaming_server: Option<&str>) -> Option<S
     Some(playback_url(server, &hash, idx, &peer_sources(stream, &hash)))
 }
 
-/// Resolve a torrent stream on a streaming server: `/create` when needed (no explicit `fileIdx`,
-/// or tracker sources to hand over), then the playback URL. `season`/`episode` let the server
-/// guess the episode file in a season pack.
+/// Resolve a torrent stream on a streaming server: always `POST /{hash}/create` first (the engine
+/// must exist before `GET /{hash}/{idx}` can stream), then the playback URL. `season`/`episode`
+/// let the server guess the episode file in a season pack. This is the only path that yields a
+/// playable torrent URL: `playable_url` alone skips creation and the GET errors.
 pub fn resolve(server: &str, stream: &Stream, season: Option<u32>, episode: Option<u32>) -> Result<String> {
     if let Some(u) = direct_url(stream) {
         return Ok(u.to_string());
     }
     let hash = info_hash(stream).ok_or(Error::NoAddon)?;
     let sources = peer_sources(stream, &hash);
-    if let (Some(idx), true) = (stream.file_idx, sources.is_empty()) {
-        return Ok(playback_url(server, &hash, idx, &sources));
-    }
     let mut guess = serde_json::Map::new();
     if let Some(s) = season {
         guess.insert("season".into(), json!(s));
@@ -221,5 +219,65 @@ mod tests {
         assert_eq!(info_hash(&s).as_deref(), Some(H));
         assert!(direct_url(&s).is_none());
         assert_eq!(peer_sources(&s, H), vec![format!("dht:{H}"), "tracker:udp://a:1".to_string()]);
+    }
+
+    /// One `POST /{hash}/create` against a loopback server, recording the request line and body.
+    fn create_against(reply_body: &str, stream: &Stream) -> (String, String) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().unwrap().port();
+        let reply = reply_body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("a connection");
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).expect("a request");
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..n]);
+                if let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                    let content_length: usize = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse().ok()))
+                        .unwrap_or(0);
+                    if raw.len() >= head_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&raw).to_string();
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply);
+            let _ = socket.write_all(resp.as_bytes());
+            let _ = socket.flush();
+            request
+        });
+        let server_url = format!("http://127.0.0.1:{port}");
+        let url = resolve(&server_url, stream, None, None).expect("resolve");
+        let request = server.join().expect("the server");
+        assert_eq!(url, format!("{server_url}/{H}/3"), "playback is GET /{{hash}}/{{idx}} after create");
+        let head = request.lines().next().unwrap_or("");
+        assert!(head.starts_with(&format!("POST /{H}/create")), "the create was POSTed: {head}");
+        (url, request)
+    }
+
+    #[test]
+    fn resolve_always_creates_even_when_fileidx_is_known() {
+        // Regression: the old early return handed the player GET /{hash}/{idx} with no engine
+        // behind it, and the first try failed. Even with a known fileIdx and no sources, /create
+        // must be POSTed first.
+        let s = Stream { info_hash: Some(H.into()), file_idx: Some(3), ..Default::default() };
+        let (_, request) = create_against("{}", &s);
+        assert!(request.contains("\"infoHash\""), "the create names the torrent: {request}");
+        assert!(request.contains("\"guessFileIdx\":false"), "a known idx guesses nothing: {request}");
+    }
+
+    #[test]
+    fn resolve_picks_the_file_the_server_answered() {
+        let s = Stream { info_hash: Some(H.into()), ..Default::default() };
+        let (_, request) = create_against(r#"{"fileIdx":3}"#, &s);
+        assert!(request.contains("\"guessFileIdx\":{}"), "an unknown idx guesses: {request}");
     }
 }

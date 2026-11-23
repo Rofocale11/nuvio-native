@@ -1332,8 +1332,14 @@ BUILD = build_configuration(STAMP_TEXT)
 # documented one that stopped shipping still fails. Whether a RELEASE build really dropped them is
 # the separate, narrower check below.
 DEV_ONLY_SONAMES = {"libswscale-plx.so.10"}   # the dev capture stream's scaler; RELEASE=1 drops it
+# Fork Rofocale11: the Linux simulator's host FFmpeg libraries are staged into pkg/ under distinct
+# `*-plx-host.so.*` loader names (docs/nuvio/MERGE-AUDIT.md). They are gitignored and never in
+# APP_FILES, so they cannot ship in the ipk. Grading them as distributed libraries made every local
+# ipk build fail as soon as a developer staged host FFmpeg for the simulator.
+HOST_ONLY_MARKER = "-plx-host.so."
 shipped = {p.name for p in (ROOT / "pkg").glob("*.so.*")
-           if p.is_file() and p.read_bytes()[:4] == b"\x7fELF"}
+           if p.is_file() and HOST_ONLY_MARKER not in p.name
+           and p.read_bytes()[:4] == b"\x7fELF"}
 if shipped:
     named = set(re.findall(r"`(lib[a-z]+-plx\.so\.\d+)`", (ROOT / "THIRD-PARTY-NOTICES.md").read_text()))
     distributed = shipped - DEV_ONLY_SONAMES

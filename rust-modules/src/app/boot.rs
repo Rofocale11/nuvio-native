@@ -716,6 +716,137 @@ pub(crate) unsafe fn boot(
     }
 }
 
+// Fork Rofocale11: the in-process C torrent engine replaces the retired Node `server.js`.
+// These statics belong to boot's lifecycle; teardown takes them from a different call site.
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+static P2P_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+static SBENGINE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start the in-process C torrent engine when its library loads. This is the only streaming
+/// engine: there is no Node fallback. When `sbengine::available()` is false (package built without
+/// the engine, or firmware fwcompat has not graded it) torrents are unavailable on that install.
+#[allow(dead_code)] // the call sits in start_p2p_service's ARM-only body
+pub(crate) fn start_sbengine() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        if !plx_stremio::sbengine::available() {
+            plx_base::eventlog::log("sbengine: libsbengine.so not available; torrents unavailable (no Node fallback)");
+            return;
+        }
+        let p2p_root = plx_base::paths::runtime_dir().join("nuvio-p2p");
+        let cache = p2p_root.join("payload");
+        // Swarm state (KB-scale) is durable; the payload stays under the RAM-backed runtime root.
+        let state = plx_base::paths::p2p_state_candidates()
+            .into_iter()
+            .find(|dir| std::fs::create_dir_all(dir).is_ok());
+        let state = match state {
+            Some(dir) => dir,
+            None => {
+                let fallback = p2p_root.join("state");
+                if let Err(e) = std::fs::create_dir_all(&fallback) {
+                    plx_base::eventlog::log(&format!(
+                        "sbengine: could not create state {}: {e}",
+                        fallback.display()
+                    ));
+                    return;
+                }
+                fallback
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&cache) {
+            plx_base::eventlog::log(&format!("sbengine: could not create {}: {e}", cache.display()));
+            return;
+        }
+        // The /media/developer/temp candidate is world-writable: create it owner-only, as imgcache
+        // does, or the peer addresses it holds are readable by any local process.
+        if plx_base::paths::p2p_state_dir_is_private(&state) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        plx_base::eventlog::log(&format!("sbengine: state {} cache {}", state.display(), cache.display()));
+        let state_s = state.to_string_lossy().into_owned();
+        let cache_s = cache.to_string_lossy().into_owned();
+        // start blocks on the C++ shim's internal mutex; this is boot, not a per-frame poll.
+        if plx_stremio::sbengine::start_engine(&state_s, &cache_s) {
+            SBENGINE_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            plx_base::eventlog::log(&format!(
+                "sbengine: engine started ({})",
+                plx_stremio::sbengine::version()
+            ));
+            // Throughput visibility: one line per 10 s, only while something is moving.
+            std::thread::spawn(|| {
+                use std::sync::atomic::Ordering;
+                let mut last = 0u64;
+                while SBENGINE_STARTED.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    if !SBENGINE_STARTED.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(s) = plx_stremio::sbengine::stats() else { continue };
+                    if s.peers == 0 && s.down_bps == 0 && s.downloaded == last {
+                        continue;
+                    }
+                    last = s.downloaded;
+                    plx_base::eventlog::log(&format!(
+                        "sbengine: peers={} seeds={} down={}KB/s up={}KB/s got={}MB delivered={}MB window={}MB resident={}MB scheduled={} demands={} at={}MB/{}MB piece={}KB mem={}MB refetch={} freed={} unsupported={}",
+                        s.peers, s.seeds, s.down_bps / 1024, s.up_bps / 1024,
+                        s.downloaded >> 20, s.delivered >> 20, s.window >> 20, s.resident >> 20,
+                        s.scheduled, s.active_demands, s.primary_demand_start >> 20,
+                        s.secondary_demand_start >> 20, s.piece_bytes >> 10,
+                        s.mem_cache_used >> 20, s.refetched, s.freed, s.window_unsupported,
+                    ));
+                }
+            });
+        } else {
+            plx_base::eventlog::log("sbengine: start_engine failed; torrents unavailable (no Node fallback)");
+        }
+    }
+}
+
+/// Stop the C torrent engine. Idempotent; safe to call twice.
+#[allow(dead_code)] // the call sits in stop_p2p_service's ARM-only body
+pub(crate) fn stop_sbengine() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        if SBENGINE_STARTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            plx_stremio::sbengine::stop_engine();
+            plx_base::eventlog::log("sbengine: engine stopped");
+        }
+    }
+}
+
+/// Start the C torrent engine on a parked thread, behind the UI, never on the boot thread and
+/// never on a controlled/replay boot. `js-service/server.js` is NOT spawned — engine only. The
+/// trailer decipher child is separate and owned by the trailer resolver.
+pub(crate) fn start_p2p_service() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        std::thread::spawn(|| {
+            start_sbengine();
+            // Park until shutdown: the engine's lifetime is the app's.
+            loop {
+                if P2P_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+    }
+}
+
+/// Stop the engine and signal the parked start thread to exit. Idempotent.
+pub(crate) fn stop_p2p_service() {
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    {
+        stop_sbengine();
+        P2P_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub(super) fn apply_deferred_capture(rec: &mut super::recorder::Recplay,
     gate: &plx_machine::landgate::Gate,
     deferred: plx_plex::plex::session::DeferredLoad) -> Result<(), &'static str> {
@@ -1885,6 +2016,10 @@ pub(crate) unsafe fn construct(
         } else {
             maybe_ask_consent(&mut app.pages, &mut app.runtime.consent.machine.ask);
         }
+    }
+    // Fork Rofocale11: start the C engine behind the UI, never on a controlled/replay boot.
+    if !controlled {
+        start_p2p_service();
     }
     Ok(app)
 }

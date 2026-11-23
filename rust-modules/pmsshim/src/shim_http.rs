@@ -79,6 +79,10 @@ pub fn serve(listener: TcpListener, handler: Arc<Handler>) {
         live.fetch_add(1, Ordering::Relaxed);
         let (h, live2) = (handler.clone(), live.clone());
         let spawned = std::thread::Builder::new().name("pmsshim-conn".into()).stack_size(1024 * 1024).spawn(move || {
+            // Every addon fetch, TMDB round trip and artwork GET is answered on one of these. They
+            // are pure speculation from the frame thread's point of view — a slower answer is
+            // invisible, a starved frame is not — so they run below it (`yield_to_frame_thread`).
+            plx_base::task::yield_to_frame_thread();
             connection(stream, &*h);
             live2.fetch_sub(1, Ordering::Relaxed);
         });

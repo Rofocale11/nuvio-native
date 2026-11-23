@@ -15,7 +15,14 @@ name = "pmsshim-serve"
 path = "src/bin/serve.rs"
 
 [dependencies]
+# Fork Rofocale11: the shim's speculative fetch/probe workers yield to the frame thread through
+# plx_base::task::yield_to_frame_thread — the same shared mechanism the poster workers use.
+plx_base = { path = "../base" }
 plx_net = { path = "../net" }
+# Fork Rofocale11: the app's bounded artwork cache (`plx_os::imgcache`) stores a cropped title logo
+# once instead of re-decoding the same PNG on every photo request. This repo's platform seam is
+# `plx_os`; all durable state stays in the one redb file, never a second cache format.
+plx_os = { path = "../os" }
 plx_stremio = { path = "../stremio" }
 # Fork Rofocale11: the shim keeps its key table, watch state and account session in the app's one
 # redb file, never in a second on-disk format.
@@ -27,6 +34,11 @@ flate2 = "1"
 # The Nuvio sign-in QR the shim serves in place of plex.tv's (both already in the tree via `ui`/`image`).
 qrcodegen = "=1.8.0"
 png = "0.18"
+# Fork Rofocale11: cutting a title logo's transparent border (PNG decode + crop + re-encode),
+# pure Rust, already compiled for the UI (`gfx::img`) at every other feature the tree uses.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Fork Rofocale11: the old fork's Node trailer resolver uses prctl/kill to reap its child on Linux.
+libc = "0.2"
 
 [lints]
 workspace = true

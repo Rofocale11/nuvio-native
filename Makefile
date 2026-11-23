@@ -1454,6 +1454,13 @@ deploy: pkg/plxnative $(FFMPEG_STAGED) $(SENTRY_NATIVE_STAMP) $(APPINFO) release
 	# television with no separate line to remember here — which is what `pkg/splash.png` needed and
 	# never got: it was staged into every `.ipk` and never scp'd by this recipe.
 	$(SCP) $(DEPLOY_FILES) tv:$(APPDIR)/
+	@# Fork Rofocale11: the trailer JS children ride in the app directory's own js-service folder.
+	$(SSH) 'mkdir -p $(APPDIR)/js-service'
+	$(SCP) $(JS_SERVICE_FILES) tv:$(APPDIR)/js-service/
+	@# Fork Rofocale11: the C engine sits beside the binary. Absent means torrents unavailable.
+	@if [ -f "$(SBENGINE_SO)" ]; then $(SCP) "$(SBENGINE_SO)" tv:$(APPDIR)/libsbengine.so; \
+	 elif [ -f "$(SBENGINE_SO_ALT)" ]; then $(SCP) "$(SBENGINE_SO_ALT)" tv:$(APPDIR)/libsbengine.so; \
+	 else echo "note: libsbengine.so not built — torrents unavailable (no Node fallback)"; fi
 	@# The subtitle faces go to their own directory (see SUBS_FONT_FILES), in one more connection.
 	$(SSH) 'mkdir -p $(APPDIR)/$(SUBS_FONT_DIR)'
 	$(SCP) $(SUBS_FONT_FILES) tv:$(APPDIR)/$(SUBS_FONT_DIR)/
@@ -1484,10 +1491,11 @@ deploy: pkg/plxnative $(FFMPEG_STAGED) $(SENTRY_NATIVE_STAMP) $(APPINFO) release
 # the crash handler and the FFmpeg libraries take their own path to the device above and are just
 # as capable of silently drifting, so they are verified too.
 VERIFY_FILES = pkg/plxnative $(SENTRY_HANDLER) $(FFMPEG_STAGED) $(DEPLOY_FILES) \
-               $(SUBS_FONT_FILES) $(if $(LAB),pkg/lab.json,)
+               $(SUBS_FONT_FILES) $(JS_SERVICE_FILES) $(SBENGINE_STAGED) $(if $(LAB),pkg/lab.json,)
 verify-deploy: tv-lock-require
 	@echo "verify-deploy: comparing $(words $(VERIFY_FILES)) files against $(APPID) [$(FLAVOR)]"
-	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out $(SUBS_FONT_FILES),$(VERIFY_FILES))) 2>&1; \
+	@$(SSH) 'cd $(APPDIR) && md5sum $(notdir $(filter-out $(SUBS_FONT_FILES) $(JS_SERVICE_FILES) $(SBENGINE_STAGED),$(VERIFY_FILES))) 2>&1; \
+	         cd $(APPDIR)/js-service && md5sum $(notdir $(JS_SERVICE_FILES)) 2>&1; \
 	         cd $(APPDIR)/$(SUBS_FONT_DIR) && md5sum $(notdir $(SUBS_FONT_FILES)) 2>&1' | \
 	  python3 ci/verify-deploy.py $(VERIFY_FILES)
 
@@ -2202,6 +2210,16 @@ IPK         := pkg/$(APPID)_$(IPK_VERSION)_arm.ipk
 # equals the staged `appinfo.json`'s `id`.
 STAGE       := ipkroot/data/usr/palm/applications/$(APPID)
 
+# Fork Rofocale11: the trailer decipher/proxy children run under system Node, spawned per-resolve
+# from `paths::app_dir()/js-service`. The P2P `server.js` is retired — the in-process C engine is
+# the only streaming path. Trailer JS stays because the trailer resolver still needs it.
+JS_SERVICE_FILES = js-service/trailer-decipher.js js-service/trailer-proxy.js
+# Fork Rofocale11: libsbengine.so is a CMake artifact beside the binary, dlopened by
+# `plx_stremio::sbengine`. Missing is not a build error; it means torrents are unavailable.
+SBENGINE_SO ?= build/sbengine/libsbengine.so
+SBENGINE_SO_ALT := build/sbengine/build/libsbengine.so
+SBENGINE_STAGED = $(if $(wildcard $(SBENGINE_SO)),$(SBENGINE_SO),$(if $(wildcard $(SBENGINE_SO_ALT)),$(SBENGINE_SO_ALT),))
+
 # The .ipk is REPRODUCIBLE: same commit + same toolchain -> same sha256. That matters because the
 # manifest carries that hash and every user's TV verifies it at install time (there is no code
 # signing anywhere in the webosbrew chain — sha256 over HTTPS is the entire integrity story), so a
@@ -2302,6 +2320,13 @@ ipk: pkg/plxnative $(APPINFO) release-guard
 	cp $(APP_FILES) $(STAGE)/
 	mkdir -p $(STAGE)/$(SUBS_FONT_DIR) && cp $(SUBS_FONT_FILES) $(STAGE)/$(SUBS_FONT_DIR)/
 	cp $(LICENSE_FILES) $(STAGE)/licenses/
+	@# Fork Rofocale11: trailer JS children and the C engine are payload of the app directory.
+	@mkdir -p $(STAGE)/js-service
+	cp $(JS_SERVICE_FILES) $(STAGE)/js-service/
+	@if [ -f "$(SBENGINE_SO)" ]; then cp "$(SBENGINE_SO)" "$(STAGE)/libsbengine.so"; \
+	 elif [ -f "$(SBENGINE_SO_ALT)" ]; then cp "$(SBENGINE_SO_ALT)" "$(STAGE)/libsbengine.so"; \
+	 else echo "note: libsbengine.so not built — the package has no torrent engine"; fi
+	@if [ -f "$(STAGE)/libsbengine.so" ]; then chmod 755 "$(STAGE)/libsbengine.so"; fi
 	@# Strip the STAGED copy only, never pkg/plxnative. ~2.4 MB of .symtab+.strtab (30% of the
 	@# download, on a device whose app partition is 615 MB total and shared with every other app).
 	@# It must not be pkg/plxnative because tools/crash-report.sh symbolizes a crash PC against
@@ -2314,6 +2339,11 @@ ipk: pkg/plxnative $(APPINFO) release-guard
 	  python3 ci/stage-link-evidence.py "$$source" "$(STAGE)/$$(basename "$$source")" --stripped \
 	    --evidence-base "pkg/link-evidence/$(FLAVOR)/$$(basename "$$source")" || exit $$?; \
 	done
+	@# Fork Rofocale11: libsbengine.so is built by CMake, outside the Rust link receipt path.
+	@# Pin the exact bytes this package carries so the packaging gate still proves provenance.
+	@if [ -f "$(STAGE)/libsbengine.so" ]; then \
+	  ( cd "$(STAGE)" && $(SHA256SUM) libsbengine.so ) > pkg/link-evidence/$(FLAVOR)/unreceipted.sha256; \
+	fi
 	@# Only THIS flavour's artifact — packaging one must never delete the other's.
 	rm -f pkg/$(APPID)_*_arm.ipk
 	FLAVOR=$(FLAVOR) python3 ci/mkipk.py
@@ -2329,7 +2359,10 @@ ipk: pkg/plxnative $(APPINFO) release-guard
 	@# written because something shipped broken, and until this line the machine that built the
 	@# package was the one machine that never ran them — the first sight of a failure was a push.
 	python3 ci/check-package.py
-	python3 ci/check-packaged-elf.py $(IPK) pkg/link-evidence/$(FLAVOR)
+	@if [ -f pkg/link-evidence/$(FLAVOR)/unreceipted.sha256 ]; then \
+	  python3 ci/check-packaged-elf.py $(IPK) pkg/link-evidence/$(FLAVOR) \
+	    --unreceipted pkg/link-evidence/$(FLAVOR)/unreceipted.sha256; \
+	 else python3 ci/check-packaged-elf.py $(IPK) pkg/link-evidence/$(FLAVOR); fi
 
 # THE STABLE INSTALL IS ALWAYS A RELEASE BUILD, and that is a gate rather than a habit.
 #

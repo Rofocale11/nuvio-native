@@ -213,6 +213,36 @@ jobs:
             vendor/ffmpeg-build
           key: ffmpeg-${{ runner.arch }}-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/deps.py', 'ci/dependencies.json') }}
 
+      - if: inputs.caches
+        name: Cache the torrent engine's downloads
+        # Boost 1.86 and libtorrent land in build/sbengine/deps (FETCHCONTENT_BASE_DIR in
+        # ci/build-sbengine.sh) because the engine's own build/ is wiped on every configure.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/sbengine/deps
+          key: sbengine-deps-${{ runner.arch }}-${{ hashFiles('ci/build-sbengine.sh', 'vendor/engine-sources/engine.patch', 'vendor/engine-sources/nuvio-engine/cmake/Dependencies.cmake') }}
+
+      - if: inputs.caches
+        name: Cache the static OpenSSL prefix
+        # ci/build-openssl.sh installs libssl.a/libcrypto.a here; ci/build-sbengine.sh rebuilds it
+        # only when the prefix is missing, so a hit skips ~5 minutes of OpenSSL entirely.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/openssl-prefix
+          key: openssl-${{ runner.arch }}-${{ hashFiles('ci/build-openssl.sh', 'ci/dependencies.json') }}
+
+      - name: Build the C torrent engine
+        # Without this step the package passes every gate but ships no engine, so torrents are
+        # unavailable. It is a separate artifact with no Rust link receipt; the Makefile pins
+        # its digest in pkg/link-evidence/<flavour>/unreceipted.sha256.
+        timeout-minutes: 30
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+        run: |
+          set -euo pipefail
+          ./ci/build-sbengine.sh
+          test -f build/sbengine/libsbengine.so
+
       - name: Build + package
         # No src/config.local.h exists in a clean checkout, so src/app.h's __has_include falls back
         # to the YOUR_PMS_HOST placeholder. That is what makes the CI-built binary the leak-free
@@ -440,6 +470,21 @@ jobs:
           { echo "| \`ci/check-elf.sh\` — ELF identity, CP15 barriers, DT_NEEDED | pass |"
             echo "| \`ci/check-package.py\` — versions, ar layout, descriptors, payload, notes | pass |"
           } >> pkg/gates.md
+
+      - name: The package carries the C engine
+        # A package without it passes every other gate and looks green, so this assertion is what
+        # distinguishes a shipped engine from a package that silently lost it.
+        run: |
+          set -euo pipefail
+          staged=$(find ipkroot/data/usr/palm/applications -maxdepth 2 -name libsbengine.so)
+          [ -n "$staged" ] || {
+            echo "::error::libsbengine.so is not staged in the package — did the engine build run?"
+            exit 1
+          }
+          printf '%s\n' "$staged"
+          [ "$(printf '%s\n' "$staged" | wc -l)" -eq 1 ]
+          file "$staged"
+          cat pkg/link-evidence/*/unreceipted.sha256
 
       - name: Create the Sentry release and attach its commits
         id: sentry

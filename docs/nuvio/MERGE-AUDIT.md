@@ -43,6 +43,10 @@ Debian `control` file.
   recording bytes, the fixtures need re-recording and re-pinning.
 - `ALPHABET.json`: union of upstream's eight new source vocabularies and the fork's
   `nuvio_stream_picker` source / `Streams` literal.
+- `pkg/resources/ca/appinfo.json` and `pkg/resources/hu/appinfo.json` (JSON, no comment syntax):
+  the localized tile title was still upstream's `PlxNative` while the other 13 locales said
+  `Nuvio Native`; the package gate rejects a localized descriptor that un-badges a flavoured
+  install. Set both to `Nuvio Native`.
 - `tests/fixtures/replay/README.md`: both branches' chronology kept as prose (HTML
   comment marker added inline).
 
@@ -78,6 +82,10 @@ each is a place to watch on the next upstream merge.
 - `ci/arm-cc.py` — drops rustc 1.100's `-fuse-ld=lld` for cargo-driven links; the
   evidence checker parses GNU ld maps, so without this the storage helper cannot link
   on this host. Reproduced on the original fork commit before changing the wrapper.
+- `ci/check-package.py` — excludes `*-plx-host.so.*` from the "distributed libraries" set.
+  Those gitignored host FFmpeg libraries are staged into `pkg/` for the Linux simulator and are
+  never in `APP_FILES`, so they cannot ship; counting them failed every local `make ipk` once
+  host FFmpeg was staged. Carries an inline `Fork Rofocale11:` marker.
 - `locales/{ca,de,fr,hu,it,nl,pl,pt,ru}/{browse,settings}.json` (18 files, JSON permits no
   comment) — added the fork's 12 pre-existing Nuvio keys (My List, stream picker, rating
   source) with the English wording verbatim. Upstream's catalog build requires every
@@ -371,8 +379,223 @@ Verification: focused `plx_pmsshim` tests for the fingerprint's persistence, pro
 pick precedence; `cargo check --workspace` green. No device verification of a resume choosing the
 same file after re-resolution.
 
+## Version alignment after the upstream merge (2026-11-23)
+
+The upstream merge moved `rust-modules/Cargo.toml` and `Cargo.lock` to 0.10.0 while the fork's
+`pkg/appinfo.json` and `ipkroot/ctl/control` stayed at 0.8.0. `ci/check-package.py` requires all
+version witnesses to agree, so no `make ipk` could pass on this tree. Bumped the two packaging
+files to 0.10.0 with `ci/bump-version.py 0.10.0` (the repo's shared version writer); neither JSON
+nor a Debian control file can carry an inline `Fork Rofocale11:` marker. Debug/stable package
+filenames and the docs' historical 0.8.0 build records are from before this alignment.
+
+## Catalog hub bounding lost in the upstream merge (2026-11-23)
+
+The pre-merge fork's `shim_pms.rs` bounded catalog work so a slow or dead addon could not hold a
+hub read: `/hubs` honoured the client's hub window, `catalog_hub` passed a `wait` budget into
+`catalog_range`, the catalog cache used one single-flight fill worker with a `retry_at` backoff
+instead of holding a mutex across network fetches, and a finished background warm bumped the
+content generation so the app re-read a partial answer. Commit `06e15f82` replaced all four with
+upstream's simpler unbounded version. The result on the set: `/hubs` took ~19 s cold (0.6 s once
+cached), the app logged 7 × `hubs: source 0 FAILED` before one success, Home needed 10–15 minutes
+to appear, and 8 `pmsshim-catalog` workers outliving the 4 s budget choked browsing.
+
+Restored the bounded `wait` on `catalog_range` (callers pass the hub budget minus 100 ms), the
+single-flight `filling`/`cv` fill worker with a 30 s `CATALOG_RETRY` backoff, and the
+`bump_content()` after `warm()`. Hub-window paging and My List offset handling were deliberately
+left unchanged to avoid a second behaviour change at the same time. A first port also bumped
+`content_gen` from each completed catalog fill, copying the pre-merge fork's separate catalog
+generation; on this tree that drove an endless Home re-read (`home: hubs refresh queued after
+account pull`, FPS → 0) and was removed. All edits in `shim_pms.rs` carry inline `Fork Rofocale11:`
+markers. Regression tests: `playback_regressions::a_dead_catalog_is_bounded_and_backed_off` (a dead
+addon returns inside the budget and is not re-fetched during backoff) and
+`nuvio_tmdb_tests::a_catalog_fill_does_not_bump_account_content`; `plx_pmsshim` 48/48.
+
+The first corrected build still left Home spinning: bounding catalog fetches was not enough,
+because `/hubs` itself did two synchronous network calls the pre-merge fork did not have —
+`saved_hub` pulled the Nuvio account list, and `continue_rows` fetched a TMDB backdrop per
+Continue Watching row. Both are now cached-only on the hub path: `Account::saved_library_cached()`
+reads the 60 s My List cache (the dedicated `/hubs/nuvio/list` route and the background warm still
+refresh it), and `continue_rows` uses `enrich_get(..).art` instead of a network lookup; the now-unused
+`tmdb_backdrop_for` was removed. A cold `/hubs` no longer waits on those hosts. Built for validation
+as a DEV ipk (`make -j10 ipk`, per the owner's preference) — all packaging gates passed.
+
+A third pass restored the last dropped behavior: `catalog_hubs` now takes a hub window and returns
+the whole filtered-list total, and `/hubs` plus `/hubs/sections/{k}` honour `X-Plex-Container-Start`
+/ `X-Plex-Container-Size` and echo `offset` / `totalSize`. This is what made a Recommended page
+re-fetch every catalog on every window and choke the TV; the old fork's own comment named it.
+Regression test `a_hub_window_fetches_only_that_slice_of_catalogs`; `plx_pmsshim` 49/49.
+
+A fourth pass restored the fork's frame-priority mechanism, which the merge had dropped whole.
+`plx_base::task::yield_to_frame_thread()` (renices the calling worker to `+10`) is back in
+`base/src/task.rs`, and `plx_pmsshim/Cargo.toml` regains the `plx_base` dep the pre-merge fork had
+(the crate table in `ARCHITECTURE.md` is updated to match). It is called at the entry of every
+speculative worker: the shim's per-connection handler, catalog fills, stream/subtitle fetches,
+the pre-probe and warm threads, profile fetches, watch-state meta reads, and the poster
+fetch/decode workers. The old fork's comment records the device measurement this answers — a cold
+Library load at `loop=6, 8, 7, 8` with `budget=0/0`, i.e. the frame loop itself starved by fetch
+workers sharing four cores — which is exactly the `budget=…/solo:residency`, `fps=8` signature seen
+after the hub fix. All edits carry inline `Fork Rofocale11:` markers. `plx_pmsshim` 49/49,
+`make check-nodef` clean, dev ipk rebuilt.
+
+A fifth pass fixed the missing catalogs on the Recommended page. The merge had deleted the fork's
+two-list distinction entirely: `Backend::all_catalogs()`, `AddonBackend::all_catalogs()` (backed by
+`stremio::browse_catalogs()`), and `Shim::all_catalogs()` with its own cached `browse_list`. The
+shim's `catalog_page()` also looked up keys only in `home_catalogs()`, so a `showInHome:false`
+catalog could be named by the Library selector but never fetched. `catalog_hubs` now takes the
+numbered list explicitly again: Home passes the full browse list filtered to Home-eligible keys,
+Recommended passes the full browse list filtered by content type, and `/hubs/nuvio/{i}` indexes
+that same full list — so a row's index names the catalog it previewed. This also removes the
+`nuvio.catalog.10/12 read failed` churn seen in the foreground log. Regression test
+`a_catalog_hidden_from_home_still_gets_a_recommended_shelf`; `plx_pmsshim` 50/50.
+
+A sixth pass ported the rest of the old fork's fix for bare headings (`8acf0953e`, whose message
+names these exact symptoms). A CSV listing read (`/library/metadata/{rk1},{rk2},…`) re-resolved
+every card through addon `meta` — measured 9.2 s for 12 cards, past the TV's 15 s loopback deadline,
+so the row read failed and left a heading with a spinner while churning the UI. `Shim` now keeps a
+bounded `cards` map; `remember_card` is called from `preview_row_raw` (where hub rows are built,
+not merely `row()`), and the CSV route answers from it, falling back to the addon only for a key
+never shown. Regression test `a_listing_read_answers_from_cards_already_built`; `plx_pmsshim` 51/51.
+
+A seventh pass enforced the owner's artwork rule: hub posters are BetterPosters by IMDb id with the
+addon's Cinemeta poster as the STRICT fallback, and TMDB is never consulted on that path. The merge
+had added `imdb_base()` (TMDB `/external_ids`) inside `poster_url`, which resolved `tmdb:` catalog
+ids through TMDB while building a hub. `poster_url` now only accepts an IMDb id already on the
+preview or its `Meta`; otherwise it keeps the addon art. TMDB remains confined to the detail page
+and its children (cast, logo, `art`, trailers, More Like This, collections). The existing
+`poster_url_resolves_imdb_ids_and_keeps_addon_art_otherwise` test still covers both branches.
+
+An eighth pass restored the rest of the old fork's artwork and TMDB/ID surface, adapted to this
+repo's one redb store and `plx_os` platform seam:
+
+- `blur_colors`, `UltraBlurColors` on preview/season/episode/collection/Continue Watching rows, the
+  addon's `logo` as the hub row's `clearLogo`, and the MetaHub `small` poster ladder (the measured
+  `solo:residency` fix at card width).
+- `crop_ink` / `logo_png` / `logo_path_key`, logo-only PNG cropping cached in `plx_os::imgcache`;
+  the `photo` route returns a retryable 503 when a row is not ready instead of latching a 404.
+- `TmdbClient::from_env`, `credits`, `person_credits`, `external_ids`, `videos`, `recommendations`,
+  the `series_id` fallback, and the richer `TmdbCredit`/`TmdbMovie`/`TmdbShow`/`TmdbPerson`/
+  `TmdbGenre` types with `TmdbCredit::movie()` / `::show()`.
+- Filmography rows built from the credit's WORK, sorted newest first/undated last, remembered for
+  the batched caption read.
+- `docs/nuvio/ID-MANAGEMENT.md` restored (redb-adapted) and `TMDB.md` updated with the artwork rule.
+
+`plx_pmsshim` 53/53, `plx_stremio` 50/50, `make check-nodef` clean, dev ipk built and deployed.
+
+A ninth pass fixed the two reported page failures. The person page was dialling
+`discover.provider.plex.tv` and getting **401** — the merge had dropped the old fork's
+`local_discover()` first hop in `plex/account.rs::discover()`, which routes Discover reads to the
+installed in-process shim. Restored `local_discover()` / `resolve_local_base()` (plain loopback http
+only), included it in `stand_in_armed()` and the read gate, with the old fork's loopback-only test.
+
+On a related title the shim short-circuited `tmdb_synthetic_row()` to a remembered bare fallback,
+losing cast, Extras and summary; it now always rebuilds the full detail row as the old fork did
+(the client caches details for 15 min). `tmdb_details_row` / `tmdb_show_details_row` publish the
+overview as `summary`, TMDB poster and Genre tags again; fallback rows carry them too. Added
+`warm_synthetic_streams` so clicking a related movie starts the addon stream fetch on detail open,
+and switched `/library/people/{id}/media` to the cast-only `person_credits`.
+
+A tenth pass made Recommended posters use BetterPoster too, per the owner's explicit decision. Home
+gets Cinemeta `tt…` ids; Recommended's extra "Streaming Catalogs" catalogs carry `tmdb:<n>` ids, so
+the `tt…`-only gate left them on the addon poster. `poster_url` now calls `imdb_base` for those: the
+one redb store is read first, a cold miss makes ONE cached TMDB `/external_ids` call (positive and
+negative answers cached under `IMDB_TTL`, `TmdbClient` keyed single-flight shares concurrent
+misses), and all later reads are redb-only. No TMDB image is ever used for a hub. `TMDB.md` and
+`ID-MANAGEMENT.md` record the rule; `plx_pmsshim` 53/53.
+
+An eleventh pass traced the remaining spinner/mixed-art symptom past the shim entirely: every hub
+thumb is BetterPoster and the `/photo` bytes are correct, but `plx_ui::tex` reported
+`budget …/solo:residency` with `residency lost … rearmed … refused …`. The old fork caps an
+oversized CDN decode to the card box and pins the MRU/recent Residency entry; this tree had
+neither. Ported `request_box` / `cap_dims` / `downscale_rgba` into the poster worker (a 500×750
+btttr.cc card now decodes at 250×375, an ordinary `Poster` take), `RECENT_RESIDENCY_GRACE` +
+`mru_residency` into `victim_ok`, and restored `PT_CAP` 96. The temporary `TRACE photo` logging
+used for the diagnosis was removed. `plx_ui` 1761/1761, focused poster cap test passes.
+
+A twelfth pass tried the requested wholesale swap — copying the old fork's whole `pmsshim/src`
+(including `shim_trailer.rs`) over this tree's and rewiring its file caches onto `plx_nuvio_store`.
+It was reverted, not shipped: the old shim is not self-contained. It fails `cargo check -p
+plx_pmsshim` with 56 errors because it calls `plx_base::flight` (7.5 KB module absent here),
+`plx_stremio::sbengine` (32 KB in-process C engine that would REPLACE this tree's EngineFS torrent
+path), `addons::opensubtitles_candidates`, the old flattened `TmdbMovieDetails`/`TmdbShowDetails`
+shape, `Meta::trailer_streams`, `Subtitle::release_title/provider`, `libc`, and `plx_platform`
+(renamed `plx_os` here). Making it build means porting those crates too, not just the shim. The
+old and current shims' `/photo` handler and `poster_url`/`poster_fallbacks` logic are also
+effectively identical, so the swap would not have changed the mixed-poster symptom. The tree was
+restored from a byte-exact backup and `cargo check -p plx_pmsshim` passes again.
+
+A thirteenth pass shipped the requested port after all: the old fork's whole `pmsshim/src` is now
+in this tree, with its **behavior** left intact and only its storage/API boundary adapted:
+
+- Redb: `Keys`, `WatchState`, `MetaCache` and `EnrichCache` now persist in the one `nuvio.redb`
+  (legacy TSV/JSON/JSONL migrated once); account session/preferences likewise. Added
+  `plx_nuvio_store::clear_table`.
+- Missing APIs adapted at the boundary, not ported as second stacks: a local `shim_flight` (the old
+  `base::flight`), `shim_sbengine` backed by this tree's `plx_stremio::torrent`/EngineFS, a local
+  `opensubtitles_candidates` in `plx_stremio::addons`, `plx_os::{imgcache,devcaps}`, `libc`, and
+  the old nested `TmdbMovieDetails`/`TmdbShowDetails` shape plus `Meta::trailer_streams` and the
+  fuller `Subtitle`. Old file-based tests were rewritten to assert redb rows and to serialise on
+  the process-wide store.
+- Deliberately **not** changed: `poster_url` still passes the item's own id to the provider (old
+  fork behavior), and a regression test pins it. The old `/photo` and `poster_fallbacks` paths are
+  unchanged.
+
+Verification: workspace `cargo check` clean, `plx_pmsshim` 154/154, `plx_stremio` 50/50,
+`plx_nuvio_store` 3/3, `plxnative-modules --lib` 1492/1492, `make check-nodef` clean. The owner
+confirmed afterwards that everything is fixed on device. `docs/nuvio/AGENTS.md` now records that
+the old fork's shim behavior is authoritative for future merges.
+
 ## Still to verify
 
 - Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.
 - Re-run the sim probe and one TV playback after the `plx_nuvio_probe` extraction.
 
+
+## Fourteenth pass — the torrent engine and trailer service
+
+The owner asked for the remaining old-fork pieces as well: `torrent.rs`, the C engine and its
+`ci/build-sbengine.sh`, and the `js-service/trailer` children. This replaced the temporary
+`shim_sbengine` adapter with the real stack:
+
+- `plx_stremio::sbengine` is the old fork's FFI module verbatim (one `sbe_get` symbol through
+  `plx_base::dynlib!`, nested `Tmdb*` details untouched elsewhere). `plx_pmsshim` now calls it
+  directly; the adapter is gone. `torrent.rs` is back to the old rule: always `POST /{hash}/create`
+  before playback, with its regression tests.
+- `boot.rs` starts/stops the engine (`p2p_state_candidates` / `p2p_state_dir_is_private` ported into
+  `plx_base::paths`), `run.rs` stops it on leaving the player and at shutdown. `plx_os` replaced
+  upstream's `platform` edge in `ci/module-layers.ini`, and the new shim/engine modules are listed.
+- Build/packaging: `ci/build-sbengine.sh`, `ci/build-openssl.sh`, `ci/cmake-toolchains/webos-arm.cmake`
+  and `vendor/engine-sources/` ported; `openssl` added to `ci/dependencies.json`. The Makefile stages
+  `libsbengine.so` and the two trailer scripts in `deploy` and `ipk`, verifies them, and pins the
+  engine digest in `unreceipted.sha256`; `ci/check-packaged-elf.py` accepts digest-pinned ELFs.
+  CI builds the engine before packaging and asserts it is staged. The trailer `server.js` is NOT
+  shipped — the engine is the only streaming path, exactly as the old fork retired it.
+- Built from source locally: `build/sbengine/libsbengine.so` (ARMv7 soft-float, `sbe_get` exported,
+  no libssl/libstdc++ in DT_NEEDED). Debug `make -j10 ipk` passes every gate: 7 receipted + 1
+  digest-pinned ELF. `nextest` 1981/1981 across the affected crates, `check-nodef`, module layers
+  and `check-deps`, `make lint` and the ledger ratchet all green. `tools/host-engine-check.sh`
+  (host build of the same engine plus its loopback seeder, running the two `#[ignore]`d real-engine
+  shim tests) was ported and both checks pass on this machine: the real engine held `/decision`
+  silent for 30.04 s past the 15 s media budget and still answered, and a loopback-seeded torrent
+  direct-played on the FIRST decision with 262144 bytes served through the engine byte-identical
+  to the source file. The host tool builds its own pinned OpenSSL 1.1.1w and points CMake at the
+  real `libz.so` because this host ships OpenSSL 4.1 and no standard multiarch zlib symlink.
+  Nothing deployed or committed for this pass.
+
+## Fifteenth pass — enable torrent offers when the engine is present
+
+The engine boot was wired but the shim's `Config::p2p_enabled` still defaulted to `false`, and this
+fork has no boot-time `restore_p2p` or Settings switch to turn it on. `torrent_server()` therefore
+returned `None` and `shim_media::rank` dropped every torrent/magnet stream before the engine could
+resolve one. `app/nuvio.rs` now sets `p2p_enabled: plx_stremio::sbengine::available()`, so torrent
+picks are offered exactly when `libsbengine.so` actually loads; a build without it still hides
+unplayable picks. This is the cheap enable, not the Settings-toggle port — the persisted
+preference and UI row remain unported. `nextest` 1646/1646 on the affected crates; workspace check
+clean.
+
+**Trailer DASH is NOT ported.** The shim-side generator (`dash_manifest`), the Node
+decipher/proxy children and their Rust parsing are present, but the player-side pieces are absent:
+`plx_media::dash` (the strict 529-line SegmentBase MPD parser), the `.mpd` → two progressive fMP4
+tracks demux path (old `media/src/ff.rs::dash_demux`), and boot's `set_trailer_reacher` /
+`probes.attach`. With no reacher installed the shim's end-of-file gate defaults to `true`, so a
+DASH row can be published for a URL that only serves its first 60 s. The muxed 360p fallback still
+plays. Porting DASH is not a copy: this fork moved the physical demuxer to `plx_play_feed`.

@@ -21,6 +21,11 @@ pub struct CatalogInfo {
 pub trait Backend: Send + Sync {
     /// Home-shelf catalogs, in the user's addon order.
     fn catalogs(&self) -> Vec<CatalogInfo>;
+    /// Every browseable catalog (Home shelves plus ones hidden from Home), for the Library
+    /// section's catalog selector. Defaults to [`Backend::catalogs`] for test/pseudo backends.
+    fn all_catalogs(&self) -> Vec<CatalogInfo> {
+        self.catalogs()
+    }
     /// One page of a catalog. `Err` is a failure (shown as an empty page, not cached).
     fn catalog_page(&self, key: &str, skip: u32, genre: Option<&str>) -> Result<Vec<MetaPreview>, ()>;
     /// Search across every search-capable catalog.
@@ -31,6 +36,12 @@ pub trait Backend: Send + Sync {
     /// Streams for a movie (`id`) or an episode (the video id), progressively through `on_batch`.
     fn streams(&self, type_: &str, id: &str, deadline: Duration, on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream>;
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle>;
+    /// The player's on-demand subtitle search (Subtitles → Search), all languages. `None` means
+    /// the provider did not answer and is a fault; `Some(empty)` is its answer that it has none.
+    /// Defaults to an empty answer so test/pseudo backends need no search provider.
+    fn search_subtitles(&self, _type_: &str, _id: &str) -> Option<Vec<Subtitle>> {
+        Some(Vec::new())
+    }
 }
 
 /// The user's addons. Swappable at run time ([`AddonBackend::replace`]) so Settings can install,
@@ -71,9 +82,13 @@ impl Backend for AddonBackend {
         let set = self.set.read().unwrap_or_else(|e| e.into_inner());
         set.home_catalogs().iter().map(|c| info(&set, c)).collect()
     }
+    fn all_catalogs(&self) -> Vec<CatalogInfo> {
+        let set = self.set.read().unwrap_or_else(|e| e.into_inner());
+        set.browse_catalogs().iter().map(|c| info(&set, c)).collect()
+    }
     fn catalog_page(&self, key: &str, skip: u32, genre: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
         let set = self.snapshot();
-        let mut all = set.home_catalogs();
+        let mut all = set.browse_catalogs();
         all.extend(set.search_catalogs());
         let cat = all.into_iter().find(|c| c.key(&set) == key).ok_or(())?;
         set.catalog(&cat, skip, genre).map_err(|_| ())
@@ -95,6 +110,11 @@ impl Backend for AddonBackend {
     }
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle> {
         self.snapshot().subtitles(type_, id)
+    }
+    /// The **builtin** OpenSubtitles v3 addon, independent of the user's installed set: the
+    /// automatic lane above already reads that set, so searching there again would only repeat it.
+    fn search_subtitles(&self, type_: &str, id: &str) -> Option<Vec<Subtitle>> {
+        plx_stremio::addons::opensubtitles_candidates(type_, id, Duration::from_secs(10))
     }
 }
 

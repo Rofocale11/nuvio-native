@@ -417,6 +417,27 @@ pub fn builtin_opensubtitles() -> Addon {
     Addon { transport_url: OPENSUBTITLES_URL.into(), manifest: parse_manifest(v).expect("builtin manifest"), disabled: false, display_name: None }
 }
 
+/// Fork Rofocale11: the builtin OpenSubtitles v3 addon's candidates for one item. This is the
+/// player's on-demand Search read, independent of the installed addon set; `None` is a transport
+/// fault, `Some(empty)` is the provider's answer that it has nothing. The shim's subtitle search
+/// route uses it so a search still works when the user has no subtitle addon installed.
+pub fn opensubtitles_candidates(type_: &str, id: &str, deadline: Duration) -> Option<Vec<Subtitle>> {
+    let addon = builtin_opensubtitles();
+    // An id the builtin cannot serve is an ANSWER (nothing for this item), not a transport fault.
+    let Some(t) = resolve_request_type(&addon, "subtitles", type_, id, false, false) else {
+        return Some(Vec::new());
+    };
+    let url = resource_url(&addon.transport_url, "subtitles", &t, id);
+    let body = http::get_json(&url, http::within_ms(deadline.as_millis() as u64)).ok()?;
+    let Value::Object(mut o) = body else { return None };
+    let mut subs: Vec<Subtitle> = lenient::decode_list(o.remove("subtitles"));
+    subs.retain(|s| !s.url.is_empty());
+    for sub in subs.iter_mut() {
+        sub.provider = Some("OpenSubtitles".into());
+    }
+    Some(subs)
+}
+
 /// Run `jobs` (one per addon index) on worker threads — or serially if libcurl's TLS is not
 /// thread-safe here — delivering results in completion order until `deadline`.
 fn fan_out<T: Send + 'static>(

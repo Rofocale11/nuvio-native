@@ -1,6 +1,6 @@
 {
   "id": "com.nuvionative.app",
-  "version": "0.8.0",
+  "version": "0.10.0",
   "vendor": "nuvionative",
   "type": "native",
   "main": "plxnative",

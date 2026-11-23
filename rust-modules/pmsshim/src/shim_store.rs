@@ -2,9 +2,14 @@
 //! last-opened page, the image cache's keys — means the same title after a restart) and the local
 //! watch state (PMS keeps watch state server-side; this server is the only one there is).
 
+// Fork Rofocale11: every durable record lives in the one redb file (`plx_nuvio_store`). The old
+// fork's keys.tsv / watch.json / meta-cache.jsonl / enrich-cache.jsonl are migrated once on first
+// open and never written again.
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The first ratingKey handed out. Section keys are 1 and 2; keeping items far above them means a
 /// stray `/library/metadata/1` can never alias a section.
@@ -55,19 +60,18 @@ struct KeysInner {
 impl Keys {
     pub fn open(dir: Option<&Path>) -> Keys {
         let mut inner = KeysInner::default();
-        // Fork Rofocale11: the append-only TSV became one JSON row in the single redb file. The
-        // slot-for-slot placeholder rule is unchanged so a cached ratingKey keeps its meaning.
+        // Fork Rofocale11: one JSON row in the single redb file. The slot-for-slot placeholder
+        // rule is unchanged, so a key the app already cached keeps its meaning after migration.
         let rows = plx_nuvio_store::get()
             .and_then(|s| s.get(plx_nuvio_store::Table::Keys, "ids"))
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
             .or_else(|| {
-                // One-time migration from the old TSV: read it, persist it, then let the old file
-                // be removed by the caller's cleanup. Never re-read it once redb has a record.
                 let legacy = dir?.join("keys.tsv");
                 let text = std::fs::read_to_string(legacy).ok()?;
                 let rows: Vec<String> = text.lines().map(str::to_string).collect();
-                let bytes = serde_json::to_vec(&rows).ok()?;
-                let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Keys, "ids", &bytes);
+                if let Ok(bytes) = serde_json::to_vec(&rows) {
+                    let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Keys, "ids", &bytes);
+                }
                 Some(rows)
             });
         if let Some(rows) = rows {
@@ -116,15 +120,17 @@ pub struct Watch {
     pub duration_ms: i64,
     pub view_count: i64,
     pub last_viewed_at: i64,
-    // Fork Rofocale11: the source last played for this item, so a resume re-selects that file
-    // instead of re-deriving it from whichever addon happens to rank first now. Local only: the
-    // account watch schema has no source column, so this never leaves the TV.
+    /// The source last played for this item, so a resume re-selects that file
+    /// instead of re-deriving it from whatever escape currently ranks first.
+    /// Local-only: the account watch-progress schema has no source column, so
+    /// this never leaves the TV.
     pub last_stream: Option<LastStream>,
 }
 
-/// A stable identity of one playable stream: addon plus a release identity that survives
-/// re-ranking. Never a signed URL (debrid links expire) and never the arrival index (that moves as
-/// addons answer). Two streams match only on the fields here.
+/// A stable identity of one playable stream: the addon that offered it plus a
+/// release identity that survives re-ranking. Never a signed URL (those expire
+/// and carry credentials), and never the arrival index (that shifts as addons
+/// answer). Two streams match last-stream identity only on the fields below.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LastStream {
@@ -144,9 +150,8 @@ struct WatchFile {
     items: HashMap<String, Watch>,
     /// The row snapshot of every item with progress, so Continue Watching draws without a fetch.
     rows: HashMap<String, serde_json::Value>,
-    // Fork Rofocale11: `"content_id|video_id" → ratingKey`. Nuvio and this device can name one
-    // episode differently, so the account row needs a durable local identity. It lives in this
-    // same redb record as the watch state — never in a second preference file.
+    /// `content_id|video_id` → the ratingKey this device pushed it under, so a resume point pulled
+    /// back from the account lands on the same item instead of a duplicate keyed by its TMDB id.
     account_keys: HashMap<String, i64>,
 }
 
@@ -160,14 +165,13 @@ pub fn now_secs() -> i64 {
 
 impl WatchState {
     pub fn open(dir: Option<&Path>) -> WatchState {
-        // Fork Rofocale11: watch state moved from `watch.json` to the one redb file. The JSON
+        // Fork Rofocale11: watch state moved from watch.json to the one redb file. The JSON
         // document is unchanged; the old file is migrated once when redb has no record yet.
         let loaded = plx_nuvio_store::get()
             .and_then(|s| s.get(plx_nuvio_store::Table::Watch, "state"))
             .and_then(|b| serde_json::from_slice::<WatchFile>(&b).ok())
             .or_else(|| {
-                let legacy = dir?.join("watch.json");
-                let bytes = std::fs::read(legacy).ok()?;
+                let bytes = std::fs::read(dir?.join("watch.json")).ok()?;
                 let parsed = serde_json::from_slice::<WatchFile>(&bytes).ok()?;
                 if let Ok(encoded) = serde_json::to_vec(&parsed) {
                     let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Watch, "state", &encoded);
@@ -210,6 +214,77 @@ impl WatchState {
         self.save(&g);
     }
 
+    /// Remember the source just played for this item, so the next resume
+    /// re-selects it while it is still offered. Storage only: a viewer picker
+    /// choice updates the fingerprint via the same path the player uses.
+    pub fn set_last_stream(&self, key: i64, last: LastStream) {
+        if last.addon.is_empty() && last.info_hash.is_none() && last.filename.is_none() {
+            return;
+        }
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let w = g.items.entry(key.to_string()).or_default();
+        w.last_stream = Some(last);
+        self.save(&g);
+    }
+
+    /// The source remembered for this item, if one was played and not cleared.
+    pub fn last_stream(&self, key: i64) -> Option<LastStream> {
+        self.get(key).last_stream
+    }
+
+    /// Forget the remembered source (a finished or removed resume point must
+    /// not promote a stale file the viewer no longer wants).
+    pub fn clear_last_stream(&self, key: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = g.items.get_mut(&key.to_string()) {
+            w.last_stream = None;
+        }
+        self.save(&g);
+    }
+
+    /// Apply a resume point pulled from the account. The newer side wins: a local report made after
+    /// the remote one is the truth, so the merge only lands when `last_viewed_at` is at least the
+    /// local stamp. Returns whether anything changed (so a caller can log/report a real merge).
+    pub fn merge_remote(
+        &self,
+        key: i64,
+        offset_ms: i64,
+        duration_ms: i64,
+        last_viewed_at: i64,
+        row: Option<serde_json::Value>,
+    ) -> bool {
+        if offset_ms <= 0 {
+            return false;
+        }
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let w = g.items.entry(key.to_string()).or_default();
+        if last_viewed_at < w.last_viewed_at {
+            return false;
+        }
+        w.offset_ms = offset_ms;
+        if duration_ms > 0 {
+            w.duration_ms = duration_ms;
+        }
+        w.last_viewed_at = last_viewed_at;
+        if let Some(r) = row {
+            g.rows.insert(key.to_string(), r);
+        }
+        self.save(&g);
+        true
+    }
+
+    /// Remember which local item an account resume point was pushed under.
+    pub fn bind_account_key(&self, content_id: &str, video_id: &str, key: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.account_keys.insert(format!("{content_id}|{video_id}"), key);
+        self.save(&g);
+    }
+
+    pub fn account_key(&self, content_id: &str, video_id: &str) -> Option<i64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.account_keys.get(&format!("{content_id}|{video_id}")).copied()
+    }
+
     pub fn scrobble(&self, key: i64, watched: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let w = g.items.entry(key.to_string()).or_default();
@@ -233,55 +308,6 @@ impl WatchState {
         self.save(&g);
     }
 
-    // Fork Rofocale11: remember the source that was actually played, so a resume re-selects it
-    // while the addons still offer it. An empty identity records nothing (no file to promote).
-    pub fn set_last_stream(&self, key: i64, last: LastStream) {
-        if last.addon.is_empty() && last.info_hash.is_none() && last.filename.is_none() { return; }
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let w = g.items.entry(key.to_string()).or_default();
-        w.last_stream = Some(last);
-        self.save(&g);
-    }
-
-    pub fn last_stream(&self, key: i64) -> Option<LastStream> {
-        self.get(key).last_stream
-    }
-
-    pub fn clear_last_stream(&self, key: i64) {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(w) = g.items.get_mut(&key.to_string()) { w.last_stream = None; }
-        self.save(&g);
-    }
-
-    // Fork Rofocale11: apply a resume point pulled from the account. The newer side wins: a local
-    // report made after the remote one is the truth. A zero position is a delete, not a resume
-    // point, and a finished title keeps its view_count while taking a resume point.
-    pub fn merge_remote(&self, key: i64, offset_ms: i64, duration_ms: i64,
-        last_viewed_at: i64, row: Option<serde_json::Value>) -> bool {
-        if offset_ms <= 0 { return false; }
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let w = g.items.entry(key.to_string()).or_default();
-        if last_viewed_at < w.last_viewed_at { return false; }
-        w.offset_ms = offset_ms;
-        if duration_ms > 0 { w.duration_ms = duration_ms; }
-        w.last_viewed_at = last_viewed_at;
-        if let Some(r) = row { g.rows.insert(key.to_string(), r); }
-        self.save(&g);
-        true
-    }
-
-    /// Remember which local item an account resume point was pushed under.
-    pub fn bind_account_key(&self, content_id: &str, video_id: &str, key: i64) {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.account_keys.insert(format!("{content_id}|{video_id}"), key);
-        self.save(&g);
-    }
-
-    pub fn account_key(&self, content_id: &str, video_id: &str) -> Option<i64> {
-        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.account_keys.get(&format!("{content_id}|{video_id}")).copied()
-    }
-
     /// Items with a resume point, most recent first, with their row snapshots.
     pub fn in_progress(&self) -> Vec<(i64, Watch, serde_json::Value)> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -296,19 +322,447 @@ impl WatchState {
     }
 }
 
+/// How long a series' meta stays usable — in memory and in the persisted log. Its `videos` array
+/// IS the episode list (`seasons_of`/`episodes_of` read it), so it has to refresh as episodes air.
+pub const META_TTL_SERIES: Duration = Duration::from_secs(6 * 3600);
+/// A movie's meta does not change once released, so the warm start may keep it far longer.
+pub const META_TTL_MOVIE: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// The TTL for one row. Anything that is not a series is treated as a movie: the addon types the
+/// shim serves are `movie` and `series` (`is_series` in `shim_pms`), and a longer life is the
+/// safer default for a type this cache does not know.
+fn meta_ttl(type_: &str) -> i64 {
+    if type_ == "series" {
+        META_TTL_SERIES.as_secs() as i64
+    } else {
+        META_TTL_MOVIE.as_secs() as i64
+    }
+}
+/// The most titles kept in memory; past it the oldest fetch is dropped.
+const META_ROWS: usize = 400;
+/// Rewrite the log once it passes this, down to about [`META_COMPACT`] bytes.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MetaRow {
+    #[serde(rename = "type")]
+    type_: String,
+    id: String,
+    /// Unix seconds when the addon answered.
+    at: i64,
+    meta: plx_stremio::model::Meta,
+}
+
+/// The addon-meta cache, with a warm-start copy on disk.
+///
+/// A restart used to make every detail open cold. The rows are the expensive part (a series meta
+/// can be ~65 KB), so they are appended to `meta-cache.jsonl` as they land — the last line for a
+/// key wins at load — and the log is rewritten down to [`META_COMPACT`] when it grows past
+/// [`META_LOG_LIMIT`]. Appending one small line is what keeps this off the request path; the
+/// write itself runs on the shared persistence worker.
+/// Fork Rofocale11: one row per title in the one redb file. The old append-only JSONL log and its
+/// compaction machinery are gone; `plx_nuvio_store::NuvioCache` supplies the TTL envelope.
+pub struct MetaCache {
+    rows: Mutex<HashMap<(String, String), (i64, Arc<plx_stremio::model::Meta>)>>,
+}
+
+fn cache_key(type_: &str, id: &str) -> String {
+    format!("{type_}\t{id}")
+}
+
+impl MetaCache {
+    pub fn open(dir: Option<&Path>) -> Arc<MetaCache> {
+        let now = now_secs();
+        let mut rows = HashMap::new();
+        let mut skipped = 0;
+        let mut legacy = Vec::new();
+        let stored = plx_nuvio_store::get()
+            .map(|s| s.list(plx_nuvio_store::Table::MetaCache))
+            .unwrap_or_default();
+        if stored.is_empty() {
+            if let Some(dir) = dir {
+                if let Ok(text) = std::fs::read_to_string(dir.join("meta-cache.jsonl")) {
+                    for line in text.lines() {
+                        match serde_json::from_str::<MetaRow>(line) {
+                            Ok(row) => legacy.push(row),
+                            Err(_) => skipped += 1,
+                        }
+                    }
+                }
+            }
+        }
+        let parsed = stored
+            .iter()
+            .filter_map(|(_, bytes)| serde_json::from_slice::<MetaRow>(bytes).ok())
+            .chain(legacy.into_iter().map(Some).filter_map(|x| x))
+            .collect::<Vec<_>>();
+        for row in parsed {
+            if now.saturating_sub(row.at) >= meta_ttl(&row.type_) {
+                continue;
+            }
+            rows.insert((row.type_, row.id), (row.at, Arc::new(row.meta)));
+        }
+        if let Some(store) = plx_nuvio_store::get() {
+            for ((type_, id), (at, meta)) in &rows {
+                let row = MetaRow { type_: type_.clone(), id: id.clone(), at: *at, meta: (**meta).clone() };
+                if let Ok(bytes) = serde_json::to_vec(&row) {
+                    let _ = store.put(plx_nuvio_store::Table::MetaCache, &cache_key(type_, id), &bytes);
+                }
+            }
+        }
+        let _ = skipped;
+        Arc::new(MetaCache { rows: Mutex::new(rows) })
+    }
+
+    pub fn get(&self, type_: &str, id: &str) -> Option<Arc<plx_stremio::model::Meta>> {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, meta) = rows.get(&(type_.to_string(), id.to_string()))?;
+        (now_secs().saturating_sub(*at) < meta_ttl(type_)).then(|| Arc::clone(meta))
+    }
+
+    pub fn insert(self: &Arc<Self>, type_: &str, id: &str, meta: Arc<plx_stremio::model::Meta>) {
+        let at = now_secs();
+        let key = (type_.to_string(), id.to_string());
+        {
+            let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            if !rows.contains_key(&key) && rows.len() >= META_ROWS {
+                if let Some(oldest) = rows.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) {
+                    rows.remove(&oldest);
+                }
+            }
+            rows.insert(key, (at, Arc::clone(&meta)));
+        }
+        let row = MetaRow { type_: type_.to_string(), id: id.to_string(), at, meta: (*meta).clone() };
+        if let (Some(store), Ok(bytes)) = (plx_nuvio_store::get(), serde_json::to_vec(&row)) {
+            let _ = store.put(plx_nuvio_store::Table::MetaCache, &cache_key(type_, id), &bytes);
+        }
+    }
+
+    /// Forget everything — the addon set changed, so the metas may describe other content.
+    pub fn clear(self: &Arc<Self>) {
+        self.rows.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::MetaCache);
+    }
+
+    /// Writes are synchronous redb commits now; kept so the old cache's tests still compile.
+    #[cfg(test)]
+    fn flush_for_test(&self) {}
+}
+
+/// TMDB enrichment does not change once a title is out: a cast and a trailer are as stable as the
+/// movie's meta, so it is kept as long as a movie's meta is.
+pub const ENRICH_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+const ENRICH_ROWS: usize = 800;
+
+/// The `More Like This` titles TMDB listed, in the shape each kind arrives in.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum RelatedSource {
+    Movies(Vec<plx_stremio::addons_tmdb::TmdbMovie>),
+    Shows(Vec<plx_stremio::addons_tmdb::TmdbShow>),
+}
+
+/// What the detail page's TMDB enrichment learned, as it was shaped for the Plex dialect. A value
+/// that is `None` means the fetch ran and produced nothing (TMDB knows no cast, or the title has
+/// no trailer) — an answer worth keeping, which is why it is not conflated with "never enriched"
+/// the way a missing cache entry is.
+///
+/// The related titles are kept as TMDB returned them and rebuilt into rows on each request: a row
+/// builder registers the fallback key a click on that card depends on, so a stored row would be a
+/// dead card after a restart.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Enrichment {
+    /// The TMDB id this answer belongs to.
+    pub tmdb_id: u64,
+    /// The `Role` array.
+    pub roles: Option<serde_json::Value>,
+    /// The `Extras` object.
+    pub extras: Option<serde_json::Value>,
+    /// The recommendation list (`None` on a row written before the shelf was kept).
+    pub related: Option<RelatedSource>,
+    /// The franchise `/movie/{id}` named, when it named one.
+    pub collection_ref: Option<plx_stremio::addons_tmdb::TmdbCollectionRef>,
+    /// The franchise's films, attached by the related route once it has fetched them.
+    pub collection: Option<plx_stremio::addons_tmdb::TmdbCollection>,
+}
+
+impl Enrichment {
+    pub fn apply(&self, row: &mut serde_json::Value) {
+        if let Some(roles) = &self.roles {
+            row["Role"] = roles.clone();
+        }
+        if let Some(extras) = &self.extras {
+            row["Extras"] = extras.clone();
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EnrichRow {
+    #[serde(rename = "type")]
+    type_: String,
+    id: String,
+    /// Unix seconds when TMDB answered.
+    at: i64,
+    enrich: Enrichment,
+}
+
+/// The parsed TMDB enrichment, with a warm-start copy in `enrich-cache.jsonl`.
+///
+/// It is the same append-only log as [`MetaCache`] and for the same reason: without it the first
+/// open after every restart pays for TMDB again (`tmdb_ms≈930` in the simulator). Rows are small
+/// (a `Role[]` of at most ten people), so the compaction budget is a quarter of the meta log's.
+/// Fork Rofocale11: one row per title in the one redb file. The old append-only JSONL log and its
+/// compaction machinery are gone; `plx_nuvio_store::NuvioCache` supplies the TTL envelope.
+pub struct EnrichCache {
+    rows: Mutex<HashMap<(String, String), (i64, Arc<Enrichment>)>>,
+}
+
+impl EnrichCache {
+    pub fn open(dir: Option<&Path>) -> Arc<EnrichCache> {
+        let now = now_secs();
+        let mut rows = HashMap::new();
+        let mut legacy = Vec::new();
+        let stored = plx_nuvio_store::get()
+            .map(|s| s.list(plx_nuvio_store::Table::EnrichCache))
+            .unwrap_or_default();
+        if stored.is_empty() {
+            if let Some(dir) = dir {
+                if let Ok(text) = std::fs::read_to_string(dir.join("enrich-cache.jsonl")) {
+                    for line in text.lines() {
+                        if let Ok(row) = serde_json::from_str::<EnrichRow>(line) {
+                            legacy.push(row);
+                        }
+                    }
+                }
+            }
+        }
+        let parsed = stored
+            .iter()
+            .filter_map(|(_, bytes)| serde_json::from_slice::<EnrichRow>(bytes).ok())
+            .chain(legacy.into_iter().map(Some).filter_map(|x| x))
+            .collect::<Vec<_>>();
+        for row in parsed {
+            if now.saturating_sub(row.at) >= ENRICH_TTL.as_secs() as i64 {
+                continue;
+            }
+            rows.insert((row.type_, row.id), (row.at, Arc::new(row.enrich)));
+        }
+        if let Some(store) = plx_nuvio_store::get() {
+            for ((type_, id), (at, enrich)) in &rows {
+                let row = EnrichRow { type_: type_.clone(), id: id.clone(), at: *at, enrich: (**enrich).clone() };
+                if let Ok(bytes) = serde_json::to_vec(&row) {
+                    let _ = store.put(plx_nuvio_store::Table::EnrichCache, &cache_key(type_, id), &bytes);
+                }
+            }
+        }
+        Arc::new(EnrichCache { rows: Mutex::new(rows) })
+    }
+
+    pub fn get(&self, type_: &str, id: &str) -> Option<Arc<Enrichment>> {
+        let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, enrich) = rows.get(&(type_.to_string(), id.to_string()))?;
+        (now_secs().saturating_sub(*at) < ENRICH_TTL.as_secs() as i64).then(|| Arc::clone(enrich))
+    }
+
+    pub fn insert(self: &Arc<Self>, type_: &str, id: &str, enrich: Enrichment) {
+        let at = now_secs();
+        let key = (type_.to_string(), id.to_string());
+        {
+            let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            if !rows.contains_key(&key) && rows.len() >= ENRICH_ROWS {
+                if let Some(oldest) = rows.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) {
+                    rows.remove(&oldest);
+                }
+            }
+            rows.insert(key, (at, Arc::new(enrich.clone())));
+        }
+        let row = EnrichRow { type_: type_.to_string(), id: id.to_string(), at, enrich: enrich.clone() };
+        if let (Some(store), Ok(bytes)) = (plx_nuvio_store::get(), serde_json::to_vec(&row)) {
+            let _ = store.put(plx_nuvio_store::Table::EnrichCache, &cache_key(type_, id), &bytes);
+        }
+    }
+
+    /// Attach a franchise once the related route has fetched its films, so the next open builds
+    /// the shelf from disk. The entry may be gone (the addon set changed, or it expired): then
+    /// there is nothing to attach the films to.
+    pub fn remember_collection(
+        self: &Arc<Self>,
+        type_: &str,
+        id: &str,
+        parts: &plx_stremio::addons_tmdb::TmdbCollection,
+    ) {
+        let Some(current) = self.get(type_, id) else { return };
+        if current.collection.is_some() {
+            return;
+        }
+        let mut updated = (*current).clone();
+        updated.collection = Some(parts.clone());
+        self.insert(type_, id, updated);
+    }
+
+    /// Forget everything — the addon set changed, so a type and id may now name other content.
+    pub fn clear(self: &Arc<Self>) {
+        self.rows.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::EnrichCache);
+    }
+
+    /// Writes are synchronous redb commits now; kept so the old cache's tests still compile.
+    #[cfg(test)]
+    fn flush_for_test(&self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    use std::path::PathBuf;
 
-    #[test]
-    fn keys_persist_and_are_stable() {
+    /// Fork Rofocale11: the old tests gave each case its own files. The one redb store is
+    /// process-wide, so take the shared serial lock and clear the table under test instead.
+    fn install_test_store() {
         static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         STORE.get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!("nuvio-store-test-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("nuvio-shim-test-store-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let store = plx_nuvio_store::Store::open_at(&dir.join("t.redb")).unwrap();
             let _ = plx_nuvio_store::install(store);
         });
+    }
+
+    fn meta(id: &str, name: &str) -> plx_stremio::model::Meta {
+        plx_stremio::model::Meta { id: id.into(), type_: "movie".into(), name: name.into(), ..Default::default() }
+    }
+
+    fn meta_scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pmsshim-meta-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_fetched_meta_is_there_after_a_restart() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::MetaCache);
+        let dir = meta_scratch("restart");
+        let cache = MetaCache::open(Some(&dir));
+        cache.insert("movie", "tt1", Arc::new(meta("tt1", "Kept")));
+        cache.flush_for_test();
+        drop(cache);
+        let reopened = MetaCache::open(Some(&dir));
+        let got = reopened.get("movie", "tt1").expect("the row survived the restart");
+        assert_eq!(got.name, "Kept");
+    }
+
+    #[test]
+    fn a_series_expires_in_hours_and_a_movie_keeps_for_a_month() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::MetaCache);
+        let dir = meta_scratch("expiry");
+        let hours_ago = META_TTL_SERIES.as_secs() as i64 + 3600;
+        let months_ago = META_TTL_MOVIE.as_secs() as i64 + 3600;
+        let row = |type_: &str, id: &str, name: &str, at: i64| MetaRow {
+            type_: type_.into(),
+            id: id.into(),
+            at,
+            meta: plx_stremio::model::Meta { type_: type_.into(), ..meta(id, name) },
+        };
+        let text = [
+            // A show's episode list must refresh as episodes air; a movie's meta does not change.
+            row("series", "tt1", "Stale Show", now_secs() - hours_ago),
+            row("movie", "tt2", "Old Movie", now_secs() - hours_ago),
+            row("movie", "tt3", "Ancient Movie", now_secs() - months_ago),
+            row("series", "tt4", "Fresh Show", now_secs()),
+        ]
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .chain(std::iter::once("{\"type\":\"movie\",\"id\":\"tt5\",\"at\":0".into()))
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(dir.join("meta-cache.jsonl"), text).unwrap();
+        let cache = MetaCache::open(Some(&dir));
+        assert!(cache.get("series", "tt1").is_none(), "a series past its hours");
+        assert_eq!(cache.get("movie", "tt2").unwrap().name, "Old Movie", "a movie keeps for a month");
+        assert!(cache.get("movie", "tt3").is_none(), "a movie past its month");
+        assert_eq!(cache.get("series", "tt4").unwrap().name, "Fresh Show");
+    }
+
+    #[test]
+    fn clearing_the_cache_forgets_the_file_too() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::MetaCache);
+        let dir = meta_scratch("clear");
+        let cache = MetaCache::open(Some(&dir));
+        cache.insert("movie", "tt5", Arc::new(meta("tt5", "Gone")));
+        cache.flush_for_test();
+        cache.clear();
+        assert!(cache.get("movie", "tt5").is_none());
+        assert!(plx_nuvio_store::get().and_then(|s| s.get(plx_nuvio_store::Table::MetaCache, &cache_key("movie", "tt5"))).is_none(),
+            "the redb row is gone with the memory");
+    }
+
+    fn enrich(tag: &str) -> Enrichment {
+        Enrichment {
+            roles: Some(serde_json::json!([{"name": tag}])),
+            extras: Some(serde_json::json!({"Video": [{"title": tag}]})),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_enrichment_is_there_after_a_restart() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::EnrichCache);
+        let dir = meta_scratch("enrich-restart");
+        let cache = EnrichCache::open(Some(&dir));
+        cache.insert("movie", "tt1", enrich("Kept Actor"));
+        cache.flush_for_test();
+        drop(cache);
+        let reopened = EnrichCache::open(Some(&dir));
+        let got = reopened.get("movie", "tt1").expect("the enrichment survived the restart");
+        assert_eq!(got.roles.as_ref().unwrap()[0]["name"], "Kept Actor");
+        assert_eq!(got.extras.as_ref().unwrap()["Video"][0]["title"], "Kept Actor");
+    }
+
+    #[test]
+    fn an_enrichment_expires_after_its_month() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::EnrichCache);
+        let dir = meta_scratch("enrich-expiry");
+        let row = |id: &str, at: i64| EnrichRow {
+            type_: "movie".into(),
+            id: id.into(),
+            at,
+            enrich: enrich(id),
+        };
+        let month_ago = ENRICH_TTL.as_secs() as i64 + 3600;
+        let text = [
+            row("tt1", now_secs() - month_ago),
+            row("tt2", now_secs() - 3600),
+        ]
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(dir.join("enrich-cache.jsonl"), text).unwrap();
+        let cache = EnrichCache::open(Some(&dir));
+        assert!(cache.get("movie", "tt1").is_none(), "past the month");
+        assert!(cache.get("movie", "tt2").is_some(), "within it");
+    }
+
+    #[test]
+    fn keys_persist_and_are_stable() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::Keys);
         let dir = std::env::temp_dir().join(format!("pmsshim-keys-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -327,61 +781,10 @@ mod tests {
     }
 
     #[test]
-    fn last_stream_survives_a_reopen_and_clears_with_the_resume_point() {
-        static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        let dir = std::env::temp_dir().join(format!("pmsshim-last-stream-{}", std::process::id()));
-        STORE.get_or_init(|| {
-            let _ = std::fs::create_dir_all(&dir);
-            if let Ok(store) = plx_nuvio_store::Store::open_at(&dir.join("t.redb")) {
-                let _ = plx_nuvio_store::install(store);
-            }
-        });
-        let last = LastStream {
-            addon: "Torrentio".into(),
-            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
-            file_idx: Some(0), filename: Some("Film.2160p.mkv".into()),
-            size_bytes: Some(58_200_000_000), height: Some(2160), label: "4K DV".into(),
-        };
-        {
-            let w = WatchState::open(Some(&dir));
-            w.progress(5, 1000, 10_000, None);
-            w.set_last_stream(5, last.clone());
-        }
-        let reopened = WatchState::open(Some(&dir));
-        assert_eq!(reopened.last_stream(5), Some(last), "the pick lives in the one redb record");
-        reopened.set_last_stream(6, LastStream::default());
-        assert_eq!(reopened.last_stream(6), None, "an empty identity records nothing");
-        reopened.progress(5, 9500, 10_000, None);
-        assert_eq!(reopened.last_stream(5), None, "a finished title clears its pick");
-    }
-
-    #[test]
-    fn merge_remote_takes_only_the_newer_side_and_never_binds_a_key() {
-        let w = WatchState::open(None);
-        w.progress(7, 1000, 10_000, None);
-        let local = w.get(7).last_viewed_at;
-        // An older remote report cannot move a fresh local one.
-        assert!(!w.merge_remote(7, 4000, 10_000, local - 60, None));
-        assert_eq!(w.get(7).offset_ms, 1000);
-        // A newer one lands, with the row snapshot Continue Watching draws.
-        assert!(w.merge_remote(7, 4000, 20_000, local + 60, Some(serde_json::json!({"ratingKey":"7"}))));
-        let got = w.get(7);
-        assert_eq!((got.offset_ms, got.duration_ms, got.last_viewed_at), (4000, 20_000, local + 60));
-        assert_eq!(w.in_progress().len(), 1);
-        // A delete is not a resume point.
-        assert!(!w.merge_remote(7, 0, 20_000, local + 120, None));
-        // A finished title keeps its scrobble and can still take a resume point.
-        w.scrobble(8, true);
-        assert!(w.merge_remote(8, 2000, 10_000, now_secs() + 60, None));
-        assert_eq!((w.get(8).view_count, w.get(8).offset_ms), (1, 2000));
-        // Binding is explicit and survives in the same record as the watch state.
-        assert_eq!(w.account_key("tt0903747", "tt0903747:1:2"), None);
-        w.bind_account_key("tt0903747", "tt0903747:1:2", 8);
-        assert_eq!(w.account_key("tt0903747", "tt0903747:1:2"), Some(8));
-    }
-
-    #[test]
     fn progress_past_ninety_percent_marks_watched() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::Watch);
         let w = WatchState::open(None);
         w.progress(5, 1000, 10_000, Some(serde_json::json!({"ratingKey": "5"})));
         assert_eq!(w.get(5).offset_ms, 1000);
@@ -389,5 +792,61 @@ mod tests {
         w.progress(5, 9500, 10_000, None);
         assert_eq!(w.get(5).view_count, 1);
         assert!(w.in_progress().is_empty());
+    }
+
+    #[test]
+    fn last_stream_survives_a_reopen_and_clears_with_the_resume_point() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::Watch);
+        let dir = std::env::temp_dir().join(format!("pmsshim-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let last = LastStream {
+            addon: "Torrentio".into(),
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            file_idx: Some(0),
+            filename: Some("Film.2160p.mkv".into()),
+            size_bytes: Some(58_200_000_000),
+            height: Some(2160),
+            label: "4K DV Torrentio".into(),
+        };
+        {
+            let w = WatchState::open(Some(&dir));
+            w.progress(5, 1000, 10_000, None);
+            w.set_last_stream(5, last.clone());
+        }
+        let reopened = WatchState::open(Some(&dir));
+        assert_eq!(reopened.last_stream(5), Some(last));
+        // Empty identity records nothing; a finished title clears its pick.
+        reopened.set_last_stream(6, LastStream::default());
+        assert_eq!(reopened.last_stream(6), None);
+        reopened.progress(5, 9500, 10_000, None);
+        assert_eq!(reopened.last_stream(5), None, "watched clears the source pick");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_remote_takes_only_the_newer_side() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::Watch);
+        let w = WatchState::open(None);
+        w.progress(7, 1000, 10_000, None);
+        let local_stamp = w.get(7).last_viewed_at;
+        // Older than the local report: ignored.
+        assert!(!w.merge_remote(7, 4000, 10_000, local_stamp - 60, None));
+        assert_eq!(w.get(7).offset_ms, 1000);
+        // Newer: lands, and its row snapshot becomes the Continue Watching row.
+        assert!(w.merge_remote(7, 4000, 20_000, local_stamp + 60, Some(serde_json::json!({"ratingKey": "7"}))));
+        let got = w.get(7);
+        assert_eq!((got.offset_ms, got.duration_ms, got.last_viewed_at), (4000, 20_000, local_stamp + 60));
+        assert_eq!(w.in_progress().len(), 1);
+        // No resume point: nothing to merge.
+        assert!(!w.merge_remote(7, 0, 20_000, local_stamp + 120, None));
+        // A finished title keeps its view count but accepts a resume point.
+        w.scrobble(8, true);
+        assert!(w.merge_remote(8, 2000, 10_000, now_secs() + 60, None));
+        assert_eq!((w.get(8).view_count, w.get(8).offset_ms), (1, 2000));
     }
 }

@@ -276,6 +276,22 @@ pub fn spawn_small(what: &str, f: impl FnOnce() + Send + 'static) -> bool {
     spawn_with(what, Some(SMALL_STACK), f).is_some()
 }
 
+/// Fork Rofocale11: put the CALLING worker below the frame thread in the scheduler's eyes.
+///
+/// The frame thread has 16.6 ms per frame and every speculative worker shares the same few cores.
+/// Measured on this TV (pre-merge fork, 2026-11-04): a cold Library load read `loop=6, 8, 7, 8`
+/// with `budget=0/0` — nothing was being uploaded, the LOOP itself was starved — and climbed back
+/// to 60 only as the fetch/decode work drained. `nice` reorders only under contention, so a
+/// settled screen pays nothing and a worker parked on the network is unaffected.
+///
+/// Deliberately NOT called from [`spawn`] itself: the demux and AC3-encode threads come through
+/// that seam and must not lose to the frame thread (an audio underrun is worse than jank). Call it
+/// at the entry of workers whose work is *speculative* and has no deadline — the shim's request
+/// handling (addon fetches, TMDB lookups, artwork GETs, stream probes) and poster fetch/decode.
+pub fn yield_to_frame_thread() {
+    let _ = lower_priority(10);
+}
+
 /// [`spawn_small`] for work that must run off the frame thread and read the proof:
 /// `f` receives the [`OffFrame`] token, minted inside the new thread. `false` = the OS refused the
 /// thread and the work does not exist (undo whatever was armed for it), exactly as

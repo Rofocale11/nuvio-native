@@ -32,6 +32,10 @@ pub use addons_tmdb::*;
 pub mod addon_http;
 pub use addon_http as http;
 
+// Fork Rofocale11: the in-process C torrent engine, ported from the old fork. It is the only
+// streaming engine on device; the Node `server.js` fallback is retired.
+pub mod sbengine;
+
 pub mod torrent;
 pub use torrent::playable_url;
 

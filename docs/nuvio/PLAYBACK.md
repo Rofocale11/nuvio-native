@@ -69,10 +69,11 @@ and the control-plane decision request has a 120 s deadline. A probe failure (`E
 container — the bundled FFmpeg demuxes only Matroska/WebM, MP4/MOV, MPEG-TS and raw H.264/HEVC —
 or unreachable); say so instead of starting the player.
 
-The probe also **pre-warms** slow sources: a cold torrent on a Stremio streaming server can take
-far longer than the player's 15 s plaintext header timeout (`stream.rs MEDIA_RECV_TIMEOUT_MS`)
-and curl's 30 s low-speed floor; probing at decision time (generous deadline) means the player's
-own open hits a warmed torrent.
+The probe also **pre-warms** slow sources: a cold torrent takes far longer than the player's 15 s
+plaintext header timeout (`stream.rs MEDIA_RECV_TIMEOUT_MS`) and curl's 30 s low-speed floor. The
+C engine's `warm` opens the torrent to restore its kept swarm state without preparing a stream,
+and `resolve_stream` waits for metadata plus a bounded prebuffer before handing back the URL;
+probing at decision time (generous deadline) means the player's own open hits a warmed torrent.
 
 ### Audio
 

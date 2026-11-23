@@ -177,6 +177,12 @@ pub(crate) fn boot() {
     let cfg = plx_pmsshim::Config {
         data_dir: Some(data.join("shim")),
         torrent_server: settings.torrent_server.clone(),
+        // Fork Rofocale11: the engine is the only streaming path, so offer torrent picks exactly
+        // when its library actually loaded. This fork has no Settings P2P switch wired yet; the
+        // shim's default `p2p_enabled = false` would hide every Torrentio stream before the engine
+        // could resolve one. Gating on `available()` keeps a build without libsbengine.so from
+        // listing picks it cannot play.
+        p2p_enabled: plx_stremio::sbengine::available(),
         ..Default::default()
     };
     let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
@@ -285,6 +291,9 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                     codec: a.codec.clone(),
                     profile: a.profile,
                     channels: a.channels,
+                    // Fork Rofocale11: the old shim publishes the file's sample rate as PMS
+                    // `samplingRate`; the player's AC3/PCM lanes read it.
+                    sample_rate: a.sample_rate,
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,

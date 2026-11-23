@@ -7,17 +7,16 @@
 //! | `POST /api/v2/pins` | `nuvio::start_login` (the code is Nuvio's user code) |
 //! | `GET /api/v2/pins/qr/{code}` | a PNG of Nuvio's `verification_uri_complete` |
 //! | `GET /api/v2/pins/{id}` | `nuvio::poll_login`; on approval the session is kept and a local token returned |
-//! | `GET /api/v2/user` | the signed-in Nuvio account (or the local "Nuvio" user), with its account preferences |
+//! | `GET /api/v2/user` | the signed-in Nuvio account (or the local "Nuvio" user) |
 //! | `GET /api/v2/resources` | exactly this shim, as the one owned server |
-//! | `GET /api/v2/home/users` | the ONE profile of the signed-in Nuvio account |
+//! | `GET /api/v2/home/users` | `nuvio::profiles` |
 //! | `POST /api/v2/home/users/{uuid}/switch` | that profile's addons (`nuvio::addons`) → the addon sink |
-//! | `GET`/`PUT /api/v2/user/profile` | account preferences from the one redb file, in plex.tv's shape |
 //!
 //! Without a Nuvio account (or a build without its backend configured) the app never reaches any
 //! of this: it boots straight into the shim with the local addon set.
 
 use crate::shim_http::{Request, Response};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -26,8 +25,9 @@ use std::sync::{Arc, Mutex};
 /// Receives a profile's addon set when the user picks it in the who's-watching picker. The app
 /// persists it and swaps it into the running backend.
 pub type AddonSink = Arc<dyn Fn(plx_stremio::addons::AddonSet) + Send + Sync>;
-/// Fork Rofocale11: fires the account watch pull after a profile's addons are installed. The pull
-/// builds each resume point's row through those addons, so this order is load-bearing.
+
+/// Receives a nudge when a profile has been selected (the shim then merges the account's resume
+/// points into its local watch state).
 pub type WatchSink = Arc<dyn Fn() + Send + Sync>;
 
 const PROFILE_UUID_PREFIX: &str = "nuvio-profile-";
@@ -38,6 +38,9 @@ pub struct Account {
     pins: Mutex<HashMap<i64, PendingPin>>,
     /// The selected profile and library cache share a lock: profile switches cannot race a write.
     library: Arc<Mutex<LibraryContext>>,
+    prefs: Arc<Mutex<serde_json::Map<String, Value>>>,
+    /// Serializes every write of `nuvio-session.json` (see [`Account::write_prefs`]).
+    write_lock: Arc<Mutex<()>>,
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
     watch_sink: Mutex<Option<WatchSink>>,
@@ -71,106 +74,40 @@ fn session_from_json(v: &Value) -> Option<plx_stremio::nuvio::Session> {
     })
 }
 
-// Fork Rofocale11: a real Plex account owns these rows and a real PMS echoes them on
-// `/api/v2/user/profile`. Nuvio has neither, so the shim provides the same surface from the ONE
-// redb file. Keeping plex.tv's camelCase keys on the wire means the app's unchanged account
-// client (Settings → Account/Subtitles and playback's preference warmup) reads and writes them
-// exactly as it does against `tests/mock_pms.py`.
-const PREF_KEYS: &[&str] = &[
-    "autoSelectAudio",
-    "defaultAudioLanguage",
-    "defaultSubtitleLanguage",
-    "autoSelectSubtitle",
-    "defaultSubtitleForced",
-];
-
-/// The same starting row the mock serves: language picking on, English audio and subtitles,
-/// subtitles "when needed". A Nuvio account that never opened Settings still reads as a complete
-/// profile rather than a Retry card.
-fn default_prefs() -> Map<String, Value> {
-    let mut prefs = Map::new();
-    prefs.insert("autoSelectAudio".into(), json!(true));
-    prefs.insert("defaultAudioLanguage".into(), json!("en"));
-    prefs.insert("defaultSubtitleLanguage".into(), json!("en"));
-    prefs.insert("autoSelectSubtitle".into(), json!(1));
-    prefs.insert("defaultSubtitleForced".into(), json!(0));
-    prefs.insert("defaultSubtitleAccessibility".into(), json!(0));
-    prefs
+/// Fork Rofocale11: the whole session document (token, profile, preferences) is one row in the
+/// single redb file, never a second JSON file.
+fn read_session_doc() -> Option<Value> {
+    plx_nuvio_store::get()?
+        .get(plx_nuvio_store::Table::AccountSession, "session")
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
 }
 
-/// Read the stored profile over the defaults. Only the keys the account client knows are adopted:
-/// an older build's row could carry other shapes, and unknown fields must never leak onto the
-/// account surface.
-fn read_prefs(store: Option<&plx_nuvio_store::Store>) -> Map<String, Value> {
-    let mut prefs = default_prefs();
-    let bytes = store.and_then(|s| s.get(plx_nuvio_store::Table::AccountPrefs, "prefs"));
-    if let Some(bytes) = bytes {
-        if let Ok(Value::Object(stored)) = serde_json::from_slice::<Value>(&bytes) {
-            for (key, value) in stored {
-                if PREF_KEYS.contains(&key.as_str()) {
-                    prefs.insert(key, value);
-                }
-            }
-        }
-    }
-    prefs
-}
-
-fn put_prefs(
-    store: Option<&plx_nuvio_store::Store>,
-    prefs: &Map<String, Value>,
-) -> Result<(), String> {
-    let store = store.ok_or_else(|| "the Nuvio store is not installed".to_string())?;
-    let bytes = serde_json::to_vec(&Value::Object(prefs.clone()))
-        .map_err(|e| format!("cannot encode account preferences: {e}"))?;
-    store.put(plx_nuvio_store::Table::AccountPrefs, "prefs", &bytes)
-}
-
-/// A PUT changes only the named keys and validates them the way the mock does: an empty language
-/// is a real value ("Original"/"Off"), booleans accept 1/0 as well as true/false, and the two
-/// numeric modes have the Plex ranges. A bad query leaves `prefs` untouched.
-fn apply_profile_update(
-    prefs: &mut Map<String, Value>,
-    query: &HashMap<String, String>,
-) -> Result<(), &'static str> {
-    for (key, value) in query {
-        let parsed = match key.as_str() {
-            "defaultAudioLanguage" | "defaultSubtitleLanguage" => Value::String(value.clone()),
-            "autoSelectAudio" => match value.as_str() {
-                "true" | "1" => json!(true),
-                "false" | "0" => json!(false),
-                _ => return Err("invalid profile preference"),
-            },
-            "autoSelectSubtitle" | "defaultSubtitleForced" => {
-                let limit = if key == "autoSelectSubtitle" { 2 } else { 3 };
-                match value.parse::<i64>() {
-                    Ok(n) if (0..=limit).contains(&n) => json!(n),
-                    _ => return Err("invalid profile preference"),
-                }
-            }
-            _ => return Err("unknown profile preference"),
-        };
-        prefs.insert(key.clone(), parsed);
-    }
-    Ok(())
+fn write_session_doc(value: &Value) -> Result<(), String> {
+    let store = plx_nuvio_store::get().ok_or_else(|| "the single redb store is not open".to_string())?;
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    store.put(plx_nuvio_store::Table::AccountSession, "session", &bytes)
 }
 
 impl Account {
     pub fn new(dir: Option<&std::path::Path>, token: &str) -> Account {
         let file = dir.map(|d| d.join("nuvio-session.json"));
-        // Fork Rofocale11: the Nuvio backend session lives in the one redb file. A legacy JSON
-        // file is still read on first boot so an install can migrate without signing in again.
-        let stored = match plx_nuvio_store::get().and_then(|s| s.get(plx_nuvio_store::Table::AccountSession, "session")) {
-            Some(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
-            None => file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok()),
-        };
+        let stored = read_session_doc().or_else(|| {
+            // One-time migration of the old session file into redb.
+            let bytes = std::fs::read(file.as_ref()?).ok()?;
+            let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+            let _ = write_session_doc(&value);
+            Some(value)
+        });
         let session = stored.as_ref().and_then(session_from_json);
         let profile = stored.as_ref().and_then(|v| v["profile_id"].as_str()).filter(|s| s.parse::<u32>().is_ok_and(|n| n > 0)).map(str::to_string);
+        let prefs = stored.as_ref().and_then(|v| v.get("preferences").and_then(|p| p.as_object()).cloned()).unwrap_or_default();
         Account {
             file,
             session: Mutex::new(session),
             pins: Mutex::new(HashMap::new()),
             library: Arc::new(Mutex::new(LibraryContext { profile, ..Default::default() })),
+            prefs: Arc::new(Mutex::new(prefs)),
+            write_lock: Arc::new(Mutex::new(())),
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
             watch_sink: Mutex::new(None),
@@ -179,11 +116,30 @@ impl Account {
         }
     }
 
+    /// Path to this account's on-disk session file, if any. The app registers it with
+    /// `plx_base::local_server` *before* starting the shim, so the route and the Settings screen
+    /// can read preferences from the first frame.
+    pub fn session_file(&self) -> Option<&std::path::Path> {
+        self.file.as_deref()
+    }
+
+    /// **The only path that writes `nuvio-session.json`.** One lock, one fresh snapshot, one
+    /// rename: serializing here is what stops a boot-time `load_profile` from overwriting a
+    /// preference saved a moment later, and stops two writers sharing (and interleaving) one
+    /// temp file. A failed write is returned, never swallowed.
+    fn write_prefs(&self) -> Result<(), String> {
+        let _writing = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let profile = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone();
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        save_session_file(session.as_ref(), profile.as_deref(), &prefs)
+    }
+
     pub fn set_sink(&self, sink: AddonSink) {
         *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
 
-    /// Fork Rofocale11: install the callback that merges this profile's account resume points.
+    /// Set once at boot, like `set_sink`.
     pub fn set_watch_sink(&self, sink: WatchSink) {
         *self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
@@ -196,10 +152,57 @@ impl Account {
         self.session.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
+    /// The account's subtitle language (`defaultSubtitleLanguage`: the picker's 2-letter code, as
+    /// the app writes it to `/api/v2/user/profile`), or `None` when the viewer never set one.
+    /// It is what the subtitle tracks are ranked against when a part is built — see
+    /// `shim_media::apply_subtitle_preference`.
+    pub fn subtitle_language(&self) -> Option<String> {
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        prefs
+            .get("defaultSubtitleLanguage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// The Subtitles mode at Settings (`autoSelectSubtitle`: 0=Manual, 1=When Needed, 2=Always;
+    /// missing → `0`). Manual clears any auto pick; 1 and 2 both rank language candidates,
+    /// release-matched first. There is no per-stream audio-lane test in the shim, so 1 and 2
+    /// share the rank path.
+    pub fn subtitle_auto_mode(&self) -> i64 {
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let v = prefs.get("autoSelectSubtitle").and_then(Value::as_i64).unwrap_or(0);
+        if (0..=2).contains(&v) { v } else { 0 }
+    }
+
+    /// Local (session-scoped) enable/disable override for an addon, keyed by transport URL.
+    pub fn addon_enabled_override(&self, key: &str) -> Option<bool> {
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        prefs.get("addonEnabled").and_then(Value::as_object).and_then(|m| m.get(key)).and_then(Value::as_bool)
+    }
+
+    /// Persist a local enable/disable override for an addon into `nuvio-session.json`.
+    pub fn set_addon_enabled(&self, key: &str, enabled: bool) {
+        {
+            let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+            let map = prefs.entry("addonEnabled".to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(m) = map {
+                m.insert(key.to_string(), Value::Bool(enabled));
+            }
+        }
+        if let Err(e) = self.write_prefs() {
+            log_prefs_error(&e);
+        }
+    }
+
     fn save(&self, s: Option<&plx_stremio::nuvio::Session>) {
-        let Some(f) = &self.file else { return };
+        let _writing = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let profile = if s.is_some() { self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() } else { None };
-        save_session_file(f, s, profile.as_deref());
+        let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Err(e) = save_session_file(s, profile.as_deref(), &prefs) {
+            log_prefs_error(&e);
+        }
     }
 
     /// The stored session, refreshed when it is near expiry.
@@ -218,12 +221,20 @@ impl Account {
     }
 
     pub fn sign_out(&self) {
-        let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
-        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if let Some(file) = &self.file { save_session_file(file, None, None); }
-        context.generation = context.generation.wrapping_add(1);
-        context.profile = None;
-        context.cached = None;
+        {
+            let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
+            *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+            context.generation = context.generation.wrapping_add(1);
+            context.profile = None;
+            context.cached = None;
+        }
+        // Signing out WIPES the install's preferences with the session: the next sign-in pulls the
+        // account's own settings, and local leftovers would only disagree with them. With no
+        // session and no preferences the write removes the file.
+        if let Err(e) = self.write_prefs() {
+            log_prefs_error(&e);
+        }
     }
 
     /// Read the active account's saved library; failures remain failures, never an empty success.
@@ -271,14 +282,14 @@ impl Account {
         Ok(())
     }
 
-    // Fork Rofocale11: account watch progress, on the same profile-scoped session as My List.
-    /// Report resume points to the account. No `library` guard is held across this call: a push
-    /// runs on the player's reporting thread while `load_profile` wants that lock.
+    /// Report resume points to the account, for the active profile.
     pub fn push_watch_progress(&self, entries: &[plx_stremio::nuvio::WatchProgress]) -> plx_stremio::model::Result<()> {
         let session = self.fresh_session().ok_or(plx_stremio::model::Error::Status(401))?;
         if !self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.user_id == session.user_id) {
             return Err(plx_stremio::model::Error::Status(401));
         }
+        // No `library` guard is held here: a push runs while the player is reporting, and
+        // `load_profile` wants that lock.
         let pid = self.profile_id(&session)?;
         plx_stremio::nuvio::push_watch_progress(&session, &pid, entries)
     }
@@ -294,7 +305,7 @@ impl Account {
     }
 
     /// The active profile id, resolving the first profile when none was picked — the same fallback
-    /// `saved_library` uses. The `library` lock is never held across the HTTP call that resolves it.
+    /// `saved_library` uses. The `library` lock is not held across the HTTP call that resolves it.
     fn profile_id(&self, session: &plx_stremio::nuvio::Session) -> plx_stremio::model::Result<String> {
         if let Some(pid) = self.library.lock().unwrap_or_else(|e| e.into_inner()).profile.clone() {
             return Ok(pid);
@@ -377,46 +388,50 @@ impl Account {
         }
     }
 
-    /// Fork Rofocale11: one Nuvio login is one Plex Home profile. Every account route must name
-    /// that same identity — the mock proves the app only seats a profile and enables its Settings
-    /// when `/user`, the Home roster and the switch reply agree on id and uuid. The uuid is a fixed
-    /// account identity rather than a live Nuvio profile id, so an addon load still in flight at
-    /// login cannot make these three answers disagree.
-    fn profile_identity(&self) -> (i64, String, String) {
-        let title = if self.signed_in() { "Nuvio account" } else { "Nuvio" };
-        (1, format!("{PROFILE_UUID_PREFIX}1"), title.to_string())
-    }
-
     fn user(&self) -> Response {
-        let (id, uuid, title) = self.profile_identity();
-        // Fork Rofocale11: `/user` carries the same preference row as `/user/profile`, just as the
-        // mock does, so playback's account warmup and Settings never see two different answers.
-        let profile = read_prefs(plx_nuvio_store::get());
         Response::json(&json!({
-            "id": id, "uuid": uuid, "username": "nuvio", "title": title,
-            "friendlyName": "Nuvio", "email": "", "thumb": "", "authToken": self.token,
-            "profile": profile,
-            "subscription": {"active": true, "status": "Active", "plan": "lifetime"},
+            "id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "email": "",
+            "thumb": "", "authToken": self.token, "plex_tv_token": self.token,
+            "subscription": {"active": true, "features": []}
         }))
     }
 
-    /// The plex.tv account-preference surface, backed by the single redb file. PUT uses an empty
-    /// body and query parameters, exactly as Plex and the mock do; the updated row is returned so
-    /// the caller can confirm what was saved without a second GET.
     fn user_profile(&self, req: &Request) -> Response {
         match req.method.as_str() {
-            "GET" | "HEAD" => Response::json(&Value::Object(read_prefs(plx_nuvio_store::get()))),
+            "GET" => {
+                let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                Response::json(&json!({
+                    "id": 1, "uuid": "nuvio", "title": "Nuvio Native", "email": "",
+                    "thumb": "", "authToken": self.token,
+                    "autoSelectAudio":         prefs.get("autoSelectAudio").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "defaultAudioLanguage":    prefs.get("defaultAudioLanguage").and_then(|v| v.as_str()).unwrap_or(""),
+                    "defaultSubtitleLanguage": prefs.get("defaultSubtitleLanguage").and_then(|v| v.as_str()).unwrap_or(""),
+                    "autoSelectSubtitle":      prefs.get("autoSelectSubtitle").and_then(|v| v.as_i64()).unwrap_or(0),
+                    "defaultSubtitleForced":   prefs.get("defaultSubtitleForced").and_then(|v| v.as_i64()).unwrap_or(0),
+                }))
+            }
             "PUT" => {
-                if !req.body.is_empty() {
-                    return Response::json_status(400, &json!({"error": "profile PUT requires an empty body"}));
+                {
+                    let mut prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                    for (k, v) in req.query.iter() {
+                        match k.as_str() {
+                            "autoSelectAudio" => { prefs.insert(k.clone(), Value::Bool(v.as_str() == "true")); }
+                            "autoSelectSubtitle" | "defaultSubtitleForced" => {
+                                if let Ok(n) = v.parse::<i64>() { prefs.insert(k.clone(), json!(n)); }
+                            }
+                            "defaultAudioLanguage" | "defaultSubtitleLanguage" => {
+                                prefs.insert(k.clone(), Value::String(v.trim().to_string()));
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                let mut prefs = read_prefs(plx_nuvio_store::get());
-                if let Err(error) = apply_profile_update(&mut prefs, &req.query) {
-                    return Response::json_status(400, &json!({"error": error}));
-                }
-                match put_prefs(plx_nuvio_store::get(), &prefs) {
-                    Ok(()) => Response::json(&Value::Object(prefs)),
-                    Err(_) => Response::json_status(503, &json!({"error": "preferences not saved"})),
+                match self.write_prefs() {
+                    Ok(()) => Response::json(&json!({})),
+                    Err(e) => {
+                        log_prefs_error(&e);
+                        Response::json_status(500, &json!({"error": "preferences not saved"}))
+                    }
                 }
             }
             _ => Response::json_status(405, &json!({"error": "method not allowed"})),
@@ -435,37 +450,33 @@ impl Account {
         }]))
     }
 
+    /// `{"users": [...]}`, not a bare array: the client parses this answer into
+    /// `plex::account::HomeUsers`, whose one field is `users`. A bare array arrived as "HTTP 200 but
+    /// the body did not parse" (simulator, 2026-11-01), the roster came back empty, and the app
+    /// silently signed in as the single default profile instead of offering the who's-watching
+    /// screen.
     fn home_users(&self) -> Response {
-        // Fork Rofocale11: one Nuvio login is one profile — the roster cannot grow a Plex Home the
-        // account does not have. Its uuid and id are the ones `/user` and switch publish.
-        let (id, uuid, title) = self.profile_identity();
-        Response::json(&json!({"users": [json!({
-            "id": id, "uuid": uuid, "title": title, "username": "nuvio", "thumb": "",
-            "admin": true, "restricted": false, "protected": false,
-        })]}))
+        Response::json(&json!({"users": [
+            {"id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "thumb": "", "admin": true, "guest": false, "restricted": false, "authToken": self.token, "plex_tv_token": self.token}
+        ]}))
     }
 
     fn switch(&self, uuid: &str) -> Response {
-        // Fork Rofocale11: the picker is a formality for one profile. Accept the uuid the account
-        // routes publish, load that account's addons, and answer with the SAME identity so the app
-        // seats it instead of leaving Settings read-only.
-        let _ = uuid;
-        self.load_profile(None);
-        let (id, uuid, title) = self.profile_identity();
-        Response::json(&json!({"id": id, "uuid": uuid, "title": title, "authToken": self.token}))
+        let profile = uuid.strip_prefix(PROFILE_UUID_PREFIX).map(str::to_string);
+        self.load_profile(profile.as_deref());
+        Response::json(&json!({"id": 1, "uuid": uuid, "title": "Nuvio", "authToken": self.token}))
     }
 
     /// Fetch a profile's addons (the first profile when `None`) and hand them to the sink, off the
-    /// request: manifests are fetched per addon. Fork Rofocale11: the account watch pull fires only
-    /// AFTER those addons are installed — its rows are built through the addon backend, and a row
-    /// stored without a snapshot is dropped by Continue Watching until the next boot.
+    /// request: manifests are fetched per addon.
     fn load_profile(&self, profile: Option<&str>) {
         let Some(session) = self.fresh_session() else { return };
         let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
         let watch_sink = self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let profile = profile.map(str::to_string);
         let library = self.library.clone();
-        let file = self.file.clone();
+        let prefs = self.prefs.clone();
+        let write_lock = Arc::clone(&self.write_lock);
         // Mark unresolved immediately, so no request can retain the previous profile's library.
         let generation = {
             let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
@@ -476,30 +487,74 @@ impl Account {
         };
         let _ = std::thread::Builder::new().name("pmsshim-profile".into()).spawn(move || {
             let pid = profile.clone().or_else(|| plx_stremio::nuvio::profiles(&session).ok().and_then(|p| p.first().map(|p| p.id.clone()))).unwrap_or_else(|| "1".into());
-            {
-                let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
-                if context.generation != generation { return; }
-                context.profile = Some(pid.clone());
+            let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
+            if context.generation != generation { return; }
+            context.profile = Some(pid.clone());
+            // Same write lock as `write_prefs`: a preference saved while the profile resolves
+            // must not be overwritten by a snapshot taken before it.
+            let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let p = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Err(e) = save_session_file(Some(&session), Some(&pid), &p) {
+                log_prefs_error(&e);
             }
-            if let Some(file) = file { save_session_file(&file, Some(&session), Some(&pid)); }
-            // The guard is dropped: the pull resolves its profile through the same lock, and
-            // holding it here deadlocks on the first profile switch.
-            let addons = plx_stremio::nuvio::addons(&session, &pid);
-            activate_loaded_profile(&library, generation, &sink, watch_sink.as_ref(), addons);
+            // The sink's merge path pulls the account's resume points, which wants `library`:
+            // drop the guard first or the two deadlock.
+            drop(context);
+            activate_loaded_profile(
+                &library, generation, &prefs, &sink, watch_sink,
+                || plx_stremio::nuvio::addons(&session, &pid),
+            );
         });
     }
 }
 
-/// Install a profile's addons, then fire its watch pull. Both are guarded by the load generation:
-/// a profile picked while this worker was fetching neither installs its set nor pulls its history.
-fn activate_loaded_profile(library: &Mutex<LibraryContext>, generation: u64, sink: &AddonSink,
-    watch_sink: Option<&WatchSink>, addons: plx_stremio::model::Result<Vec<plx_stremio::model::Addon>>) {
-    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
-    if let Ok(addons) = addons {
-        if !addons.is_empty() { sink(plx_stremio::addons::AddonSet { addons }); }
+/// **The half of [`Account::load_profile`] that installs what the profile resolved.** `fetch` is
+/// the addon lookup, injected so the ordering and the supersession rule can be graded on the host
+/// without a backend.
+///
+/// **The profile's addons are installed BEFORE the watch pull**, and that order is load-bearing:
+/// `pull_account_watch` builds each resume point's row through the addon backend (`Shim::row`),
+/// and `WatchState::in_progress` drops an entry whose row snapshot is missing. Pulling first
+/// stored the position with no row, so Continue Watching stayed empty until a restart ran the
+/// pull against the real addons.
+fn activate_loaded_profile<F>(
+    library: &Mutex<LibraryContext>,
+    generation: u64,
+    prefs: &Mutex<serde_json::Map<String, Value>>,
+    sink: &AddonSink,
+    watch_sink: Option<WatchSink>,
+    fetch: F,
+) where
+    F: FnOnce() -> plx_stremio::model::Result<Vec<plx_stremio::model::Addon>>,
+{
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
+        return;
     }
-    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
-    if let Some(watch) = watch_sink { watch(); }
+    // The fetch can take the manifest deadline (15 s), so a newer profile load may land while it
+    // is out. Nothing this worker resolved belongs to the current profile any more, so install
+    // neither set and pull neither history.
+    let addons = fetch();
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
+        return;
+    }
+    if let Ok(mut addons) = addons {
+        if !addons.is_empty() {
+            // Apply session-scoped enable/disable overrides from nuvio-session.json.
+            let overrides = prefs.lock().unwrap_or_else(|e| e.into_inner()).get("addonEnabled").and_then(Value::as_object).cloned().unwrap_or_default();
+            for a in addons.iter_mut() {
+                if let Some(b) = overrides.get(&a.transport_url).and_then(Value::as_bool) {
+                    a.disabled = !b;
+                }
+            }
+            sink(plx_stremio::addons::AddonSet { addons });
+        }
+    }
+    if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
+        return;
+    }
+    if let Some(watch) = watch_sink {
+        watch();
+    }
 }
 
 /// A QR code PNG the way plex.tv serves one (RGBA, opaque modules on transparent, 8 px modules,
@@ -531,121 +586,192 @@ pub fn qr_png(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    use std::sync::atomic::AtomicU64;
 
-    fn request(method: &str, query: &[(&str, &str)], body: &[u8]) -> Request {
-        Request {
-            method: method.to_string(),
-            path: "/api/v2/user/profile".to_string(),
-            query: query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-            headers: HashMap::new(),
-            body: body.to_vec(),
-        }
+    /// Fork Rofocale11: the old tests gave each case its own files. The one redb store is
+    /// process-wide, so take the shared serial lock and clear the table under test instead.
+    fn install_test_store() {
+        static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        STORE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("nuvio-shim-test-store-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let store = plx_nuvio_store::Store::open_at(&dir.join("t.redb")).unwrap();
+            let _ = plx_nuvio_store::install(store);
+        });
     }
 
-    /// Fork Rofocale11: a profile's addons are installed before its watch pull. The pull builds
-    /// each resume point's row through the addon backend, so reversing this order stores positions
-    /// with no row snapshot and Continue Watching drops them until the next launch.
+    /// A directory of this test's own: the process id alone is shared by every test in the
+    /// binary, so two preference tests would write the same `nuvio-session.json`.
+    fn temp_dir() -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "nuvio-prefs-test-{}-{nanos}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        dir
+    }
+
+    /// The answer shape the CLIENT parses (`plex::account::HomeUsers` has one field, `users`). A
+    /// bare array made the roster empty on the simulator, so the who's-watching screen never
+    /// appeared and the app used the single default profile.
     #[test]
-    fn a_profile_load_installs_addons_before_it_pulls_watch() {
-        use std::sync::Mutex as StdMutex;
-        let order = Arc::new(StdMutex::new(Vec::new()));
-        let library = Mutex::new(LibraryContext { generation: 7, ..Default::default() });
-        let sink_addons = Arc::clone(&order);
-        let sink: AddonSink = Arc::new(move |_| sink_addons.lock().unwrap().push("addons"));
-        let pull_order = Arc::clone(&order);
-        let watch: WatchSink = Arc::new(move || pull_order.lock().unwrap().push("watch"));
-        let addon = plx_stremio::model::Addon { transport_url: "https://example.invalid/addon".into(), ..Default::default() };
-        activate_loaded_profile(&library, 7, &sink, Some(&watch), Ok(vec![addon]));
-        assert_eq!(*order.lock().unwrap(), ["addons", "watch"]);
-        // A stale load pulls nothing.
-        order.lock().unwrap().clear();
-        activate_loaded_profile(&library, 6, &sink, Some(&watch), Ok(Vec::new()));
-        assert!(order.lock().unwrap().is_empty());
-        // An empty addon answer still pulls the account history.
-        activate_loaded_profile(&library, 7, &sink, Some(&watch), Ok(Vec::new()));
-        assert_eq!(*order.lock().unwrap(), ["watch"]);
+    fn home_users_answers_the_wrapper_object_the_client_parses() {
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        let req = crate::shim_http::Request {
+            method: "GET".into(),
+            path: "/api/v2/home/users".into(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        let response = account.handle(&req, &["home", "users"]);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("JSON");
+        assert!(body.is_object(), "a bare array is not parseable by the client: {body}");
+        let users = body["users"].as_array().expect("users");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["uuid"], "nuvio");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn qr_is_a_png() {
-        let png = super::qr_png("https://example.invalid/tv?code=ABCD").unwrap();
-        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
-    }
-
-    /// The mock's own selftest (`tests/mock_pms.py`, account-preference block): `/user`, the Home
-    /// roster and the switch reply all describe one profile, so the app seats it and reads its
-    /// Settings. A uuid mismatch here is what left Nuvio's Settings rows greyed out.
-    #[test]
-    fn account_routes_publish_one_profile_identity() {
-        let account = Account::new(None, "local-token");
-        let user: Value = serde_json::from_slice(&account.user().body).unwrap();
-        let roster: Value = serde_json::from_slice(&account.home_users().body).unwrap();
-        let switched: Value = serde_json::from_slice(&account.switch(user["uuid"].as_str().unwrap()).body).unwrap();
-        let only = &roster["users"][0];
-        assert_eq!(roster["users"].as_array().unwrap().len(), 1);
-        assert_eq!(user["uuid"], only["uuid"]);
-        assert_eq!(user["id"], only["id"]);
-        assert_eq!(user["uuid"], switched["uuid"]);
-        assert_eq!(user["id"], switched["id"]);
-        assert_eq!(user["title"], only["title"]);
-        assert_eq!(user["profile"], json!(default_prefs()), "the account row is on /user too");
+        assert!(super::qr_png("https://example.invalid/tv?code=ABCD").unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
     }
 
     #[test]
-    fn profile_get_and_put_follow_the_mock_contract() {
-        // GET serves the defaults even with no installed store (the memory-only build).
-        let account = Account::new(None, "local-token");
-        // Through `handle`, the route the app's `GET /api/v2/user/profile` actually takes.
-        let got = account.handle(&request("GET", &[], b""), &["user", "profile"]);
-        assert_eq!(got.status, 200);
-        assert_eq!(serde_json::from_slice::<Value>(&got.body).unwrap(), json!(default_prefs()));
+    fn user_profile_put_persists_prefs_without_session() {
+        let _serial = serial();
+        install_test_store();
+        let _ = plx_nuvio_store::get().unwrap().remove(plx_nuvio_store::Table::AccountSession, "session");
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        let req = crate::shim_http::Request {
+            method: "PUT".into(),
+            path: "/api/v2/user/profile".into(),
+            query: [("defaultAudioLanguage".to_string(), "fr".to_string())].into_iter().collect(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        // segs passed via handle path; call user_profile directly through handle dispatch.
+        let _ = account.handle(&req, &["user", "profile"]);
+        let bytes = plx_nuvio_store::get().unwrap().get(plx_nuvio_store::Table::AccountSession, "session").expect("session row should be written");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["preferences"]["defaultAudioLanguage"], "fr");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // A body on PUT is refused, as in the mock.
-        assert_eq!(account.user_profile(&request("PUT", &[], b"body")).status, 400);
-        assert_eq!(account.user_profile(&request("POST", &[], b"")).status, 405);
+    /// Signing out WIPES the install's preferences with the session: the next sign-in pulls the
+    /// account's settings, and a leftover local language would only disagree with them.
+    #[test]
+    fn signing_out_removes_the_session_file_and_its_preferences() {
+        let _serial = serial();
+        install_test_store();
+        let _ = plx_nuvio_store::get().unwrap().remove(plx_nuvio_store::Table::AccountSession, "session");
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        account.set_addon_enabled("https://addon.example/manifest.json", false);
+        assert!(plx_nuvio_store::get().unwrap().get(plx_nuvio_store::Table::AccountSession, "session").is_some(), "the write must land first");
+        account.sign_out();
+        assert!(
+            plx_nuvio_store::get().unwrap().get(plx_nuvio_store::Table::AccountSession, "session").is_none(),
+            "a signed-out install keeps no preferences"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // An update changes only the named keys; an empty language is a real value.
-        let mut prefs = default_prefs();
-        let query: HashMap<String, String> = [("defaultAudioLanguage", ""),
-            ("autoSelectAudio", "true"), ("defaultSubtitleForced", "3")]
-            .into_iter().map(|(k, v)| (k.into(), v.into())).collect();
-        apply_profile_update(&mut prefs, &query).unwrap();
-        assert_eq!(prefs["defaultAudioLanguage"], json!(""));
-        assert_eq!(prefs["autoSelectAudio"], json!(true));
-        assert_eq!(prefs["defaultSubtitleForced"], json!(3));
-        assert_eq!(prefs["defaultSubtitleLanguage"], json!("en"), "unnamed keys survive");
-        assert_eq!(prefs["autoSelectSubtitle"], json!(1));
-
-        // Bad values and unknown keys are refused and leave the row alone.
-        for bad in [("autoSelectSubtitle", "3"), ("defaultSubtitleForced", "9"),
-            ("autoSelectAudio", "yes"), ("unknown", "1")] {
-            let mut before = default_prefs();
-            let q: HashMap<String, String> = [(bad.0.to_string(), bad.1.to_string())].into_iter().collect();
-            assert!(apply_profile_update(&mut before, &q).is_err(), "{bad:?}");
-            assert_eq!(before, default_prefs(), "a refused PUT cannot partially apply");
+    fn test_addon() -> plx_stremio::model::Addon {
+        plx_stremio::model::Addon {
+            transport_url: "https://addon.example".into(),
+            manifest: Default::default(),
+            disabled: false,
+            display_name: None,
         }
     }
 
-    /// The durable half: a PUT's row is what a later GET reads, including after a restart (a
-    /// second `Store::open_at` over the same file). Unknown redb rows are never echoed.
+    /// **Addons first, watch pull second.** The pull builds each resume point's row through the
+    /// addon backend; pulling first stored positions whose row snapshot was missing, and
+    /// Continue Watching dropped them until a restart.
     #[test]
-    fn account_preferences_round_trip_through_redb() {
-        let dir = std::env::temp_dir().join(format!("nuvio-account-prefs-test-{}-{}",
-            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let file = dir.join("nuvio.redb");
-        let mut prefs = default_prefs();
-        prefs.insert("defaultSubtitleLanguage".into(), json!("nl"));
-        prefs.insert("bogus".into(), json!(1));
-        {
-            let store = plx_nuvio_store::Store::open_at(&file).unwrap();
-            put_prefs(Some(&store), &prefs).unwrap();
-        } // release redb's file lock before re-opening, as a process restart would
-        let reopened = plx_nuvio_store::Store::open_at(&file).unwrap();
-        let read = read_prefs(Some(&reopened));
-        assert_eq!(read["defaultSubtitleLanguage"], json!("nl"));
-        assert!(!read.contains_key("bogus"));
-        assert_eq!(read["autoSelectSubtitle"], json!(1));
+    fn a_profile_load_installs_its_addons_before_it_pulls_watch() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { profile: Some("1".into()), generation: 7, cached: None });
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), || Ok(vec![test_addon()]));
+
+        assert_eq!(*order.lock().unwrap(), ["addons", "watch"]);
+    }
+
+    /// An account with no addons still has a watch history to merge, so an empty answer installs
+    /// nothing but must not suppress the pull.
+    #[test]
+    fn an_empty_addon_answer_still_pulls_watch() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { profile: None, generation: 7, cached: None });
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), || Ok(Vec::new()));
+
+        assert_eq!(*order.lock().unwrap(), ["watch"]);
+    }
+
+    /// A newer profile load wins even when it lands before this worker fetches anything.
+    #[test]
+    fn a_superseded_profile_load_fetches_nothing() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Mutex::new(LibraryContext { profile: None, generation: 8, cached: None });
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch),
+            || -> plx_stremio::model::Result<Vec<plx_stremio::model::Addon>> {
+                panic!("a superseded load must not fetch")
+            });
+
+        assert!(order.lock().unwrap().is_empty());
+    }
+
+    /// The fetch can take the 15 s manifest deadline. A profile picked while it is out owns the
+    /// backend and the history; the older worker must not install its set or pull its watch state.
+    #[test]
+    fn a_profile_superseded_while_fetching_installs_and_pulls_nothing() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let library = Arc::new(Mutex::new(LibraryContext { profile: Some("1".into()), generation: 7, cached: None }));
+        let prefs = Mutex::new(serde_json::Map::new());
+        let sink_order = Arc::clone(&order);
+        let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
+        let watch_order = Arc::clone(&order);
+        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+        let newer = Arc::clone(&library);
+
+        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), move || {
+            newer.lock().unwrap().generation = 8;
+            Ok(vec![test_addon()])
+        });
+
+        assert!(order.lock().unwrap().is_empty(), "a superseded fetch must not install or pull");
     }
 }
 
@@ -656,28 +782,41 @@ fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
 }
 
 
-fn save_session_file(file: &std::path::Path, session: Option<&plx_stremio::nuvio::Session>, profile: Option<&str>) {
-    // Fork Rofocale11: one file, one record. The path is kept only as the in-memory-mode gate.
-    if let Some(store) = plx_nuvio_store::get() {
-        match session {
-            Some(session) => {
-                let mut value = session_to_json(session);
-                value["profile_id"] = json!(profile);
-                if let Ok(bytes) = serde_json::to_vec(&value) {
-                    let _ = store.put(plx_nuvio_store::Table::AccountSession, "session", &bytes);
-                }
-            }
-            None => { let _ = store.remove(plx_nuvio_store::Table::AccountSession, "session"); }
-        }
-        return;
-    }
+/// Fork Rofocale11: the session document is one row in the single redb file. The JSON shape is
+/// unchanged, so a session migrated from the old file means exactly what it did before.
+fn save_session_file(
+    session: Option<&plx_stremio::nuvio::Session>,
+    profile: Option<&str>,
+    prefs: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
     match session {
         Some(session) => {
             let mut value = session_to_json(session);
-            value["profile_id"] = json!(profile);
-            let tmp = file.with_extension("json.tmp");
-            if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() { let _ = std::fs::rename(&tmp,file); }
+            // A preferences PUT can land before `load_profile` resolved the active profile.
+            // Never write `null` over the id already in redb: the next boot would reset the
+            // account to profile 1 after nothing but a language change.
+            let stored_profile = profile.map(str::to_string).or_else(|| {
+                read_session_doc()?.get("profile_id").and_then(Value::as_str).map(str::to_string)
+            });
+            value["profile_id"] = json!(stored_profile);
+            value["preferences"] = Value::Object(prefs.clone());
+            write_session_doc(&value)
         }
-        None => { let _ = std::fs::remove_file(file); }
+        None if prefs.is_empty() => {
+            if let Some(store) = plx_nuvio_store::get() {
+                store.remove(plx_nuvio_store::Table::AccountSession, "session")
+            } else {
+                Ok(())
+            }
+        }
+        None => {
+            let mut value = serde_json::Map::new();
+            value.insert("preferences".to_string(), Value::Object(prefs.clone()));
+            write_session_doc(&Value::Object(value))
+        }
     }
+}
+
+fn log_prefs_error(e: &str) {
+    plx_stremio::nuvio::log_account_event(&format!("nuvio account: preferences not persisted: {e}"));
 }

@@ -651,8 +651,28 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
     /// is `protect` (the key about to be re-uploaded in place) or was drawn in the current or the
     /// last completed [`TexCache::frame`] (`drawn_frame == 0`, "never drawn since upload", is
     /// deliberately NOT protected — an entry nothing has ever resolved is not what is on screen).
+    /// Fork Rofocale11: a recently-resolved Residency entry is the backdrop of the page the user
+    /// is about to scroll back to. Heavy-first eviction would take it first and buy a full solo
+    /// re-upload on the way back — the spinner/churn seen while browsing a Recommended page.
+    const RECENT_RESIDENCY_GRACE: u64 = 2_000;
+
+    /// Fork Rofocale11: the most-recently-resolved Residency entry is pinned unconditionally.
+    fn mru_residency(&self) -> Option<K> {
+        self.resident
+            .iter()
+            .filter(|(_, e)| class_for(e.bytes).is_solo())
+            .max_by_key(|(_, e)| e.last_used)
+            .map(|(k, _)| *k)
+    }
+
     fn victim_ok(&self, k: K, e: &Entry, protect: Option<K>) -> bool {
-        Some(k) != protect && !(e.drawn_frame != 0 && e.drawn_frame + 1 >= self.frame)
+        if Some(k) == protect { return false; }
+        if e.drawn_frame != 0 && e.drawn_frame + 1 >= self.frame { return false; }
+        if class_for(e.bytes).is_solo() {
+            if self.clock.saturating_sub(e.last_used) < Self::RECENT_RESIDENCY_GRACE { return false; }
+            if self.mru_residency() == Some(k) { return false; }
+        }
+        true
     }
 
     /// Make `room` more slots fit under `cap` and `incoming` more bytes fit under `bytes_max` by
@@ -1016,7 +1036,30 @@ mod tests {
     fn a_heavy_entry_is_evicted_before_an_older_light_one() {
         const LIGHT: usize = 900_000; // under RESIDENCY_BYTES
         const HEAVY: usize = 2_000_000; // over it: a Residency take
-        let mut c: TexCache<u32> = TexCache::with_budget(8, 3_500_000);
+        // Fork Rofocale11: the old fork's grace/MRU pin means a heavy entry inside the grace (or
+        // that is the MRU) is the page's own art and the older light one goes first. Age it past
+        // the grace AND make it non-MRU by landing a second, later heavy entry.
+        let mut c: TexCache<u32> = TexCache::with_budget(64, 6_000_000);
+        let mut up = StubUp { next: 0, freed: vec![], warmed: vec![] };
+        let mut present = Present::new();
+        let mut b = Budget::new();
+        for (at, key, bytes) in [(0, 1, LIGHT), (20_000, 2, HEAVY), (40_000, 3, LIGHT), (50_000, 5, HEAVY)] {
+            c.accept(sized(key, bytes));
+            b.begin_frame(at);
+            let mut ph = PresentHandle(&mut present);
+            assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || at), 1, "key {key} lands");
+        }
+        for _ in 0..2_100 { assert!(c.resolve(3).is_some()); }
+        c.accept(sized(4, LIGHT));
+        b.begin_frame(60_000);
+        let mut ph = PresentHandle(&mut present);
+        assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || 60_000), 1, "key 4 lands");
+        assert!(c.resolve(3).is_some(), "the arrival is resident");
+        let evicted = c.take_unresident().collect::<Vec<_>>();
+        assert!(evicted.contains(&(2, false)), "the stale non-MRU heavy entry went first: {evicted:?}");
+
+        // A heavy entry resolved inside the grace survives; the light one is evicted instead.
+        let mut c: TexCache<u32> = TexCache::with_budget(64, 3_500_000);
         let mut up = StubUp { next: 0, freed: vec![], warmed: vec![] };
         let mut present = Present::new();
         let mut b = Budget::new();
@@ -1026,10 +1069,13 @@ mod tests {
             let mut ph = PresentHandle(&mut present);
             assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || at), 1, "key {key} lands");
         }
-        assert!(c.resolve(1).is_some(), "the older light entry stays");
-        assert!(c.resolve(3).is_some(), "the arrival is resident");
-        assert!(c.resolve(2).is_none(), "the heavy entry went first");
-        assert_eq!(c.take_unresident().collect::<Vec<_>>(), vec![(2, false)]);
+        assert!(c.resolve(2).is_some());
+        c.accept(sized(4, LIGHT));
+        b.begin_frame(60_000);
+        let mut ph = PresentHandle(&mut present);
+        assert_eq!(c.prepare(&mut b, &mut up, &mut ph, || 60_000), 1, "key 4 lands");
+        assert!(c.resolve(2).is_some(), "a recently-resolved heavy entry is protected");
+        assert!(c.resolve(3).is_none(), "the light entry went instead");
     }
 
     /// F2: an image bigger than the whole byte budget, with nothing on screen blocking it, is

@@ -168,12 +168,30 @@ fn discover_resolved() -> DiscoverBase {
 /// (`discover.rs`) and the Watchlist (`watchlist.rs`) both build their URLs on it, so a stand-in
 /// armed for one serves the other and neither can reach the real host behind the other's back.
 pub fn discover() -> String {
-    discover_resolved().base
+    // Fork Rofocale11: the old fork routes Nuvio's Discover reads (person biography, filmography)
+    // to the installed in-process shim. The merge dropped this, so the app dialled
+    // `discover.provider.plex.tv` with no Plex credential and every person page returned 401 with
+    // no info and no filmography. Read on EVERY call: the shim installs itself during boot, after
+    // an early caller may already have resolved the real host.
+    local_discover().unwrap_or_else(|| discover_resolved().base)
+}
+
+/// Fork Rofocale11: the Discover base the installed local server names, if usable.
+fn local_discover() -> Option<String> {
+    resolve_local_base(plx_base::local_server::get().map(|local| local.origin.as_str()))
+}
+
+/// Fork Rofocale11: a local origin is followed only when it is plain `http` to a loopback address —
+/// the same rule every Discover trigger obeys, so a hostile server cannot steer the account token.
+fn resolve_local_base(local: Option<&str>) -> Option<String> {
+    local
+        .filter(|base| loopback_http(base))
+        .map(|base| base.trim_end_matches('/').to_string())
 }
 
 /// Is a Discover stand-in in force (the base is not the real service)?
 pub(super) fn stand_in_armed() -> bool {
-    discover_resolved().source != DiscoverSource::Real
+    local_discover().is_some() || discover_resolved().source != DiscoverSource::Real
 }
 
 /// The dev-build failsafe for READS, [`watchlist`](super::watchlist)'s `permit_write` for the other
@@ -207,7 +225,7 @@ fn permit_read(devtriggers_build: bool, token_boot: bool, armed: bool) -> bool {
 /// caller sends nothing.
 pub(super) fn discover_read_allowed(url: &str) -> bool {
     let resolved = discover_resolved();
-    if permit_read(cfg!(feature = "devtriggers"), resolved.token_boot, resolved.source != DiscoverSource::Real) {
+    if permit_read(cfg!(feature = "devtriggers"), resolved.token_boot, stand_in_armed()) {
         return true;
     }
     // The shapes fold REAL ids (all-digit or all-hex segments of 8 or more characters, so a
@@ -1713,8 +1731,20 @@ pub struct HomeUser {
 #[cfg(test)]
 mod tests {
     use super::{endpoint_shape, pin_is_gone, AccountClient, Pin, Resource};
-    use super::{permit_read, resolve_discover, DiscoverSource, DISCOVER};
+    use super::{permit_read, resolve_discover, resolve_local_base, DiscoverSource, DISCOVER};
     use std::time::Duration;
+
+    /// Fork Rofocale11: the in-process shim is the Discover base ONLY when it is plain loopback
+    /// http — the same rule every trigger obeys, so a hostile server cannot steer the token.
+    #[test]
+    fn the_local_server_is_the_discover_base_only_when_it_is_plain_loopback_http() {
+        assert_eq!(resolve_local_base(Some("http://127.0.0.1:32420/")).as_deref(), Some("http://127.0.0.1:32420"));
+        assert_eq!(resolve_local_base(Some("http://localhost:32420")).as_deref(), Some("http://localhost:32420"));
+        for refused in ["https://127.0.0.1:32420", "http://192.168.1.2:32420", "http://example.com", "not a url"] {
+            assert_eq!(resolve_local_base(Some(refused)), None, "{refused}");
+        }
+        assert_eq!(resolve_local_base(None), None);
+    }
 
     #[test]
     fn discover_resolves_trigger_then_plex_tv_then_the_real_host() {

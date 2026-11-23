@@ -56,10 +56,17 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   `language.json`) are read once as migration sources and written into redb. DB8 records cannot
   be migrated — no helper is available to read them — so anything that lived only there starts
   fresh.
-- Torrents (`infoHash`): played through a Stremio-compatible streaming server URL
-  (`<server>/<infoHash>/<fileIdx>`) when one is configured; debrid-resolved HTTP links from
-  Torrentio/AIOStreams play directly. Local server scanning is off by default and
-  requires `enableTorrents`; a configured `torrentServer` can be used directly.
+- Torrents (`infoHash`): played through the **in-process C engine** (`libsbengine.so`, `dlopen`ed
+  beside the binary by `plx_stremio::sbengine`, never linked). `boot::start_p2p_service` starts it
+  on a parked thread with durable swarm state and a RAM-backed payload window; the shim resolves a
+  stream with `sbengine::resolve_stream` and serves it on the engine's own loopback Range URL.
+  When the library cannot load, torrents are unavailable — there is deliberately no Node fallback.
+  Debrid-resolved HTTP links from Torrentio/AIOStreams play directly and need no engine. The
+  Node scripts shipped in `js-service/` are only the trailer decipher/proxy children: system Node
+  spawns them per resolve from `<app_dir>/js-service/`, independent of the P2P engine.
+  `ci/build-sbengine.sh` builds the engine (Nuvio Engine + libtorrent 2.0.12 + statically linked
+  OpenSSL 1.1.1) and the Makefile stages it in both `deploy` and the `.ipk`, where its bytes are
+  pinned by `pkg/link-evidence/<flavour>/unreceipted.sha256`.
 - Release discovery permits plaintext credentials for the registered in-process shim
   only when its origin, token and machine identity match the boot registration and
   its address is literal loopback. Identity probing and authenticated library admission
@@ -91,7 +98,7 @@ marked seams into `plx_nuvio_store`; `plx_pmsshim` and `plx_nuvio_probe` are ent
 | crate | owner | depends on |
 |---|---|---|
 | `rust-modules/stremio` (`plx_stremio`) | fork-owned backend | `plx_base`, `plx_net`, serde |
-| `rust-modules/pmsshim` (`plx_pmsshim`) | fork-owned shim | `plx_stremio`, `plx_net`, `plx_nuvio_store`, serde |
+| `rust-modules/pmsshim` (`plx_pmsshim`) | fork-owned shim | `plx_base`, `plx_stremio`, `plx_net`, `plx_nuvio_store`, serde |
 | `rust-modules/nuvio-probe` (`plx_nuvio_probe`) | fork-owned probe | `plx_base`, `plx_net`, `plx_plex`, `plx_media_codecs` |
 | `rust-modules/nuvio-store` (`plx_nuvio_store`) | fork-owned single store | `redb`, `plx_base` |
 | `rust-modules/os` (`plx_os`) | upstream, fork-marked | `plx_nuvio_store`, `ring` — runs the canonical storage backend in process |

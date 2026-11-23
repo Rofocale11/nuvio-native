@@ -238,3 +238,12 @@ rust-modules/target*-none/
 
 # Fork Rofocale11: HOST=1 FFmpeg staged by hand for the Linux simulator. Rebuildable, never shipped.
 /pkg/*-plx-host.so.*
+
+# Fork Rofocale11: the C torrent engine's build tree — CMake output, the unstripped copy and the
+# stripped `build/sbengine/libsbengine.so` that `make ipk` stages. Derived, never source.
+/build/
+# Fork Rofocale11: ci/build-openssl.sh fetches the pinned tarball through ci/deps.py into
+# vendor/openssl-src and installs the ARM archives into vendor/openssl-prefix. Both are rebuildable
+# from ci/dependencies.json (id: openssl). vendor/engine-sources/ IS source and stays tracked.
+/vendor/openssl-src/
+/vendor/openssl-prefix/

@@ -32,6 +32,15 @@ state, key table, account session and local settings. There is no DB8 record and
 helper in the package. Add new persisted state as a table in `plx_nuvio_store`, not a new file or a
 new DB8 kind. See `ARCHITECTURE.md` for the in-process backend and the migration limits.
 
+## The old fork's shim behavior is authoritative
+
+`pmsshim` is the old fork's shim source, ported wholesale. When a merge or a host port disagrees
+with the old fork about shim behavior — hub rows, BetterPoster selection, `/photo` fallbacks,
+poster URLs — the old fork is right and the newer tree is the regression. Port the old behavior;
+adapt only the **boundary** (storage, renamed crate APIs, types this tree no longer owns) and add a
+test that pins the behavior. Do not "improve" the shim's poster or catalog logic to match the newer
+fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale port.
+
 ## Verification and device work
 
 - Prefer focused host gates over repeated full `make check` loops. After Rust edits also run

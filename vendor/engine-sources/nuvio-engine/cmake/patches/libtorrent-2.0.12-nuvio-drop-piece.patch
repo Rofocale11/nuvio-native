@@ -1,0 +1,89 @@
+diff --git a/include/libtorrent/torrent.hpp b/include/libtorrent/torrent.hpp
+index 99f41f297..9655c43fd 100644
+--- a/include/libtorrent/torrent.hpp
++++ b/include/libtorrent/torrent.hpp
+@@ -646,6 +646,7 @@ namespace libtorrent {
+ 		void set_piece_deadline(piece_index_t piece, int t, deadline_flags_t flags);
+ 		void reset_piece_deadline(piece_index_t piece);
+ 		void set_piece_first_block(piece_index_t piece, int block);
++		void nuvio_drop_piece(piece_index_t piece);
+ 		void clear_time_critical();
+ #endif // TORRENT_DISABLE_STREAMING
+ 
+diff --git a/include/libtorrent/torrent_handle.hpp b/include/libtorrent/torrent_handle.hpp
+index 24b6363fe..a2433979d 100644
+--- a/include/libtorrent/torrent_handle.hpp
++++ b/include/libtorrent/torrent_handle.hpp
+@@ -426,6 +426,12 @@ namespace aux {
+ 		void set_piece_deadline(piece_index_t index, int deadline, deadline_flags_t flags = {}) const;
+ 		void reset_piece_deadline(piece_index_t index) const;
+ 		void set_piece_first_block(piece_index_t index, int block) const;
++
++		// nuvio (#334): forget a piece we have. The caller has already freed
++		// its bytes on disk; the piece becomes "not have" in the picker, peers
++		// that understand lt_donthave are told so, and the piece is downloaded
++		// again only if its priority asks for it.
++		void nuvio_drop_piece(piece_index_t index) const;
+ 		void clear_piece_deadlines() const;
+ 
+ #if TORRENT_ABI_VERSION == 1
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index bc72b4ed8..fe5b25b33 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -5417,6 +5417,39 @@ namespace {
+ 		if (has_picker()) m_picker->set_block_start(piece, 0);
+ 	}
+ 
++	// nuvio (#334): streaming window. The disk back-end already punched the
++	// piece out of the file, so it must stop being "have": otherwise reads
++	// would serve a hole to the player or to peers.
++	void torrent::nuvio_drop_piece(piece_index_t const piece)
++	{
++		if (!valid_metadata() || piece < piece_index_t(0)
++			|| piece >= m_torrent_file->end_piece())
++			return;
++		if (!has_picker() && !m_have_all) return;
++		need_picker();
++		m_have_all = false;
++		if (!m_picker->have_piece(piece)) return;
++		m_picker->we_dont_have(piece);
++		inc_stats_counter(counters::num_have_pieces, -1);
++		// file_progress has no "lost a piece": rebuild it from the picker
++		if (!m_file_progress.empty())
++		{
++			m_file_progress.clear();
++			m_file_progress.init(*m_picker, m_torrent_file->files());
++		}
++		for (auto c : m_connections)
++		{
++			TORRENT_INCREMENT(m_iterating_connections);
++			if (c->is_disconnecting()) continue;
++			c->reject_piece(piece);
++			c->write_dont_have(piece);
++		}
++		update_gauge();
++		set_need_save_resume(torrent_handle::if_download_progress);
++		state_updated();
++		update_want_tick();
++	}
++
+ 	void torrent::set_piece_first_block(piece_index_t const piece, int const block)
+ 	{
+ 		if (!valid_metadata() || piece < piece_index_t(0)
+diff --git a/src/torrent_handle.cpp b/src/torrent_handle.cpp
+index 3bfb27d0b..eb390566f 100644
+--- a/src/torrent_handle.cpp
++++ b/src/torrent_handle.cpp
+@@ -951,6 +951,11 @@ namespace libtorrent {
+ 		async_call(&torrent::set_piece_first_block, index, block);
+ 	}
+ 
++	void torrent_handle::nuvio_drop_piece(piece_index_t index) const
++	{
++		async_call(&torrent::nuvio_drop_piece, index);
++	}
++
+ 	void torrent_handle::clear_piece_deadlines() const
+ 	{
+ #ifndef TORRENT_DISABLE_STREAMING

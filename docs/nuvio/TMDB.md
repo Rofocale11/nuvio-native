@@ -12,14 +12,20 @@ pub struct TmdbClient { /* Clone, Debug (redacted), Default */ }
 
 impl TmdbClient {
     pub fn new() -> Self;                                   // option_env!("TMDB_API_KEY") -> std::env; blank/unset => configured()==false
+    pub fn from_env() -> Option<Self>;                      // the old fork's constructor: None when unconfigured
     pub fn configured(&self) -> bool;
     pub fn movie_details(&self, id: u64) -> Result<TmdbMovieDetails>;
     pub fn tv_details(&self, id: u64) -> Result<TmdbShowDetails>;
     pub fn movie_id(&self, id: &str) -> Result<Option<u64>>;
     pub fn series_id(&self, id: &str) -> Result<Option<u64>>;
     pub fn movie_external_ids(&self, id: u64) -> Result<Option<String>>;
+    pub fn external_ids(&self, id: u64) -> Result<Option<String>>;  // old alias
     pub fn tv_external_ids(&self, id: u64) -> Result<Option<String>>;
+    pub fn credits(&self, movie_id: u64) -> Result<Vec<TmdbCast>>;
+    pub fn recommendations(&self, movie_id: u64) -> Result<Vec<TmdbMovie>>;
+    pub fn videos(&self, movie_id: u64) -> Result<Vec<TmdbVideo>>;
     pub fn person_details(&self, id: u64) -> Result<TmdbPerson>;
+    pub fn person_credits(&self, id: u64) -> Result<Vec<TmdbCredit>>;  // cast-only filmography
     pub fn person_career(&self, id: u64) -> Result<TmdbCombinedCredits>;
     pub fn collection_details(&self, id: u64) -> Result<TmdbCollection>;
 }
@@ -36,11 +42,10 @@ All public serde types derive `Clone, Debug, Default, Serialize, Deserialize`, c
 fails a whole response. The fields are exactly:
 
 - `TmdbCast { id, name, character, profile_path }` — the Role array; `id` is the synthetic person key.
-- `TmdbCredit { id, name, character, job, department, profile_path, media_type }` — one combined-credit row.
-- `TmdbCollectionRef { id, name }`, `TmdbMovie { id, title, release_date, runtime, backdrop_path, poster_path, belongs_to_collection }`, `TmdbCollection { id, name, overview, poster_path, backdrop_path, parts }`.
-- `TmdbShow { id, name, first_air_date, backdrop_path, poster_path }` — a show spells a movie's
-  `title`/`release_date` as `name`/`first_air_date`.
-- `TmdbPerson { name, biography, birthday, deathday, place_of_birth, known_for_department, profile_path }`.
+- `TmdbCredit { id, name, title, overview, poster_path, backdrop_path, release_date, first_air_date, character, job, department, profile_path, media_type }` — one combined-credit row. `TmdbCredit::movie()` / `::show()` turn it into the WORK the person appeared in, so a filmography row shows that title's poster, synopsis and year rather than the person's face.
+- `TmdbGenre { id, name }`, `TmdbCollectionRef { id, name }`, `TmdbMovie { id, title, overview, release_date, runtime, backdrop_path, poster_path, genres, belongs_to_collection }`, `TmdbCollection { id, name, overview, poster_path, backdrop_path, parts }`.
+- `TmdbShow { id, name, overview, first_air_date, backdrop_path, poster_path, genres }` — a show spells a movie's `title`/`release_date` as `name`/`first_air_date`.
+- `TmdbPerson { id, name, biography, birthday, deathday, place_of_birth, known_for_department, profile_path }`.
 - `TmdbVideo { id, key, site, name, type_ }` (`type_` is the wire `type`), `TmdbVideos { results }`.
 - `TmdbCredits { cast: Vec<TmdbCast>, crew: Vec<TmdbCredit> }` — cast rows carry the character,
   crew rows carry department/job for the filmography's tabs.
@@ -74,6 +79,31 @@ episode suffixes (`tt0944947:1:2` → `tt0944947`). The shim checks `Meta::movie
 
 `movie_external_ids` / `tv_external_ids` read `/movie|tv/{id}/external_ids`, trim the `imdb_id`,
 and keep it only when it starts with `tt`.
+
+## Where TMDB is allowed (owner's rule)
+
+TMDB is **only** for the detail page and its children: cast, title logo (`clearLogo`), landscape
+`art`, trailers, More Like This, and franchise collections. It is never used while building a hub.
+
+A hub row's poster is **BetterPosters** by IMDb id, with the addon's own (Cinemeta) poster as the
+**strict fallback**. No TMDB image is ever used for a hub.
+
+Home's Cinemeta catalogs carry `tt…` ids and need no resolution. The extra catalogs in Recommended
+("Streaming Catalogs" — Apple TV+, Netflix, HBO Max…) carry `tmdb:<n>` ids. Per the owner's decision,
+`poster_url` resolves those to IMDb **once** with `imdb_base`: the one redb store is checked first,
+and only a cold miss calls TMDB `/external_ids`. Positive **and negative** answers are cached under
+`IMDB_TTL`, and `TmdbClient`'s keyed single-flight makes concurrent cold hub fills share the one
+request. Every later read comes from redb. An id that resolves to no IMDb id keeps the addon poster.
+
+The addon's `logo` is published as the row's `clearLogo`, and `UltraBlurColors` is derived from the
+poster actually chosen.
+
+## Filmography
+
+The person page's cast/crew rows are built from `TmdbCredit::movie()` / `::show()` and ordered
+newest first, undated last. The rows are remembered in the shim so the page's batched
+`/library/metadata/{csv}` caption read is answered locally. `person_credits()` supplies the
+cast-only filmography the `/library/people/{id}/media` route uses.
 
 ## Single-flight choice
 

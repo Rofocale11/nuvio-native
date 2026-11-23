@@ -660,6 +660,32 @@ pub fn image_cache_dir_is_private(path: &Path) -> bool {
     path.parent() == Some(Path::new("/media/developer/temp"))
 }
 
+/// Fork Rofocale11: durable directories for the in-process C torrent engine's swarm state (metadata,
+/// saved peers, DHT — KB-scale). Mirrors `image_cache_candidates` so a Developer Mode app gets a
+/// writable persistent rung on old firmwares, with the RAM-backed runtime dir last: the payload
+/// itself always stays under the runtime root. `boot::start_sbengine` picks the first rung it can
+/// create and falls back to `in_runtime_dir("serverp2p/state")`.
+pub fn p2p_state_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if ENV_STEERABLE {
+        v.push(in_runtime_dir("serverp2p/state"));
+    }
+    let id = app_id();
+    v.extend([
+        PathBuf::from(format!("/media/developer/{id}-engine-p2p/state")),
+        PathBuf::from(format!("/media/internal/.{id}-engine-p2p/state")),
+        PathBuf::from(format!("/media/developer/temp/{id}-engine-p2p/state")),
+        in_runtime_dir("serverp2p/state"),
+    ]);
+    v
+}
+
+/// Fork Rofocale11: the `/media/developer/temp` swarm-state rung holds peer addresses, so like
+/// `imgcache` it must be created owner-only rather than left group/other-readable.
+pub fn p2p_state_dir_is_private(path: &Path) -> bool {
+    path.parent().and_then(|p| p.parent()) == Some(Path::new("/media/developer/temp"))
+}
+
 /// Where the installed player-HUD packages may live (`data::hudpacks`), best first, on
 /// [`image_cache_candidates`]'s pattern and keyed by [`app_id`] so two flavours never share a store
 /// (a debug build's unreviewed sideload must never reach the stable install):
@@ -805,6 +831,29 @@ pub fn obsolete_last_place_candidates() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// Fork Rofocale11: the engine's swarm state is per-flavour and flat under `/media/`, with the
+    /// RAM-backed runtime dir last, and exactly the shared-temp rung is created owner-only.
+    #[test]
+    fn p2p_state_candidates_are_flat_per_flavour_with_runtime_last() {
+        let c = super::p2p_state_candidates();
+        assert!(c.len() >= 2, "{c:?}");
+        assert_eq!(*c.last().unwrap(), super::in_runtime_dir("serverp2p/state"));
+        for p in &c {
+            let s = p.to_string_lossy();
+            assert!(
+                !s.contains(&format!("/{}/", super::app_id())),
+                "a candidate nests under the id, reading as an install: {s}"
+            );
+            if s.starts_with("/media/developer/") && !s.contains("/temp/") {
+                assert!(s.contains(&format!("{}-engine-p2p", super::app_id())), "{s}");
+                assert!(s.ends_with("-engine-p2p/state"), "{s}");
+            }
+        }
+        let privates: Vec<_> = c.iter().filter(|p| super::p2p_state_dir_is_private(p)).collect();
+        assert_eq!(privates.len(), 1, "{c:?}");
+        assert!(privates[0].starts_with("/media/developer/temp"), "{c:?}");
+    }
+
     /// Only the candidate inside the world-writable `/media/developer/temp` is created owner-only.
     #[test]
     fn only_the_shared_temp_image_cache_directory_is_private() {

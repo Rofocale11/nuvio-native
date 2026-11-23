@@ -79,7 +79,7 @@ pub(crate) fn take_upload_stats() -> (u32, u64) {
     )
 }
 
-const PT_CAP: usize = 64;
+const PT_CAP: usize = 96; // Fork Rofocale11: restored from the old fork — fewer cold-row evictions
 /// Decoded pixels waiting for upload, independent of the persistent and GPU cache budgets.
 /// Existing active decodes can exceed this threshold; no further demand work starts until
 /// the upload queue drains. This prevents a fast disk from queuing 64 large backdrops.
@@ -1842,6 +1842,14 @@ fn load_art<T>(
     cache_gen: u64,
     mut decode: impl FnMut(&[u8]) -> Option<T>,
 ) -> Loaded<T> {
+    // TEMP TRACE (remove after diagnosis): the actual art path the app fetches.
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 40 {
+            plx_base::eventlog::log(&format!("TRACE load_art srv={} key={}", srv.raw(), key_s));
+        }
+    }
     let mut out = Loaded { art: None, from_disk: false, stale: None, transient: false };
     let disk = if crate::dev::scenarios::imagecache_bypass_armed() {
         None
@@ -2041,6 +2049,63 @@ fn bake_fan(
     fan::bake(&mut WorkerFanIo { client, srv, rk, cache_gen, disk, token_gen, profile })
 }
 
+/// Fork Rofocale11: the request box a built key names (`width`/`height` from the transcode path).
+/// `None` for a fan key or anything the builder did not size.
+fn request_box(key: &str) -> Option<(c_int, c_int)> {
+    let query = key.split_once('?')?.1;
+    let param = |name: &str| {
+        query.split('&').find_map(|kv| kv.strip_prefix(name)).and_then(|v| v.parse::<c_int>().ok())
+    };
+    let (w, h) = (param("width=")?, param("height=")?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Fork Rofocale11: the largest box that is still a CARD's. Above it the box is a drawn size (the
+/// Home hero's 1280×720), so the box alone bounds the decode.
+const CAP_BOX_MAX_PX: i64 = 500 * 750;
+
+/// Fork Rofocale11: downscale a decoded RGBA image in place (the old fork's `cap_dims` follow-up).
+/// Some addon CDNs (btttr.cc) answer 500×750 for a 250×375 card: 1.5 MB of RGBA, over
+/// `tex::RESIDENCY_BYTES`, which makes every fast-scroll poster a solo `Residency` frame (fps
+/// 44–54 with `budget …/solo:residency` on the TV). Keeping it under the threshold leaves it an
+/// ordinary `Poster` take — no spinner, no frame stall.
+fn cap_dims(w: c_int, h: c_int, box_w: c_int, box_h: c_int) -> Option<(c_int, c_int)> {
+    if w <= 0 || h <= 0 || box_w <= 0 || box_h <= 0 {
+        return None;
+    }
+    if plx_base::surface::render_scale() > 1 {
+        return None;
+    }
+    let bytes = (w as usize) * (h as usize) * 4;
+    if bytes <= tex::RESIDENCY_BYTES {
+        return None;
+    }
+    let cover = (box_w as f32 / w as f32).max(box_h as f32 / h as f32);
+    let scale = if i64::from(box_w) * i64::from(box_h) <= CAP_BOX_MAX_PX {
+        let area = (tex::RESIDENCY_BYTES as f32 / bytes as f32).sqrt() * 0.999;
+        cover.min(area)
+    } else {
+        cover
+    };
+    if scale >= 1.0 {
+        return None;
+    }
+    let (dw, dh) = (((w as f32 * scale).round() as c_int).max(1), ((h as f32 * scale).round() as c_int).max(1));
+    (dw != w || dh != h).then_some((dw, dh))
+}
+
+fn downscale_rgba(px: *mut c_uchar, w: c_int, h: c_int, dw: c_int, dh: c_int) -> Option<(*mut c_uchar, c_int, c_int)> {
+    if px.is_null() || w <= 0 || h <= 0 || dw <= 0 || dh <= 0 {
+        return None;
+    }
+    let len = (w as usize) * (h as usize) * 4;
+    let src = unsafe { std::slice::from_raw_parts(px, len) };
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, src.to_vec())?;
+    let scaled = image::imageops::resize(&img, dw as u32, dh as u32, image::imageops::FilterType::Triangle);
+    let out = img::img_malloc_copy(scaled.as_raw(), || format!("{dw}x{dh} from {w}x{h}"));
+    (!out.is_null()).then_some((out, dw, dh))
+}
+
 /// BACKGROUND worker: claim a request, read disk or fetch and decode off-lock, publish pixels.
 /// RAM/GPU residency stays bounded independently of the number of persistent images.
 /// Public content shares the durable image cache and the existing decode workers. Every disk hit
@@ -2078,6 +2143,10 @@ fn load_content_png<T>(url: &str, sha: plx_data::hudpacks::Sha, cache_gen: u64,
 }
 
 fn poster_worker() {
+    // Fork Rofocale11: a poster has no deadline, the frame waiting on it does. Let the frame thread
+    // win the cores whenever they contend (`task::yield_to_frame_thread`'s doc carries the TV
+    // reading this answers — `loop=6` on a cold Library load with nothing being uploaded).
+    plx_base::task::yield_to_frame_thread();
     loop {
         let (idx, key_s, srv, gen, cache_gen, token_gen, grant_epoch) = {
             let mut g = store();
@@ -2162,6 +2231,16 @@ fn poster_worker() {
                 });
                 if let Some((p, dw, dh)) = loaded.art {
                     (px, w, h) = (p, dw, dh);
+                    // Fork Rofocale11: the old fork's oversized-art cap. Without it a btttr.cc card
+                    // decode is a solo `Residency` take on every fast scroll, which is exactly the
+                    // spinner + `budget …/solo:residency` seen on the TV.
+                    let capped = request_box(&key_s)
+                        .and_then(|(bw, bh)| cap_dims(w, h, bw, bh))
+                        .and_then(|(cw, ch)| downscale_rgba(px, w, h, cw, ch));
+                    if let Some((p2, cw, ch)) = capped {
+                        img::img_free(px);
+                        (px, w, h) = (p2, cw, ch);
+                    }
                 }
                 trace::disk(idx, gen, if loaded.from_disk { "hit" } else { "net" });
                 stale = loaded.stale.map(|k| (client, k));
@@ -4615,5 +4694,15 @@ mod tests {
             "the cards on screen (the newest ordinary slots) were never recycled");
         // And a third ask for the same set claims nothing: the page can go idle.
         assert_eq!(run(&mut slots, &second), 0);
+    }
+
+    /// Fork Rofocale11: an oversized CDN poster must be capped to the card box so its upload is an
+    /// ordinary `Poster` take, not a solo `Residency` frame. TMDB's smaller art is left alone.
+    #[test]
+    fn an_oversized_card_poster_is_capped_to_the_box() {
+        assert_eq!(cap_dims(500, 750, 250, 375), Some((250, 375)));
+        assert_eq!(cap_dims(780, 1170, 250, 375), Some((250, 375)));
+        assert_eq!(cap_dims(342, 513, 250, 375), None, "TMDB w342 already fits");
+        assert_eq!(cap_dims(1920, 1080, 1280, 720), Some((1280, 720)));
     }
 }

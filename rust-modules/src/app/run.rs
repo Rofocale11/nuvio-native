@@ -323,7 +323,16 @@ impl plx_ui::dispatch::FrameRuntime<AppHost> for ProductFrameRuntime<'_> {
         // wash dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
         fr.tree_report = Some(tree_report);
-        if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); }
+        let playing = super::bridge::player(&app.pages).is_some();
+        // Fork Rofocale11: leaving the player stops the engine outright — a torrent left
+        // downloading under Home stutters the UI, and the kept resume file makes the next play
+        // restore metadata and peers. Entering lifts any limit a previous session left behind.
+        if was_player && !playing {
+            restore_played_entry(app);
+            plx_stremio::sbengine::stop_background();
+        } else if !was_player && playing {
+            plx_stremio::sbengine::resume_foreground();
+        }
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);
         app.instr.mark(plx_base::diag::heartbeat::Phase::NavCommit); // navcommit
@@ -3869,6 +3878,8 @@ pub(crate) unsafe fn shutdown(
     pa: &mut plx_media::player::adapter::PlayerAdapter,
     surface: &dyn super::platform::Surface,
 ) -> Release {
+    // Fork Rofocale11: stop the C torrent engine before the process group goes away. Idempotent.
+    super::boot::stop_p2p_service();
     ps.finish_metric_request(plx_media::player::attempt_metrics::RequestOutcome::Cancelled);
     pa.sync_request_metrics(ps);
     plx_media::player::report::abandon_pending(ps);

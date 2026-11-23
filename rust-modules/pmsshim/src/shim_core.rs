@@ -15,12 +15,21 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
     /// A Stremio-compatible streaming server (`http://host:11470`) for `infoHash` streams.
     pub torrent_server: Option<String>,
-    /// How long a detail request waits for addons' streams at most.
+    /// May peer-to-peer (torrent/magnet) streams be offered at all. Off by default: a torrent the
+    /// client has no engine for is a pick that cannot start, so it is not listed. The app's
+    /// Settings > Playback switch sets this at boot (`nuvio::restore_p2p`).
+    pub p2p_enabled: bool,
+    /// How long a stream slot waits for addons at most (a play waits this; a detail read does not).
     pub stream_deadline: Duration,
     /// Once one playable stream has arrived, how much longer to wait for the rest.
     pub stream_grace: Duration,
     /// The token the app sends; checked on nothing (loopback only), carried for the boot wiring.
     pub token: String,
+    /// How long a section listing waits for a catalog window the cache does not cover before it
+    /// answers with the rows it already holds. The addon's own page budget is 30 s and the app's
+    /// loopback read deadline is 15 s, so this wait is what keeps a slow catalog from being
+    /// reported as a dead server; the rest arrives in the background and the library re-reads.
+    pub catalog_wait: Duration,
 }
 
 impl Default for Config {
@@ -28,9 +37,11 @@ impl Default for Config {
         Config {
             data_dir: None,
             torrent_server: None,
+            p2p_enabled: false,
             stream_deadline: Duration::from_secs(60),
             stream_grace: Duration::from_millis(2500),
             token: "nuvionative-local".into(),
+            catalog_wait: Duration::from_secs(3),
         }
     }
 }
@@ -64,8 +75,8 @@ pub fn start_on(backend: Arc<dyn Backend>, cfg: Config, host: &str, port: u16) -
     let shim = Arc::new(crate::shim_pms::Shim::new(backend, cfg));
     shim.bind_self();
     shim.account.set_origin(&format!("http://127.0.0.1:{port}"));
-    // Fork Rofocale11: resume points from the Nuvio account are pulled at boot and whenever a
-    // profile is picked (`Account::load_profile` fires this sink after installing its addons).
+    // Continue Watching is account-backed: merge the account's resume points at boot, and again
+    // whenever the profile changes (a profile's history is its own).
     let s3 = shim.clone();
     shim.account.set_watch_sink(Arc::new(move || s3.pull_account_watch()));
     shim.pull_account_watch();
