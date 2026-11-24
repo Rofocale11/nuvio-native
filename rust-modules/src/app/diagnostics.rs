@@ -106,13 +106,15 @@
 //! id is reduced to `window ready`/`NO WINDOW`; the only server-derived text is the PMS release and
 //! Pass state, never its name or address. There is no generic "push a string to diagnostics" path,
 //! so adding a field is a deliberate edit to the file that carries these rules.
+// Fork Rofocale11: the torrent/debrid delivery rows live in a fork-owned child module so an
+// upstream merge cannot reintroduce the Plex-only nine-placeholder right column. Its only seam
+// here is this declaration, the row budgets below and the delegation in `model_rows`.
+mod diagnostics_nuvio;
 use plx_ui::hstack::Item;
 use plx_ui::label::Label;
-use plx_machine::machine::Measure;
 use plx_ui::vstack::VFlow;
-use plx_ui::widgets::{Field, FieldList, FIELD_COL_W};
+use plx_ui::widgets::{Field, FieldList, FIELD_COL_W, FIELD_KEY_W};
 use plx_ui::{theme, Env, Painter, Rect, View};
-use std::cell::Cell;
 use std::ffi::CString;
 use std::sync::atomic::Ordering;
 // The one bit that crosses a module boundary without an instance. It is owned by `player` (the
@@ -140,11 +142,7 @@ pub(crate) struct Diagnostics {
     history: SweepHistory,
     /// Formatted only at the 2 Hz sampling boundary, never in the render loop, so the whole-string
     /// glyph cache sees the same held values the ordinary rows do.
-    chart_values: [String; 3],
-    /// SDL_ttf measurement of [`CHART_LABELS`] plus their sibling gap, measured once rather than
-    /// three times on every presented playback frame. A `Cell` because it is a cache filled during
-    /// a `&self` draw — main-thread draw state, like `Popover::rise`.
-    chart_key_w: Cell<f32>,
+    chart_values: [String; 2],
     /// `SDL_GetTicks` at which the next sample is due.
     next_sample: u32,
     /// Was the panel on at the last [`update`](Self::update)? The re-sample "kick" a toggle used to
@@ -172,8 +170,7 @@ impl Default for Diagnostics {
         Self {
             prev_fed: (0, 0, 0),
             history: SweepHistory::new(),
-            chart_values: [String::new(), String::new(), String::new()],
-            chart_key_w: Cell::new(0.0),
+            chart_values: [String::new(), String::new()],
             next_sample: 0,
             was_on: false,
             columns: [Vec::new(), Vec::new()],
@@ -236,7 +233,15 @@ const SAMPLE_MS: u32 = 500;
 /// value is inactive, but it may not delete the row and slide unrelated evidence into its place —
 /// photographs from two modes must be directly comparable by y-coordinate.
 const LEFT_ROWS: usize = 13;
-const RIGHT_ROWS: usize = 9;
+const RIGHT_ROWS: usize = 10;
+// Fork Rofocale11: the old fork's delivery-column budgets. A torrent's column is `SWARM_ROWS` + 3
+// (File, Size, Ram); a debrid link's is `LINK_ROWS`; the adaptive branch keeps this tree's nine
+// controller rows plus one File row. All three total exactly `RIGHT_ROWS`.
+const SWARM_ROWS: usize = 7;
+// Fork Rofocale11: File, Size, Addon, Rate, Headroom, Quality and Ram — the seven facts a debrid
+// link actually has. The chart starts under the column's real row count, so these seven replace
+// the old fork's five inert-pitch gap with two more useful rows.
+const LINK_ROWS: usize = 7;
 /// Compatibility name for the support-panel budget and its existing host assertions. Playback
 /// uses [`LEFT_ROWS`] as the taller of the two fixed columns; the pre-playback device card uses
 /// only the rows it actually has. **Test-only, and stated as such since this module left `ui/`**:
@@ -256,21 +261,16 @@ const CHART_ROWS: usize = LEFT_ROWS - RIGHT_ROWS;
 /// Sixteen seconds at 2 Hz is long enough to show a segment acquisition, a quality transaction and
 /// its buffer consequence while keeping every cell wide enough to survive a phone camera.
 const HIST_N: usize = 32;
-/// The three plot keys, in English (every message here is `translate:false`). A function rather than a table because the catalog is
-/// the only place the words live; [`Diagnostics::chart_key_width`] measures exactly these runs.
-fn chart_labels() -> [&'static str; 3] {
+// Fork Rofocale11: the old fork's two plot keys. The third lane plotted the adaptive controller's
+// fictional safe spend against demand; the shim opens no adaptive session, so it printed dashes on
+// every photograph. Both remaining lanes are quantities this app actually measures.
+fn chart_labels() -> [&'static str; 2] {
     use plx_os::i18n::msg;
-    [msg::browse_diagnostics_chart_budget(), msg::browse_diagnostics_chart_network(), msg::browse_diagnostics_chart_buffer()]
+    [msg::browse_diagnostics_chart_network(), msg::browse_diagnostics_chart_buffer()]
 }
-/// Conservative paint width before SDL_ttf is ready. The live path measures the same three runs
-/// the chart draws; this fallback is the widest one's 1920×1080 simulator measurement rounded up.
-const CHART_LABEL_FALLBACK_PX: f32 = 200.0;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SweepSample {
     valid: bool,
-    budget_kbps: i64,
-    demand_kbps: i64,
     activity_kbps: i64,
     buffer_ms: i64,
 }
@@ -278,8 +278,6 @@ struct SweepSample {
 impl SweepSample {
     const EMPTY: Self = Self {
         valid: false,
-        budget_kbps: -1,
-        demand_kbps: -1,
         activity_kbps: -1,
         buffer_ms: -1,
     };
@@ -327,13 +325,8 @@ impl SweepHistory {
         self.filled = self.filled.saturating_add(1).min(HIST_N);
     }
 
-    fn record(
-        &mut self,
-        epoch: u32,
-        d: &plx_media::player::Diag,
-        selected: plx_media::route::Quality,
-        now: u32,
-    ) {
+    // Fork Rofocale11: the controller budget/demand sample is gone with the lane that drew it.
+    fn record(&mut self, epoch: u32, d: &plx_media::player::Diag, now: u32) {
         if !self.has_epoch || self.epoch != epoch {
             self.reset_for(epoch);
         }
@@ -342,8 +335,6 @@ impl SweepHistory {
         self.prev_at = now;
         self.push(SweepSample {
             valid: true,
-            budget_kbps: d.abr_safe_kbps,
-            demand_kbps: chart_demand_kbps(d, selected),
             activity_kbps,
             buffer_ms: observed_buffer_ms(d).unwrap_or(-1),
         });
@@ -374,23 +365,6 @@ impl SweepHistory {
                 (sum + i128::from(sample.activity_kbps), count + 1)
             });
         (count > 0).then(|| i64::try_from(sum / count).unwrap_or(i64::MAX))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LinkState {
-    Unknown,
-    Deficit,
-    Sustains,
-}
-
-fn link_state(budget_kbps: i64, demand_kbps: i64) -> LinkState {
-    if budget_kbps < 0 || demand_kbps <= 0 {
-        LinkState::Unknown
-    } else if budget_kbps < demand_kbps {
-        LinkState::Deficit
-    } else {
-        LinkState::Sustains
     }
 }
 
@@ -446,12 +420,7 @@ impl Diagnostics {
             columns(ps, &d, prev, now, paused)
         };
         self.prev_fed = (d.fed_v, d.fed_a, now);
-        self.history.record(
-            plx_media::route::playback_trace_generation(),
-            &d,
-            plx_media::route::quality(),
-            now,
-        );
+        self.history.record(plx_media::route::playback_trace_generation(), &d, now);
         self.chart_values = chart_values(&self.history);
         // The caller owns presentation authority; update reports this sample edge.
     }
@@ -666,7 +635,7 @@ fn decoder_summary(c: &plx_os::devcaps::Caps, measured: bool) -> String {
 /// model.  Fixed playback keeps every right-hand row and says `inactive`; that stability is what
 /// makes a LAN/Original photograph directly comparable with a remote/HLS one.
 fn columns(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, prev: (i64, i64, u32), now: u32, paused: Option<bool>) -> [Vec<Field>; 2] {
-    [pipeline_rows(ps, d, prev, now, paused), model_rows(ps, d)]
+    [pipeline_rows(ps, d, prev, now, paused), model_rows(ps, d, now)]
 }
 
 /// Flattened only for host assertions that inspect the whole schema.  Production draws the two
@@ -1058,33 +1027,16 @@ fn frames_str(d: &plx_media::player::Diag, now: u32, paused: Option<bool>) -> St
     }
 }
 
-/// Build the fixed right-hand schema.  `inactive` is data: it says that a manual selection owns the
-/// playback and no Auto estimate should be inferred from the empty cells.  Deleting those cells
+/// Build the fixed right-hand schema. `inactive` is data: it says that a manual selection owns the
+/// playback and no Auto estimate should be inferred from the empty cells. Deleting those cells
 /// made every mode a different panel and is the regression this shape prevents.
-fn model_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag) -> Vec<Field> {
-    let mut v = Vec::with_capacity(RIGHT_ROWS);
-    if d.backend == Some(plx_media::player::attempt_view::Backend::Uri) {
-        let unknown = plx_os::i18n::msg::browse_diagnostics_unknown();
-        for label in [
-            plx_os::i18n::msg::browse_diagnostics_field_mode(),
-            plx_os::i18n::msg::browse_diagnostics_field_quality(),
-            plx_os::i18n::msg::browse_diagnostics_field_sample(),
-            plx_os::i18n::msg::browse_diagnostics_field_conservative(),
-            plx_os::i18n::msg::browse_diagnostics_field_buffer(),
-            plx_os::i18n::msg::browse_diagnostics_field_risk(),
-            plx_os::i18n::msg::browse_diagnostics_field_acquisition(),
-            plx_os::i18n::msg::browse_diagnostics_field_action(),
-            plx_os::i18n::msg::browse_diagnostics_field_reason(),
-        ] {
-            v.push(Field::new(label, unknown));
-        }
-        return v;
-    }
-    // One selection snapshot for the whole block.  A quality press must not leave Mode saying
-    // Auto while the lower rows have already formatted the new manual state.
-    abr_rows(ps, d, plx_media::route::quality(), &mut v);
-    debug_assert_eq!(v.len(), RIGHT_ROWS);
-    v
+///
+/// Fork Rofocale11: the three-way torrent / adaptive / debrid switch — and the rows each branch
+/// owns — is in `diagnostics_nuvio`. The old fork's rule survives there: a branch may use fewer
+/// pitches (a debrid link has only five facts), but never more than `RIGHT_ROWS`, and the chart
+/// starts under the column's actual rows so two photographs stay comparable by y-coordinate.
+fn model_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, now: u32) -> Vec<Field> {
+    diagnostics_nuvio::model_rows(ps, d, now)
 }
 
 fn abr_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, selected: plx_media::route::Quality, v: &mut Vec<Field>) {
@@ -1272,21 +1224,6 @@ fn abr_rate(kbps: i64) -> String {
     }
 }
 
-/// Demand is what the current delivery has to carry, not the request ceiling when PMS emitted a
-/// smaller VBR stream. Manual fixed HLS has no segment estimator, so its explicit ceiling is the
-/// honest planning demand; Original uses the whole-file transport rate captured by the resolve.
-fn chart_demand_kbps(d: &plx_media::player::Diag, selected: plx_media::route::Quality) -> i64 {
-    match d.abr_mode {
-        plx_playback_contract::readout::ABR_MODE_HLS => [d.abr_media_kbps, d.abr_declared_kbps, d.abr_kbps]
-            .into_iter()
-            .find(|&v| v > 0)
-            .unwrap_or(-1),
-        plx_playback_contract::readout::ABR_MODE_ORIGINAL if d.abr_kbps > 0 => d.abr_kbps,
-        _ if selected == plx_media::route::Quality::Original && d.source_kbps > 0 => d.source_kbps,
-        _ => selected.ceiling().map_or(-1, |c| i64::from(c.max_kbps)),
-    }
-}
-
 /// Bytes delivered to FFmpeg during this held sample, expressed as a wire rate. A counter reset is
 /// a reload inside the interval: the new counter still names bytes received since that reset and
 /// is therefore the best lower bound available. `-1` keeps "not observed" distinct from an idle
@@ -1312,34 +1249,13 @@ fn chart_rate(kbps: i64) -> String {
     }
 }
 
-fn chart_budget_demand(budget_kbps: i64, demand_kbps: i64) -> String {
-    if budget_kbps.max(demand_kbps) >= 1_000 {
-        let n = |v: i64| {
-            if v < 0 {
-                "—".to_string()
-            } else {
-                decimal(v as f64 / 1_000.0, 1)
-            }
-        };
-        plx_os::i18n::msg::browse_diagnostics_chart_budget_mbps(&n(budget_kbps), &n(demand_kbps))
-    } else {
-        let n = |v: i64| {
-            if v < 0 {
-                "—".to_string()
-            } else {
-                plx_os::i18n::current().number(v)
-            }
-        };
-        plx_os::i18n::msg::browse_diagnostics_chart_budget_kbps(&n(budget_kbps), &n(demand_kbps))
-    }
-}
-
-fn chart_values(history: &SweepHistory) -> [String; 3] {
+// Fork Rofocale11: two values for the two real lanes. The controller's fictional budget/demand
+// string was the first of three and is gone with the lane.
+fn chart_values(history: &SweepHistory) -> [String; 2] {
     let Some(s) = history.latest() else {
-        return ["—".into(), "—".into(), "—".into()];
+        return ["—".into(), "—".into()];
     };
     [
-        chart_budget_demand(s.budget_kbps, s.demand_kbps),
         plx_os::i18n::msg::browse_diagnostics_network_mean(&history.mean_activity_kbps().map(chart_rate).unwrap_or_else(|| "—".to_string()), &chart_rate(s.activity_kbps)),
         if s.buffer_ms >= 0 {
             plx_os::i18n::msg::core_seconds(&decimal(s.buffer_ms as f64 / 1_000.0, 1))
@@ -1349,38 +1265,11 @@ fn chart_values(history: &SweepHistory) -> [String; 3] {
     ]
 }
 
-fn chart_key_width_for(widest_label_px: f32) -> f32 {
-    widest_label_px.max(CHART_LABEL_FALLBACK_PX) + theme::space::SM
-}
-
-/// Width of the chart's left label gutter. [`Label`] deliberately lets glyph ink overflow its
-/// frame, so the plot cannot use a guessed frame width as its origin: measure the actual ink and
-/// then add the design system's ordinary sibling gap.
-impl Diagnostics {
-fn chart_key_width(&self) -> f32 {
-    let cached = self.chart_key_w.get();
-    if cached > 0.0 {
-        return cached;
-    }
-    // `draw()` is invoked directly from `app/run.rs`'s frame loop, outside the owned-screen
-    // `Cx`/`DrawFrame` plumbing that carries a `Measure` everywhere else (spec §4.3, D4) — this
-    // panel predates that seam and is not itself an owned screen. Rather than widen `draw`'s own
-    // signature (and so `app/run.rs`'s two call sites, out of scope here), it reaches for the
-    // same `TtfMeasure` a `DrawFrame` would have handed it: the device/simulator `Measure`, which
-    // is what every other render-time site converted to.
-    let measure = plx_gfx::text::TtfMeasure;
-    let measured = chart_labels()
-        .iter()
-        .map(|label| measure.width_str(label, theme::size::DIAGNOSTIC, false))
-        .fold(0.0f32, f32::max);
-    let width = chart_key_width_for(measured);
-    // `text_width` is zero before text initialisation. Use the conservative width for this frame,
-    // but retry rather than permanently caching an absence that existed only during boot.
-    if measured > 0.0 {
-        self.chart_key_w.set(width);
-    }
-    width
-}
+// Fork Rofocale11: the plot's gutter is the field rows' key gutter, so the bars start exactly
+// under the right column's VALUES — one table, not a chart pushed right by long uppercase keys.
+// The two chart keys are deliberately short (NETWORK / BUFFER) and fit this gutter at DIAGNOSTIC.
+fn chart_key_width() -> f32 {
+    FIELD_KEY_W + theme::space::SM
 }
 
 fn decoded_raster(d: &plx_media::player::Diag) -> String {
@@ -1846,7 +1735,9 @@ pub(crate) fn draw(&self) {
     )
     .draw(&e, p);
 
-    let cy = top + FieldList::height(FieldList::wrapped_line_count(&cols[1]).max(RIGHT_ROWS));
+    // Fork Rofocale11: the old fork starts the chart under the right column's ACTUAL rows, so a
+    // torrent or a debrid link's freed pitches belong to the plot instead of a blank gap.
+    let cy = top + FieldList::height(FieldList::wrapped_line_count(&cols[1]));
     self.draw_chart(
         p,
         Rect::new(
@@ -1884,23 +1775,16 @@ fn draw_chart(&self, p: Painter, r: Rect) {
             .unwrap_or(0)
             .max(1) as f32
     };
-    let link_peak = history
-        .slots
-        .iter()
-        .copied()
-        .filter(|s| s.valid)
-        .flat_map(|s| [s.budget_kbps, s.demand_kbps])
-        .max()
-        .unwrap_or(0)
-        .max(1) as f32;
+    // Fork Rofocale11: only the two lanes this app actually measures; the controller budget/demand
+    // lane is gone, so the remaining lanes split the whole chart band.
     let activity_peak = peak(|s| s.activity_kbps);
     let activity_mean = history.mean_activity_kbps();
     let buffer_peak = peak(|s| s.buffer_ms);
 
     const CHART_VALUE_W: f32 = 280.0;
     const CHART_GAP: f32 = 8.0;
-    let lane_h = r.h / 3.0;
-    let key_w = self.chart_key_width();
+    let lane_h = r.h / 2.0;
+    let key_w = chart_key_width();
     let bx = r.x + key_w;
     let bars_w = (r.w - key_w - CHART_VALUE_W - CHART_GAP).max(1.0);
     let value_x = bx + bars_w + CHART_GAP;
@@ -1913,16 +1797,7 @@ fn draw_chart(&self, p: Painter, r: Rect) {
             Label::new(cs.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_TERTIARY)
                 .draw(p, Rect::new(r.x, by, key_w, lane_h));
         }
-        let latest = history.latest().unwrap_or(SweepSample::EMPTY);
-        let value_tint = match i {
-            0 => match link_state(latest.budget_kbps, latest.demand_kbps) {
-                LinkState::Sustains => theme::DIAG_LINK_SUSTAINS,
-                LinkState::Deficit => theme::DIAG_LINK_DEFICIT,
-                LinkState::Unknown => theme::TEXT_TERTIARY,
-            },
-            1 => theme::DIAG_NETWORK_ACTIVITY,
-            _ => theme::RESUME_FILL,
-        };
+        let value_tint = if i == 0 { theme::DIAG_NETWORK_ACTIVITY } else { theme::RESUME_FILL };
         if let Ok(cs) = CString::new(values[i].as_str()) {
             Label::new(cs.as_ptr(), theme::size::DIAGNOSTIC, value_tint)
                 .draw(p, Rect::new(value_x, by, CHART_VALUE_W, lane_h));
@@ -1941,18 +1816,10 @@ fn draw_chart(&self, p: Painter, r: Rect) {
             if !s.valid {
                 continue;
             }
-            let (raw, scale, tint) = match i {
-                0 => (
-                    s.budget_kbps,
-                    link_peak,
-                    match link_state(s.budget_kbps, s.demand_kbps) {
-                        LinkState::Sustains => theme::DIAG_LINK_SUSTAINS,
-                        LinkState::Deficit => theme::DIAG_LINK_DEFICIT,
-                        LinkState::Unknown => theme::TEXT_TERTIARY,
-                    },
-                ),
-                1 => (s.activity_kbps, activity_peak, theme::DIAG_NETWORK_ACTIVITY),
-                _ => (s.buffer_ms, buffer_peak, theme::RESUME_FILL),
+            let (raw, scale, tint) = if i == 0 {
+                (s.activity_kbps, activity_peak, theme::DIAG_NETWORK_ACTIVITY)
+            } else {
+                (s.buffer_ms, buffer_peak, theme::RESUME_FILL)
             };
             if raw >= 0 {
                 let bh = ((raw as f32 / scale).clamp(0.0, 1.0) * band).max(0.0);
@@ -1966,23 +1833,11 @@ fn draw_chart(&self, p: Painter, r: Rect) {
                     );
                 }
             }
-            // Demand is a per-sample threshold, not a second filled series. A one-pixel amber
-            // marker keeps "budget is high" visually distinct from "budget covers THIS stream".
-            if i == 0 && s.demand_kbps > 0 {
-                let y = by + band - (s.demand_kbps as f32 / link_peak).clamp(0.0, 1.0) * band;
-                p.rect(
-                    Rect::new(bx + k as f32 * bw, y, (bw - 1.0).max(1.0), 1.0),
-                    0.0,
-                    theme::RESUME_FILL,
-                    theme::RESUME_FILL,
-                    0.0,
-                );
-            }
         }
         // One line over the same exact 16-second physical window as the bars. It is the arithmetic
         // mean inflow, explicitly labelled at the right; unlike a percentile it makes no claim
         // about unobserved link capacity and unlike the bursty median it does not collapse to zero.
-        if i == 1 {
+        if i == 0 {
             if let Some(mean_kbps) = activity_mean {
                 let y = by + band - (mean_kbps as f32 / activity_peak).clamp(0.0, 1.0) * band;
                 p.rect(
@@ -2038,9 +1893,15 @@ mod tests {
         for row in &left[4..] {
             assert_eq!(row.val.as_deref(), Some(unknown), "{} must not show feed data", row.key);
         }
-        let right = model_rows(&ps, &d);
-        assert_eq!(right.len(), RIGHT_ROWS);
-        assert!(right.iter().all(|row| row.val.as_deref() == Some(unknown)));
+        // Fork Rofocale11: a URI attempt with no adaptive session is a debrid/addon link, so the
+        // right column reports the five facts such a route actually has — not nine Plex-model
+        // placeholders and never the Feed backend's measurements.
+        let right = model_rows(&ps, &d, 0);
+        assert_eq!(right.len(), LINK_ROWS);
+        for key in ["File", "Size", "Addon", "Rate", "Headroom", "Quality", "Ram"] {
+            assert!(right.iter().any(|row| row.key == key), "missing {key}");
+        }
+        assert!(right.iter().all(|row| row.val.as_deref() != Some(unknown)));
     }
 
     /// The top of the transport's control row, as the layout reports it (`HudGeometry`): the line the
@@ -2242,30 +2103,23 @@ mod tests {
         );
     }
 
-    /// `Label` frames do not clip their ink. The widest chart caption in the shipped diagnostic
-    /// face measures about 200 px, so the plot must begin after that ink plus the standard sibling
-    /// gap. The old 178 px gutter put every plot underneath its own caption.
+    // Fork Rofocale11: the plot's gutter is now the FIELD rows' key gutter, so the bars begin
+    // exactly under the right column's values. The short NETWORK / BUFFER keys fit at DIAGNOSTIC.
     #[test]
-    fn chart_plot_starts_after_the_label_ink() {
-        const WIDEST_LABEL_PX: f32 = 200.0;
-        let key_w = chart_key_width_for(WIDEST_LABEL_PX);
-        assert!(
-            key_w >= WIDEST_LABEL_PX + theme::space::SM,
-            "plot begins at {key_w}px, inside the label's {}px paint + {}px gap",
-            WIDEST_LABEL_PX,
-            theme::space::SM,
-        );
+    fn chart_plot_starts_at_the_field_value_column() {
+        assert_eq!(chart_key_width(), FIELD_KEY_W + theme::space::SM);
+        assert_eq!(chart_labels(), [
+            plx_os::i18n::msg::browse_diagnostics_chart_network(),
+            plx_os::i18n::msg::browse_diagnostics_chart_buffer(),
+        ]);
     }
 
-    /// There is no taste threshold in the link colour. Green means the conservative budget
-    /// physically covers demand; red means it does not; absent evidence stays neutral.
+    // Fork Rofocale11: the shim runs no adaptive controller, so the fictional budget/demand lane
+    // and its colour scale are gone. Only the two measured lanes remain.
     #[test]
-    fn chart_link_colour_is_the_budget_inequality() {
-        assert_eq!(link_state(-1, 4_000), LinkState::Unknown);
-        assert_eq!(link_state(4_000, -1), LinkState::Unknown);
-        assert_eq!(link_state(3_999, 4_000), LinkState::Deficit);
-        assert_eq!(link_state(4_000, 4_000), LinkState::Sustains);
-        assert_eq!(link_state(12_000, 4_000), LinkState::Sustains);
+    fn chart_has_only_the_two_measured_lanes() {
+        assert_eq!(chart_labels().len(), 2);
+        assert_eq!(chart_values(&SweepHistory::new()).len(), 2);
     }
 
     #[test]
@@ -2304,37 +2158,15 @@ mod tests {
         }
         assert_eq!(history.mean_activity_kbps(), Some(100));
         assert_eq!(
-            chart_values(&history)[1],
+            chart_values(&history)[0],
             "200 kbps · mean 100 kbps",
-            "the right-hand legend names both the current bar and the exact visible-window statistic",
+            "the network legend names both the current bar and the exact visible-window statistic",
         );
     }
 
-    #[test]
-    fn manual_original_keeps_the_same_demand_lane() {
-        let d = plx_media::player::Diag {
-            source_kbps: 28_000,
-            ..Default::default()
-        };
-        assert_eq!(
-            chart_demand_kbps(&d, plx_media::route::Quality::Original),
-            28_000
-        );
-        let hls = plx_media::player::Diag {
-            abr_mode: plx_playback_contract::readout::ABR_MODE_HLS,
-            abr_kbps: 22_000,
-            abr_declared_kbps: 18_600,
-            abr_media_kbps: 17_900,
-            ..Default::default()
-        };
-        assert_eq!(
-            chart_demand_kbps(&hls, plx_media::route::Quality::Auto),
-            17_900,
-            "actual measured HLS demand outranks both PMS declaration and request ceiling",
-        );
-    }
-
-    /// The row budgets are the design: mode changes replace values, never geometry.
+    /// The row budgets are the design: the left column and the right column never exceed their
+    /// budgets. Fork Rofocale11: a debrid link uses fewer pitches than a torrent or an adaptive
+    /// session, and the chart starts under its actual rows — so the freed space belongs to the plot.
     #[test]
     fn the_read_out_never_outgrows_its_budget() {
         let ps = plx_media::route::PlaybackSession::IDLE;
@@ -2358,16 +2190,19 @@ mod tests {
                 };
                 let [left, right] = columns(&ps, &d, (0, 0, 0), 1_000, None);
                 assert_eq!(left.len(), LEFT_ROWS, "vp={vp} abr={abr_mode}: left");
-                assert_eq!(right.len(), RIGHT_ROWS, "vp={vp} abr={abr_mode}: right");
+                // Fork Rofocale11: no adaptive session means a debrid link's short block of five
+                // rows; the other five pitches stay blank so the chart keeps its fixed band.
+                let expected = if abr_mode == 0 { LINK_ROWS } else { RIGHT_ROWS };
+                assert_eq!(right.len(), expected, "vp={vp} abr={abr_mode}: right");
             }
         }
     }
 
-    /// A photograph must be directly comparable across every delivery mode.  Rows that disappear
-    /// in fixed/Original mode make the reader compare two different instruments and, worse, move
-    /// every pipeline fact to a different y between photographs.
+    /// Two photographs of the same delivery must be directly comparable: rows may not disappear
+    /// between Original and HLS, or move a pipeline fact to a different y. A DIFFERENT delivery
+    /// (a debrid link or a torrent) is a different instrument by design and gets its own rows.
     #[test]
-    fn every_delivery_mode_keeps_the_same_schema() {
+    fn every_delivery_mode_keeps_a_stable_schema() {
         let ps = plx_media::route::PlaybackSession::IDLE;
         let schema = |mode| {
             rows(&ps, 
@@ -2383,25 +2218,34 @@ mod tests {
             .map(|f| f.key)
             .collect::<Vec<_>>()
         };
-        let fixed = schema(0);
+        // Fork Rofocale11: the old fork's stable-schema rule. The adaptive rows must not move
+        // between Original and HLS, while a direct/debrid link gets its own five honest rows
+        // instead of the shim's inert controller placeholders. A torrent's column is graded by
+        // `diagnostics_nuvio`'s swarm test.
+        let adaptive = schema(plx_playback_contract::readout::ABR_MODE_ORIGINAL);
         assert!(
-            fixed.contains(&"Acquisition"),
-            "the cadence row disappeared from the fixed schema"
+            adaptive.contains(&"Acquisition"),
+            "the cadence row disappeared from the adaptive schema"
         );
         assert!(
-            !fixed.contains(&"Encoder"),
+            !adaptive.contains(&"Encoder"),
             "the end-to-end cadence was mislabeled as server state"
         );
         assert_eq!(
-            schema(plx_playback_contract::readout::ABR_MODE_ORIGINAL),
-            fixed,
-            "Original moved or added rows"
-        );
-        assert_eq!(
             schema(plx_playback_contract::readout::ABR_MODE_HLS),
-            fixed,
+            adaptive,
             "HLS moved or added rows"
         );
+        let direct = schema(0);
+        for key in ["File", "Size", "Addon", "Rate", "Headroom", "Quality", "Ram"] {
+            assert!(direct.contains(&key), "the direct-link schema lost {key}: {direct:?}");
+        }
+        for key in ["Acquisition", "Sample", "Mode", "Peers"] {
+            assert!(
+                !direct.contains(&key),
+                "a direct/debrid link must not show the inert model row {key}: {direct:?}"
+            );
+        }
     }
 
     /// Regression for the photographed `6.9 s · +0.2 s/s · starves in 116 s` reading.  The
@@ -2841,6 +2685,12 @@ mod tests {
         };
         let build_with = |d: &plx_media::player::Diag, selected: plx_media::route::Quality| {
             let mut v = Vec::new();
+            // Fork Rofocale11: the adaptive branch carries one File row before the controller
+            // rows, exactly as the old fork's model_rows does.
+            v.push(Field::new(
+                plx_os::i18n::msg::browse_diagnostics_field_file(),
+                diagnostics_nuvio::file_line(&ps),
+            ));
             abr_rows(&ps, d, selected, &mut v);
             v
         };

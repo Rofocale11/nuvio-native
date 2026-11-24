@@ -51,6 +51,42 @@ fn a_mock_pms_that_sees_exactly_its_count_stops_at_once_and_passes() {
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "it must not wait for its deadline");
 }
 
+// Fork Rofocale11: the shim's file identity and engine marker travel Plan -> PlaybackSession for
+// diagnostics only. A refused/empty landing must keep the previous values so a torrent's swarm
+// block cannot flip back to the adaptive one mid-play.
+#[test]
+fn the_shims_file_identity_and_p2p_marker_survive_a_plan_landing() {
+    let mut ps = PlaybackSession::IDLE;
+    apply_plan(
+        &mut ps,
+        Plan {
+            vcodec: "h264".into(),
+            file: "Release.Group.mkv".into(),
+            file_bytes: 42,
+            p2p: true,
+            addon: "Torrentio".into(),
+            ..Default::default()
+        },
+        "rk",
+    );
+    assert_eq!(source_file(&ps), "Release.Group.mkv");
+    assert_eq!(source_bytes(&ps), 42);
+    assert!(is_p2p(&ps));
+    assert_eq!(addon_name(&ps), "Torrentio");
+
+    let mut refused = PlaybackSession::IDLE;
+    apply_plan(
+        &mut refused,
+        Plan { vcodec: "h264".into(), file: "Release.Group.mkv".into(), file_bytes: 42, p2p: true, addon: "Torrentio".into(), ..Default::default() },
+        "rk",
+    );
+    apply_plan(&mut refused, Plan::default(), "rk");
+    assert_eq!(source_file(&refused), "Release.Group.mkv", "a no-codec landing keeps the file");
+    assert_eq!(source_bytes(&refused), 42);
+    assert!(is_p2p(&refused), "a no-codec landing keeps the engine marker");
+    assert_eq!(addon_name(&refused), "Torrentio", "a no-codec landing keeps the addon");
+}
+
 /// The identity round trip: `request_play`'s captured id reaches `cur_sid` unchanged, through
 /// `ResolveEnv` (the main-thread snapshot) and `Plan` (the worker's output).
 ///

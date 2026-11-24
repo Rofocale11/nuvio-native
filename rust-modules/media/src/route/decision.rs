@@ -493,6 +493,16 @@ pub struct PlaybackSession {
     /// reason: `stream_fps` is what the Load declares for the stream now playing, and a route
     /// rebuilt mid-play needs the file's rate again ([`video_copy_fps`]).
     src_fps: f64,
+    // Fork Rofocale11: the SOURCE file's name and size in bytes (0 = unknown), from the part
+    // `/decision` named, and whether the local torrent engine serves it (the shim's `Media.p2p`).
+    // Diagnostics only: the read-out's "which file is this" row and the torrent/debrid switch.
+    // They survive a route rebuild — they describe the file, not the delivery. No route decision
+    // reads them, so a real PMS (which never sends `p2p`) cannot change a playback choice.
+    src_file: String,
+    src_bytes: i64,
+    p2p: bool,
+    /// The addon that supplied the stream (empty on a real PMS). Diagnostics only.
+    src_addon: String,
     /// The streamed item's Media video/audio codec (h264/hevc, ac3/eac3/aac), so the player picks
     /// the H265 Load payload for a native HEVC direct-play and the matching audio codec.
     stream_vcodec: String,
@@ -1752,6 +1762,10 @@ impl PlaybackSession {
         src_vcodec: String::new(),
         src_acodec: String::new(),
         src_fps: 0.0,
+        src_file: String::new(),
+        src_bytes: 0,
+        p2p: false,
+        src_addon: String::new(),
         stream_vcodec: String::new(),
         stream_acodec: String::new(),
         stream_fps: 0.0,
@@ -1861,6 +1875,10 @@ impl PlaybackSession {
             src_vcodec,
             src_acodec,
             src_fps,
+            src_file,
+            src_bytes,
+            p2p,
+            src_addon,
             stream_vcodec,
             stream_acodec,
             stream_fps,
@@ -1950,6 +1968,10 @@ impl PlaybackSession {
             src_vcodec: src_vcodec.clone(),
             src_acodec: src_acodec.clone(),
             src_fps: *src_fps,
+            src_file: src_file.clone(),
+            src_bytes: *src_bytes,
+            p2p: *p2p,
+            src_addon: src_addon.clone(),
             stream_vcodec: stream_vcodec.clone(),
             stream_acodec: stream_acodec.clone(),
             stream_fps: *stream_fps,
@@ -8141,6 +8163,22 @@ pub fn source_vcodec(ps: &PlaybackSession) -> String {
     ps.src_vcodec.clone()
 }
 
+// Fork Rofocale11: pure diagnostics-only projections of the file identity and engine marker
+// carried from the shim's PMS answer. No route decision reads any of them.
+pub fn source_file(ps: &PlaybackSession) -> String {
+    ps.src_file.clone()
+}
+pub fn source_bytes(ps: &PlaybackSession) -> i64 {
+    ps.src_bytes
+}
+pub fn is_p2p(ps: &PlaybackSession) -> bool {
+    ps.p2p
+}
+/// The addon that supplied the stream, for the diagnostics panel's debrid row.
+pub fn addon_name(ps: &PlaybackSession) -> String {
+    ps.src_addon.clone()
+}
+
 /// **Can the pixels of this playback's source reach the panel untouched?** See
 /// [`PlaybackSession::cur_source_decodable`]. `false` is the state in which the quality ladder's
 /// "Original" row is a promise the pipeline cannot keep.
@@ -11508,6 +11546,20 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         // move together because `stream_*` is what arrives and `src_*` is what the file is, and the
         // diagnostics read-out needs both.
         let src_fps = if plan.vcodec.is_empty() { s.src_fps } else { plan.src_fps };
+        // Fork Rofocale11: the same no-codec skip as the codec quartet above. A refused/empty
+        // landing keeps the old file marker, so a failed landing cannot turn a torrent's swarm
+        // block back into the adaptive one mid-play. No route decision reads these fields.
+        let (src_file, src_bytes) = if plan.vcodec.is_empty() {
+            (std::mem::take(&mut s.src_file), std::mem::take(&mut s.src_bytes))
+        } else {
+            (plan.file, plan.file_bytes)
+        };
+        let p2p = if plan.vcodec.is_empty() { s.p2p } else { plan.p2p };
+        let src_addon = if plan.vcodec.is_empty() {
+            std::mem::take(&mut s.src_addon)
+        } else {
+            plan.addon
+        };
         let (stream_vcodec, stream_acodec, src_vcodec, src_acodec) = if plan.vcodec.is_empty() {
             (
                 std::mem::take(&mut s.stream_vcodec),
@@ -11625,6 +11677,10 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             src_vcodec,
             src_acodec,
             src_fps,
+            src_file,
+            src_bytes,
+            p2p,
+            src_addon,
             stream_vcodec,
             stream_acodec,
             stream_fps: plan.fps,

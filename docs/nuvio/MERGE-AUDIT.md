@@ -1160,3 +1160,61 @@ Verified on the working tree: `make check` **146 steps — all ok**, `make check
   durable data is logged and left intact.
 - Tests: `plx_os` redb backend 6/6 (foreign kind, wrong flavour, valid record preserved),
   `plx_nuvio_store` 6/6 (expired purge, over-budget shed/compact, durable rows survive).
+
+## Torrent/debrid diagnostics panel (2026-11-24)
+
+Ported the old fork's three-way delivery column so a torrent shows its swarm and a debrid/addon
+link shows its own five facts instead of nine inert Plex-controller placeholders. The old
+`diagnostics.rs` was NOT copied: the two files differ by ~2,700 lines (crate renames, a different
+chart legend, newer ABR/LinkState machinery), so a wholesale copy would not compile here.
+
+Fork-owned:
+- **`src/app/diagnostics/diagnostics_nuvio.rs`** (new child module): the `model_rows` three-way
+  switch, `swarm_rows` (Peers/Seeds/Rate/Window/Engine/Refetch/Quality), the File/Size/Rate/
+  Quality/Ram debrid block, `file_name`/`file_size`/`file_line`/`link_rate`/`ram_value` and the
+  old fork's exact swarm test. Calls the parent's private `abr_rows`/`abr_quality`/`mb`/`since`
+  via `super`, so no upstream code moved.
+
+Upstream surfaces touched, intentionally minimal:
+- **`src/app/diagnostics.rs`**: one `mod` declaration and one delegating `model_rows(ps, d, now)`;
+  `RIGHT_ROWS` 9→10 plus `SWARM_ROWS`/`LINK_ROWS` budgets; upstream test sites adapted to the new
+  row counts. **Correction after the owner's TV test:** my first pass kept this tree's
+  `.max(RIGHT_ROWS)` floor on the chart's `cy`, which left a five-pitch blank gap for debrid links.
+  The old fork has no floor (`cy = top + height(wrapped_line_count(cols[1]))`); the floor is now
+  removed here too, so the chart starts under the column's actual rows.
+- **`plex/src/plex/models.rs`**: `Media.p2p` and `Media.addon_name`, both `#[serde(default)]`, so a
+  real PMS answer reads false/empty and no playback decision can change. `MediaPart.file`/`size`
+  already existed.
+- **`media/src/route/plan.rs`**: `Plan.file`/`file_bytes`/`p2p`/`addon`, captured from the same
+  probed `nuvio_media` that supplies the codecs (this tree uses `media_version(None)`, not the old
+  fork's `primary_media()`).
+- **`media/src/route/decision.rs`**: `PlaybackSession.src_file`/`src_bytes`/`p2p`/`src_addon`,
+  `IDLE`, the two `publication()` copies, the pure
+  `route::{source_file, source_bytes, is_p2p, addon_name}` accessors, and the no-codec preservation
+  guard in `apply_plan` so a refused landing cannot flip the panel mid-play. These fields are
+  diagnostics-only; no route predicate reads them.
+- **`locales/en/browse.json`**: 16 `translate:false` catalog keys copied verbatim from the old
+  fork, plus `field.addon`, `field.headroom` and `headroom`; the three `chart.budget*` keys were
+  removed with the fictional lane. No translator catalog changes are needed.
+- **Chart (owner direction 2026-11-24):** the BUDGET/DEMAND lane, `LinkState`, `chart_demand_kbps`
+  and `chart_budget_demand` are removed — the shim opens no adaptive controller. The two real lanes
+  (network activity, buffer health) split the whole plot, and the debrid column gained two honest
+  rows instead of blank space: `Addon` (which addon supplied the link) and `Headroom` (observed mean
+  rate as a multiple of the file's own declared bitrate, fault-tinted below `1.0x`). `LINK_ROWS` is
+  now 7. Headroom is deliberately NOT the old fictional budget: both halves are measured facts
+  already on `Diag`/the debrid Rate row.
+
+Tests: `plx_plex` p2p/addon parse 1/1, `plx_media` Plan→session propagation 1/1, app diagnostics
+54/54 (old fork's exact swarm fixture, revised stable-schema rule, 2-lane chart, headroom maths).
+
+### Post-deploy tuning (2026-11-24)
+
+After the owner tested the deployed build:
+- **Headroom no longer faults at 0.9x.** A mean slightly below the file's declared average is normal
+  for VBR and the buffer was healthy (4.0 s); the tint now fires only below `0.75x`. The number is
+  unchanged — only `Field::fault` was loosened, and the test pins both arms.
+- **Chart aligned with the value column.** The old key gutter was measured from the long uppercase
+  captions (~200 px), pushing the bars ~68 px right of the field values. `chart_key_width()` is now
+  the field rows' `FIELD_KEY_W + space::SM`, and the two captions are shortened to `NETWORK` /
+  `BUFFER` so they fit at the existing `DIAGNOSTIC` 20 rung. No new font role was added to the
+  shared design tokens, and the `Cell` glyph-measure cache is gone with the measured gutter.

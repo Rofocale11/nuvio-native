@@ -1633,6 +1633,15 @@ pub struct Plan {
     /// The played version's `mediaIndex`: 0 for the default, else the picked version's position
     /// in the item this resolve fetched. `part_id` and the source codecs are that version's too.
     pub media_index: usize,
+    // Fork Rofocale11: the SOURCE file's name and size in bytes (0 = unknown), from the part
+    // `/decision` named, plus whether the local torrent engine serves it (the shim's `Media.p2p`).
+    // Diagnostics only — the read-out's "which file is this" row and the torrent/debrid switch;
+    // no route decision reads any of the three. They survive a route rebuild unchanged.
+    pub file: String,
+    pub file_bytes: i64,
+    pub p2p: bool,
+    /// The addon that supplied this stream (empty on a real PMS). Diagnostics only.
+    pub addon: String,
     pub pq_id: String,
     pub pq_item_id: String,
     pub machine_id: String, // "" = leave the cached one alone
@@ -1891,6 +1900,17 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
             ),
             None => (part, vcodec, acodec),
         };
+        // Fork Rofocale11: carry the probed file identity and the engine marker beside the codecs
+        // above. Diagnostics only — nothing in this resolver or `decision.rs` routes on them.
+        let (file, file_bytes, p2p, addon) = match nuvio_media {
+            Some(m) => (
+                m.part.first().map_or("", |p| p.file.as_str()).to_string(),
+                m.part.first().map_or(0, |p| p.size),
+                m.p2p,
+                m.addon_name.clone(),
+            ),
+            None => (String::new(), 0, false, String::new()),
+        };
 
         // The caller's Part and codecs are the default candidate. Replace all of them together
         // for a picked version, including the Part used for track selection requests.
@@ -1900,6 +1920,10 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
             part_id: part_id_of(part),
             src_vcodec: vcodec.to_string(),
             src_acodec: acodec.to_string(),
+            file: file.clone(),
+            file_bytes,
+            p2p,
+            addon: addon.clone(),
             // Early failures carry no negative claim about the decoder.
             source_decodable: true,
             ..Default::default()

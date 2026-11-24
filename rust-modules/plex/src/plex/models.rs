@@ -714,6 +714,15 @@ pub struct Media {
     /// reads it, and the profile that matters to the decoder rides the Load payload's own fields.
     #[serde(rename = "videoProfile", default)]
     pub video_profile: String,
+    // Fork Rofocale11: the Nuvio shim's marker for "the local torrent engine serves this file" (no
+    // addon URL — the shim resolves the info hash itself). Absent from every real PMS answer, so
+    // `default` keeps it false there; only the diagnostics panel reads it, never a route decision.
+    #[serde(default)]
+    pub p2p: bool,
+    // Fork Rofocale11: the addon that supplied this stream, emitted by the shim for the Streams
+    // picker and read by diagnostics to name the source of a debrid link. Absent from a real PMS.
+    #[serde(rename = "addon_name", default)]
+    pub addon_name: String,
     #[serde(rename = "Part", default)]
     pub part: Vec<MediaPart>,
 }
@@ -1422,6 +1431,28 @@ mod tests {
         assert_eq!(v1.video_resolution, "1080");
         // the two versions therefore badge differently ("4K" vs "1080p" — see ui::fmt::resolution's
         // own tests), which is the whole reason the accessor has to name WHICH one it returned.
+    }
+
+    // Fork Rofocale11: the shim's `p2p` marker and the Part's file/size survive the same lenient
+    // parse as the technical fields. A real PMS never sends `p2p`, and `#[serde(default)]` reads it
+    // as false there — it can never change a playback decision.
+    #[test]
+    fn the_shims_p2p_marker_and_the_parts_file_identity_survive_parsing() {
+        let shim = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"1","Media":[
+            {"videoCodec":"h264","p2p":true,"addon_name":"Torrentio",
+             "Part":[{"key":"/library/parts/1/0/file.mkv","file":"Release.Group.mkv","size":42}]}]}]}}"#;
+        let env: Envelope = serde_json::from_slice(shim).expect("shim parse");
+        let media = env.media_container.metadata[0].media_version(None).map(|(_, m)| m).expect("Media[0]");
+        assert!(media.p2p, "the engine-fed stream is marked");
+        assert_eq!(media.addon_name, "Torrentio");
+        assert_eq!(media.part[0].file, "Release.Group.mkv");
+        assert_eq!(media.part[0].size, 42);
+
+        let pms = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"1","Media":[
+            {"videoCodec":"h264","Part":[{"key":"/library/parts/1/0/file.mkv"}]}]}]}}"#;
+        let env: Envelope = serde_json::from_slice(pms).expect("PMS parse");
+        let media = env.media_container.metadata[0].media_version(None).map(|(_, m)| m).expect("Media[0]");
+        assert!(!media.p2p, "an absent marker is a real PMS answer, not a torrent");
     }
 
     /// A version is found by its `Media.id` wherever the answer lists it, so a refetch that
