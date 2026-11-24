@@ -26,7 +26,7 @@ Debian `control` file.
 | `ci/module-layers.ini` | `platform`→`os`, playback crates, host-doorway comment, `testrace`/`testheap` | `local_server`, `stremio`, `pmsshim` — the shim identity and addon backend must stay registered or the layer gate rejects the app's own references. |
 | `ci/test_no_host_staticlib.py` | New layer lists, pinned toolchain, upstream workspace tree | `plx_stremio`/`plx_pmsshim` in both lists — the harness symlinks these paths; without them a cargo graph resolve in the throwaway copy fails. |
 | `ipkroot/ctl/control` | Nothing lost (only upstream's identity fields) | `com.nuvionative.app`, version `0.8.0`, fork maintainer/homepage — upstream's `com.beb.plxnative` collides with the real PlxNative install and breaks opkg identity and DB8 separation. No safe comment syntax in a Debian control file. |
-| `pkg/appinfo.json` | Nothing lost (other fields identical) | Fork app id/version/vendor for the same identity reason; JSON permits no comment. |
+| `pkg/appinfo.json` | Nothing lost (other fields identical) | Fork app id/version/vendor for the same identity reason; JSON permits no comment. `requiredPermissions` emptied 2026-11-24: there is no DB8 record or keymanager service, so the installed app requests no TV database / security-key grant. |
 | `tools/tv-lock.sh` | `PLX_TV_LOCK_LOCAL` short-circuit, `SSH_TV_OPTS`, bounded-run helpers | `NV_DEVICE` ares-novacom branch — this fork drives a non-rooted LG CX through an ares device; upstream's ssh-only helper cannot reach it. |
 
 ## Locales and replay fixtures (no comment syntax)

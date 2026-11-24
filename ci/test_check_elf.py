@@ -368,14 +368,15 @@ class ElfGateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, "wrong helper ELF was allowed: " + result.stdout)
                 self.assertIn(diagnostic, result.stdout)
 
-    def test_absent_storage_helper_fails_in_ci_and_is_skipped_elsewhere(self):
+    def test_absent_storage_helper_is_skipped_even_in_ci(self):
+        # Fork Rofocale11: the private DB8 helper was dissolved into the app's in-process redb
+        # backend and is never packaged, so its absence cannot be a CI failure. An explicitly
+        # named STORAGE_BIN is still graded by test_storage_helper_path_can_be_named.
         (self.root / "plxnative-storage").unlink()
-        result = self.run_gate(defaults())
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("storage helper ships in the package", result.stdout)
-        result = self.run_gate(defaults(), extra_env={"CI": "false"})
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("SKIP", result.stdout)
+        for env in ({"CI": "true"}, {"CI": "false"}):
+            result = self.run_gate(defaults(), extra_env=env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Nuvio Native ships no storage helper", result.stdout)
 
     def test_storage_helper_path_can_be_named(self):
         (self.root / "plxnative-storage").unlink()

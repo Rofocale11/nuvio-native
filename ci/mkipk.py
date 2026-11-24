@@ -78,7 +78,10 @@ import flavor  # noqa: E402  — ci/flavor.py, which DECIDES a flavour's id and 
 
 # Any fixed epoch works; 2010-01-01 is safely inside the range old opkg builds accept.
 EPOCH = 1262304000
-STORAGE_PERMISSIONS = ["database.operation", "securitykey.operation"]
+# Fork Rofocale11: Nuvio Native has no DB8 record and no keymanager service — both are served in
+# process from the single redb file. Declaring these groups would grant the installed app TV
+# database / security-key access it never uses, so the package requests neither.
+STORAGE_PERMISSIONS = []
 
 
 def stage_storage_service(repo: Path, data: Path, app: dict) -> Path:

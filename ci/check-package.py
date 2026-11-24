@@ -12,6 +12,7 @@ import re
 import struct
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,6 +31,29 @@ def check(cond: bool, msg: str) -> None:
     else:
         FAILURES.append(msg)
         print(f"  FAIL — {msg}")
+
+
+# Fork Rofocale11: keep the upstream-shaped DB8 strings for mergeability, but gate any LS2 send.
+# A DB8 URI is allowed to EXIST in the upstream-shaped storage files: the in-process redb shim
+# matches those strings and answers them from the single store, and the test mocks do the same. What
+# is forbidden is sending one over Luna. A file carrying both a DB8 URI and an LS2 send call is the
+# regression — it would put the app on the television's DB8 bus for the first time.
+_DB8_URI = re.compile(r"luna://(?:com\.palm\.db|com\.webos\.db8)/")
+_LS2_SEND = re.compile(r"\bls2::|\bcall_once\s*\(|\bluna[-_]send\b|\bLSCall\b")
+
+
+def db8_ls2_violations(root: Path) -> list:
+    """Shipping Rust files that both name a DB8 URI and can send it over LS2."""
+    bad = []
+    for pattern in ("rust-modules/src/**/*.rs", "rust-modules/*/src/**/*.rs", "src/**/*.rs"):
+        for path in sorted(root.glob(pattern)):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _DB8_URI.search(text) and _LS2_SEND.search(text):
+                bad.append(str(path.relative_to(root)))
+    return bad
 
 
 def lg_maintainer_address(value: str) -> bool:
@@ -694,7 +718,25 @@ const DIAG: [&str; 6] = [
             print(f"  FAIL — rc_stamp_number({stamp!r}) = {got!r}, want {want!r}")
     print(f"check-package: rc_stamp_number {len(rc_cases) - rc_bad}/{len(rc_cases)} cases correct")
 
+    # Fork Rofocale11: pin the guard against a planted LS2 send, not just the inert redb seam.
+    # The DB8 guard must fail on a planted LS2 send and pass on the in-process redb Rpc seam, or
+    # it is just a comment. Private temp dirs; no cargo, no network, no checkout writes.
+    with tempfile.TemporaryDirectory() as tmp:
+        t = Path(tmp)
+        shim = t / "rust-modules/os/src/storage/redb_backend.rs"
+        shim.parent.mkdir(parents=True)
+        shim.write_text('match uri { "luna://com.palm.db/put" => self.rpc.call(uri, payload) }\n')
+        sender = t / "rust-modules/platform-webos/src/webos.rs"
+        sender.parent.mkdir(parents=True)
+        sender.write_text('ls2::call_once("luna://com.palm.db/put", "{}")\n')
+        got = db8_ls2_violations(t)
+        db8_bad = got != ["rust-modules/platform-webos/src/webos.rs"]
+        if db8_bad:
+            print(f"  FAIL — db8_ls2_violations = {got!r}, want the planted LS2 sender")
+    print(f"check-package: db8_ls2_violations {1 - db8_bad}/1 cases correct")
+
     bad += (maintainer_bad + dev_bad + nightly_date_bad + cli_bad + nightly_blob_bad + rc_bad
+            + db8_bad
             + catalog_bad + sinks_bad + int(catalog_vacuous) + boundary_bad + pkgver_bad + rep_bad)
     return 1 if bad else 0
 
@@ -1929,6 +1971,16 @@ if data_blob is not None:
           + (f" (missing {' '.join(missing)})" if missing else ""))
 else:
     print("  SKIP — no IPK data.tar.gz member (run `make ipk` first)")
+
+print("== television DB8 ==")
+# Fork Rofocale11: no install-time DB8 permission and no LS2 path to the TV's DB8 remain.
+# Source-level half of the invariant: the package gate already refuses any usr/palm/services
+# payload, and the appinfo now requests no database/security-key permission. This catches the
+# remaining way a future edit could reach the TV's DB8 — an LS2 send in shipping Rust. The
+# upstream-shaped `rpc.call("luna://com.palm.db/...")` stays legal: RedbRpc answers it in process.
+_violations = db8_ls2_violations(ROOT)
+check(not _violations, "no shipping Rust sends a DB8 URI over LS2"
+      + (f" (found {', '.join(_violations)})" if _violations else ""))
 
 print("== ar container ==")
 # `ar rcD` (GNU) terminates short member names with '/', which appinstalld rejects outright:

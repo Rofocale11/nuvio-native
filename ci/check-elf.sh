@@ -226,22 +226,13 @@ fi
 ok "$(wc -l < "$AUDIT_TMP/dt-needed.actual" | tr -d ' ') entries for $PLAYBACK_MODE, unchanged"
 
 echo "== storage helper =="
-# pkg/plxnative-storage ships to the TV beside the app and links the same way, through the same stub
-# .so trick: a library it quietly starts needing is a binary that will not start on a firmware
-# without it, which `tools/fwcompat.py` would only say if somebody ran it by hand. It is a separate
-# executable with its own list (libluna-service2 and glib are its, and it needs none of the app's
-# media libraries), so it gets its own expectation file rather than a shared one. Only the identity
-# and DT_NEEDED are graded here: the barrier, interposer, crash-report and host-identity checks
-# above are about the application. The list is the fat-LTO `release` profile's, which is what CI and
-# every shipped package build; a local `tvdev` build links two entries more (ld-linux.so.3 and
-# libdl.so.2) and reads as drift, so grade a local helper after `make ARM_PROFILE=release`.
-#
-# Absent is a failure in CI, where `make ipk` has just built it, and a skip anywhere else, where
-# `./ci/check-elf.sh` is run on a tree that built the application alone.
+# Fork Rofocale11: Nuvio Native dissolved the private DB8 helper into the app's in-process redb
+# backend and packages no second binary (ci/mkipk.py fails the IPK if one appears). The grading
+# below stays only for an explicitly named STORAGE_BIN; an absent helper is always a skip, including
+# in CI, where a missing helper used to be fatal and contradicted the package gate.
 STORAGE="${STORAGE_BIN:-$(dirname "$BIN")/plxnative-storage}"
 if [ ! -f "$STORAGE" ]; then
-  [ "${CI:-}" != "true" ] || fail "$STORAGE is missing — the storage helper ships in the package and must be graded"
-  echo "  SKIP — $STORAGE not built"
+  echo "  SKIP — Nuvio Native ships no storage helper"
 else
   SH=$("$READELF" -h "$STORAGE") || fail "readelf -h failed on the storage helper"
   grep -q 'Class: *ELF32'      <<<"$SH" || fail "storage helper is not ELF32"

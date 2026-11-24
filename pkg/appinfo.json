@@ -14,8 +14,5 @@
   "handlesRelaunch": false,
   "transparent": true,
   "requiredMemory": 160,
-  "requiredPermissions": [
-    "database.operation",
-    "securitykey.operation"
-  ]
+  "requiredPermissions": []
 }
