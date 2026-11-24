@@ -12,8 +12,10 @@ import json
 import re
 from readonly_dependencies import _local_sha, _sha, _json, _manifest_paths, _configs, _workspace_hashes, WORKSPACE_HASHING
 
+# Fork Rofocale11: re-derived for the fork workspace after adding the Nuvio crates; the
+# production sources and enum grammar are unchanged, only the pinned manifests/lock hashes moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'platform-generated-enums.json'
-CERTIFICATE_SHA256 = '4b7e9650767578f78e3b9bcfa36ae43df469b13dcca23f241eda358fc871fe1c'
+CERTIFICATE_SHA256 = '11e8d0749919df7a63957bf6a4a0269a49d00d6a0d3743bc6a27311e7252dba9'
 SOURCES = ['os/Cargo.toml', 'os/src/lib.rs', 'os/src/i18n/mod.rs',
            'os/build.rs', 'os/build_support/catalog.rs', 'build_support/install_identities.rs',
            'machine/src/lib.rs', 'machine/src/machine.rs']

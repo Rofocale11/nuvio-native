@@ -17,8 +17,10 @@ import json
 import re
 import tarfile
 
+# Fork Rofocale11: re-derived from the reviewed serde_json 1.0.154 archive for the fork workspace;
+# the crate's source/grammar and locked dependency set are unchanged, only manifest/lock hashes moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'serde-json-immutable.json'
-CERTIFICATE_SHA256 = '5295c37c52fa820907d879f9d88b841e5de63a82ac395fdb76c7e07128299aa9'
+CERTIFICATE_SHA256 = 'f5a5d2c6399d99baff1db7513725801fb34d19cda5acd3e3be85329e19f65285'
 SCHEMA = 'plx.readonly.locked-json.v1'
 REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index'
 SUPPORTED = ['alloc', 'arbitrary_precision', 'default', 'float_roundtrip', 'raw_value', 'std', 'unbounded_depth']

@@ -74,11 +74,17 @@ def apt_update_problems(name, text):
     ]
 
 
+# `curl` as a shell COMMAND must be bounded. Listing curl as an apt package (or mentioning it in
+# prose on a `run:` line) is not a fetch and must not be flagged: Fork Rofocale11's build-ipk.yml
+# installs curl alongside build-essential, which used to trip the old any-token matcher.
+CURL_COMMAND = re.compile(r"(?:^\s*|[;&|]\s*|\(\s*)(?:(?:sudo|timeout\s+\S+|env\s+[^;&|]+)\s+)*curl\s")
+
+
 def curl_problems(name, text):
     return [
         f"{name}:{i}: `curl` has no --max-time"
         for i, l in code_lines(text)
-        if re.search(r"(^|[\s;&|(])curl\s", l) and "--max-time" not in l
+        if CURL_COMMAND.search(l) and "--max-time" not in l
     ]
 
 
@@ -140,6 +146,9 @@ class CheckersGoRed(unittest.TestCase):
         mutated = bounded.replace("--max-time 120 ", "")
         self.assertNotEqual(mutated, bounded)
         self.assertTrue(curl_problems("x.yml", mutated))
+        # Naming curl as a package to install is not a fetch, even on a curl-free runner.
+        installed = "        run: |\n          sudo apt-get install -y --no-install-recommends build-essential curl tar\n"
+        self.assertEqual(curl_problems("x.yml", installed), [])
 
 
 if __name__ == "__main__":

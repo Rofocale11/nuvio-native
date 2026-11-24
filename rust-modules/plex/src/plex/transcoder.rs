@@ -1500,6 +1500,9 @@ mod tests {
     /// itself, so `dca` is announced with no table row — up to 8 channels, no rate bound — in the
     /// Auto direct-play list and its copy lane and in Force Direct Play's; and the lossless set is
     /// untouched either way.
+    ///
+    /// Fork Rofocale11: Opus is app-decoded to stereo PCM on this fork (commit 7c5064a7b), so the
+    /// Force Direct Play list also carries `opus`; the upstream expectation omitted it.
     #[test]
     fn the_lossy_gate_adds_dca_to_both_profiles_and_off_changes_nothing() {
         let off = Caps::assumed();
@@ -1513,7 +1516,7 @@ mod tests {
         assert!(!auto.contains("scopeName=dca&type=upperBound&name=audio.samplingRate"), "no rate bound on the core: {auto}");
         assert!(!auto.contains("dts"), "{auto}");
         let forced = super::forced_direct_profile_for(&on);
-        assert_eq!(list_of(&forced, "audioCodec="), ["aac", "ac3", "eac3", "dca", "mp3", "vorbis", "truehd"], "{forced}");
+        assert_eq!(list_of(&forced, "audioCodec="), ["aac", "ac3", "eac3", "dca", "opus", "mp3", "vorbis", "truehd"], "{forced}");
         assert_eq!(super::profile_for(&off), super::profile_for(&Caps::assumed()));
     }
 
@@ -1538,7 +1541,7 @@ mod tests {
         }
         assert!(!auto.contains("scopeName=dca&type=upperBound&name=audio.samplingRate"), "a DTS core still is not: {auto}");
         let forced = list_of(&super::forced_direct_profile_for(&on), "audioCodec=");
-        assert_eq!(forced, ["aac", "ac3", "eac3", "dca", "mp3", "vorbis", "truehd"]);
+        assert_eq!(forced, ["aac", "ac3", "eac3", "dca", "opus", "mp3", "vorbis", "truehd"]);
     }
 
     /// **TrueHD in both profiles under the gate** (S4-5): announced up to eight channels, in the
@@ -1557,7 +1560,7 @@ mod tests {
         assert!(!auto.contains("scopeName=truehd&type=upperBound&name=audio.samplingRate"), "no rate bound: {auto}");
         assert!(!list_of(target_of(&auto), "audioCodec=").contains(&"truehd".into()), "never a transcode target");
         let forced = list_of(&super::forced_direct_profile_for(&on), "audioCodec=");
-        assert_eq!(forced, ["aac", "ac3", "eac3", "dca", "mp3", "vorbis", "truehd"]);
+        assert_eq!(forced, ["aac", "ac3", "eac3", "dca", "opus", "mp3", "vorbis", "truehd"]);
     }
 
     /// **Force Direct Play offers the lossy codec the policy enabled even where the set has no decoder

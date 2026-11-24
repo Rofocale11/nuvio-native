@@ -371,9 +371,9 @@
       ".cargo/config": null,
       ".cargo/config.toml": "82f061c716740e16cfee63a74d87159e0e0dc253e1092b87c54190c603515b14"
     },
-    "lock_sha256": "af3d2a3f7d2e2dcd178e02d0377010cedb98339218d6b5512771539dad5338f7",
+    "lock_sha256": "26df03f3e7785068e606a6cd6378b267a4186fd973a57fdcaa0fc04f86452f28",
     "manifests": {
-      "Cargo.toml": "133fb6f50e5cda51d503002b31ca79187f7eba762a386378b60421e0ac7806f5",
+      "Cargo.toml": "d90a98a2c62d9477f39d059c20fc7902113ba465475511c91b4e2ea7570d9a54",
       "appkit/Cargo.toml": "5cc1214cba7746fe0f2d4cfa5047b599e0d5124abe7bdaebe210381021b88c4a",
       "base/Cargo.toml": "ebe0b95553bd44f33f422f7d8e22b75ddeb53c7ee81bbe738f675690694568f7",
       "data/Cargo.toml": "74f79e6240f0965069ec34916ae276b3f7e5f4b944cf16a0846570a6b115afa0",
@@ -382,15 +382,18 @@
       "media-codecs/Cargo.toml": "503c8681289314b5c8a63195aad6796cbad93fcb3eedd8d7cba9e8ed0233783f",
       "media/Cargo.toml": "a17c8c14730bff0af4183f7c9c2bb9cc6de8fd91ecd66b1afdbf1567fc71bba0",
       "net/Cargo.toml": "bfdb3a08200642eeeafc9762733718c407529f26dce8a7b90665bc77ac928171",
-      "os/Cargo.toml": "38d59148bbf6a9814c27411f3310db5d690ac5583050a6e68a39141356fa2000",
+      "nuvio-dash/Cargo.toml": "5858a8709ee28f9ec3cf574944c03788f0b258a054e6708e44ebf3aee1519fd6",
+      "nuvio-probe/Cargo.toml": "fdd2a8aaddd6caa018caef411a8fff5df5b1b8a0628e0953050de37a14b53178",
+      "nuvio-store/Cargo.toml": "801d6eae4f386f544c7885ceb874e858bd2ea3f15fbc145d7d7a602f1caa93e0",
+      "os/Cargo.toml": "e2169633b235f37f5c85998bcc39347a5aa0c4da0b1144805138418a8dfd9eb9",
       "owp/Cargo.toml": "2c1354bce16b34f0d006fc04cd4c8eb22ef91f00063b53a1113e32f475ecae33",
       "platform-desktop/Cargo.toml": "d8b6237952dda5e052d16f10215cacb2ea6b581e094a9db2eada59b92aea4c58",
       "platform-webos/Cargo.toml": "d5a7ec2c5e0db66cdf8c9944eef5c86161c82798d0c767772ba42e0a590d354e",
-      "play-feed/Cargo.toml": "5bd2b67820914b578fcb371b80ed9274eae4b57078391c38161a67fc22df760d",
+      "play-feed/Cargo.toml": "e719a046260632c6de58092b5dbc3ecfd3780d496403cab60c47eea1a1f4cd65",
       "play-uri/Cargo.toml": "48528dd164a910a32f5396ab8f5bc4c6c13f6fd5f1136ee080f8424fe663280b",
       "playback-contract/Cargo.toml": "bde335ea645552d4f7481b007b80204ecb5bb592caaca22af58a8361cd050dcf",
-      "plex/Cargo.toml": "5cdb185265b7f7217cff08e54ef683a827735c9b3ae7c50161850f7064667b66",
-      "pmsshim/Cargo.toml": "49fcaa59a1a383eec3fcdf7e7a7ffdf176be81837a03b62d2e265c8b05a7940c",
+      "plex/Cargo.toml": "2646e980b06b4900c144edd175ef81edbe64d6f7e49689aa17e64937b1565160",
+      "pmsshim/Cargo.toml": "acd94d92430b36898c4a7a4b5d9dc14ac770a96cc064124ec8dd611e3b2f1365",
       "screens/Cargo.toml": "cd42484a49fac394244ebc7b81f30f7e4f9a31cdf7bc1ace5c3fae21afd6d511",
       "session/Cargo.toml": "ecb49fc9f44177be6de36715ad70845b8929799cdbeb5ce9d6939be741704db0",
       "shell-sdl/Cargo.toml": "9bccdb0abdb2ce9afdc030af9454117ed53884f9b50e1ee35a21bcfe6459e9a1",
@@ -530,7 +533,7 @@
         ],
         "edition": "2021",
         "lib": "play-feed/src/lib.rs",
-        "lib_sha256": "d3e124eb236e1c9c7cee328f4c01988f32589d5427123603dab8ca9b174e60c0"
+        "lib_sha256": "4d32dd49b2acf68d76bdbc8ff60d7fcc5910d231dddd8dda35282dd5faf33390"
       },
       "play-uri/Cargo.toml": {
         "dependency": [
@@ -575,7 +578,7 @@
         ],
         "edition": "2021",
         "lib": "pmsshim/src/lib.rs",
-        "lib_sha256": "3baadf4bc84fd92695bf3f18d79b19c694cc5f9068dc9deee125778b57a39443"
+        "lib_sha256": "61ec9a1b216f4f79fc57ed453d2b12c01509e25b6f15c4834b9bd4f606095a38"
       },
       "screens/Cargo.toml": {
         "dependency": [
@@ -638,7 +641,7 @@
         ],
         "edition": "2021",
         "lib": "stremio/src/lib.rs",
-        "lib_sha256": "7c4095e34b3004028e76ddf715061a4255b4101877c1f8ea51ee6902a8845092"
+        "lib_sha256": "5e44876d430969738d3f1f05ce10f82f5dc1c6b3e9a854c096aed51e77f13dfe"
       },
       "telemetry/Cargo.toml": {
         "dependency": [

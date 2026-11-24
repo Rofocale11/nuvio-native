@@ -1113,3 +1113,32 @@ test that pins active-track promotion, the `selected` fallback and the siblings 
 whole `plx_data` lib suite 1663/1663, `plx_appkit` 968/968, `plx_screens` 2343/2343 and
 `plxnative-modules` 1496/1496, `make check-nodef`, `git diff --check`, and a debug ARM
 `make FLAVOR=debug` cross-build (fresh 32-bit `pkg/plxnative` ELF). No commit, deploy or TV work.
+
+## `make check` alignment (2026-11-24)
+
+The gate was red on the committed tree for pre-existing fork/upstream drift, unrelated to the
+subtitle drill-down. Fixed without weakening any gate:
+
+- **Registries/composition** — `ci/list-caps.ini` (fork cap sites classified from the old fork's
+  registry plus code for its later stages, stale `date_of` entry removed), `ci/plex-requests.ini`
+  (the shim's `/allLeaves` and the single redb InstallPrefs write), `ci/third-party-crates.json`
+  (redb and the reached ring/untrusted rows; stale `not_shipped` entries removed — JSON has no
+  comment syntax, hence this record), regenerated `THIRD-PARTY-NOTICES.md`, and `RUST_INPUTS` in
+  the `Makefile` (nuvio-store/nuvio-dash).
+- **Pinned-test expectations** — `test_test_fast`, `test_ci_split`, `test_no_host_staticlib`
+  (all gained the fork's library crates), `test_deploy_manifest` (the fork's VERIFY_FILES tail),
+  `test_build_gc` (the real fix was `tools/build-gc.sh`'s `derived_output` allow-list: the fork's
+  host-FFmpeg, CMake and OpenSSL paths are rebuildable output), `test_ci_timeouts` (a curl PACKAGE
+  in an apt-install line is not a fetch), and `check-plex-requests`/`check-list-caps` themselves.
+- **Proof certificates** — re-derived `ci/proofs/{serde-json-immutable,platform-generated-enums}.json`
+  and their SHA pins after the fork's workspace changed. The machine-shape failures were a
+  downstream symptom of the stale serde-json certificate, not a defect in SessionMachine;
+  `check-machine-shape.py` is green with the registry unchanged.
+- **Cargo-branch failures exposed by the green python branch** — the shared TLS session cache must
+  be skipped for the identity probe's learning request (`net.rs`, or curl resumes the session and
+  `CURLINFO_CERTINFO` has no leaf); the Opus app-decode fork adds `opus` to the Force Direct Play
+  expectation in `plex/transcoder.rs`; and the nuvio-store cache test now uses
+  `plx_base::testscratch` so it leaves no TMPDIR entry (with its `test-support` dev-dependency).
+
+Verified on the working tree: `make check` **146 steps — all ok**, `make check-nodef`,
+`git diff --check`, and a 32-bit ARM `make FLAVOR=debug` cross-build. No commit or deploy.

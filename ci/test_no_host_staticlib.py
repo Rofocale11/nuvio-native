@@ -51,7 +51,7 @@ CRATE = "plxnative_modules"
 # and the throwaway-workspace file list; upstream has neither. `plx_nuvio_probe` is the fork's
 # extracted addon-stream prober, held to the same rlib-only rule.
 # Upstream's `plx_platform` -> `plx_os` rename and new playback/platform crates are kept.
-LAYER_CRATES = ("plx_base", "plx_machine", "plx_net", "plx_os", "plx_gfx", "plx_ui", "plx_plex", "plx_telemetry", "plx_data", "plx_session", "plx_media", "plx_playback_contract", "plx_play_uri", "plx_play_feed", "plx_media_codecs", "plx_appkit", "plx_screens", "plx_shell_sdl", "plx_stremio", "plx_pmsshim", "plx_nuvio_probe", "plx_nuvio_store")
+LAYER_CRATES = ("plx_base", "plx_machine", "plx_net", "plx_os", "plx_gfx", "plx_ui", "plx_plex", "plx_telemetry", "plx_data", "plx_session", "plx_media", "plx_playback_contract", "plx_play_uri", "plx_play_feed", "plx_media_codecs", "plx_appkit", "plx_screens", "plx_shell_sdl", "plx_stremio", "plx_pmsshim", "plx_nuvio_probe", "plx_nuvio_store", "plx_nuvio_dash")
 # The two platform crates (W7b): dependents of the app crate, never dependencies of it, so they are
 # in a unit graph of their own, and held to the same rule.
 PLATFORM_CRATES = ("plx_platform_webos", "plx_platform_desktop")
@@ -64,7 +64,9 @@ TOOLCHAIN = pinned()  # the repo's one toolchain
 # graph resolve in the throwaway copy fails on the missing shim packages.
 # Fork Rofocale11: `nuvio-probe` is the fork-owned stream-prober crate; like stremio/pmsshim it must be
 # symlinked into the throwaway workspace or cargo cannot resolve the manifest's `plx_nuvio_probe` edge.
-WORKSPACE_FILES = (".cargo", "Cargo.lock", "build.rs", "build_support", "src", "storage", "base", "machine", "net", "os", "gfx", "ui", "plex", "telemetry", "data", "session", "media", "playback-contract", "play-uri", "play-feed", "media-codecs", "appkit", "screens", "shell-sdl", "platform-webos", "platform-desktop", "owp", "stremio", "pmsshim", "nuvio-probe", "nuvio-store")
+# `nuvio-dash` is the trailer demux crate plx_play_feed depends on; the same rule applies to its path
+# dependency, or the throwaway resolve fails on a missing manifest.
+WORKSPACE_FILES = (".cargo", "Cargo.lock", "build.rs", "build_support", "src", "storage", "base", "machine", "net", "os", "gfx", "ui", "plex", "telemetry", "data", "session", "media", "playback-contract", "play-uri", "play-feed", "media-codecs", "appkit", "screens", "shell-sdl", "platform-webos", "platform-desktop", "owp", "stremio", "pmsshim", "nuvio-probe", "nuvio-store", "nuvio-dash")
 
 
 def offences(unit_graph=None, metadata=None, crate=CRATE):

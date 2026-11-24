@@ -325,7 +325,7 @@ stated; election does not alter your rights under the other arms.
 | equivalent | 1.0.3 | Apache-2.0 OR MIT | 2016–2023 The equivalent authors |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | The image-rs Developers |
 | flate2 | 1.1.9 | MIT OR Apache-2.0 | 2014-2026 Alex Crichton |
-| getrandom | 0.4.3 | MIT OR Apache-2.0 | 2018–2026 The rust-random Project Developers; 2014 The Rust Project Developers |
+| getrandom | 0.4.3 and 0.2.17 | MIT OR Apache-2.0 | 2018–2026 The rust-random Project Developers; 2014 The Rust Project Developers |
 | gimli | 0.34.0 | MIT OR Apache-2.0 | The `gimli` authors |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | Amanieu d'Antras |
 | image | 0.25.10 | MIT OR Apache-2.0 | The image-rs Developers |
@@ -340,6 +340,8 @@ stated; election does not alter your rights under the other arms.
 | object | 0.39.1 | Apache-2.0 OR MIT | The `object` authors |
 | png | 0.18.1 | MIT OR Apache-2.0 | 2015 nwin |
 | quick-error | 2.0.1 | MIT/Apache-2.0 | 2015 The quick-error Developers |
+| redb | 4.6.0 | MIT OR Apache-2.0 | 2021 Christopher Berner |
+| ring | 0.17.14 | Apache-2.0 AND ISC | 2015-2025 Brian Smith (ISC); BoringSSL contributors (Apache-2.0) |
 | rustc-demangle | 0.1.28 | MIT/Apache-2.0 | Alex Crichton |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers |
 | serde | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay |
@@ -349,6 +351,7 @@ stated; election does not alter your rights under the other arms.
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | Copyright (c) 2017 Robert Grosse |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | 2019 Daniel "Lokathor" Gee |
 | typed-path | 0.13.0 | MIT OR Apache-2.0 | The typed-path authors |
+| untrusted | 0.9.0 | ISC | 2015-2016 Brian Smith |
 | zip | 9.2.2 | MIT | 2014 Mathijs van de Nes |
 | zune-core | 0.5.1 | MIT OR Apache-2.0 OR Zlib | The zune-image developers |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | The zune-image developers |

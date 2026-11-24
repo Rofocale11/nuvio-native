@@ -1364,6 +1364,9 @@ derived_output() {
     pkg/plxnative|pkg/plxnative-storage|pkg/plxnative-stackwalk|pkg/plxnative.debug|pkg/threadprobe) ;;
     pkg/mali-irq-sample|pkg/sockprobe|pkg/logmprobe) ;;
     pkg/*.ipk|pkg/ipk.sha256|pkg/lib*-plx.so.*|pkg/libass-plx-host.so.0*|pkg/libass-plx.0.dylib.*.new) ;;
+    # Fork Rofocale11: the hand-staged host FFmpeg sonames, the C engine's CMake tree and the
+    # pinned OpenSSL source/prefix are all rebuilt from tracked inputs, never private state.
+    pkg/*-plx-host.so.*|build|vendor/openssl-src|vendor/openssl-prefix) ;;
     pkg/*.dylib|pkg/symbols|pkg/.ffabi-ok|pkg/.ffabi-host-ok|pkg/.build-config|pkg/.config-local-stamp) ;;
     pkg/.flavor|pkg/PlxNative.app|pkg/PlxNative-*|pkg/*.link.*|pkg/link-evidence) ;;
     ipkroot/*.tar.gz|ipkroot/debian-binary|ipkroot/data/usr|stub/*.so|*.o) ;;

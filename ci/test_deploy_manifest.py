@@ -80,9 +80,11 @@ class DeployManifest(unittest.TestCase):
         manifest = __import__("json").loads((ROOT / "pkg/fonts/subs/manifest.json").read_text())
         self.assertEqual(sorted(f["file"] for f in manifest["faces"]), sorted(n for n in names if n.endswith(".ttf")))
         makefile = (ROOT / "Makefile").read_text()
+        # Fork Rofocale11: VERIFY_FILES also carries the trailer JS services and libsbengine, so the
+        # lab-only entry is no longer adjacent to SUBS_FONT_FILES; assert the whole shipped tail.
         for recipe, needle in (("ipk", "cp $(SUBS_FONT_FILES) $(STAGE)/$(SUBS_FONT_DIR)/"),
                                ("deploy", "$(SCP) $(SUBS_FONT_FILES) tv:$(APPDIR)/$(SUBS_FONT_DIR)/"),
-                               ("verify-deploy", "$(SUBS_FONT_FILES) $(if $(LAB),pkg/lab.json,)")):
+                               ("verify-deploy", "$(SUBS_FONT_FILES) $(JS_SERVICE_FILES) $(SBENGINE_STAGED) $(if $(LAB),pkg/lab.json,)")):
             with self.subTest(recipe=recipe):
                 self.assertIn(needle, makefile)
 

@@ -227,8 +227,9 @@ mod tests {
     fn store() -> Arc<Store> {
         static STORE: OnceLock<Arc<Store>> = OnceLock::new();
         STORE.get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!("nuvio-cache-test-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
+            // Fork Rofocale11: the shared process_dir registers an atexit cleanup, so the cache
+            // fixture no longer leaves a directory behind for cargo-test-parallel's TMPDIR check.
+            let dir = plx_base::testscratch::process_dir("nuvio-cache-test");
             Store::open_at(&dir.join("cache.redb")).unwrap()
         }).clone()
     }

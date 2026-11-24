@@ -2379,8 +2379,13 @@ fn request_tls_sink(
             // CURLOPT_RESOLVE. Sharing the DNS cache would leak that entry to unrelated handles
             // (and let a later request reuse an address it was never given), so those requests
             // keep the per-call handle too.
+            // Fork Rofocale11: a learning request needs a FRESH handshake. On a resumed SSL
+            // session libcurl does not decode the chain again and CURLINFO_CERTINFO carries no
+            // leaf, so the identity probe would remember no pin (the discovery test reproduces
+            // this). Keep those few requests off the shared session cache.
             let attach_share = !matches!(mode, keypin::Mode::Key { .. })
                 && !matches!(tls_c, TlsCfg::Pinned(_))
+                && !read_peer_pin
                 && resolve.is_none();
             if attach_share {
                 if let Some(s) = share_handle() {

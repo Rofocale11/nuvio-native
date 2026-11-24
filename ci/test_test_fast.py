@@ -147,6 +147,8 @@ class OtherTargetsAreUnaffected(unittest.TestCase):
         self.assertIn("CARGO_INCREMENTAL=0", out)
 
 
+# Fork Rofocale11: the two Nuvio library crates are in the shipped staticlib and therefore in
+# `test-fast`'s package list; the upstream list alone does not name them.
 class TestFastRuns(unittest.TestCase):
     def test_incremental_in_its_own_target_dir_and_forwards_the_filter(self):
         with FakeCargoHome() as fake:
@@ -162,7 +164,7 @@ class TestFastRuns(unittest.TestCase):
             self.assertEqual(call["target_dir"], TDIR)
             self.assertTrue(call["cwd"].endswith("rust-modules"), call["cwd"])
             self.assertEqual(call["runtime_dir_set"], "yes")
-            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp --no-run --message-format=json-render-diagnostics$")
+            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp -p plx_nuvio_probe -p plx_nuvio_store --no-run --message-format=json-render-diagnostics$")
             # The filter goes to each test binary (the runner builds first, then runs), not to cargo.
             self.assertEqual(len(fake.bin_calls()), call["args"].split().count("-p"))
             self.assertTrue(all(line.endswith("args=route::") for line in fake.bin_calls()), fake.bin_calls())
@@ -171,7 +173,7 @@ class TestFastRuns(unittest.TestCase):
         with FakeCargoHome() as fake:
             self.assertEqual(fake.run("test-fast").returncode, 0)
             (call,) = fake.calls()
-            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp --no-run --message-format=json-render-diagnostics$")
+            self.assertRegex(call["args"], r"^\+\S+ test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp -p plx_nuvio_probe -p plx_nuvio_store --no-run --message-format=json-render-diagnostics$")
             self.assertNotIn("--features", call["args"])
             self.assertEqual(len(fake.bin_calls()), call["args"].split().count("-p"))
             self.assertTrue(all(line.endswith("args=") for line in fake.bin_calls()), fake.bin_calls())
