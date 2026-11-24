@@ -1842,14 +1842,6 @@ fn load_art<T>(
     cache_gen: u64,
     mut decode: impl FnMut(&[u8]) -> Option<T>,
 ) -> Loaded<T> {
-    // TEMP TRACE (remove after diagnosis): the actual art path the app fetches.
-    {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static N: AtomicUsize = AtomicUsize::new(0);
-        if N.fetch_add(1, Ordering::Relaxed) < 40 {
-            plx_base::eventlog::log(&format!("TRACE load_art srv={} key={}", srv.raw(), key_s));
-        }
-    }
     let mut out = Loaded { art: None, from_disk: false, stale: None, transient: false };
     let disk = if crate::dev::scenarios::imagecache_bypass_armed() {
         None
