@@ -546,8 +546,11 @@ the old fork's shim behavior is authoritative for future merges.
 
 ## Still to verify
 
-- Dolby Vision P8 playback, seek/resume, and multi-hour stability on the device.
-- Re-run the sim probe and one TV playback after the `plx_nuvio_probe` extraction.
+Point-in-time list (2026-11-23). Later sections and the current-status blocks at the top of
+`VALIDATION.md` / `HANDOFF.md` supersede part of it: Dolby Vision P8 playback, seek and
+pause/resume were later confirmed by the owner on debug and stable installs. Multi-hour
+stability, a dedicated sim-probe comparison and a TV playback run explicitly attributed to the
+post-extraction probe are still not recorded in these docs.
 
 
 ## Fourteenth pass — the torrent engine and trailer service
@@ -1082,8 +1085,8 @@ deploy: warm movie and series re-opens `ms=84…282`, `related_ms=5…233`, insi
 target; a title never seen before still paid one TMDB enrichment up front (`ms=1439…2061`), so the
 ≤800 ms cold target is not met on a first open. See `DETAIL-LATENCY.md` for the full run record.
 
-**Player Subtitles drill-down (2026-11-24), from `~/dev/nuvio-native-old` `nuvio-native` at
-`83339172d`.** The old fork's commits `9a58f217d` ("collapse multi-track subtitle expansion to one
+**Player Subtitles drill-down (2026-11-24), from https://github.com/Rofocale11/nuvio-native-old
+(branch `nuvio-native`) at `83339172d`.** The old fork's commits `9a58f217d` ("collapse multi-track subtitle expansion to one
 track per language") and `2de0b4e94` ("make popped-out subtitle track dynamic based on active
 selection") are the authoritative behavior: a multi-track "yours" language gets ONE root row —
 the drawn track, else the stream's `selected`, else the first — and its other variants are folded
@@ -1293,3 +1296,31 @@ Nuvio stream either.
 - `AddonsPage` reads the two `nuvio` accessors directly from `new`/`rebuild`, mirroring the
   retained `nuvio::rating_source()` pattern. This is the same process-global tension the old fork
   has; a future bridge-publication refactor would move both to `ScreenInputs`.
+
+## Docs audit (2026-11-25)
+
+Reconciled every file in `docs/nuvio/` against the working tree at HEAD `eef501647`. No Rust
+code, build input, upstream seam or gate changed; all edits are in Markdown. Only fork-owned files
+were changed without a marker; the one upstream-owned file touched (`docs/player-submenus.md`)
+keeps its existing inline `Fork Rofocale11:` marker. Corrections made:
+
+- `AGENTS.md` — added `ID-MANAGEMENT.md` and `DETAIL-LATENCY.md` to the documents of record,
+  flagged the two dated snapshot docs, and listed the caches/id map in the one-store rule.
+- `ARCHITECTURE.md` — added `plx_nuvio_dash` to the crate table, recorded version 0.10.0 and the
+  Settings additions, and replaced the stale `NuvioCache` description: after the wholesale old-fork
+  shim port the meta/enrich rows are written by the shim's own caches, the tmdb→IMDb direction is
+  the in-memory `Shim::imdb_ids` map, and only IMDb→TMDB is durable (`imdb_tmdb`, no TTL).
+- `ID-MANAGEMENT.md` / `TMDB.md` — same cache/id correction; removed the claims that `imdb_base`
+  is redb-backed and that `IMDB_TTL` keys the hub-poster mapping.
+- `PLAYBACK.md` — removed the 120 s / 30 s contradiction (120 s for Plex, 30 s deadline-only for
+  Nuvio) and added current tree status.
+- `DETAIL-LATENCY.md` — updated crate/test counts (the three opus failures are gone) and replaced
+  the stale "nothing verified" paragraph with the measured warm result and the unmet cold target.
+- `HANDOFF.md` / `VALIDATION.md` — kept their dated records intact but added current-status
+  sections and annotated DB8, 0.8.0, old test counts, the old shim port and the torrent-server
+  statements that are no longer true of the shipped tree.
+- The "Still to verify" list above was annotated in place rather than silently rewritten.
+- Local checkout paths to the two forks were replaced with durable URLs: current fork
+  https://github.com/Rofocale11/nuvio-native, authoritative old fork
+  https://github.com/Rofocale11/nuvio-native-old (`nuvio-native` branch). Commit ids are kept
+  because they identify the exact revisions; folder paths can be deleted at any time.

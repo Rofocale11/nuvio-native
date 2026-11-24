@@ -50,7 +50,8 @@ Nuvio Streams picker.
 
 Every Nuvio Native record lives in a single `nuvio.redb` under `<data>/shim/`: canonical session
 and Settings preferences, addon config, install preferences, Nuvio account preferences, watch
-state, key table, account session and local settings. There is no DB8 record and no `plxstorage`
+state, key table, account session, local settings, the metadata/enrichment caches and the durable
+IMDb→TMDB id map. There is no DB8 record and no `plxstorage`
 helper in the package. Add new persisted state as a table in `plx_nuvio_store`, not a new file or a
 new DB8 kind. The file has a 50 MiB soft budget: expired and oldest TTL cache rows are shed and the file is compacted at boot, never truncated; durable records are kept even if the budget is exceeded. An unreadable canonical record is quarantined as `<id>.rejected-<millis>` and read as missing so sign-in recovers without SSH. See `ARCHITECTURE.md` for the in-process backend and the migration limits.
 
@@ -73,12 +74,17 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 
 ## Documents of record
 
-- `docs/nuvio/ARCHITECTURE.md` — components, storage, identity.
-- `docs/nuvio/TMDB.md` — the TMDB client contract, the five synthetic key ranges, and the
-  artwork order: TMDB backdrop/logo first, BetterPosters posters by resolved IMDb id,
-  metahub art fallback-only.
+- `docs/nuvio/ARCHITECTURE.md` — current components, storage, identity.
+- `docs/nuvio/ID-MANAGEMENT.md` — numeric `ratingKey`s, the key table and the five synthetic key
+  ranges; read with `TMDB.md`.
+- `docs/nuvio/TMDB.md` — the TMDB client contract and the artwork order: TMDB backdrop/logo
+  first, BetterPosters posters by resolved IMDb id, metahub art fallback-only.
 - `docs/nuvio/PLAYBACK.md` — probe, route and shim playback contract.
+- `docs/nuvio/DETAIL-LATENCY.md` — detail-page phase timings, what is measured on TV and what is
+  still over target.
 - `docs/nuvio/WATCH-PROGRESS.md` — account mirror: IMDb identity, push/pull RPCs and Home refresh.
-- `docs/nuvio/VALIDATION.md` — what has and has not been verified.
-- `docs/nuvio/HANDOFF.md` — delivery history and known limitations.
+- `docs/nuvio/VALIDATION.md` — what has and has not been verified. Its early sections are dated
+  snapshots; the current status is at the top.
+- `docs/nuvio/HANDOFF.md` — delivery history and known limitations. It opens with the current
+  status; everything below the first section is the 2026-10-10 snapshot.
 - `docs/nuvio/MERGE-AUDIT.md` — upstream conflicts and non-commentable fork edits.

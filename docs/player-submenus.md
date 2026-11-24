@@ -28,7 +28,7 @@ because the overlay's state shape changed on purpose.
   the playing item already carries as a sidecar (same release name and language) reads "Added"
   and OK is inert, since adding it again would list one subtitle twice.
 
-<!-- Fork Rofocale11: the old fork (`~/dev/nuvio-native-old`, commits 9a58f217d and 2de0b4e94)
+<!-- Fork Rofocale11: the old fork (https://github.com/Rofocale11/nuvio-native-old, commits 9a58f217d and 2de0b4e94)
      collapses a multi-track "yours" language to a single top-level row — the active track, else
      the stream's `selected`, else the first — and folds its other variants into the Other
      languages drill-in. Upstream's per-language inline sections are the flat list this replaces;

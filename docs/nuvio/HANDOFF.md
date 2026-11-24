@@ -1,18 +1,54 @@
 # Nuvio Native handoff (2026-10-10)
 
-Repo: ~/Developer/nuvio-native/app. Fork: https://github.com/current/nuvio-native. Commit as `Rofocale11 <131918567+Rofocale11@users.noreply.github.com>` with no AI
+## Current status (HEAD `eef501647`, 2026-11-24)
+
+Everything from "Build and TV" below is the original 2026-10-10 snapshot, kept as history. The
+shipped tree is `nuvio-native` at `eef501647` in https://github.com/Rofocale11/nuvio-native; the
+authoritative old fork is https://github.com/Rofocale11/nuvio-native-old (branch `nuvio-native`)
+at `83339172d`. This last port was not pushed, tagged, PR'd or released. Current facts that
+supersede the snapshot:
+
+- Version **0.10.0**, app id `com.nuvionative.app` (debug `.debug`); all packaging witnesses
+  agree and `requiredPermissions` is empty. IPKs: `pkg/com.nuvionative.app_0.10.0_arm.ipk` and
+  `pkg/com.nuvionative.app.debug_0.10.0_arm.ipk`. The 0.8.0 names below are historical.
+- Every durable record is in **one `nuvio.redb`** — no DB8, no `plxstorage` helper, no DB8
+  permission grant. Self-heal quarantines unreadable canonical records; a 50 MiB soft budget
+  sheds only cache rows. References to DB8 restoration below describe the pre-migration builds.
+- Torrents run through the **in-process C engine** (`libsbengine.so`, no Node fallback), not a
+  separate Stremio-compatible server. Settings > Playback has a P2P switch (absent key means ON)
+  and Settings > Addons lists/flips installed addons; Default quality, Direct Play and Playback
+  engine rows are hidden, not deleted. A torrent/debrid diagnostics panel replaced the inert
+  playback-controller placeholders.
+- On the committed tree `make check` reported **146 steps — all ok** (harness 753 tests), with
+  `plx_screens` 2347/2347, app crate 1503/1503, `plx_plex` 826/826, `plx_data` 1663/1663,
+  `plx_pmsshim` 159/159, `plx_net` 338/338, `plx_os` 427/427, `plx_nuvio_store` 6/6 and
+  `plx_stremio` 54/54. `make check-nodef` and a 32-bit ARM cross-build passed. The three
+  `transcoder.rs` opus failures below were fixed by the `make check` alignment pass.
+- The stable 0.10.0 build was deployed with `make FLAVOR=stable RELEASE=1 deploy`
+  (`verify-deploy: 50 files match`) and the owner confirmed it works. Still open: P7 HDR10
+  fallback, cross-device watch sync on a real account, a cold detail open inside 800 ms, a
+  dedicated sim-probe comparison after the `plx_nuvio_probe` extraction, and an in-app reset.
+
+Repo / current fork: https://github.com/Rofocale11/nuvio-native. Commit as
+`Rofocale11 <131918567+Rofocale11@users.noreply.github.com>` with no AI
 attribution lines. Never modify the installed `space.nuvio.webos` app. Never print
 or commit addon URLs or `rust-modules/stremio/nuvio.local.env`.
 
 Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
+
+---
+
+## 2026-10-10 snapshot
 
 ## Build and TV
 
 - Debug: `source ~/.cargo/env; make ipk` → `pkg/com.nuvionative.app.debug_0.8.0_arm.ipk`.
 - Stable: `source ~/.cargo/env; make FLAVOR=stable RELEASE=1 ipk` →
   `pkg/com.nuvionative.app_0.8.0_arm.ipk`.
-- TV: ares device `tv`, LG CX, webOS 5, Developer Mode, not rooted. Use
-  `tools/nv-tv.py` under `NV_DEVICE=tv tools/tv-lock.sh with …`.
+- TV (at this snapshot): ares device `tv`, LG CX, webOS 5, Developer Mode, not rooted. Use
+  `tools/nv-tv.py` under `NV_DEVICE=tv tools/tv-lock.sh with …`. Later verification used an LG
+  `45UR7500PSC` (webOS 10.3.1, board `K8LPN_DVB`) reached over SSH by `make deploy`; hold
+  `tools/tv-lock.sh` either way and release it as soon as the device work pauses.
 - With the original Nuvio running, import its configuration using
   `node tools/nv-import-nuvio.mjs 10.0.0.73 --appid com.nuvionative.app.debug`
   (use `com.nuvionative.app` for stable). This reads the original app's localStorage.
@@ -27,7 +63,8 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
   decision and consumes that response's codecs, frame rate, tracks and DV fields.
   Unprobed or unsupported media is refused, rather than loaded with guessed codecs.
 - The refused curl connections were optional torrent-server scans at
-  `127.0.0.1:2710–2714`, not the shim at port 32420. Automatic scans now require
+  `127.0.0.1:2710–2714`, not the shim's own loopback port (now 8911 debug / 8910 stable;
+  32420 appears only in the old log fixtures). Automatic scans now require
   `enableTorrents: true`; HTTP/debrid playback works without them.
 - The photo endpoint resolves relative metadata images and proxies image bytes;
   supported CDN sizing avoids decoding unnecessarily large posters.
@@ -76,7 +113,8 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 - Audio switch to EAC3, selection of another 4K DV source (3832×1600), and playback
   after that source switch. Selected embedded subtitles returned HTTP 200 and emitted
   nonempty timed subtitle cues (dialogue is never logged).
-- Addons restored from DB8 after app reinstall/relaunch.
+- Addons restored after app reinstall/relaunch (from DB8 at this snapshot; the single redb
+  replaced DB8 on 2026-11-22).
 
 ## Device playback verification (upstream merge, 2026-11-22)
 
@@ -86,8 +124,10 @@ shows the probe (then `ff::probe`, now `plx_nuvio_probe`) reporting `hevc 3840x2
 a DIRECT PLAY decision, `SMP Load ok=1`, the exported window bound to the video plane,
 `feed: presented`, `timeline playing` advancing for ~135 s, and a clean stop with the
 callback gate reporting `dropped=0`. See `docs/nuvio/MERGE-AUDIT.md` for the exact
-evidence and its scope (HDR10, not DV P8; no seek/resume cases in this run). The
-extraction itself still needs a sim probe and one TV playback run.
+evidence and its scope (HDR10, not DV P8; no seek/resume cases in this run). At that
+point the extraction itself still needed a sim probe and one TV playback run; later
+debug and stable installs shipped it and the owner confirmed the current stable build
+works, but a dedicated sim-probe comparison is still not recorded here.
 
 ## Stable TV observation
 
@@ -134,8 +174,11 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
   and publishes its one profile. That seat is what makes the Settings rows editable. A fresh
   install with no stored sign-in now opens the Nuvio QR sign-in instead of dropping straight into
   Home.
-- Torrents require a configured Stremio-compatible server or explicit local scanning.
-  The user's P2P-disabled setup was tested with HTTP/debrid streams.
+- At this snapshot, torrents required a configured Stremio-compatible server or explicit
+  local scanning, and the user's P2P-disabled setup was tested with HTTP/debrid streams.
+  Superseded: the current tree runs the in-process C engine (`libsbengine.so`) and offers
+  torrent picks when Settings > Playback P2P is ON (default ON); HTTP/debrid streams need
+  no engine.
 - <!-- Fork Rofocale11: was "No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required." -->
   In Auto the app now converts DTS, TrueHD and Opus to stereo 48 kHz PCM when the TV has no native path; a compatible AAC/AC3/EAC3 track is no longer required for those.
 - P7 enhancement-layer playback is unsupported; the HDR10 base-layer fallback has

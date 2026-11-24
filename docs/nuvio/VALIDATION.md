@@ -1,5 +1,22 @@
 # Nuvio Native validation — 2026-10-10
 
+## Current status (HEAD `eef501647`, 2026-11-24)
+
+The dated sections below are historical snapshots; this section describes the shipped tree.
+On the exact committed tree `make check` reported **146 steps — all ok**, with the Python
+harness at 753 tests (`OK (skipped=4)`). Focused crate results now are `plx_screens` 2347/2347,
+app crate 1503/1503, `plx_plex` 826/826, `plx_data` 1663/1663, `plx_pmsshim` 159/159,
+`plx_net` 338/338, `plx_os` 427/427, `plx_nuvio_store` 6/6 and `plx_stremio` 54/54.
+`make check-nodef`, a 32-bit ARM cross-build and `ci/check-package.py` are green. The three
+`transcoder.rs` opus failures noted below were fixed by the `make check` alignment pass.
+
+Every durable record now lives in one `nuvio.redb` (no DB8 helper, no permission grant), with
+self-heal for unreadable canonical records and a 50 MiB cache-only soft budget. The current
+0.10.0 stable package was deployed with `make FLAVOR=stable RELEASE=1 deploy` —
+`verify-deploy: 50 files match` — and the owner confirmed it works. Still open: cross-device
+watch sync on a real account, the P7 HDR10 base-layer fallback, a cold detail open inside
+800 ms, and a dedicated sim-probe comparison after the `plx_nuvio_probe` extraction.
+
 ## Debug TV
 
 On the LG CX (`tv`, webOS 5 Developer Mode), the debug app installed and launched,
@@ -14,7 +31,8 @@ An external addon subtitle also fetched successfully (2,047 parsed cues ready).
 These are native event-log observations. UI-plane screenshots cannot prove video-plane
 appearance or visible subtitle compositing.
 
-Addon configuration restored from DB8 after reinstall/relaunch. Stable import testing
+Addon configuration restored from DB8 after reinstall/relaunch (DB8 at this snapshot; the
+single redb replaced it on 2026-11-22). Stable import testing
 exposed a sticky-`/tmp` unlink failure; the handoff now uses a group-writable directory
 so a verified import is consumed rather than replayed on each launch. The original Nuvio
 app was read only for addon import and was not modified.
@@ -29,7 +47,8 @@ cover image passthrough, actual HEVC/DV/track metadata and decision refusal.
 Fresh synthetic UI anchors pass Targets and Resolve (six replays, zero differences).
 The shipping Rust feature set passes `cargo +nightly check --lib --no-default-features`.
 The complete `make check` gate passed: all 79 auxiliary steps and the 443-test Python
-harness, plus the default and hostsim Rust suites and lint checks. Representative
+harness at this snapshot (today: 146 steps and a 753-test harness), plus the default and
+hostsim Rust suites and lint checks. Representative
 unit-test result lines (the gate retains every crate's result):
 
 ```
@@ -50,7 +69,8 @@ The release discovery regression first failed under `HttpsOnly` and then passed.
 It covers the registered shim plus rejected absent registration, wrong token, wrong
 machine identity, wrong port, unowned resource and a falsely registered LAN server.
 English audio tests cover a foreign default and English commentary. Rating tests
-cover canonical DB8 preference splitting and switching a cached detail without
+cover the canonical preference (DB8 at this snapshot; the redb session record now) and
+switching a cached detail without
 substituting IMDb when RT is absent. The picker was inspected in the simulator;
 all three fresh synthetic fixtures passed both replay modes with zero differences.
 
@@ -72,8 +92,8 @@ with the consumed import file absent.
 
 The user confirmed Home, 4K Dolby Vision playback, seek, pause/resume and visible
 English subtitles on the initial stable build. The follow-up release installed and
-launched, restored four addons from DB8, and its payload hash matched the installed
-binary; the boot identity reported `features=release`.
+launched, restored four addons from DB8 (the store in use at that time), and its payload
+hash matched the installed binary; the boot identity reported `features=release`.
 
 A fresh QR approval then logged `authorized — discovering server`, reached the
 registered Nuvio server, installed its PMS client and loaded the account's addons.
@@ -107,18 +127,22 @@ Three known limits, not claimed as verified:
 - DB8 records are not migrated (no helper can read them); legacy on-disk files are migrated once.
 - Reboot durability depends on which `nuvio_data_dir()` candidate the set grants; the last fallback
   is `/tmp`.
-- `plx_plex` has three pre-existing `transcoder.rs` failures at HEAD (the fork added `opus` to the
-  codec list without updating those expectations). They are unrelated to the store change.
+- `plx_plex` had three pre-existing `transcoder.rs` failures at that time (the fork had added
+  `opus` to the codec list without updating those expectations). The later `make check` alignment
+  pass fixed the expectations; `plx_plex` is 826/0 at `eef501647`.
 
-Still needed from the owner on device: relaunch persistence of a Settings pick, and that addons,
-My List and watch state load after the switch.
+At that time the owner still needed to check relaunch persistence of a Settings pick, and that
+addons, My List and watch state load after the switch. The later stable deploy was confirmed
+working, but a dedicated relaunch-persistence check is not recorded in these docs.
 
 ## Limitations
 
 <!-- Fork Rofocale11: DTS/TrueHD conversion was listed here as follow-up work; it is now
      implemented for Auto (in-app stereo PCM) and must be re-checked on every merge. -->
 See `HANDOFF.md`: watch state/key table and account backend session persistence
-across TV reboot, configured torrent service and P7 fallback remain follow-up work. RT scores require metadata supplied by an addon; MDBList
+across TV reboot and the P7 HDR10 fallback remain unverified. The configured torrent service
+from this snapshot has been replaced by the in-process C engine with a Settings P2P switch
+(default ON). RT scores require metadata supplied by an addon; MDBList
 was not configured or tested here.
 
 

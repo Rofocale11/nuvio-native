@@ -21,11 +21,19 @@ In particular:
   append-only `keys.tsv` is read ONCE as a migration source; runtime reads and writes never touch
   it. `Keys::key_of` / `Keys::ident` behave exactly as in the old fork, and real keys still start at
   `FIRST_KEY = 10_000`.
-- **The IMDb mapping** used by `imdb_base()` (a `tmdb:<n>` → `tt…` resolution) is cached in the
-  same redb via `NuvioCache::Imdb`, with positive and negative entries, instead of the old fork's
-  in-memory `imdb_ids` map. A restart keeps the mapping.
-- **Meta and enrichment** answers are likewise cached through `NuvioCache::{Meta, Enrich, Imdb}`
-  in that one store; there is no second cache file and no JSONL sidecar.
+- **The IMDb→TMDB mapping** (a `tt…` → bare TMDB id resolution used by the detail client) is the
+  durable one: `Table::ImdbTmdb` in the same redb holds a plain big-endian `u64` with **no** TTL, so
+  a `/find` answer is paid for once per title. `shim_tmdb_ids::PersistentIdLookup` is its only
+  writer; negatives are never stored.
+- **The reverse mapping** used by `imdb_base()` (`tmdb:<n>` → `tt…`) is an in-memory
+  `Shim::imdb_ids` map (512 entries, negative answers cached too), not a redb row. A restart
+  re-pays a cold resolution; `TmdbClient`'s 15-minute `(api_key, path)` cache and keyed
+  single-flight keep it to one request per burst.
+- **Meta and enrichment** answers are one JSON row per `(type, id)` in `Table::MetaCache` /
+  `Table::EnrichCache` of that one store, written directly by the shim's `MetaCache` /
+  `EnrichCache` with an `at` timestamp. No new JSONL sidecar is written; the old logs are migrated
+  once on an empty table. The generic `NuvioCache` / `cache_get` wrapper in `nuvio-store` is now
+  exercised only by that crate's own tests.
 
 ## Synthetic key bases (do not change or overlap)
 
@@ -66,7 +74,8 @@ would re-poll forever.
 
 A hub row's poster is BetterPosters by IMDb id, with the addon's (Cinemeta) poster as the strict
 fallback. Home's Cinemeta ids are already `tt…`; Recommended's extra catalogs carry `tmdb:<n>` ids,
-which `poster_url` resolves to IMDb **once** via `imdb_base` — redb first, a single cached TMDB
-`/external_ids` call on a cold miss, then redb forever. No TMDB image is ever used for a hub; TMDB
-beyond that one id mapping is only for the detail page and its children (cast, logo, `art`,
-trailers, More Like This, collections). See `TMDB.md`.
+which `poster_url` resolves to IMDb **once** via `imdb_base` — the in-memory `Shim::imdb_ids` map
+first, then a single cached TMDB `/external_ids` call on a cold miss (positive and negative answers
+are remembered in that map). No TMDB image is ever used for a hub; TMDB beyond that one id mapping
+is only for the detail page and its children (cast, logo, `art`, trailers, More Like This,
+collections). See `TMDB.md`.

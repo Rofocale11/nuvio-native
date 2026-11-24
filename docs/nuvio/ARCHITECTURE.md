@@ -4,6 +4,9 @@ NuvioNative is a fork of PlxNative (GPL-3.0-or-later, upstream GLinnik21/plx-nat
 browses and plays content from Stremio addons — the same addons a user configured in Nuvio — with
 PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
+Current state: branch `nuvio-native` at `eef501647` (2026-11-24). Dated delivery history lives in
+`HANDOFF.md` and `VALIDATION.md`; the upstream conflict surface is in `MERGE-AUDIT.md`.
+
 ## Findings that drive the design
 
 - **Nuvio has no reusable backend service.** NuvioTVSmart (the code behind the webOS app
@@ -88,37 +91,52 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
   resolves to: `/media/developer/<appid>.nuvio` when writable, else the persistent state root,
   else the Developer Mode runtime fallback (`/tmp`). Confirm the chosen directory on the set
   before claiming reboot durability.
+- Settings: Addons lists the installed addons and flips one through the boot-registered
+  `nuvio::AddonControl` (the screens layer may not name `pmsshim`). Playback's P2P switch is
+  persisted in the one redb `LocalSettings` value (absent key means ON) and applied live through
+  `shim.set_p2p`; screens read the published `ScreenInputs.p2p_enabled`. Default quality, Direct
+  Play and Playback engine rows are hidden, not deleted — the shim has no transcoder and forces
+  Original, and all three already default to Original / Auto / Standard.
 
 ## Crates
 
 The fork-owned crates are separate workspace members so an upstream rewrite of a shared file
 cannot drag fork code through a merge. `plx_os`, `plx_plex` and the application crate have small
-marked seams into `plx_nuvio_store`; `plx_pmsshim` and `plx_nuvio_probe` are entirely fork-owned.
+marked seams into `plx_nuvio_store`; `plx_stremio`, `plx_pmsshim`, `plx_nuvio_probe`,
+`plx_nuvio_store` and `plx_nuvio_dash` are entirely fork-owned.
 
 | crate | owner | depends on |
 |---|---|---|
 | `rust-modules/stremio` (`plx_stremio`) | fork-owned backend | `plx_base`, `plx_net`, serde |
-| `rust-modules/pmsshim` (`plx_pmsshim`) | fork-owned shim | `plx_base`, `plx_stremio`, `plx_net`, `plx_nuvio_store`, serde |
+| `rust-modules/pmsshim` (`plx_pmsshim`) | fork-owned shim | `plx_base`, `plx_net`, `plx_os`, `plx_stremio`, `plx_nuvio_store`, serde |
 | `rust-modules/nuvio-probe` (`plx_nuvio_probe`) | fork-owned probe | `plx_base`, `plx_net`, `plx_plex`, `plx_media_codecs` |
 | `rust-modules/nuvio-store` (`plx_nuvio_store`) | fork-owned single store | `redb`, `plx_base` |
+| `rust-modules/nuvio-dash` (`plx_nuvio_dash`) | fork-owned trailer MPD parser | pure Rust, no dependencies |
 | `rust-modules/os` (`plx_os`) | upstream, fork-marked | `plx_nuvio_store`, `ring` — runs the canonical storage backend in process |
 | `rust-modules/plex` (`plx_plex`) | upstream, fork-marked | `plx_nuvio_store` — Nuvio account preferences |
 | `rust-modules/src/app` (`plxnative-modules`) | upstream, fork-marked | all of the above — boot, appinfo, settings |
 
-### Cache tables in the one store
+### Cache and id tables in the one store
 
-`plx_nuvio_store` adds three `TableDefinition<&str, &[u8]>` tables to the SAME `nuvio.redb` —
-`META_CACHE`, `ENRICH_CACHE` and `IMDB_IDS` (the `Table` variants `MetaCache`, `EnrichCache` and
-`ImdbIds`). No second cache file and no JSONL sidecar. The shim lane uses a thin typed wrapper,
-`NuvioCache::{Meta, Enrich, Imdb}`, so callers never name a redb table or parse an envelope:
+All of these are tables in the SAME `nuvio.redb`; there is no second cache file and no new JSONL
+sidecar:
 
-- `Store::cache_get(kind, key) -> Option<Vec<u8>>` — `None` on a miss OR an expired entry;
-- `Store::cache_put(kind, key, ttl, value) -> Result<(), String>` — writes a TTL envelope
-  (expiry millis, big-endian u64, followed by the raw bytes) through the store's existing `put`.
+- `META_CACHE` and `ENRICH_CACHE` — one JSON row per `(type, id)` written by the shim's
+  `MetaCache` / `EnrichCache` (`pmsshim/src/shim_store.rs`), each carrying its own `at` unix-seconds
+  stamp and an in-memory warm copy. Expired rows are dropped on open. The old `meta-cache.jsonl` /
+  `enrich-cache.jsonl` files are read **once** as migration sources only when the redb table is
+  empty; nothing writes them any more.
+- `IMDB_IDS` — the old generic TTL table, retained in `nuvio-store` and still used by its own
+  tests. The shim no longer calls through `NuvioCache::{Meta,Enrich,Imdb}` / `Store::cache_get` /
+  `cache_put`: after the wholesale old-fork shim port its caches write redb tables directly.
+- `IMDB_TMDB` — the durable IMDb→TMDB id map: a plain big-endian `u64` with **no** TTL, written by
+  `shim_tmdb_ids::PersistentIdLookup` so a `/find` answer is paid for once per title. Negatives and
+  non-IMDb ids are not stored.
 
-Keys are isolated per kind, a put overwrites both value and expiry, and a stale row simply reads as
-a miss (the next put replaces it). This is the durable cache the shim's metadata / enrichment /
-imdb-id GETs warm into; see `docs/nuvio/TMDB.md` for the shim-side producer.
+The opposite direction (`tmdb:<n>` → `tt…`, used by `imdb_base()` for hub posters) is deliberately
+**not** a redb row in this tree: `Shim::imdb_ids` is a bounded in-memory map (512 entries, negative
+answers cached too). See `ID-MANAGEMENT.md` and `TMDB.md`. The 50 MiB soft budget sheds expired and
+oldest cache rows only; `IMDB_TMDB` and the durable tables are never discarded to meet it.
 
 ### Focus-warm (sans-IO)
 
@@ -132,5 +150,8 @@ runner dedups by `(sid, rk)` for 60 s and releases the key if the worker is refu
 
 ## App identity
 
-- appid `com.nuvionative.app`, title "Nuvio Native". Installs beside `space.nuvio.webos`; never
-  touches it.
+- appid `com.nuvionative.app` (debug: `com.nuvionative.app.debug`), title "Nuvio Native". Installs
+  beside `space.nuvio.webos`; never touches it.
+- Packaging version is **0.10.0** — `pkg/appinfo.json`, `ipkroot/ctl/control` and the Cargo
+  manifests agree, and `requiredPermissions` is empty because the app declares no DB8/keymanager
+  service. Earlier 0.8.0 package names in the dated docs are historical.

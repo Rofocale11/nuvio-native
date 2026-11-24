@@ -1,6 +1,6 @@
 # Nuvio Native
 
-A native LG webOS client for Stremio/Nuvio addons, maintained by [Chris](https://github.com/current).
+A native LG webOS client for Stremio/Nuvio addons, maintained by [Rofocale11](https://github.com/Rofocale11).
 This is a fork of [PlxNative](https://github.com/GLinnik21/plx-native); its upstream authors and GPL license are retained.
 
 See [the Nuvio handoff](docs/nuvio/HANDOFF.md), [architecture](docs/nuvio/ARCHITECTURE.md),

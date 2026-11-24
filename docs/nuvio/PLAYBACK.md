@@ -65,7 +65,9 @@ Until the probe answers, label guesses are acceptable for the **detail page** on
 not start on guessed fields. The Nuvio route fetches this decision BEFORE queueing or
 planning playback, replaces the detail item with the probed item, and uses Original
 quality because the shim has no transcoder. Discovery has a 60 s budget, probing 45 s,
-and the control-plane decision request has a 120 s deadline. A probe failure (`Err`) means "not playable here" (unsupported
+and the control-plane decision request has a 120 s deadline for a Plex server — for a Nuvio
+shim decision it is **30 s, deadline-only** (no silence watchdog), as below. A probe failure
+(`Err`) means "not playable here" (unsupported
 container — the bundled FFmpeg demuxes only Matroska/WebM, MP4/MOV, MPEG-TS and raw H.264/HEVC —
 or unreachable); say so instead of starting the player.
 
@@ -222,3 +224,15 @@ account addons. English audio default behavior is host-tested; physical confirma
 on a newly started stream remains pending.
 See `VALIDATION.md`
 for the stable install's final checks.
+
+## Current tree (2026-11-24, HEAD `eef501647`)
+
+The contracts above still describe the shipped path. The current 0.10.0 stable build
+(Addons page, P2P switch default ON, three hidden Playback rows) was deployed with
+`make FLAVOR=stable RELEASE=1 deploy` — `verify-deploy: 50 files match` — and the owner
+confirmed it works. On that exact committed tree `make check` reported **146 steps — all ok**;
+`plx_plex` 826/826, `plx_screens` 2347/2347 and the app crate 1503/1503. The three
+`transcoder.rs` lossy-gate failures mentioned in older validation notes were fixed by the
+`make check` alignment pass and no longer occur. Still unverified on device: the P7 HDR10
+base-layer fallback, a dedicated sim-probe comparison after the `plx_nuvio_probe` extraction,
+and a newly started stream's English audio default.

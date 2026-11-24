@@ -90,10 +90,12 @@ A hub row's poster is **BetterPosters** by IMDb id, with the addon's own (Cineme
 
 Home's Cinemeta catalogs carry `tt…` ids and need no resolution. The extra catalogs in Recommended
 ("Streaming Catalogs" — Apple TV+, Netflix, HBO Max…) carry `tmdb:<n>` ids. Per the owner's decision,
-`poster_url` resolves those to IMDb **once** with `imdb_base`: the one redb store is checked first,
-and only a cold miss calls TMDB `/external_ids`. Positive **and negative** answers are cached under
-`IMDB_TTL`, and `TmdbClient`'s keyed single-flight makes concurrent cold hub fills share the one
-request. Every later read comes from redb. An id that resolves to no IMDb id keeps the addon poster.
+`poster_url` resolves those to IMDb **once** with `imdb_base`: the shim's in-memory `Shim::imdb_ids`
+map is checked first (512 entries, positive **and negative** answers cached), and only a cold miss
+calls TMDB `/external_ids`. `TmdbClient`'s 15-minute `(api_key, path)` cache and keyed single-flight
+make concurrent cold hub fills share the one request. Later fills in the same process read the map;
+a restart pays one cold lookup again. The durable `IMDB_TMDB` redb table is the opposite direction
+(IMDb→TMDB), not this one. An id that resolves to no IMDb id keeps the addon poster.
 
 The addon's `logo` is published as the row's `clearLogo`, and `UltraBlurColors` is derived from the
 poster actually chosen.

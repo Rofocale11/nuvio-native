@@ -4,7 +4,7 @@ Fork Rofocale11. Scope: wall-clock from pressing OK on a Home/Library card to a 
 page on the TV. Not the player, Home's own first paint, or poster throughput.
 
 This file supersedes the old fork's 452-line plan of the same name
-(`/home/kungpow/dev/nuvio-native-old/docs/nuvio/DETAIL-LATENCY.md`). That document was a snapshot
+(`docs/nuvio/DETAIL-LATENCY.md` in https://github.com/Rofocale11/nuvio-native-old). That document was a snapshot
 of work on `forward-port/v0.9-hq`; its line numbers, commit ids and "next" list are stale. The
 status below describes **this** tree. The old file remains the source of the problem analysis
 (one shim request composites addon meta, TMDB enrichment and streams; per-call curl handles pay a
@@ -63,12 +63,19 @@ TMDB once; the second open of the same title should not.
 
 ## Verification
 
-Host, 2026-11-24, on the working tree (`2b7c2067e` plus these changes): `plx_net` 338 passed,
-`plx_pmsshim` 158 passed, `plx_data` 1662 passed, `plx_nuvio_store` 4 passed, `plx_plex` 821
-passed with 3 pre-existing lossy-gate `opus` profile-list failures; `make check-nodef` green;
-`ci/check-module-layers.py` and `ci/check-deps.sh` green; `git diff --check` clean; ARM
-cross-build green (`pkg/plxnative` is a 32-bit ARM ELF). A focused `plx_plex` re-run against the
-unmodified `nuvio.rs` reproduced the same three failures, so they are not from `all_leaves`.
+At the port stage (2026-11-24, working tree `2b7c2067e` plus these changes): `plx_net` 338
+passed, `plx_pmsshim` 158 passed, `plx_data` 1662 passed, `plx_nuvio_store` 4 passed,
+`plx_plex` 821 passed with 3 then-pre-existing lossy-gate `opus` profile-list failures;
+`make check-nodef` green; `ci/check-module-layers.py` and `ci/check-deps.sh` green;
+`git diff --check` clean; ARM cross-build green (`pkg/plxnative` is a 32-bit ARM ELF). A
+focused `plx_plex` re-run against the unmodified `nuvio.rs` reproduced those three failures,
+so they were not from `all_leaves`.
+
+**Current tree (`eef501647`):** `plx_net` 338/0 (1 ignored), `plx_pmsshim` 159/0 (2 ignored),
+`plx_data` 1663/0, `plx_nuvio_store` 6/0, `plx_plex` **826/0** — the three `opus` expectation
+failures were fixed by the `make check` alignment pass. On the committed tree `make check`
+reported **146 steps — all ok**; `make check-nodef`, the module-layer/deps gates and the ARM
+cross-build remain green.
 
 **First two device runs (2026-11-24, debug install).** The focus warm fired on every Home card
 tested, with warm shim answers (`tmdb_ms=0…12`). The first run's single cold movie open logged
@@ -95,12 +102,16 @@ one-time migration refresh of enrichment rows written before the `videos` field 
 `trailer: youtube ids from tmdb videos` log line is emitted for the cached path too, so its
 presence alone no longer proves a network call; the phase times do.
 
-**Not yet verified on the television.** The acceptance gate from the old plan still stands:
-acquire the TV lock, boot with a guest profile, and compare a cold open (press OK immediately
-after focus) with a warm one (rest on the card over a second, then OK) and a leave/re-enter of the
-same title. Targets: warm open ≤ 300 ms, cold open ≤ 800 ms. Playback must still start through the
-placeholder Part, and cast, trailer, logo and collection shelf must survive a restart. Opening a
-detail page is a read, but never press Play or change a real account's state during this check.
+**Status of the old acceptance gate.** The warm target **is** met on device: the verified run
+above logged `ms=84…282` for movie and series re-opens (`related_ms=5…233`), inside ≤300 ms.
+The cold first open is **not** inside the old plan's ≤800 ms target — a never-seen title paid
+`ms=1439…2061`, part of it the one-time refresh of enrichment rows written before the `videos`
+field existed. A leave/re-enter case against that same target is not recorded in these docs, and
+that run did not check playback through the placeholder Part or cast/trailer/logo/collection
+shelf survival across a restart. To re-run: acquire the TV lock, boot with a guest profile and
+read the identity line, press OK immediately after focus for the cold case and after >1 s of rest
+for the warm case. Opening a detail page is a read — never press Play or change a real account's
+state during this check.
 
 ## Non-goals
 
