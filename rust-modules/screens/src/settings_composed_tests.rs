@@ -571,31 +571,29 @@ fn a_real_push_seats_the_new_page_fresh_and_a_pop_restores_the_row_that_opened_i
 fn playback_picker_seats_the_saved_option_and_restores_its_parent_row() {
     let _g = plx_base::testlock::serial();
     let _sess = seated_scratch_session("composed-playback-picker-seat");
-    let previous_quality = plx_media::route::quality();
-    let previous_mode = plx_media::route::direct_play_mode();
-    plx_media::route::restore_quality(plx_media::route::Quality::P480);
-    plx_media::route::restore_direct_play_mode(plx_media::route::DirectPlayMode::Auto);
+    // Fork Rofocale11: the Default-quality row is hidden on this fork; the first Playback row is
+    // Dolby Vision (key 11) and its picker still exercises the same parent/picker seat separation.
     for back in [Key::Back, Key::Left] {
         let (mut d, mut rig, id) = consent_opened(SettingsPage::Playback);
-        rig.preferences = Some(plx_plex::plex::session::ProfilePrefs { playback_quality: Some(plx_media::route::Quality::P480), direct_play_mode: Some(plx_media::route::DirectPlayMode::Auto), ..Default::default() });
-        // A real DOWN/UP gives the engine an explicit parent cursor at Default quality.
+        rig.preferences = Some(plx_plex::plex::session::ProfilePrefs {
+            dolby_vision_mode: Some(plx_plex::plex::session::DolbyVisionMode::Off), ..Default::default() });
+        // A real DOWN/UP gives the engine an explicit parent cursor at the first visible row.
         frame(&mut d, &mut rig, 32, vec![key(Key::Down, tick(32))]);
         frame(&mut d, &mut rig, 48, vec![key(Key::Up, tick(48))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 0 }));
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 11 }));
         frame(&mut d, &mut rig, 64, vec![key(Key::Ok, tick(64))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 6 }),
-            "the quality picker opens at saved P480, not the parent's remembered row 0");
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 1 }),
+            "the Dolby Vision picker opens at saved Off, not the parent's remembered row 11");
         frame(&mut d, &mut rig, 80, vec![]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 6 }));
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 1 }));
         frame(&mut d, &mut rig, 96, vec![key(back, tick(96))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 0 }),
-            "{back:?} restores Default quality, not the picker's remembered row 6");
+        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 11 }),
+            "{back:?} restores the first visible row, not the picker's remembered option 1");
         assert_eq!(d.nav.input_owner(), Some(InputOwner::Entry(id)));
-        assert_eq!(plx_media::route::quality(), plx_media::route::Quality::P480,
+        assert_eq!(rig.preferences.as_ref().and_then(|p| p.dolby_vision_mode),
+            Some(plx_plex::plex::session::DolbyVisionMode::Off),
             "leaving the picker does not change the saved preference");
     }
-    plx_media::route::restore_quality(previous_quality);
-    plx_media::route::restore_direct_play_mode(previous_mode);
 }
 
 
@@ -686,10 +684,9 @@ fn force_warning_engine_focus_confirms_only_the_chosen_answer() {
         vec![down, up]
     };
     for confirm in [false, true] {
-        let (mut d, mut rig, id) = consent_opened(SettingsPage::Playback);
-        frame(&mut d, &mut rig, 32, vec![key(Key::Down, tick(32))]);
-        assert_eq!(d.focus(), Some(FocusKey { entry: id, elem: 1 }));
-        frame(&mut d, &mut rig, 48, ok(48));
+        // Fork Rofocale11: the Direct Play row is hidden on this fork (no shim transcoder), but its
+        // picker is retained. Boot the picker through the same trail an interactive visit uses.
+        let (mut d, mut rig, id) = consent_opened(SettingsPage::Picker(PickerKind::DirectPlay));
         assert!(path(&d, id).contains("picker DirectPlay"), "{}", path(&d, id));
         frame(&mut d, &mut rig, 64, vec![key(Key::Down, tick(64))]);
         frame(&mut d, &mut rig, 80, ok(80));

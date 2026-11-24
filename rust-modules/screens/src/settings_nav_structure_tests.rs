@@ -122,13 +122,14 @@ fn every_playback_field_pushes_its_picker() {
     let items = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
     assert_eq!(items.iter().map(|(_, d)| *d).collect::<Vec<_>>(),
         // Fork Rofocale11: RatingSource is the Nuvio IMDb/Rotten Tomatoes picker and is listed at
-        // the end of the Playback page's Video group; upstream's reordered groups are kept.
-        [SettingsPage::Picker(PickerKind::Quality), SettingsPage::Picker(PickerKind::DirectPlay), SettingsPage::Picker(PickerKind::DolbyVision), SettingsPage::Picker(PickerKind::UriEngine),
+        // the end of the Playback page's Video group; upstream's reordered groups are kept. The
+        // Quality / Direct Play / Uri Engine rows are hidden on this fork (no shim transcoder).
+        [SettingsPage::Picker(PickerKind::DolbyVision),
          SettingsPage::Picker(PickerKind::RatingSource),
          SettingsPage::Picker(PickerKind::SkipInterval), SettingsPage::Picker(PickerKind::InstantDpadSeeking), SettingsPage::Picker(PickerKind::HdrOverlay),
          SettingsPage::PlayerHud,
          SettingsPage::Picker(PickerKind::NextEpisode), SettingsPage::Picker(PickerKind::DeckPress)],
-        "Video: quality, direct play, Dolby Vision, playback engine, rating source. Player: skip interval, D-pad seeking, HDR overlay, the HUD page. Up next: next episode, continue watching");
+        "Video: Dolby Vision, rating source. Player: skip interval, D-pad seeking, HDR overlay, the HUD page. Up next: next episode, continue watching");
     assert_every_nav_item_pushes_exactly_its_dest("playback", &items, &|| consent_opened(SettingsPage::Playback));
 }
 
@@ -414,7 +415,7 @@ fn every_pushed_picker_opens_on_its_checked_line_and_pops_to_its_row() {
     let playback = super::super::preferences::nav_items_for_test(super::super::preferences::Kind::Playback, None);
     // Fork Rofocale11: RatingSource (the Nuvio rating-provider picker) joins upstream's Playback
     // rows — the count must be 11, not 10, and it sits in the Video group after the engine.
-    assert_eq!(playback.len(), 11, "every Playback picker and the Player HUD page are in the table: {playback:?}");
+    assert_eq!(playback.len(), 8, "every visible Playback picker and the Player HUD page are in the table: {playback:?}");
     assert_eq!(playback.iter().filter(|(_, d)| *d == SettingsPage::PlayerHud).count(), 1, "the Player HUD row is the one that is not a picker");
     for &(row, dest) in playback.iter().filter(|(_, d)| *d != SettingsPage::PlayerHud) {
         let SettingsPage::Picker(kind) = dest else { panic!("a Playback row pushes a picker: {dest:?}") };

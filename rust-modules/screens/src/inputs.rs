@@ -54,6 +54,10 @@ pub struct ScreenInputs {
     /// that never publishes the set (a cold or controlled one) keeps today's `FEED`, so nothing a
     /// screen draws changes unless a live host says no driver is composed.
     pub backends: plx_media::route::BackendSet,
+    /// Fork Rofocale11: whether the Nuvio shim may offer P2P (torrent) sources. It is an install
+    /// policy the bridge publishes with the other frame inputs; a screen never reads the shim's
+    /// process-global registry itself.
+    pub p2p_enabled: bool,
 }
 impl Default for ScreenInputs {
     fn default() -> Self {
@@ -61,7 +65,10 @@ impl Default for ScreenInputs {
             profile: Arc::new(CurrentProfile { user: None, generation: 0, stamp: String::new() }),
             current_server: ServerId::UNSET, servers: Default::default(), grants: Arc::new(GrantInputs::default()),
             grant_generation: 0, resolution_offered: false, backends: plx_media::route::BackendSet::FEED, runtime_policy: RuntimePolicy::default(), preferences: None,
-            install_language: Default::default(), running_language: Default::default(), player_presentation: Default::default() }
+            install_language: Default::default(), running_language: Default::default(), player_presentation: Default::default(),
+            // Fork Rofocale11: P2P is opt-out, so a cold/controlled host draws the same On row as a
+            // live install that has never disabled it.
+            p2p_enabled: true }
     }
 }
 /// **Did a setting a page draws from move since the page last held it?** Settings changes a
@@ -101,6 +108,9 @@ impl ScreenInputs {
             && self.servers == other.servers
             && self.resolution_offered == other.resolution_offered
             && self.backends == other.backends
+            // Fork Rofocale11: the Playback P2P row is drawn from this input, so a policy change
+            // has to rebuild the page rather than be missed as an invisible fact.
+            && self.p2p_enabled == other.p2p_enabled
             && self.grant_generation == other.grant_generation
             && self.profile.generation == other.profile.generation
             && self.profile.stamp == other.profile.stamp
@@ -143,6 +153,8 @@ pub(crate) fn capture_fixture() -> ScreenInputs {
         resolution_offered: plx_os::tv::device::ui_resolution_offered(), runtime_policy: RuntimePolicy::default(),
         install_language: plx_os::i18n::saved_preference(), running_language: plx_os::i18n::current().preference(), player_presentation: Default::default(),
         backends: plx_media::route::BackendSet::FEED,
+        // Fork Rofocale11: fixture hosts draw the same default P2P policy as a live install.
+        p2p_enabled: true,
         preferences: crate::registry::captions::TEST_UNDER_POSTERS.with(|cell| cell.get()).map(|setting|
             session::ProfilePrefs { under_posters: Some(setting), ..Default::default() }) }
 }

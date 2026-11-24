@@ -1218,3 +1218,78 @@ After the owner tested the deployed build:
   the field rows' `FIELD_KEY_W + space::SM`, and the two captions are shortened to `NETWORK` /
   `BUFFER` so they fit at the existing `DIAGNOSTIC` 20 rung. No new font role was added to the
   shared design tokens, and the `Cell` glyph-measure cache is gone with the measured gutter.
+
+## Settings: hide the three inert Playback rows, port Addons and P2P (2026-11-24)
+
+Owner direction: the shim has no transcoder and forces Original, so Default quality, Direct Play
+and Playback engine must not be offered. Their stored values and picker code stay (fork rule:
+hide, never delete upstream features); all three already default to the values the owner wants —
+Original, Auto and Standard (`UriEngine::Off`) — so a hidden non-default pick cannot change a
+Nuvio stream either.
+
+### Upstream files edited (re-check on the next upstream merge)
+
+- **`rust-modules/screens/src/preferences.rs`** — `shown()` hides `Quality`/`DirectPlay`/`UriEngine`
+  rows only; `field_form()` appends a fork-owned `p2p_section()` for the Playback kind;
+  `RowId::P2pToggle` (key 20, past every upstream key), `Action::ToggleP2p`, `Value::P2pEnabled`
+  and the command write path. All carry inline `Fork Rofocale11:` markers.
+- **`rust-modules/screens/src/inputs.rs`** — `ScreenInputs.p2p_enabled` (default `true`), its
+  `same_facts` term and the fixture capture. The P2P row reads the frame's published input, not a
+  process-global, so no new IO site is introduced in a screen.
+- **`rust-modules/screens/src/registry.rs`** — `PreferenceCmd::P2pEnabled { on, reply }`,
+  `word::ADDONS`, the a11y coverage entry and `ARMS` 49→50.
+- **`rust-modules/screens/src/family.rs`** — `SettingsPage::Addons`, new forward ScreenId **122**
+  (Diagnostics is 121), word `addons`, exhaustive-match arms.
+- **`rust-modules/screens/src/settings.rs`** — only a `#[path]` module declaration, the mount arm
+  and the signed-in root row (`RootId::Addons`, key 13) for the fork-owned page.
+- **`rust-modules/screens/src/settings_{nav_structure,v2,composed,draw_and_lifecycle}_tests.rs`
+  and `preferences_tests.rs`** — field-list pins, root-row counts, a11y namespace and the Playback
+  scroll pin (244→370, from the P2P section); two new focused fork tests pin exactly which rows are
+  hidden and that the toggle reads the published input and writes the flip.
+- **`rust-modules/plex/src/plex/nuvio.rs`** — the old fork's `AddonControl` seam (trait, OnceLock,
+  `register_addon_control` / `installed_addons` / `set_addon_enabled`), ported verbatim. The screens
+  crate cannot name `pmsshim`, so Settings reaches the addon set through this boot-registered
+  control; no new store record.
+- **`rust-modules/src/app/preferences.rs`** — `P2pEnabled` executes on the retained storage worker
+  with a durable reply, like `RatingSource`/`AutoSignIn`.
+- **`rust-modules/src/app/bridge.rs`** — publishes the live shim switch into captured
+  `ScreenInputs` and bumps the revision on a toggle; a redundant local comparison is kept as a
+  hedge against a future upstream rewrite dropping the fork-only `same_facts` term.
+- **`rust-modules/src/app/nuvio.rs`** (fork-heavy) — `Settings.p2p_enabled` in the ONE redb
+  `LocalSettings` value (`#[serde(default = "default_p2p_enabled")]` + a hand-written `Default`,
+  because a derived `Default` would turn torrents OFF on a fresh install), boot's engine-gated
+  config, `p2p_enabled()` / `set_p2p_enabled()` (persist to redb then apply live with
+  `shim.set_p2p`), and the boot-registered `AddonControl` that replaces the live `AddonBackend`
+  set, records the override in shim account prefs and clears dependent caches.
+- **`tests/manifest.json`** (JSON, no comment syntax) — the `settings-playback` scene's `comment`
+  no longer says the page shows Default Quality / Direct Play; the `picker-quality` boot target
+  still resolves because the picker code is kept.
+
+### New fork-owned file
+
+- **`rust-modules/screens/src/settings_addons.rs`** — the old fork's Addons page adapted to this
+  tree's `family`/`FormTable`, `plx_os` messages and `word::ADDONS`: a keyed toggle list over
+  `installed_addons()` with `set_addon_enabled()` on activation, a real-builder fit test in every
+  shipped language and a toggle-row test.
+
+### Non-commentable edits recorded here
+
+- **`locales/{en,es,be,ca,fr,it,pt,de,hu,ru,pl,nl}/settings.json`** — 8 keys copied verbatim from
+  the old fork (`settings.playback.p2p*`, `settings.addons.*`); en/es/be translations are the old
+  fork's, the other languages use English fallback because the catalog requires every key in every
+  language. The root row's `settings.playback.detail` was likewise replaced with the old fork's
+  "Subtitles, HDR and playback." (its translations for es/be/fr/it/pt/de/hu, English fallback for
+  ca/ru/pl/nl) — the old sentence advertised the now-hidden rows.
+- **`tests/fixtures/replay/ALPHABET.json`** — `addons` joined the a11y namespace alternation so
+  `the_replay_alphabet_names_exactly_the_namespaces_the_table_reports` passes. This widening does
+  NOT move `SCREEN_SHAPES_PIN` or invalidate the three replay recordings.
+
+### Decisions and deliberate omissions
+
+- **No `AddonsPage::SHAPE` in `SCREEN_SHAPES`.** Adding any entry moves `SCREEN_SHAPES_PIN` and
+  invalidates all committed replay fixtures; the page's state is already captured by `LogicalState`.
+- **No fps scene or boot target for Addons.** It would need `bootstrap.rs`/`dev/scenarios.rs`
+  edits and a TV measurement; not required for the feature and out of scope here.
+- `AddonsPage` reads the two `nuvio` accessors directly from `new`/`rebuild`, mirroring the
+  retained `nuvio::rating_source()` pattern. This is the same process-global tension the old fork
+  has; a future bridge-publication refactor would move both to `ScreenInputs`.

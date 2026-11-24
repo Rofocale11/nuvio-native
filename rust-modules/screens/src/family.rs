@@ -65,6 +65,9 @@ pub enum SettingsPage {
     /// Diagnostics (Settings v2): the playback-trace switch, the saved-log button and Delete, one level
     /// below the root's single Diagnostics row.
     Diagnostics,
+    // Fork Rofocale11: Settings > Addons lists the installed Nuvio addons with per-addon switches.
+    // It is pushed from a root row of its own, like Diagnostics, and shares its family plumbing.
+    Addons,
     /// The Player HUD page: the installed packages, the drop folder and the chosen HUD (`hud_settings`).
     PlayerHud,
     HudGallery,
@@ -144,6 +147,7 @@ impl SettingsPage {
             | SettingsPage::Preview(_)
             | SettingsPage::Picker(_)
             | SettingsPage::Diagnostics
+            | SettingsPage::Addons
             | SettingsPage::PlayerHud
             | SettingsPage::HudGallery
             | SettingsPage::HudDetail(_)
@@ -211,6 +215,8 @@ impl ScreenArg for SettingsPage {
             SettingsPage::HudAbout(..) => 119,
             SettingsPage::HudPreview(..) => 120,
             SettingsPage::Diagnostics => 121,
+            // Fork Rofocale11: a new forward id; reusing 113 would collide with Under posters here.
+            SettingsPage::Addons => 122,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -256,6 +262,7 @@ impl LogicalState for SettingsPage {
             | SettingsPage::PlayerHud
             | SettingsPage::HudGallery
             | SettingsPage::Diagnostics
+            | SettingsPage::Addons
             | SettingsPage::About => 0,
             SettingsPage::Document(i) | SettingsPage::Preview(i) | SettingsPage::ConsentStage(i) => *i,
             SettingsPage::Picker(kind) => *kind as u8,
@@ -287,6 +294,7 @@ impl LogicalState for SettingsPage {
             SettingsPage::HudAbout(..) => "hud-about",
             SettingsPage::HudPreview(..) => "hud-preview",
             SettingsPage::Diagnostics => "diagnostics",
+            SettingsPage::Addons => "addons",
         });
         if let SettingsPage::Document(i) | SettingsPage::Preview(i) | SettingsPage::ConsentStage(i) = self {
             out.push_str(&format!("[{i}]"));
@@ -472,6 +480,7 @@ mod tests {
             SettingsPage::Picker(PickerKind::Quality),
             SettingsPage::PlayerHud,
             SettingsPage::Diagnostics,
+            SettingsPage::Addons,
             SettingsPage::HudGallery,
             SettingsPage::HudDetail(plx_data::hudpacks::Sha::of(b"test")),
             SettingsPage::HudAbout(plx_data::hudpacks::Sha::of(b"test")),

@@ -196,7 +196,9 @@ fn every_field_row_pushes_its_picker_and_nothing_else() {
     let mut playback = PreferencesPage::new(EntryId(0), Kind::Playback, &crate::registry::capture_fixture());
     let mut audio = loaded_audio_page(&account);
     for (page, fields) in [
-        (&mut playback, vec![PickerKind::Quality, PickerKind::DirectPlay, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::DolbyVision, PickerKind::UriEngine]),
+        // Fork Rofocale11: Quality / Direct Play / Uri Engine are hidden on this fork (no shim
+        // transcoder), but their picker code is retained and tested directly below.
+        (&mut playback, vec![PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::DolbyVision]),
         (&mut audio, vec![PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::SubtitleColor]),
     ] {
         for field in fields {
@@ -232,19 +234,21 @@ fn the_field_list_shows_the_value_a_picker_committed_after_the_pop() {
 }
 
 /// The local fields have no snapshot to publish: the list re-reads the session values on its tick.
+/// Fork Rofocale11: the hidden Default-quality row is gone, so this pins the same behaviour on the
+/// first still-listed local row (Dolby Vision); the quality picker itself is tested directly in
+/// `picker_tests.rs` and its `field_readout` remains available below.
 #[test]
 fn the_field_list_rereads_a_local_value_a_picker_committed() {
     let _serial = plx_base::testlock::serial();
     let _session = plx_plex::plex::session::TempSession::new("pref-parent-local");
-    let previous = plx_media::route::quality();
-    plx_media::route::restore_quality(Quality::Original);
     let mut parent = PreferencesPage::new(EntryId(0), Kind::Playback, &crate::registry::capture_fixture());
     let before = parent.state.values[0].clone();
-    plx_media::route::restore_quality(Quality::P480);
-    drive_preferences(&mut parent, tick(), 0, plx_plex::plex::session::ProfilePrefs { playback_quality: Some(Quality::P480), ..Default::default() });
+    drive_preferences(&mut parent, tick(), 0,
+        plx_plex::plex::session::ProfilePrefs { dolby_vision_mode: Some(plx_plex::plex::session::DolbyVisionMode::Off), ..Default::default() });
     assert_ne!(parent.state.values[0], before);
-    assert_eq!(parent.state.values[0], Quality::P480.label());
-    plx_media::route::restore_quality(previous);
+    assert_eq!(parent.state.values[0], plx_os::i18n::msg::settings_playback_dolby_vision_off());
+    // The retained Quality picker still reads the quality the session publishes.
+    assert_eq!(field_readout(PickerKind::Quality, Quality::P480, DirectPlayMode::Auto, None, crate::registry::empty_fixture()), Quality::P480.label());
 }
 
 /// A Size/Position pick made anywhere (the player's Style pages publish the live value before
@@ -409,8 +413,10 @@ fn playback_rows_are_read_only_while_no_profile_is_seated() {
     let _session = plx_plex::plex::session::TempSession::new("pref-read-only-unseated");
     let mut page = PreferencesPage::new(EntryId(0), Kind::Playback, &crate::registry::capture_fixture());
     assert_eq!(page.copy, plx_os::i18n::msg::settings_playback_unseated(), "the page says to choose a profile");
-    for field in [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::HdrOverlay,
-        PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::DolbyVision, PickerKind::UriEngine] {
+    // Fork Rofocale11: the hidden Quality / Direct Play / Uri Engine rows are absent, so they
+    // cannot be read-only either; the remaining local rows are.
+    for field in [PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress,
+        PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::DolbyVision] {
         let key = RowId::Field(field).key().0;
         let row = page.form.index_of(&RowId::Field(field)).expect("the row is still listed");
         assert!(disabled_rows(&page)[row], "{field:?}: disabled");
@@ -473,8 +479,9 @@ fn the_playback_page_names_the_seated_profile_and_follows_the_seat() {
     drive(&mut page, tick(), 0);
     assert_eq!(page.copy, plx_os::i18n::msg::settings_playback_copy_profile("Maya"));
     assert!(page.copy.contains("Maya"));
-    let key = RowId::Field(PickerKind::Quality).key().0;
-    assert_eq!(pushed(&drive(&mut page, ScreenEvent::Activate(key), key)), vec![SettingsPage::Picker(PickerKind::Quality)],
+    // Fork Rofocale11: use a still-listed Playback row — the Default Quality row is hidden on this fork.
+    let key = RowId::Field(PickerKind::HdrOverlay).key().0;
+    assert_eq!(pushed(&drive(&mut page, ScreenEvent::Activate(key), key)), vec![SettingsPage::Picker(PickerKind::HdrOverlay)],
         "a seated profile's rows open");
 
     seat_named(&session, "noah", "Noah");
@@ -542,18 +549,76 @@ fn video_and_playback_lists_video_player_and_up_next() {
     let all = FieldListInputs { marker_prefs: granted, ..inputs_of(Kind::Playback, None) };
     assert_eq!(fields_of(&all), vec![
         // Fork Rofocale11: NuvioNative adds the IMDb/Rotten Tomatoes rating-source picker to the
-        // Playback page; upstream's expected field list has no such kind.
-        PickerKind::Quality, PickerKind::DirectPlay, PickerKind::DolbyVision, PickerKind::UriEngine, PickerKind::RatingSource,
+        // Playback page; upstream's expected field list has no such kind. Quality / Direct Play /
+        // Uri Engine are hidden (no shim transcoder), so they are absent here.
+        PickerKind::DolbyVision, PickerKind::RatingSource,
         PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::HdrOverlay, PickerKind::IntroSkip, PickerKind::CreditsSkip,
         PickerKind::NextEpisode, PickerKind::DeckPress,
     ]);
     let groups = groups_listed(&all);
     assert_eq!(groups.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
-        [msg::settings_playback_group_video(), msg::settings_playback_group_player(), msg::settings_playback_group_up_next()]);
+        // Fork Rofocale11: the P2P section follows the three upstream groups.
+        [msg::settings_playback_group_video(), msg::settings_playback_group_player(), msg::settings_playback_group_up_next(), msg::settings_playback_p2p()]);
     assert_eq!(groups[2].1, vec![PickerKind::NextEpisode, PickerKind::DeckPress], "Up next");
     assert!(!fields_of(&all).contains(&PickerKind::SubtitleSize) && !fields_of(&all).contains(&PickerKind::SubtitlePosition) && !fields_of(&all).contains(&PickerKind::SubtitleColor),
         "subtitle size and position are on Audio & subtitles");
     assert_eq!(["Video", "Player", "Up next"], [msg::settings_playback_group_video(), msg::settings_playback_group_player(), msg::settings_playback_group_up_next()]);
+}
+
+/// Fork Rofocale11: exactly the three PMS-facing playback controls are hidden on this fork, and every
+/// other Playback row stays listed. The picker machinery for the hidden fields is deliberately kept
+/// (the FPS scene boots `picker-quality` directly), so the test also proves that path still resolves.
+#[test]
+fn fork_hides_only_quality_direct_play_and_uri_engine_rows() {
+    let _serial = plx_base::testlock::serial();
+    let granted = MarkerPrefsView { scope: 1, intro_granted: true, credits_granted: true, ..Default::default() };
+    let inputs = FieldListInputs { marker_prefs: granted, ..inputs_of(Kind::Playback, None) };
+    let fields = fields_of(&inputs);
+    for hidden in [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::UriEngine] {
+        assert!(!fields.contains(&hidden), "{hidden:?} must not be listed on this fork");
+        let key = RowId::Field(hidden).key().0;
+        let mut form: FormTable<RowId, Action, SettingsPage> = FormTable::new(BAND);
+        form.set(field_form(&inputs), None);
+        assert!(form.index_of_key(RowKey(key)).is_none(), "{hidden:?} has no row in the real form");
+        // The picker itself stays: its options and its parent page still resolve.
+        assert!(!field_options(hidden, Quality::Original, DirectPlayMode::Auto, None).is_empty(), "{hidden:?} picker is retained");
+        assert_eq!(hidden.parent(), SettingsPage::Playback);
+    }
+    for visible in [PickerKind::DolbyVision, PickerKind::RatingSource, PickerKind::SkipInterval,
+        PickerKind::InstantDpadSeeking, PickerKind::HdrOverlay, PickerKind::IntroSkip,
+        PickerKind::CreditsSkip, PickerKind::NextEpisode, PickerKind::DeckPress] {
+        assert!(fields.contains(&visible), "{visible:?} must still be listed");
+    }
+}
+
+/// Fork Rofocale11: the P2P toggle is a Playback row driven by the published `p2p_enabled` input,
+/// and OK emits the shim-policy command with the flipped value through the shared reply machinery.
+#[test]
+fn fork_p2p_toggle_reads_published_input_and_writes_the_flip() {
+    let _serial = plx_base::testlock::serial();
+    for on in [true, false] {
+        let inputs = crate::registry::ScreenInputs { p2p_enabled: on, ..crate::registry::capture_fixture() };
+        let mut page = PreferencesPage::new(EntryId(0), Kind::Playback, &inputs);
+        let row = page.form.index_of(&RowId::P2pToggle).expect("the P2P row is listed on Playback");
+        assert!(page.form.binding_at(row).unwrap().kind == RowKind::Toggle, "the P2P row is a switch");
+        assert_eq!(page.state.values.last().map(String::as_str), Some(if on {
+            plx_os::i18n::msg::settings_playback_p2p_on()
+        } else { plx_os::i18n::msg::settings_playback_p2p_off() }));
+        assert!(page.form.index_of(&RowId::Field(PickerKind::Quality)).is_none(), "the hidden rows stay hidden");
+
+        let key = RowId::P2pToggle.key().0;
+        let mut cx = context(key);
+        cx.views.inputs = &inputs;
+        let mut out = Vec::new();
+        let mut present = Present::new();
+        page.step(&ScreenEvent::Activate(key), &cx,
+            &mut Effects::new(&mut out, MachineId::Instance(InstanceId(0)), &mut present));
+        let commands: Vec<_> = out.iter().filter_map(|e| match &e.fx {
+            Fx::App(AppFx::Preferences(PreferenceCmd::P2pEnabled { on: written, .. })) => Some(*written),
+            _ => None,
+        }).collect();
+        assert_eq!(commands, vec![!on], "OK flips the published value through the shim command");
+    }
 }
 
 /// The marker skips are rows only while their grants are held, each on its own grant, and they stand in
@@ -564,8 +629,8 @@ fn intro_and_credits_skip_rows_follow_their_grants_in_the_player_group() {
     let none = inputs_of(Kind::Playback, None);
     assert_eq!(fields_of(&none), vec![
         // Fork Rofocale11: NuvioNative's IMDb/Rotten Tomatoes rating-source picker is a Playback
-        // field; upstream's expected list predates it. Its position matches `fields_of`.
-        PickerKind::Quality, PickerKind::DirectPlay, PickerKind::DolbyVision, PickerKind::UriEngine, PickerKind::RatingSource,
+        // field; upstream's expected list predates it. Quality / Direct Play / Uri Engine are hidden.
+        PickerKind::DolbyVision, PickerKind::RatingSource,
         PickerKind::SkipInterval, PickerKind::InstantDpadSeeking, PickerKind::HdrOverlay, PickerKind::NextEpisode, PickerKind::DeckPress]);
     let intro = FieldListInputs { marker_prefs: MarkerPrefsView { scope: 2, intro_granted: true, ..Default::default() }, ..inputs_of(Kind::Playback, None) };
     assert_eq!(fields_of(&intro).iter().filter(|f| matches!(f, PickerKind::IntroSkip | PickerKind::CreditsSkip)).collect::<Vec<_>>(), [&PickerKind::IntroSkip]);
@@ -638,6 +703,8 @@ fn every_field_list_row_states_its_own_sentence() {
     let seated = Whose::Profile("Maya".into());
     let sentence = |kind, id: Option<&RowId>, status, force, whose: &Whose|
         row_sentence(kind, id, page, status, if force { DirectPlayMode::Forced } else { DirectPlayMode::Auto }, whose).into_owned();
+    // Fork Rofocale11: this pins the retained PICKER copy, not the field list, so the three hidden
+    // fields stay here even though no Playback row opens them.
     for field in [PickerKind::Quality, PickerKind::DirectPlay, PickerKind::DolbyVision, PickerKind::UriEngine, PickerKind::SkipInterval, PickerKind::InstantDpadSeeking,
         PickerKind::HdrOverlay, PickerKind::IntroSkip, PickerKind::CreditsSkip, PickerKind::NextEpisode, PickerKind::DeckPress] {
         assert_eq!(sentence(Kind::Playback, Some(&RowId::Field(field)), false, false, &seated), field.copy(), "{field:?}");

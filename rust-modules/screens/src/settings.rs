@@ -508,6 +508,8 @@ fn mount_page(
         SettingsPage::Picker(kind) => Box::new(super::preferences::PickerPage::new(entry, kind, &cx.views.inputs)),
         SettingsPage::PlayerHud => Box::new(super::hud_settings::HudPage::new(entry)),
         SettingsPage::Diagnostics => Box::new(diagnostics::DiagnosticsPage::new(entry)),
+        // Fork Rofocale11: the Addons page is mounted from its own root row, like Diagnostics.
+        SettingsPage::Addons => Box::new(addons::AddonsPage::new(entry)),
         page @ (SettingsPage::HudGallery | SettingsPage::HudDetail(..) | SettingsPage::HudAbout(..) | SettingsPage::HudPreview(..)) =>
             Box::new(super::hud_settings::HudPage::at(entry, page)),
     }
@@ -1096,6 +1098,8 @@ enum RootId {
     /// The single Diagnostics row (Settings v2): its value reads Off or On and it opens the page
     /// that holds the trace rows.
     Diagnostics,
+    // Fork Rofocale11: the Addons root row opens the fork's addon enable/disable page.
+    Addons,
     Legal,
     About,
 }
@@ -1118,6 +1122,8 @@ impl FormId for RootId {
             RootId::Resolution => 10,
             RootId::UnderPosters => 11,
             RootId::Diagnostics => 12,
+            // Fork Rofocale11: 13 is past every upstream root key.
+            RootId::Addons => 13,
             // the base; `root_form` adds the position (`item_keyed`)
             RootId::Plaintext(_) => PLAINTEXT_KEY_BASE,
         })
@@ -1136,6 +1142,7 @@ impl FormId for RootId {
             RootId::Plaintext(_) => return None,
             RootId::Privacy => "privacy",
             RootId::Diagnostics => "diagnostics",
+            RootId::Addons => "addons",
             RootId::Legal => "legal",
             RootId::About => "about",
         })
@@ -1306,6 +1313,8 @@ fn sentence_for(id: Option<&RootId>) -> Cow<'static, str> {
         Some(RootId::Resolution) => Cow::Borrowed(msg::settings_resolution_detail()),
         Some(RootId::Privacy) => Cow::Borrowed(msg::settings_privacy_detail()),
         Some(RootId::Diagnostics) => Cow::Borrowed(msg::settings_diagnostics_detail()),
+        // Fork Rofocale11: the Addons row states what the page it opens is for.
+        Some(RootId::Addons) => Cow::Borrowed(msg::settings_addons_detail()),
         Some(RootId::Legal) => Cow::Borrowed(msg::settings_legal_detail()),
         Some(RootId::About) => Cow::Borrowed(msg::settings_about_detail()),
         Some(RootId::Plaintext(_)) | None => Cow::Borrowed(msg::settings_root_copy()),
@@ -1353,6 +1362,16 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
             RowKind::Nav(SettingsPage::AudioSubtitles),
             Action::Door,
             Row::new(plx_os::i18n::msg::settings_audio_title()).chevron(true),
+        );
+    // Fork Rofocale11: the Nuvio addon inventory is account-scoped, so the Addons row joins the
+    // signed-in root between Playback and System, exactly where the authoritative fork put it.
+    let addons = FormSection::new(plx_os::i18n::msg::settings_addons_section())
+        .visible(signed_in)
+        .item(
+            RootId::Addons,
+            RowKind::Nav(SettingsPage::Addons),
+            Action::Door,
+            Row::new(plx_os::i18n::msg::settings_addons_title()).chevron(true),
         );
     let system = FormSection::new(plx_os::i18n::msg::settings_system_section())
         .item(
@@ -1440,6 +1459,7 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
     Form::new()
         .section(libraries)
         .section(playback)
+        .section(addons)
         .section(system)
         .section(plaintext)
         .section(support)
@@ -1908,6 +1928,10 @@ impl Screen<InnerHost> for RootPage {
 mod under_posters;
 #[path = "settings_diagnostics.rs"]
 mod diagnostics;
+// Fork Rofocale11: Settings > Addons is a fork-owned page (the Nuvio addon inventory and switch);
+// the diff to this upstream file is just this declaration, the mount arm and the root row.
+#[path = "settings_addons.rs"]
+mod addons;
 #[cfg(test)]
 #[path = "settings_v2_tests.rs"]
 mod v2_tests;

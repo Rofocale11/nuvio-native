@@ -101,6 +101,16 @@ pub(super) fn execute(command: PreferenceCmd) {
                 plx_machine::present::wake_from_worker();
             });
         }
+        // Fork Rofocale11: Nuvio's P2P Streaming row is not a plex.tv/session preference. It lives
+        // in the one redb LocalSettings record and is applied to the running shim by the fork-owned
+        // app adapter, so it needs its own retained write like RatingSource/AutoSignIn above. Runs
+        // off the frame thread; the present gate wakes the idle screen on the durable receipt.
+        PreferenceCmd::P2pEnabled { on, reply } => {
+            let _ = plx_base::storage_worker::submit_retained(move || {
+                let _ = reply.send(super::nuvio::set_p2p_enabled(on));
+                plx_machine::present::wake_from_worker();
+            });
+        }
         PreferenceCmd::UiResolution { mode, reply } => {
             let _ = plx_base::storage_worker::submit_retained(move || {
                 let _ = reply.send(plx_plex::plex::session::set_ui_resolution(mode));

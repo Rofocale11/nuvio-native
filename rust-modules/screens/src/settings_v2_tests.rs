@@ -24,14 +24,17 @@ fn ids(inputs: &RootInputs) -> Vec<RootId> {
     (0..form.table.n_rows() as usize).filter_map(|i| form.id_at(i).cloned()).collect()
 }
 
-/// The board's root (Sv2-1): four groups in order, eleven rows for a signed-in multi-profile
-/// set — and no row carries a sub-line, because the sentence lives beside the table.
+/// The board's root (Sv2-1): the upstream groups in order plus the fork's Addons group, twelve rows
+/// for a signed-in multi-profile set — and no row carries a sub-line, because the sentence lives
+/// beside the table. (Fork Rofocale11: the Addons row sits between Playback and System.)
 #[test]
 fn the_root_is_four_groups_of_rows_without_sub_lines() {
     let inputs = RootInputs { multi_user: true, ..inputs(true) };
     assert_eq!(ids(&inputs), vec![
         RootId::Favourites, RootId::UnderPosters,
         RootId::Playback, RootId::AudioSubtitles,
+        // Fork Rofocale11: the Addons row sits between Playback and System.
+        RootId::Addons,
         RootId::Language, RootId::AutoSignIn, RootId::TrailerAutoplay,
         RootId::Privacy, RootId::Diagnostics, RootId::Legal, RootId::About,
     ]);
@@ -54,13 +57,16 @@ fn the_signed_out_root_drops_every_signed_in_row() {
         RootId::Privacy, RootId::Diagnostics, RootId::Legal, RootId::About,
     ]);
     assert!(!ids(&inputs(true)).contains(&RootId::AutoSignIn), "one profile skips the picker already");
+    assert!(!ids(&inputs(false)).contains(&RootId::Addons), "Fork Rofocale11: Addons is signed-in only");
 }
 
 /// How far the longest root scrolls to seat About, MEASURED on the table the root draws (board row
 /// metrics, in the Settings layout's own table frame), and how far it may drift before this test
 /// says the row heights or the section break moved. It is a pin of our geometry, not a number
 /// read off the board.
-const ALL_ROWS_SCROLL: f32 = 244.0;
+// Fork Rofocale11: the Addons row adds one row to the longest root, moving the scroll-to-About pin
+// from 244 to 370 (measured with the real table builder).
+const ALL_ROWS_SCROLL: f32 = 370.0;
 const ALL_ROWS_SCROLL_TOLERANCE: f32 = 6.0;
 
 /// Sv2s-R2: every conditional row at once is the board's longest root, and it scrolls.
@@ -138,7 +144,7 @@ fn every_followed_sentence_fits_five_lines_in_every_language() {
         // `Header::paint` hangs the sentence its CSS box's cap drop (~7px) below the frame's top
         let drop = layout.copy_cap_drop(&ShippedMeasure);
         let mut all: Vec<RootId> = vec![RootId::Favourites, RootId::UnderPosters, RootId::Playback, RootId::AudioSubtitles,
-            RootId::Language, RootId::AutoSignIn, RootId::TrailerAutoplay, RootId::Resolution, RootId::Privacy,
+            RootId::Addons, RootId::Language, RootId::AutoSignIn, RootId::TrailerAutoplay, RootId::Resolution, RootId::Privacy,
             RootId::Diagnostics, RootId::Legal, RootId::About];
         all.push(RootId::Plaintext(ServerMachineId("m".into())));
         for id in all {
@@ -271,7 +277,7 @@ fn the_root_asks_for_posters_while_favorite_libraries_has_focus_and_the_fan_is_e
 #[test]
 fn the_root_and_diagnostics_rows_name_themselves_with_distinct_ids() {
     let root = [
-        RootId::Favourites, RootId::UnderPosters, RootId::Playback, RootId::AudioSubtitles, RootId::Language,
+        RootId::Favourites, RootId::UnderPosters, RootId::Playback, RootId::AudioSubtitles, RootId::Addons, RootId::Language,
         RootId::AutoSignIn, RootId::TrailerAutoplay, RootId::Resolution, RootId::Privacy, RootId::Diagnostics,
         RootId::Legal, RootId::About,
     ];

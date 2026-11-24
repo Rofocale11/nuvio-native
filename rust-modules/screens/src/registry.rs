@@ -284,6 +284,10 @@ pub enum PreferenceCmd {
     // provider is not a live player setting. Upstream's unified `Choose` supersedes the fork's
     // other per-setting variants, so only RatingSource is retained alongside it.
     RatingSource { source: plx_plex::plex::session::RatingSource, reply: std::sync::mpsc::Sender<bool> },
+    // Fork Rofocale11: the P2P switch writes the shim's own install policy, not a Plex preference or
+    // a live `Choice`; the app executes this through the same transaction/reply machinery local
+    // toggles use and answers `reply` with whether the write was durable.
+    P2pEnabled { on: bool, reply: std::sync::mpsc::Sender<bool> },
     /// One live player setting's pick (`plx_media::route::Choice`): the app writes it through the
     /// media door, and `reply` learns whether the write was durable.
     Choose(plx_media::route::Choice, std::sync::mpsc::Sender<bool>),
@@ -1818,6 +1822,8 @@ pub mod word {
     /// `tests/run.py` captures an overlay word as `[\w-]+`.
     pub const LANGUAGE: &str = "language";
     pub const DIAGNOSTICS: &str = "diagnostics";
+    // Fork Rofocale11: the Settings > Addons page's route/heartbeat word (`SettingsPage::Addons`).
+    pub const ADDONS: &str = "addons";
     pub const UNDER_POSTERS: &str = "under-posters";
     pub const UNDER_POSTERS_MOVIE: &str = "under-posters-movie";
     pub const UNDER_POSTERS_SHOW: &str = "under-posters-show";
@@ -3471,6 +3477,8 @@ mod a11y_coverage_tests {
                 SettingsPage::ConsentStage(_) => Covered("Settings::ConsentStage", || surface(SettingsPage::ConsentStage(0))),
                 SettingsPage::Picker(_) => Covered("Settings::Picker", || surface(SettingsPage::Picker(PickerKind::Quality))),
                 SettingsPage::Diagnostics => Covered("Settings::Diagnostics", || surface(SettingsPage::Diagnostics)),
+                // Fork Rofocale11: the Addons page is mounted like any other Settings page.
+                SettingsPage::Addons => Covered("Settings::Addons", || surface(SettingsPage::Addons)),
                 SettingsPage::PlayerHud => Covered("Settings::PlayerHud", || surface(SettingsPage::PlayerHud)),
                 SettingsPage::HudGallery => Covered("Settings::HudGallery", || surface(SettingsPage::HudGallery)),
                 SettingsPage::HudDetail(_) => Covered("Settings::HudDetail", crate::hud_settings::tests::hud_detail_conforms),
@@ -3481,10 +3489,11 @@ mod a11y_coverage_tests {
         }
     }
 
-    /// How many leaf arms the table has: 21 flat `AppArg` arms, 5 `ContentArg`, 22 `SettingsPage` and
+    /// How many leaf arms the table has: 21 flat `AppArg` arms, 5 `ContentArg`, 23 `SettingsPage` (Fork Rofocale11: + Addons) and
     /// `FirstRunConsent`. A new arm fails [`coverage`] to compile, and then this to pass until the census
     /// below holds it too.
-    const ARMS: usize = 49;
+    // Fork Rofocale11: +1 for Settings::Addons.
+    const ARMS: usize = 50;
 
     /// **A value of every leaf arm** the table names: the registry's own page and surface censuses, plus
     /// the arms those leave out (Filmography and every Settings page).
@@ -3515,6 +3524,7 @@ mod a11y_coverage_tests {
                 SettingsPage::ConsentStage(0),
                 SettingsPage::Picker(PickerKind::Quality),
                 SettingsPage::Diagnostics,
+                SettingsPage::Addons,
                 SettingsPage::PlayerHud,
                 SettingsPage::HudGallery,
                 SettingsPage::HudDetail(sha),

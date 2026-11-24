@@ -20,6 +20,7 @@
 use plx_base::eventlog::log;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The loopback port the shim prefers. Fixed so the server's origin is the same every boot (the
 /// session and the per-server caches key on it); any free port if it is taken.
@@ -27,6 +28,12 @@ const PORT: u16 = 32_420;
 
 static HANDLE: OnceLock<plx_pmsshim::Handle> = OnceLock::new();
 static BACKEND: OnceLock<Arc<plx_pmsshim::AddonBackend>> = OnceLock::new();
+
+/// Fork Rofocale11: the persisted P2P switch, mirrored into a plain atomic for the frame thread.
+/// Screens ask for it before the shim exists (and on controlled boots with no shim at all), so the
+/// fallback must never read redb or load the engine from the frame loop. Boot seeds it from the
+/// Settings record; the storage worker updates it alongside the shim when the user flips the row.
+static P2P_FALLBACK: AtomicBool = AtomicBool::new(true);
 
 /// The running shim, for Settings screens that change addons.
 #[allow(dead_code)]
@@ -41,17 +48,68 @@ pub(crate) fn content_generation() -> Option<u64> {
     handle().map(|h| h.shim.content_generation())
 }
 
+/// Fork Rofocale11: the live P2P decision for the frame thread. The shim owns the switch once it
+/// exists (a Settings change takes effect without a restart); before then the boot-seeded atomic
+/// answers, so no screen ever reads redb or loads the engine from the frame loop.
+pub(crate) fn p2p_enabled() -> bool {
+    handle().map(|h| h.shim.p2p_enabled())
+        .unwrap_or_else(|| P2P_FALLBACK.load(Ordering::Relaxed))
+}
+
+/// Fork Rofocale11: persist the Settings P2P row in the ONE redb store and apply it to the running
+/// shim. Called from the preferences executor on the retained storage worker, never the frame
+/// thread. The whole `Settings` value is written back to the SAME key, so the two existing fields
+/// keep their on-disk shape while an install without `p2pEnabled` gains the ON default. The reply
+/// is the durability of the write: an applied-but-unwritten toggle is never reported as saved.
+pub(crate) fn set_p2p_enabled(on: bool) -> bool {
+    let Some(store) = plx_nuvio_store::get() else { return false; };
+    let mut settings: Settings = store
+        .get(plx_nuvio_store::Table::LocalSettings, "settings")
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default();
+    settings.p2p_enabled = on;
+    let durable = serde_json::to_vec(&settings)
+        .ok()
+        .and_then(|bytes| store.put(plx_nuvio_store::Table::LocalSettings, "settings", &bytes).ok())
+        .is_some();
+    P2P_FALLBACK.store(on, Ordering::Relaxed);
+    if let Some(handle) = handle() {
+        handle.shim.set_p2p(on, settings.torrent_server.clone());
+    }
+    durable
+}
+
 /// Fork Rofocale11: the data root now lives in `plx_base::paths` so the app, the shim and the
 /// in-process storage backend all resolve the SAME single redb file without a circular edge.
 fn data_dir() -> PathBuf {
     plx_base::paths::nuvio_data_dir()
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+/// Fork Rofocale11: an install that predates the Settings P2P row has no `p2pEnabled` key. It
+/// defaults ON so existing installs keep the engine-gated torrent behavior they have today; only
+/// an explicit write can turn it off. The other two fields keep their exact on-disk spelling.
+fn default_p2p_enabled() -> bool { true }
+
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     torrent_server: Option<String>,
     enable_torrents: bool,
+    // Fork Rofocale11: the Settings P2P switch lives in this same one-redb value; an absent key
+    // reads ON (see `default_p2p_enabled`) so an older install keeps its torrents.
+    #[serde(default = "default_p2p_enabled")]
+    p2p_enabled: bool,
+}
+
+// Fork Rofocale11: a derived `Default` would set `p2p_enabled: false` and disagree with the serde
+// field default, so a fresh install (no redb record and no settings.json) would silently lose
+// torrents. The hand-written impl keeps the two doors in agreement: absent key OR absent record
+// both mean ON, while the other two fields keep their ordinary derived values.
+impl Default for Settings {
+    fn default() -> Self {
+        Self { torrent_server: None, enable_torrents: false, p2p_enabled: default_p2p_enabled() }
+    }
 }
 
 /// `{"local_storage": {"installedAddonUrls": "<raw>", ...}, "profile_id": "1"}`.
@@ -177,14 +235,14 @@ pub(crate) fn boot() {
     let cfg = plx_pmsshim::Config {
         data_dir: Some(data.join("shim")),
         torrent_server: settings.torrent_server.clone(),
-        // Fork Rofocale11: the engine is the only streaming path, so offer torrent picks exactly
-        // when its library actually loaded. This fork has no Settings P2P switch wired yet; the
-        // shim's default `p2p_enabled = false` would hide every Torrentio stream before the engine
-        // could resolve one. Gating on `available()` keeps a build without libsbengine.so from
-        // listing picks it cannot play.
-        p2p_enabled: plx_stremio::sbengine::available(),
+        // Fork Rofocale11: the persisted Settings switch is now authoritative, but the engine is
+        // still the only streaming path, so a build without libsbengine.so never lists picks it
+        // cannot play. An absent `p2pEnabled` key deserializes ON, preserving today's behavior.
+        p2p_enabled: settings.p2p_enabled && plx_stremio::sbengine::available(),
         ..Default::default()
     };
+    // Fork Rofocale11: the same decision is the frame-thread fallback until the shim is published.
+    P2P_FALLBACK.store(cfg.p2p_enabled, Ordering::Relaxed);
     let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
     let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT).or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));
     let handle = match started {
@@ -235,6 +293,46 @@ pub(crate) fn boot() {
             backend.replace(set);
             shim.addons_changed();
             shim.warm();
+        }));
+    }
+    // Fork Rofocale11: the old fork's addon-enable seam, adapted to this tree's single redb store
+    // and `plx_pmsshim` backend. Settings cannot name pmsshim itself, so it reaches the installed
+    // addon set through this registered control; a flip replaces the live backend set, records the
+    // override in the shim's account prefs, and drops the caches that depended on the old set.
+    {
+        struct Ctl {
+            backend: Arc<plx_pmsshim::AddonBackend>,
+            shim: Arc<plx_pmsshim::shim_pms::Shim>,
+        }
+        impl plx_plex::plex::nuvio::AddonControl for Ctl {
+            fn installed(&self) -> Vec<(String, String, bool)> {
+                self.backend.snapshot().addons.into_iter()
+                    .map(|a| {
+                        let name = a.display_name.clone().unwrap_or_else(|| a.manifest.name.clone());
+                        (a.transport_url, name, !a.disabled)
+                    })
+                    .collect()
+            }
+            fn set_enabled(&self, key: String, enabled: bool) -> bool {
+                let mut set = self.backend.snapshot();
+                let mut found = false;
+                for a in set.addons.iter_mut() {
+                    if a.transport_url == key {
+                        a.disabled = !enabled;
+                        found = true;
+                    }
+                }
+                if !found { return false; }
+                self.backend.replace(set);
+                self.shim.account.set_addon_enabled(&key, enabled);
+                self.shim.addons_changed();
+                self.shim.warm();
+                true
+            }
+        }
+        plx_plex::plex::nuvio::register_addon_control(Arc::new(Ctl {
+            backend: backend.clone(),
+            shim: handle.shim.clone(),
         }));
     }
     let _ = BACKEND.set(backend.clone());
@@ -337,4 +435,32 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                 .collect(),
         })
     })
+}
+
+/// Fork Rofocale11: test-only seam for the frame-thread fallback; the bridge publication test
+/// drives the switch without booting a shim or touching the process-wide store.
+#[cfg(test)]
+pub(crate) fn set_p2p_fallback_for_test(on: bool) { P2P_FALLBACK.store(on, Ordering::Relaxed); }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fork Rofocale11: an install whose settings.json predates the switch must keep torrents on,
+    /// while an explicit off survives the write-back. This pins the on-disk shape of the one redb
+    /// LocalSettings value the storage worker rewrites as a whole.
+    #[test]
+    fn p2p_setting_defaults_on_and_round_trips_explicit_off() {
+        assert!(Settings::default().p2p_enabled, "a fresh install keeps torrents on");
+        let older: Settings = serde_json::from_str(r#"{"torrentServer":"http://127.0.0.1:2710","enableTorrents":true}"#).unwrap();
+        assert!(older.p2p_enabled, "an absent key means ON, so existing installs keep torrents");
+        assert_eq!(older.torrent_server.as_deref(), Some("http://127.0.0.1:2710"));
+        assert!(older.enable_torrents);
+        let explicit: Settings = serde_json::from_str(r#"{"p2pEnabled":false}"#).unwrap();
+        assert!(!explicit.p2p_enabled);
+        let value = serde_json::to_value(&explicit).unwrap();
+        assert_eq!(value["p2pEnabled"], false);
+        assert_eq!(value["enableTorrents"], false, "the other fields keep their shape on write");
+        assert!(value["torrentServer"].is_null());
+    }
 }

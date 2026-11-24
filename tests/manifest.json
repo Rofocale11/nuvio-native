@@ -1369,7 +1369,7 @@
         "plxnative-settings": "playback",
         "plxnative-settingsosc": true
       },
-      "comment": "The Playback page (Default Quality / Direct Play) opened through Settings: a form page whose field rows are Nav items onto the picker pages. settingsosc feeds UP/DOWN to whichever Settings page is on top, so it alternates the page's two real rows and keeps the present gate awake; the heartbeat word is the page's own (`playback`), so a boot target that stayed on the root cannot satisfy it."
+      "comment": "The Playback page (Dolby Vision / rating source / skip interval / HDR overlay / Next episode and the P2P switch) opened through Settings: a form page whose field rows are Nav items onto the picker pages. Default Quality / Direct Play / playback engine are hidden on this fork (the in-process shim has no transcoder), but their picker code stays. settingsosc feeds UP/DOWN to whichever Settings page is on top, so it alternates the page's real rows and keeps the present gate awake; the heartbeat word is the page's own (`playback`), so a boot target that stayed on the root cannot satisfy it."
     },
     {
       "name": "settings-picker",

@@ -157,9 +157,10 @@ fn the_signed_in_root_carries_no_sub_line_and_its_sentences_fit_elsewhere() {
             assert!(row.detail.is_empty(), "{:?} still carries the sub-line {:?}", row.label, row.detail);
         }
     }
+    // Fork Rofocale11: the Addons root row makes this twelve, not upstream's eleven.
     assert_eq!(
-        rows, 11,
-        "Favorite libraries, Under posters, Video & playback, Audio & subtitles, Language, \
+        rows, 12,
+        "Favorite libraries, Under posters, Video & playback, Audio & subtitles, Addons, Language, \
          Automatically Sign In, Play trailers automatically, Privacy & data, Diagnostics, Legal \
          notices and About PlxNative (this host is not webOS 1-3, so no Interface resolution row; \
          its fit is `settings_text_fit_tests`) - got {rows}; did the signed-in multi-user fixture \

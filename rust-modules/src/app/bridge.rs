@@ -1754,6 +1754,11 @@ impl Bridge<'_> {
         use plx_plex::plex::{grant, session};
         let before = revision();
         let mut next = self.retained.screen_inputs.clone();
+        // Fork Rofocale11: the P2P Streaming switch is a live shim fact, not a session preference.
+        // Refresh it on every publication so the Settings row flips without a restart; the atomic
+        // read is safe here on the frame thread (see `crate::app::nuvio::p2p_enabled`).
+        let p2p_enabled = crate::app::nuvio::p2p_enabled();
+        next.p2p_enabled = p2p_enabled;
         let mut grant_session = self.retained.screen_grant_session.clone();
         // Install-wide, including a durable pick before the session cache publishes it. Never seat-fenced.
         next.install_language = plx_os::i18n::saved_preference();
@@ -1811,7 +1816,12 @@ impl Bridge<'_> {
         // These tokens fence completed publications, not requests. Keep the previous coherent
         // view if a worker or profile publisher moved while facts were copied; retry next pump.
         if revision() != before || grant::revision() != key.0 { return false; }
-        let changed = !self.retained.screen_inputs.same_facts(&next);
+        // Fork Rofocale11: `same_facts` compares this field today, but the screens crate owns that
+        // method and an upstream rewrite could drop a fork-only field silently. Compare it here as
+        // well so a toggle always bumps the revision the pages key their caches on, with no edit to
+        // a file this lane does not own.
+        let p2p_moved = self.retained.screen_inputs.p2p_enabled != p2p_enabled;
+        let changed = !self.retained.screen_inputs.same_facts(&next) || p2p_moved;
         if changed {
             next.revision = self.retained.screen_inputs.revision.wrapping_add(1);
             self.retained.screen_inputs = next;
@@ -6195,6 +6205,28 @@ mod screen_input_publication_tests {
             assert!(!bridge.publish_player_presentation(&ps), "controlled capture must perform no IO");
             assert_eq!(bridge.retained.screen_inputs.player_presentation, Default::default());
         });
+    }
+
+    /// Fork Rofocale11: the P2P switch is a live shim fact, not a session row. Flipping it must
+    /// refresh the captured inputs and move the revision on its own, so the Settings row's result
+    /// reaches a page already on screen without a restart.
+    #[test]
+    fn a_p2p_toggle_moves_the_screen_input_publication() {
+        let _serial = plx_base::testlock::serial();
+        let mut owner = crate::app::runtime_owners::Harness::new(|| 0);
+        let mut bridge = owner.bridge();
+        let original = crate::app::nuvio::p2p_enabled();
+        struct Restore(bool);
+        impl Drop for Restore { fn drop(&mut self) { crate::app::nuvio::set_p2p_fallback_for_test(self.0); } }
+        let _restore = Restore(original);
+        crate::app::nuvio::set_p2p_fallback_for_test(false);
+        let _ = bridge.capture_screen_inputs();
+        assert!(!bridge.retained.screen_inputs.p2p_enabled);
+        let revision = bridge.retained.screen_inputs.revision;
+        crate::app::nuvio::set_p2p_fallback_for_test(true);
+        assert!(bridge.capture_screen_inputs(), "a toggle alone is a screen-visible change");
+        assert!(bridge.retained.screen_inputs.p2p_enabled);
+        assert_ne!(bridge.retained.screen_inputs.revision, revision);
     }
 
     /// W6c: the set the session was told reaches the screens as `ScreenInputs.backends`, moves the

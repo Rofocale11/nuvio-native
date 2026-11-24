@@ -640,8 +640,40 @@
     "description": "Settings, consent or sign-in UI: settings.playback.title"
   },
   "settings.playback.detail": {
-    "value": "Default quality and Direct Play.",
+    "value": "Subtitles, HDR and playback.",
     "description": "Settings, consent or sign-in UI: settings.playback.detail"
+  },
+  "settings.playback.p2p": {
+    "value": "P2P Streaming",
+    "description": "Settings > Playback section heading: the peer-to-peer (torrent) streaming settings."
+  },
+  "settings.playback.p2p_enable": {
+    "value": "Enable P2P",
+    "description": "Settings > Playback toggle: whether torrent streams may be offered in the Source Picker."
+  },
+  "settings.playback.p2p_enable.detail": {
+    "value": "Offer torrents in the Source Picker.",
+    "description": "Settings > Playback: what the Enable P2P toggle does."
+  },
+  "settings.playback.p2p_on": {
+    "value": "On",
+    "description": "Settings > Playback read-out for the P2P switch when it is on."
+  },
+  "settings.playback.p2p_off": {
+    "value": "Off",
+    "description": "Settings > Playback read-out for the P2P switch when it is off."
+  },
+  "settings.addons.section": {
+    "value": "Addons",
+    "description": "Settings, account, onboarding or privacy UI: settings.addons.section"
+  },
+  "settings.addons.title": {
+    "value": "Addons",
+    "description": "Settings, account, onboarding or privacy UI: settings.addons.title"
+  },
+  "settings.addons.detail": {
+    "value": "Enable or disable installed addons for this session",
+    "description": "Settings, account, onboarding or privacy UI: settings.addons.detail"
   },
   "settings.audio.title": {
     "value": "Audio & subtitles",

@@ -121,7 +121,9 @@ impl Kind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 // Fork Rofocale11: `Value::RatingSource` carries the Nuvio IMDb/Rotten Tomatoes pick; it coexists
 // with all of upstream's new local-preference values.
-enum Value { RatingSource(plx_plex::plex::session::RatingSource), IntroSkip(MarkerSkipMode, u64), CreditsSkip(MarkerSkipMode, u64), InstantDpadSeeking(InstantDpadSeeking), UriEngine(UriEngine), DolbyVision(DolbyVisionMode), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), SubtitleTone(SubtitleTone), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64) }
+enum Value { RatingSource(plx_plex::plex::session::RatingSource), IntroSkip(MarkerSkipMode, u64), CreditsSkip(MarkerSkipMode, u64), InstantDpadSeeking(InstantDpadSeeking), UriEngine(UriEngine), DolbyVision(DolbyVisionMode), Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), SubtitleTone(SubtitleTone), HdrOverlay(HdrOverlayBrightness), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), UiResolution(UiResolution), Language(String), Mode(i64), Forced(i64),
+    // Fork Rofocale11: the P2P switch writes the shim's install policy through its own command.
+    P2pEnabled(bool) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -288,6 +290,9 @@ impl Txn {
             // record (`PreferenceCmd::RatingSource`), not upstream's media `Choice` door — there is
             // no live route `Choice` for a rating provider.
             Value::RatingSource(source) => PreferenceCmd::RatingSource { source, reply },
+            // Fork Rofocale11: same transaction/reply path as the other local writes; the app owns
+            // the shim write and the receipt tells the row whether the pick was durable.
+            Value::P2pEnabled(on) => PreferenceCmd::P2pEnabled { on, reply },
             Value::IntroSkip(mode, scope) => PreferenceCmd::ChooseMarker { kind: plx_data::metadata::MarkerKind::Intro, mode, scope, reply },
             Value::CreditsSkip(mode, scope) => PreferenceCmd::ChooseMarker { kind: plx_data::metadata::MarkerKind::Credits, mode, scope, reply },
             Value::Quality(quality) => PreferenceCmd::Choose(Choice::Quality(quality), reply),
@@ -363,7 +368,10 @@ impl Txn {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowId { Field(PickerKind), PlayerHud, Retry }
+enum RowId { Field(PickerKind), PlayerHud, Retry,
+    // Fork Rofocale11: the P2P section's single toggle. A new stable key (20 — 18 is upstream's
+    // SubtitleColor), so a recorded focus on an upstream row keeps its identity.
+    P2pToggle }
 impl FormId for RowId {
     /// Hand-assigned, per page: each field's position in ITS page's list (what its table index was
     /// before the page moved onto a form, so a recorded focus on a field row is unchanged), Retry
@@ -395,6 +403,8 @@ impl FormId for RowId {
             Self::Field(PickerKind::IntroSkip) => 13,
             Self::Field(PickerKind::CreditsSkip) => 14,
             Self::Retry => 6,
+            // Fork Rofocale11: 20 is past every upstream key on this page.
+            Self::P2pToggle => 20,
         })
     }
     fn a11y(&self) -> Option<&'static str> {
@@ -423,11 +433,15 @@ impl FormId for RowId {
             Self::Field(PickerKind::RatingSource) => "rating_source",
             Self::PlayerHud => "player_hud",
             Self::Retry => "retry",
+            // Fork Rofocale11: the Nuvio P2P toggle needs its own accessibility id.
+            Self::P2pToggle => "p2p_toggle",
         })
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action { Open, Retry }
+enum Action { Open, Retry,
+    // Fork Rofocale11: OK on the P2P row writes the shim's install policy.
+    ToggleP2p }
 
 struct State {
     marker_prefs: MarkerPrefsView,
@@ -539,6 +553,13 @@ impl PreferencesPage {
         };
         self.state.values = fields_of(&inputs).iter()
             .map(|&f| field_readout_with_marker(f, inputs.quality, inputs.direct_play, inputs.prefs, inputs.marker_prefs, inputs.local)).collect();
+        // Fork Rofocale11: the P2P row's read-out is part of the page's canonical state, as it was
+        // in the authoritative fork. It is appended, so upstream field indices stay unchanged.
+        if self.state.kind == Kind::Playback {
+            self.state.values.push(if inputs.local.p2p_enabled {
+                plx_os::i18n::msg::settings_playback_p2p_on()
+            } else { plx_os::i18n::msg::settings_playback_p2p_off() }.into());
+        }
         self.form.table.list_focused = true;
         self.form.set(field_form(&inputs), keep.as_ref());
         self.state.selected = self.form.key_at(self.form.table.sel.max(0) as usize).map_or(0, |k| k.0);
@@ -559,6 +580,13 @@ impl PreferencesPage {
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
             Some(Action::Open) | None => {}
+            // Fork Rofocale11: flip the shim's install policy through the app's command door, then
+            // rebuild the row from the published value (and let the receipt reverse it on failure).
+            Some(Action::ToggleP2p) => {
+                self.txn.save_local(&mut self.state.io, Value::P2pEnabled(!self.inputs.p2p_enabled), fx);
+                self.rebuild_keeping();
+                fx.invalidate(plx_machine::present::Provenance::Input);
+            }
         }
     }
 }
@@ -591,6 +619,11 @@ fn groups_of(kind: Kind) -> [(&'static str, &'static [PickerKind]); 3] {
 /// seats its top row.
 fn shown(field: PickerKind, inputs: &FieldListInputs<'_>) -> bool {
     match field {
+        // Fork Rofocale11: the in-process PMS shim has no transcoder and forces Original quality,
+        // so these three PMS-facing controls cannot change a Nuvio stream at all. Hide their ROWS
+        // only — the pickers, media settings, strings and constants stay (the picker for `Quality`
+        // is still booted by the FPS scene, and the canonical SHAPE must not move).
+        PickerKind::Quality | PickerKind::DirectPlay | PickerKind::UriEngine => false,
         PickerKind::SubtitleSize | PickerKind::SubtitlePosition | PickerKind::SubtitleColor => inputs.prefs.is_some() || (inputs.show_retry && !inputs.busy),
         PickerKind::IntroSkip => inputs.marker_prefs.intro_granted,
         PickerKind::CreditsSkip => inputs.marker_prefs.credits_granted,
@@ -750,6 +783,18 @@ struct FieldListInputs<'a> {
     read_only: bool,
     marker_prefs: MarkerPrefsView,
 }
+
+/// Fork Rofocale11: P2P streaming is a Nuvio shim install policy, not a Plex account preference, so
+/// it rides its own section after the three upstream groups. The value is read from the frame's
+/// published [`ScreenInputs`](crate::registry::ScreenInputs) — a screen never reads the shim's
+/// process-global registry.
+fn p2p_section(inputs: &FieldListInputs<'_>) -> FormSection<RowId, Action, SettingsPage> {
+    FormSection::new(plx_os::i18n::msg::settings_playback_p2p())
+        .item(RowId::P2pToggle, RowKind::Toggle, Action::ToggleP2p,
+            Row::new(plx_os::i18n::msg::settings_playback_p2p_enable())
+                .detail(plx_os::i18n::msg::settings_playback_p2p_enable_detail())
+                .toggle(inputs.local.p2p_enabled).dim(inputs.busy))
+}
 /// The page's field list as a [`Form`]: each field a `Nav` item onto its picker page, plus the
 /// Audio & Subtitles Retry button, built from [`FieldListInputs`] alone.
 fn field_form(inputs: &FieldListInputs<'_>) -> Form<RowId, Action, SettingsPage> {
@@ -783,6 +828,8 @@ fn field_form(inputs: &FieldListInputs<'_>) -> Form<RowId, Action, SettingsPage>
         }
         form = form.section(section);
     }
+    // Fork Rofocale11: the Nuvio P2P switch follows the upstream Playback groups as its own section.
+    if inputs.kind == Kind::Playback { form = form.section(p2p_section(inputs)); }
     form
 }
 fn mode_label(mode: DirectPlayMode) -> &'static str {
