@@ -52,7 +52,7 @@ Every Nuvio Native record lives in a single `nuvio.redb` under `<data>/shim/`: c
 and Settings preferences, addon config, install preferences, Nuvio account preferences, watch
 state, key table, account session and local settings. There is no DB8 record and no `plxstorage`
 helper in the package. Add new persisted state as a table in `plx_nuvio_store`, not a new file or a
-new DB8 kind. See `ARCHITECTURE.md` for the in-process backend and the migration limits.
+new DB8 kind. The file has a 50 MiB soft budget: expired and oldest TTL cache rows are shed and the file is compacted at boot, never truncated; durable records are kept even if the budget is exceeded. An unreadable canonical record is quarantined as `<id>.rejected-<millis>` and read as missing so sign-in recovers without SSH. See `ARCHITECTURE.md` for the in-process backend and the migration limits.
 
 ## The old fork's shim behavior is authoritative
 

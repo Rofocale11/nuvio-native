@@ -8,11 +8,22 @@
 //! owner of a table decides its encoding, just as the owner of a DB8 object used to. All IO is
 //! explicit — callers run it on a worker, never in a machine's `step`.
 
+use plx_base::eventlog::log;
 use plx_base::paths;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Fork Rofocale11: the single store's soft budget (50 MiB). It is enforced by removing expired
+/// and oldest TTL cache rows and by compacting at boot — NEVER by truncating a live redb file,
+/// which would destroy the durable records in it. If the non-cache rows alone exceed this, the
+/// store is logged and left intact; no account data is sacrificed to hit a round number.
+pub const BUDGET_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The TTL-enveloped tables. `ImdbTmdb` is deliberately absent: its rows never expire and are
+/// expensive to rebuild, so they are durable data, not cache.
+const CACHE_TABLES: [Table; 3] = [Table::MetaCache, Table::EnrichCache, Table::ImdbIds];
 
 /// The one file name. Kept here so boot, the shim and the in-process backend cannot disagree.
 pub const FILE_NAME: &str = "nuvio.redb";
@@ -91,20 +102,53 @@ impl Table {
 /// write transaction, so no application lock is needed around it.
 pub struct Store {
     db: Database,
+    path: PathBuf,
+    budget: u64,
 }
 
 impl Store {
     pub fn open_at(path: &Path) -> Result<Arc<Self>, String> {
+        Self::open_at_with_budget(path, BUDGET_BYTES)
+    }
+
+    fn open_at_with_budget(path: &Path, budget: u64) -> Result<Arc<Self>, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("cannot create store dir: {e}"))?;
         }
         let db = Database::create(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-        Ok(Arc::new(Self { db }))
+        Ok(Arc::new(Self { db, path: path.to_path_buf(), budget }))
     }
 
-    /// The shipping path: the shim's data directory under the fork's data root.
+    /// The shipping path: the shim's data directory under the fork's data root. Maintenance is
+    /// best effort — a TV with a full or read-only data directory must still boot — so its
+    /// failure is logged, not propagated.
     pub fn open() -> Result<Arc<Self>, String> {
-        Self::open_at(&paths::nuvio_store_path())
+        let path = paths::nuvio_store_path();
+        let maintained = if path.is_file() { Some(maintain(&path)) } else { None };
+        match maintained {
+            Some(Ok(report)) => log(&format!(
+                "nuvio: store maintenance {:.1} -> {:.1} MiB (expired {}, shed {}, compacted {})",
+                report.before as f64 / (1024.0 * 1024.0),
+                report.after as f64 / (1024.0 * 1024.0),
+                report.expired, report.shed, report.compacted,
+            )),
+            Some(Err(error)) => log(&format!("nuvio: store maintenance skipped: {error}")),
+            None => (),
+        }
+        Self::open_at(&path)
+    }
+
+    /// Keep the file's live cache footprint under budget while the app is running. redb reuses
+    /// freed pages, so removing rows here stops growth; only the boot pass can return the pages.
+    fn enforce_budget(&self) {
+        let Ok(len) = std::fs::metadata(&self.path).map(|m| m.len()) else { return };
+        if len <= self.budget { return; }
+        let expired = purge_expired(&self.db);
+        let after = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(len);
+        let shed = if after > self.budget { shed_oldest(&self.db, self.budget, after) } else { 0 };
+        if expired + shed > 0 {
+            log(&format!("nuvio: store over budget ({len} bytes), purged {expired} expired and shed {shed} cache rows"));
+        }
     }
 
     /// Fork Rofocale11: read a cached value that has not passed its TTL. The envelope is an
@@ -123,6 +167,7 @@ impl Store {
     }
 
     pub fn cache_put(&self, kind: NuvioCache, key: &str, ttl: Duration, value: &[u8]) -> Result<(), String> {
+        self.enforce_budget();
         let table = match kind {
             NuvioCache::Meta => Table::MetaCache,
             NuvioCache::Enrich => Table::EnrichCache,
@@ -171,6 +216,118 @@ impl Store {
             .map(|(k, v)| (k.value().to_string(), v.value().to_vec()))
             .collect()
     }
+}
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn expiry_of(value: &[u8]) -> Option<u64> {
+    let (head, _) = value.split_at_checked(8)?;
+    Some(u64::from_be_bytes(head.try_into().ok()?))
+}
+
+/// Remove TTL cache rows whose envelope has expired. `cache_get` only ignores them; this pass
+/// returns their pages to redb. Durable tables are never touched.
+fn purge_expired(db: &Database) -> usize {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64).unwrap_or(u64::MAX);
+    let mut removed = 0;
+    for table in CACHE_TABLES {
+        let Ok(write) = db.begin_write() else { continue };
+        let expired: Vec<String> = {
+            let Ok(t) = write.open_table(table.def()) else { continue };
+            let Ok(iter) = t.iter() else { continue };
+            iter.flatten().filter_map(|(k, v)| {
+                (expiry_of(v.value()).is_some_and(|e| now >= e)).then(|| k.value().to_string())
+            }).collect()
+        };
+        if expired.is_empty() { continue; }
+        if let Ok(mut t) = write.open_table(table.def()) {
+            for key in &expired { let _ = t.remove(key.as_str()); }
+        }
+        let _ = write.commit();
+        removed += expired.len();
+    }
+    removed
+}
+
+/// Oldest-first cache rows, ordered by expiry. Pure data collection, so the caller can decide
+/// how much to shed without holding a transaction open while it reads metadata.
+fn cache_rows(db: &Database) -> Vec<(u64, Table, String, usize)> {
+    let Ok(read) = db.begin_read() else { return Vec::new() };
+    let mut rows = Vec::new();
+    for table in CACHE_TABLES {
+        let Ok(t) = read.open_table(table.def()) else { continue };
+        let Ok(iter) = t.iter() else { continue };
+        for entry in iter.flatten() {
+            let (key, value) = entry;
+            let bytes = value.value();
+            rows.push((expiry_of(bytes).unwrap_or(0), table, key.value().to_string(), bytes.len()));
+        }
+    }
+    rows
+}
+
+/// Drop the oldest cache rows until the live cache footprint fits the budget. Expired rows were
+/// already removed by [`purge_expired`]; these are live but least recently useful entries.
+fn shed_oldest(db: &Database, budget: u64, len: u64) -> usize {
+    if len <= budget { return 0; }
+    let need = (len - budget) as usize;
+    let mut rows = cache_rows(db);
+    rows.sort_by_key(|row| row.0);
+    let mut keys: Vec<(Table, String)> = Vec::new();
+    let mut freed = 0usize;
+    for (_, table, key, bytes) in rows {
+        if freed >= need { break; }
+        freed += bytes;
+        keys.push((table, key));
+    }
+    let mut removed = 0;
+    for table in CACHE_TABLES {
+        let selected: Vec<&String> = keys.iter().filter(|(t, _)| *t == table).map(|(_, k)| k).collect();
+        if selected.is_empty() { continue; }
+        let Ok(write) = db.begin_write() else { continue };
+        if let Ok(mut t) = write.open_table(table.def()) {
+            for key in selected {
+                if t.remove(key.as_str()).is_ok() { removed += 1; }
+            }
+        }
+        let _ = write.commit();
+    }
+    removed
+}
+
+/// The result of a boot-time maintenance pass, for the log line and the tests.
+pub struct Maintenance {
+    pub before: u64,
+    pub after: u64,
+    pub expired: usize,
+    pub shed: usize,
+    pub compacted: bool,
+}
+
+/// Purge, shed and compact a store that is NOT yet open by this process. Called from [`Store::open`]
+/// before the file is installed, when no transactions or second handle can block compaction.
+pub fn maintain(path: &Path) -> Result<Maintenance, String> {
+    maintain_with_budget(path, BUDGET_BYTES)
+}
+
+fn maintain_with_budget(path: &Path, budget: u64) -> Result<Maintenance, String> {
+    let before = file_len(path);
+    let mut db = Database::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let expired = purge_expired(&db);
+    let shed = if file_len(path) > budget { shed_oldest(&db, budget, file_len(path)) } else { 0 };
+    let compacted = db.compact().unwrap_or(false);
+    drop(db);
+    let after = file_len(path);
+    if after > budget {
+        log(&format!(
+            "nuvio: store is {after} bytes after maintenance, above the {budget}-byte budget; \
+             durable records were kept intact"
+        ));
+    }
+    Ok(Maintenance { before, after, expired, shed, compacted })
 }
 
 /// Fork Rofocale11: drop every row of a table. The addon-set change invalidates the meta and
@@ -262,6 +419,58 @@ mod tests {
         store.cache_put(NuvioCache::Imdb, "movie:tt4", Duration::from_secs(60), b"first").unwrap();
         store.cache_put(NuvioCache::Imdb, "movie:tt4", Duration::from_secs(60), b"second").unwrap();
         assert_eq!(store.cache_get(NuvioCache::Imdb, "movie:tt4").unwrap(), b"second");
+    }
+
+    #[test]
+    fn expired_cache_rows_are_purged_but_durable_rows_survive() {
+        let dir = plx_base::testscratch::process_dir("nuvio-store-purge");
+        let path = dir.join("purge.redb");
+        let budget = 64 * 1024 * 1024;
+        let store = Store::open_at_with_budget(&path, budget).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        store.put(Table::MetaCache, "old", &(now - 10).to_be_bytes()).unwrap();
+        store.put(Table::MetaCache, "fresh", &(now + 600_000).to_be_bytes()).unwrap();
+        store.put(Table::ImdbTmdb, "movie:tt1", &603u64.to_be_bytes()).unwrap();
+        store.put(Table::AccountSession, "session", b"token").unwrap();
+        drop(store);
+
+        let report = maintain_with_budget(&path, budget).unwrap();
+        assert_eq!(report.expired, 1, "only the expired row should be purged");
+
+        let store = Store::open_at_with_budget(&path, budget).unwrap();
+        assert!(store.get(Table::MetaCache, "old").is_none());
+        assert!(store.get(Table::MetaCache, "fresh").is_some());
+        assert_eq!(store.get(Table::ImdbTmdb, "movie:tt1").unwrap(), 603u64.to_be_bytes());
+        assert_eq!(store.get(Table::AccountSession, "session").unwrap(), b"token");
+    }
+
+    #[test]
+    fn an_over_budget_store_is_shed_and_compacted_without_touching_durable_rows() {
+        const BUDGET: u64 = 2 * 1024 * 1024;
+        let dir = plx_base::testscratch::process_dir("nuvio-store-budget");
+        let path = dir.join("budget.redb");
+        let store = Store::open_at_with_budget(&path, BUDGET).unwrap();
+        let future = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 + 3_600_000;
+        let payload = vec![7u8; 512 * 1024];
+        for i in 0..8 {
+            let mut envelope = future.to_be_bytes().to_vec();
+            envelope.extend_from_slice(&payload);
+            store.put(Table::EnrichCache, &format!("movie:tt{i}"), &envelope).unwrap();
+        }
+        store.put(Table::ImdbTmdb, "movie:tt1", &603u64.to_be_bytes()).unwrap();
+        store.put(Table::Watch, "w1", b"watch").unwrap();
+        let before = file_len(&path);
+        assert!(before > BUDGET, "fixture should exceed the budget: {before}");
+        drop(store);
+
+        let report = maintain_with_budget(&path, BUDGET).unwrap();
+        assert!(report.shed > 0, "the oldest cache rows must be shed");
+        assert!(report.after < before, "compaction must return pages: {before} -> {}", report.after);
+        assert!(report.after <= BUDGET + 1024 * 1024, "still too large: {}", report.after);
+
+        let store = Store::open_at_with_budget(&path, BUDGET).unwrap();
+        assert_eq!(store.get(Table::ImdbTmdb, "movie:tt1").unwrap(), 603u64.to_be_bytes());
+        assert_eq!(store.get(Table::Watch, "w1").unwrap(), b"watch");
     }
 
     #[test]

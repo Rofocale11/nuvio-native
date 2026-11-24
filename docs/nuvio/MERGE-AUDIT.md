@@ -1142,3 +1142,21 @@ subtitle drill-down. Fixed without weakening any gate:
 
 Verified on the working tree: `make check` **146 steps — all ok**, `make check-nodef`,
 `git diff --check`, and a 32-bit ARM `make FLAVOR=debug` cross-build. No commit or deploy.
+
+## Redb recovery and size budget (2026-11-24)
+
+- **`os/src/storage/redb_backend.rs`** (fork-owned): the `get` RPC now validates an object's
+  `_kind`, `_id` and canonical state against the running app's flavour before serving it. An
+  unreadable record (a store copied across debug/stable, a wrong `state` flavour, corrupt JSON)
+  is moved to `<id>.rejected-<millis>` and read as missing, so `Backend` creates a fresh Cleared
+  state and sign-in works again. The rest of the file — addons, watch state, session, caches — is
+  untouched. This is the automatic, one-record version of deleting the whole file by hand.
+- **`nuvio-store/src/lib.rs`** (fork-owned): added a 50 MiB soft budget (`BUDGET_BYTES`). At boot,
+  `Store::open` purges expired TTL cache rows, sheds the oldest live cache rows if the file is
+  still over budget, then calls redb's `compact()` before the store is installed. `cache_put`
+  enforces the same budget during a run by purging/shedding cache rows; no file is ever
+  truncated. Durable tables (`ImdbTmdb`, `Watch`, `Keys`, `AccountSession`, `Addons`,
+  `InstallPrefs`) are never discarded to meet the budget — an over-budget store made only of
+  durable data is logged and left intact.
+- Tests: `plx_os` redb backend 6/6 (foreign kind, wrong flavour, valid record preserved),
+  `plx_nuvio_store` 6/6 (expired purge, over-budget shed/compact, durable rows survive).
