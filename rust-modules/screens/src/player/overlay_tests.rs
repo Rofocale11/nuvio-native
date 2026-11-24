@@ -1328,10 +1328,13 @@ fn the_player_panels_dim_through_the_container_in_the_neutral_dim_whatever_the_i
 }
 
 /// **A pointer click on a row activates THAT row** — the keys the panel registers as hit stops, the
-/// keys its `Focusable` places, and what `Activate(key)` spends all agree. The cursor is left on
-/// Off (never moved by a `FocusMoved`), so a click that still read the cursor would commit the
-/// wrong row; each stop is resolved at its own centre through the hit map the way the dispatcher
-/// does, then activated by the key the map returned.
+/// keys its `Focusable` places, and what `Activate(key)` spends all agree. The click target is a
+/// row other than the focused opener, so a click that still read the cursor would commit the wrong
+/// row; each stop is resolved at its own centre through the hit map the way the dispatcher does,
+/// then activated by the key the map returned.
+///
+/// Fork Rofocale11: two tracks of one language now collapse to ONE root row; the sibling is a
+/// direct pick on the Other languages page, so the click is exercised there.
 #[test]
 fn a_pointer_click_activates_the_row_it_hit_by_key() {
     use plx_ui::hit::HitMap;
@@ -1352,6 +1355,10 @@ fn a_pointer_click_activates_the_row_it_hit_by_key() {
         english_audio_with_subs(&ps, vec![sub(11, 0, "English", "eng"), sub(22, 1, "English", "eng")]),
     ))));
     let mut page = PlayerOverlayScreen::new(&ps, store.view(), ENTRY, OverlayKind::Tracks { tab: 1 });
+    // Fork Rofocale11: the drawn English track is the one root row; its sibling is folded into
+    // the Other languages drill-in, where it is a direct pick. Go there to click it.
+    open_row(&mut page, TrackRow::OpenOther);
+    assert_eq!(tracks_path(&page), [TrackPage::OtherLanguages]);
     let cx = cx();
     let mut f = DrawFrame::new(&cx, plx_ui::Painter::root());
     page.record_stops(&mut f);
@@ -1362,19 +1369,22 @@ fn a_pointer_click_activates_the_row_it_hit_by_key() {
 
     let Panel::Tracks(menu) = page.panel() else { panic!("Tracks panel") };
     let mut keys = menu.keys();
-    assert!(keys.contains(&TrackRow::Sub(1).key().0), "premise: both tracks are rows");
-    let mut stop_keys: Vec<u32> = stops.iter().map(|s| s.key.elem).collect();
+    assert!(keys.contains(&TrackRow::Sub(1).key().0), "premise: the second track is a direct pick here");
+    // Fork Rofocale11: the Other languages page has a title band with a pointer-only stop; compare
+    // the ROW stops, which are the ones the panel's focus keys cover.
+    let rows: Vec<_> = stops.iter().filter(|s| !plx_ui::page_stack::is_title_key(s.key.elem)).cloned().collect();
+    let mut stop_keys: Vec<u32> = rows.iter().map(|s| s.key.elem).collect();
     keys.sort_unstable();
     stop_keys.sort_unstable();
     assert_eq!(stop_keys, keys, "every focusable row registers exactly one stop, under its key");
-    for stop in &stops {
+    for stop in &rows {
         let (x, y) = (stop.rect.x + stop.rect.w / 2.0, stop.rect.y + stop.rect.h / 2.0);
         assert_eq!(map.top_at(x, y).map(|s| s.key.elem), Some(stop.key.elem), "the hit map resolves the row's centre");
         let placed = Focusable::<TestHost>::place(&page, &stop.key.elem, &cx, At::Drawn).expect("placed");
         assert_eq!((placed.rect.x, placed.rect.y), (stop.rect.x, stop.rect.y), "place and stop agree");
     }
 
-    // click the second English track (subs index 1) while the cursor still sits on Off
+    // click the second English track (subs index 1) while the cursor still sits on the opener
     let second = TrackRow::Sub(1).key().0;
     let (_, reqs, dismissed) = activate(&mut page, second);
     assert!(dismissed, "a track pick closes the panel");

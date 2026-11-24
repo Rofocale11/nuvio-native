@@ -15,10 +15,10 @@ because the overlay's state shape changed on purpose.
 
 ## Behaviour
 
-- **Subtitles root:** a Subtitles section (Off, Forced only, and the single-track languages), one section per
-  multi-track language of `yours`, an "Other languages N" row, then Timing (a value row, no
-  chevron; it hands off to the timing capsule) and Style. **Other languages:** one row per
-  language A-Z; a single-track language is a direct pick row, a multi-track one is a "French, 3
+- **Subtitles root:** a Subtitles section (Off, Forced only, and every "yours" language as ONE
+  row — the drawn track when a language has several), an "Other languages N" row, then Timing (a
+  value row, no chevron; it hands off to the timing capsule) and Style. **Other languages:** one row
+  per language A-Z; a single-track language is a direct pick row, a multi-track one is a "French, 3
   tracks" drill-in. **Language page:** Full / SDH / Forced / Commentary ranked, identical ones
   numbered. **Style:** Size, Position and Color drill into picker pages with checkmarks. When
   the host can run a subtitle search, the root ends with a **Search subtitles** row: its page
@@ -27,18 +27,25 @@ because the overlay's state shape changed on purpose.
   server lists the new stream the panel selects it and closes (`docs/pms-api.md` §8). A result
   the playing item already carries as a sidecar (same release name and language) reads "Added"
   and OK is inert, since adding it again would list one subtitle twice.
+
+<!-- Fork Rofocale11: the old fork (`~/dev/nuvio-native-old`, commits 9a58f217d and 2de0b4e94)
+     collapses a multi-track "yours" language to a single top-level row — the active track, else
+     the stream's `selected`, else the first — and folds its other variants into the Other
+     languages drill-in. Upstream's per-language inline sections are the flat list this replaces;
+     `sub_layout::sub_sections` takes `active_sub` so the promoted row follows a mid-play pick. -->
+
 - **Keys:** UP/DOWN move; OK or RIGHT on a Nav row pushes; on a sub-page LEFT/BACK pops and focus
   returns to the opener by semantic id; on the root LEFT/RIGHT switch tabs as before (RIGHT on a
   Nav row pushes instead); BACK on the root dismisses; clicking the "< TITLE" band pops. A track
   pick at any depth commits and dismisses; a Style pick commits and stays. The menu reopens at the
   root.
 - **Format badge (owner edit, 2026-10-01):** only image subtitles (PGS/VobSub) show one, a chip with the format's short name ("PGS", "VOBSUB", "DVB" for Plex's `hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`; `sub_layout::image_codec_badge`) that FOLLOWS the row's kind chip (SDH, Forced, External) instead of being outranked by it, so an SDH bitmap track still says what it is; text subtitles show no format, and the design board's "SRT" sub-lines are gone. A kind chip that only repeats the row's own label ("SDH" on the row called SDH) is still dropped; the format never is.
-- **Other languages row:** one Nav row on the root reading the language count (no "N languages" header accessory); when the active track lives behind it (a live change put it there) it reads a check and the track's language instead. On the page, a multi-track language that holds the active track reads a check and that variant ("SDH"), otherwise its track count.
+- **Other languages row:** one Nav row on the root reading the language count (no "N languages" header accessory); the count includes the unselected variants folded out of multi-track "yours" languages. When the active track lives behind it (a code-less or unrecognised language, or a live change) it reads a check and the track's language instead. On the page, a multi-track language that holds the active track reads a check and that variant ("SDH"), otherwise its track count.
 - **Page identity:** a language page is `TrackPage::Language(stream)`, its opener `TrackRow::OpenLang(LangId)`, where `stream` is the Plex stream id of the language's first track in the item's FULL list (`sub_layout::LangId`), never a list position: a track leaving mid-play shifts every index, and an index-keyed page would silently relabel to another language. `LangId` also carries a slot, the language's ordinal on the Other languages page, which only decides the row's focus key (re-derived on each build, so the key may move when a language arrives above it; equality ignores the slot). The page's data is `TrackMenuState::other`, refreshed from the same `sub_model` the root is built from; a page whose language is no longer listed (its first track's stream is gone) pops to the root.
 - **A language changing shape (one track <-> several):** on the Other languages page a single-track language is a direct pick row and a multi-track one a drill-in, so a language that grows or shrinks while the viewer is on its row gets the focus carried to its new row (`other_row_for`). A language page whose language drops to ONE track stays open and lists that track (a page lists whatever its language still offers; popping is the only shape change), and the pop lands on the language's now-direct row on Other languages.
 - **Harness `track:N`:** the N-th track in page order: the root's track rows, then the tracks behind Other languages A-Z, a multi-track language expanded into its ranked page. It commits by the track's own list index (`commit_sub_track`), not by focusing a row, so it reaches a track whose row is on a page that is not showing.
 - **Title band:** a larger gap under the "< TITLE" caption (`table::TITLE_GAP`) before its hairline.
-- **Why the root row shows the language and the variant is shown on the page:** when the active track lives behind Other languages, the root's row reads a check and that track's LANGUAGE ("French"), not the variant: a stacked variant on a row would read as a description of the row, and the variant ("SDH") is already answered one level down, where the language's drill-in on the page reads the check and the variant and its own page checks the track. An active track is behind that row in two ways. Normally its language is "yours" and it sits on the root, so the row reads the language count. But a CODELESS subtitle (no language code, grouped under "Unknown") and a track whose code names no language `lang_key` recognises are never added to "yours" (`overlay::subtitle_yours_langs` only adds codes `lang_key` accepts), so such a track opens behind Other languages even though it is the active one, and a live change can put any active track there too. In every such case the menu opens, and the live poll falls back, with focus on the Other languages row (the root's landing id is `TrackRow::OpenOther`), never on Off. `yours` stays the opening snapshot so groups do not reshuffle under the viewer.
+- **Why the root row shows the language and the variant is shown on the page:** when the active track lives behind Other languages, the root's row reads a check and that track's LANGUAGE ("French"), not the variant: a stacked variant on a row would read as a description of the row, and the variant ("SDH") is already answered one level down, where the language's drill-in on the page reads the check and the variant and its own page checks the track. An active track is behind that row in two ways. Fork Rofocale11: normally its language is "yours" and the drawn track is promoted to its single root row, so the Other languages row reads the language count, now including that language's folded variants. But a CODELESS subtitle (no language code, grouped under "Unknown") and a track whose code names no language `lang_key` recognises are never added to "yours" (`overlay::subtitle_yours_langs` only adds codes `lang_key` accepts), so such a track opens behind Other languages even though it is the active one, and a live change can put any active track there too. In every such case the menu opens, and the live poll falls back, with focus on the Other languages row (the root's landing id is `TrackRow::OpenOther`), never on Off. `yours` stays the opening snapshot so groups do not reshuffle under the viewer.
 
 ## Availability and locks
 

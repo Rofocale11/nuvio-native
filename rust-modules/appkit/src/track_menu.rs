@@ -2162,7 +2162,11 @@ impl TrackMenuState {
         let subs: &[metadata::Stream] = tracks(meta).map(|t| t.subs.as_slice()).unwrap_or(&[]);
         let offered = visible_subs(ps, meta);
         let names = plx_media::player::SHARED.track_names.lock().unwrap();
-        sub_layout::sub_sections(subs, &offered, &names, &self.yours, show_timing)
+        // Fork Rofocale11: the old fork's drill-down collapses a multi-track "yours" language to
+        // ONE row — the track actually drawn — and puts its siblings behind Other languages. Pass
+        // the live pick so that row follows a mid-play change instead of a fixed first track.
+        let active_sub = (self.active_sub >= 0).then(|| self.active_sub as usize);
+        sub_layout::sub_sections(subs, &offered, &names, &self.yours, show_timing, active_sub)
     }
 
     /// The [`TrackRow::Boost`]/[`TrackRow::Loudness`] pair's three inputs, read fresh
@@ -2855,7 +2859,9 @@ mod tests {
         offset_ms: i64,
     ) -> (Vec<Section>, Vec<Option<TrackRow>>) {
         let yours: Vec<String> = yours.iter().map(|y| y.to_string()).collect();
-        let model = sub_layout::sub_sections(subs, offered, names, &yours, show_timing);
+        // Fork Rofocale11: the drill-down's one row per language follows the active track.
+        let active = (active_sub >= 0).then(|| active_sub as usize);
+        let model = sub_layout::sub_sections(subs, offered, names, &yours, show_timing, active);
         let mut built = FormTable::new(plx_ui::table_screen::BAND_BASE);
         built.set(table_form(&model, active_sub, offset_ms, None, false, None), None);
         let ids = (0..built.table.n_rows() as usize).map(|i| built.id_at(i).copied()).collect();
@@ -2920,11 +2926,16 @@ mod tests {
         let names = TrackNames::new();
         let (sections, _targets) =
             sub_layout(&subs, &offered, &names, &["rus"], -1, true, 0);
-        let forced_row = sections[1]
-            .rows
+        assert_eq!(sections[0].rows.len(), 3, "Fork Rofocale11: Off, Forced only and ONE Russian row");
+        // Fork Rofocale11: the forced variant now lives one level down, on the language page.
+        let model = sub_layout::sub_sections(&subs, &offered, &names, &["rus".to_string()], true, None);
+        let forced = model.other[0]
+            .tracks
             .iter()
-            .find(|r| r.label == "Forced")
+            .find(|t| in_lang_label(t) == "Forced")
             .expect("a nameless forced track reads as its kind word");
+        let forced_row = in_lang_row(forced, -1);
+        assert_eq!(forced_row.label, "Forced");
         assert!(
             forced_row.badges.is_empty(),
             "the kind word already says Forced; the badge is dropped"
@@ -2943,8 +2954,14 @@ mod tests {
         let names = TrackNames::new();
         let (sections, _targets) =
             sub_layout(&subs, &offered, &names, &["rus"], -1, true, 0);
-        let labels: Vec<&str> = sections[1].rows.iter().map(|r| r.label.as_str()).collect();
-        assert_eq!(labels, ["iTunes \u{b7} Track 1", "iTunes \u{b7} Track 2"]);
+        // Fork Rofocale11: the first identical track is the one flat row, the second is a level
+        // down; both still get their ordinal, in their own page's vocabulary.
+        let root = &sections[0].rows[2];
+        assert_eq!(root.label, "Russian");
+        assert_eq!(root.detail, "iTunes \u{b7} Track 1");
+        let model = sub_layout::sub_sections(&subs, &offered, &names, &["rus".to_string()], true, None);
+        assert_eq!(model.other[0].tracks.len(), 1, "the other copy drills down");
+        assert_eq!(in_lang_label(&model.other[0].tracks[0]), "iTunes \u{b7} Track 2");
     }
 
     // ---- sub_layout: one badge per row, by priority --------------------------------------------
@@ -6165,9 +6182,17 @@ mod style_page_tests {
             subtitle_effect: SubtitleEffect::Sidecar,
             ..Default::default()
         });
-        let subs: Vec<_> = (0..40).map(|i| stream(999 + i, i, "English", "eng", &format!("Track {i}"))).collect();
+        // Fork Rofocale11: a collapsed multi-track language is one row, so 40 tracks of ONE
+        // language no longer push Style below the fold. Use 40 distinct "yours" languages to pin
+        // the same scroll-restore behavior at the new depth.
+        let codes: Vec<String> = (0..40).map(|i| format!("x{i}")).collect();
+        let subs: Vec<_> = codes
+            .iter()
+            .enumerate()
+            .map(|(i, code)| stream(999 + i as i64, i as i64, &format!("Language {i}"), code, &format!("Track {i}")))
+            .collect();
         let store = store_with(subs);
-        let mut menu = TrackMenuState::new(&ps, store.view(), 1, vec!["eng".to_string()]);
+        let mut menu = TrackMenuState::new(&ps, store.view(), 1, codes);
         focus_id(&mut menu, TrackRow::Style);
         for _ in 0..240 {
             menu.update(0.016, &plx_ui::fixture::FixtureMeasure, &ps, store.view());

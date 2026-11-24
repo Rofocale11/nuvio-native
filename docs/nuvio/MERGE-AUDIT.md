@@ -1081,3 +1081,35 @@ passed, `plx_nuvio_store` 4 passed, `plx_plex` 821 passed with the same three pr
 deploy: warm movie and series re-opens `ms=84…282`, `related_ms=5…233`, inside the ≤300 ms warm
 target; a title never seen before still paid one TMDB enrichment up front (`ms=1439…2061`), so the
 ≤800 ms cold target is not met on a first open. See `DETAIL-LATENCY.md` for the full run record.
+
+**Player Subtitles drill-down (2026-11-24), from `~/dev/nuvio-native-old` `nuvio-native` at
+`83339172d`.** The old fork's commits `9a58f217d` ("collapse multi-track subtitle expansion to one
+track per language") and `2de0b4e94` ("make popped-out subtitle track dynamic based on active
+selection") are the authoritative behavior: a multi-track "yours" language gets ONE root row —
+the drawn track, else the stream's `selected`, else the first — and its other variants are folded
+into the existing Other languages drill-in. This checkout had upstream's flat list (every variant
+expanded into its own inline section), so:
+
+- `rust-modules/data/src/metadata/sub_layout.rs` — `sub_sections` takes `active_sub: Option<usize>`,
+  keeps each bucket's `LangGroup`, promotes one `SubRow::Flat`, folds the rest into `other` and
+  re-sorts it. Inline `SubHeader::Language` / `SubRow::InLanguage` construction is retired (the
+  variants remain for the Other-languages language page). Reason: old-fork player behavior; the
+  flat expansion is a wall of tracks when an addon supplies many sidecars for one language.
+  The only boundary adaptation is the new `active_sub` argument; the fork's `ForcedOnly` row and
+  `plx_os` rename are preserved.
+- `rust-modules/appkit/src/track_menu.rs` — `TrackMenuState::sub_model` passes the live
+  `active_sub`, and its test helper does the same. Three upstream tests that assumed inline
+  expansion were re-pointed at the drill-down (root row plus language page) instead of ignored:
+  the nameless-forced label, the "Track N" ordinals and the scroll-restore premise (40 distinct
+  languages, since 40 tracks of one language now collapse to one row).
+- `rust-modules/screens/src/player/overlay_tests.rs` — the pointer-click test now opens the Other
+  languages page before clicking the second English track (the sibling is a direct pick there) and
+  compares ROW stops, not the page's pointer-only title-band stop. Reason: same collapsed shape.
+- `docs/player-submenus.md` — the root/opening-row prose now describes the collapse; the change is
+  marked with an inline HTML comment.
+
+Verified on the working tree: `plx_data` `metadata::sub_layout::tests` 14/14 (including a new
+test that pins active-track promotion, the `selected` fallback and the siblings moving down), the
+whole `plx_data` lib suite 1663/1663, `plx_appkit` 968/968, `plx_screens` 2343/2343 and
+`plxnative-modules` 1496/1496, `make check-nodef`, `git diff --check`, and a debug ARM
+`make FLAVOR=debug` cross-build (fresh 32-bit `pkg/plxnative` ELF). No commit, deploy or TV work.
