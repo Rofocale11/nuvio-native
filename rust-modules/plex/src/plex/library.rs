@@ -171,6 +171,27 @@ impl Client {
         self.get_json(&section_directory_path(section_key, directory, filters))
     }
 
+    /// Fork Rofocale11: the Nuvio shim scopes its filter-value directories (notably `/genre`) to a
+    /// named addon catalog. This spells the `type=`/`catalog=` terms through the same filter path
+    /// the grid uses, so the Filter menu always describes the catalog the grid is browsing.
+    /// The same directory scoped to one catalog; `None` keeps the server's default catalog.
+    pub fn section_directory_with_catalog(
+        &self,
+        section_key: i64,
+        directory: &str,
+        metadata_type: Option<i64>,
+        catalog: Option<&str>,
+    ) -> Option<MediaContainer> {
+        let mut filters = Vec::new();
+        if let Some(metadata_type) = metadata_type {
+            filters.push(("type".to_owned(), metadata_type.to_string()));
+        }
+        if let Some(catalog) = catalog.filter(|key| !key.is_empty()) {
+            filters.push(("catalog".to_owned(), catalog.to_owned()));
+        }
+        self.section_directory(section_key, directory, &filters)
+    }
+
     /// How many items of a section satisfy `terms`: one count-only read, `GET
     /// /library/sections/{key}/all?<terms>` with `X-Plex-Container-Start: 0` and `X-Plex-Container-Size:
     /// 0`, which answers no rows and the number as `totalSize`. `terms` are the wire terms in the

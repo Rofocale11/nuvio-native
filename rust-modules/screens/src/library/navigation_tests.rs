@@ -1,5 +1,6 @@
 //! Owned engine ports for requested kinds, source-row seating and document navigation.
 use super::*;
+use crate::library::tests::{test_catalogs, TEST_CATALOGS};
 use plx_ui::fixture::{FixtureArg, FixtureMeasure};
 use plx_ui::focus::{FocusEngine, Outcome};
 use plx_machine::machine::{Host, InputOwner, Tick};
@@ -38,27 +39,7 @@ impl LibraryLike for TestHost {
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> {
         cx.views.hubs
     }
-    /// The app's probe, in the one respect the header cares about: it answers for ANY section of
-    /// the directory the probe has learned (`collections_probe::count`, which the app warms for
-    /// every section when the directory lands), and only once a test has said the probe landed
-    /// ([`land_collections`]). A section the test has not landed is the probe that has not answered
-    /// yet: `None`, whichever library the row names.
-    fn collections_count(cx: &Cx<'_, Self>, section: usize) -> Option<Result<u32, crate::registry::Forbidden>> {
-        let key = u32::try_from(cx.views.directory.sections().get(section)?.key).ok()?;
-        COLLECTION_ANSWERS.with(|answers| answers.borrow().iter().find(|(seen, _)| *seen == key).map(|(_, answer)| *answer))
-    }
-}
-thread_local! {
-    /// What the fixture's collections probe has learned, by section key.
-    static COLLECTION_ANSWERS: std::cell::RefCell<Vec<(u32, Result<u32, crate::registry::Forbidden>)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-/// The fixture's probe for section `key` returns: `Ok(0)` / `Err` hide the control, `Ok(n)` counts.
-fn land_collections(key: u32, answer: Result<u32, crate::registry::Forbidden>) {
-    COLLECTION_ANSWERS.with(|answers| {
-        let mut answers = answers.borrow_mut();
-        answers.retain(|(seen, _)| *seen != key);
-        answers.push((key, answer));
-    });
+    // Fork Rofocale11: the collections probe is gone; the catalogs come on the published listing.
 }
 const ENTRY: EntryId = EntryId(81);
 const OWNER: InputOwner = InputOwner::Entry(ENTRY);
@@ -147,7 +128,10 @@ impl Fixture {
                 ("Z".into(), items as i64 - items as i64 / 2),
             ],
         )
-        .with_section(self.epoch, current as i64 + 1);
+        .with_section(self.epoch, current as i64 + 1)
+        // Fork Rofocale11: every section of this fixture advertises the same catalogs, so the
+        // Catalogs control is on the row from the first sync of every library.
+        .with_catalogs(test_catalogs(), Some(TEST_CATALOGS[0].0));
     }
     fn cx(&self, engine: &FocusEngine<u32>) -> Cx<'_, TestHost> {
         Cx {
@@ -285,25 +269,17 @@ fn shows_requested_before_discovery_stays_loading_and_never_fetches_the_foreign_
 }
 
 #[test]
-fn an_external_sources_selection_reseats_the_library_row_once_not_on_metadata_refresh() {
+fn an_external_library_selection_reseats_the_library_row_once_not_on_metadata_refresh() {
     let _guard = plx_base::testlock::serial();
     let mut fixture = Fixture::new(12, 12, 0);
     let mut page = fixture.screen();
     page.initial = false;
     let mut engine = FocusEngine::new();
-    assert!(
-        page.libraries.iter().any(|(elem, _)| *elem == MORE),
-        "the fixture must have actual overflow"
-    );
-    engine.set(OWNER, page.key(MORE), Some(LIBRARY_GROUP), By::Restore);
-    let effects = fixture.step(&mut page, &mut engine, ScreenEvent::Activate(MORE));
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        AppFx::Library(LibraryReq::Menu {
-            kind: crate::registry::LibraryMenuKind::Sources,
-            ..
-        })
-    )));
+    assert!(!page.folded.is_empty(), "the fixture must have actual overflow");
+    // Fork Rofocale11: the Sources menu had no header opener after the options pill was removed;
+    // the same external selection arrives directly as an addressed `LibrarySelect`.
+    let last = page.libraries.last().unwrap().0;
+    engine.set(OWNER, page.key(last), Some(LIBRARY_GROUP), By::Restore);
     let target = SectionAddress {
         epoch: fixture.epoch,
         sid: plx_plex::plex::ServerId::UNSET,
@@ -353,7 +329,7 @@ fn an_external_sources_selection_reseats_the_library_row_once_not_on_metadata_re
         Some(wanted),
         "the row must seat the library selected in Sources"
     );
-    engine.set(OWNER, page.key(MORE), Some(LIBRARY_GROUP), By::Dir);
+    engine.set(OWNER, page.key(last), Some(LIBRARY_GROUP), By::Dir);
     fixture.publish(2, 24);
     fixture.step(
         &mut page,
@@ -370,7 +346,7 @@ fn an_external_sources_selection_reseats_the_library_row_once_not_on_metadata_re
     );
     assert_eq!(
         engine.current(OWNER),
-        Some(page.key(MORE)),
+        Some(page.key(last)),
         "same-selection refresh must not leash the cursor"
     );
 }
@@ -385,8 +361,9 @@ fn choosing_a_non_favorite_seats_its_temporary_pill_without_changing_shortcuts()
     page.initial = false;
     let before = page.libraries.clone();
     let mut engine = FocusEngine::new();
-    engine.set(OWNER, page.key(MORE), Some(LIBRARY_GROUP), By::Restore);
-    engine.remember_projected(ENTRY, LIBRARY_GROUP, before[0].0);
+    let fixed = before[0].0;
+    engine.set(OWNER, page.key(fixed), Some(LIBRARY_GROUP), By::Restore);
+    engine.remember_projected(ENTRY, LIBRARY_GROUP, fixed);
     fixture.step(&mut page, &mut engine, ScreenEvent::App(AppMsg::LibrarySelect(SectionAddress {
         epoch: fixture.epoch, sid: plx_plex::plex::ServerId::UNSET, section: 3,
     })));

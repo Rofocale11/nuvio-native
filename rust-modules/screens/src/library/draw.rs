@@ -12,6 +12,16 @@ fn layers(mut visit: impl FnMut(Layer)) {
     for layer in [Layer::Grid, Layer::Document, Layer::Rail] { visit(layer); }
 }
 
+/// The capsule's leading run: the library's whole name, its owner when shared, and the catalog in
+/// force when the section advertised one. One place spells the separators so the name the header
+/// names and the name the capsule names cannot drift apart.
+pub(super) fn capsule_words(title: &str, owner: &str, server: &str, catalog: &str) -> String {
+    let mut name = super::toolbar::joined_name(title, owner);
+    if !server.is_empty() { name = format!("{name} · {server}"); }
+    if !catalog.is_empty() { name = format!("{name} · {catalog}"); }
+    name
+}
+
 /// Reject a whole control band before creating labels or measuring individual pills. The
 /// full-width envelope preserves travelling capsules; shared cast tokens cover their shadows.
 /// It is deliberately wider than the controls, so no text metrics are needed to reject it.
@@ -115,10 +125,10 @@ impl LibraryScreen {
         // first because the fade reaches through it (`scroll_capsule::fade_reach`).
         let tuck = self.handoff.tuck();
         let capsule = self.handoff.capsule();
-        // The capsule carries the sort: the criterion the header's control shows, a queued edit
-        // included. Its strings are kept while they stand (`CapsuleText`), and it is measured once
-        // here (`Capsule::new`): the fade reads its rectangle and the capsule draws from the same
-        // measured runs.
+        // The capsule names the place the rows are drawn from: the library, the catalog in force,
+        // the count, then the sort and the active filter. Its strings are kept while they stand
+        // (`CapsuleText`), and it is measured once here (`Capsule::new`): the fade reads its
+        // rectangle and the capsule draws from the same measured runs.
         let name = (capsule > 0.0 && self.capsule_wanted())
             .then(|| self.view_section(f.cx).map(|index| {
                 let (title, owner) = self.library_name(index, f.cx);
@@ -131,14 +141,27 @@ impl LibraryScreen {
                 (title, owner, server)
             }))
             .flatten();
-        let sort = name.map(|_| self.sort_value(f.cx));
+        // Fork Rofocale11: a catalog and a genre/unwatched filter are part of what the reader is
+        // looking at, so the capsule names them beside the library and the criterion it already
+        // carried. Both are read from the same published listing the grid draws.
+        let catalog = name.as_ref().and_then(|_| self.current_catalog(f.cx)).unwrap_or_default();
+        let filter = name.as_ref().and_then(|_| self.filter_value(f.cx));
+        let criterion = name.as_ref().map(|_| {
+            let sort = self.sort_value(f.cx);
+            match filter.as_deref().filter(|filter| !filter.is_empty()) {
+                Some(filter) => format!("{sort} · {filter}"),
+                None => sort.to_owned(),
+            }
+        });
         let total = H::listing(f.cx).total();
-        // The name is made of the two borrowed pieces and keyed on them: no string is put together
-        // on a frame that changes none of them.
-        let strings = name.map(|(title, owner, server)| self.capsule_text.get_keyed(&[title, owner, server], || {
-            let name = super::toolbar::joined_name(title, owner);
-            if server.is_empty() { name } else { format!("{name} · {server}") }
-        }, total, sort));
+        // The name is keyed on the pieces it is made of: no string is put together on a frame that
+        // changes none of them. The catalog is one of those pieces; the sort and filter are keyed
+        // by the criterion `get_keyed` compares against.
+        let strings = name.map(|(title, owner, server)| self.capsule_text.get_keyed(
+            &[title, owner, server, catalog.as_str()],
+            || capsule_words(title, owner, server, &catalog),
+            total, criterion.as_deref(),
+        ));
         let worn = strings.map(|(name, count, criterion)| plx_ui::scroll_capsule::Capsule::new(name, count, criterion, f.measure));
         if tuck > 0.0 {
             let ground = self.ground.sample(Rect::FULL, SCR_W * 0.5, 0.0);

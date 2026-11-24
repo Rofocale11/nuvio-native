@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! Source reachability/probe-state plumbing, discovery-spawn backoff, and the
 //! optimistic watched-edit fanout.
 
@@ -368,7 +370,7 @@ fn a_stale_failure_landing_does_not_blame_the_current_query() {
         items: Vec::new(),
         total: -1,
         sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true);
     let _outcome = browse.pump();

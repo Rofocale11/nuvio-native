@@ -97,7 +97,6 @@ pub(crate) mod bridge;
 pub(crate) mod platform;
 mod runtime_owners;
 pub(crate) mod chrome;
-mod collections_probe;
 pub(crate) mod content;
 pub(crate) mod deeplink;
 pub(crate) mod reread;

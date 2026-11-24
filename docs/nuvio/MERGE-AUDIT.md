@@ -1324,3 +1324,62 @@ keeps its existing inline `Fork Rofocale11:` marker. Corrections made:
   https://github.com/Rofocale11/nuvio-native, authoritative old fork
   https://github.com/Rofocale11/nuvio-native-old (`nuvio-native` branch). Commit ids are kept
   because they identify the exact revisions; folder paths can be deleted at any time.
+
+## Library header: Catalogs replaces the fabricated Collections count (current status)
+
+The Movies/TV Shows header no longer shows a "Collections · N" control or the "…" library-options
+pill. Both came from upstream Plex vocabulary this fork cannot honour: the app's Collections probe
+counted cached TMDB rows plus a page-size hint (a number the shim never actually knew), and the
+ellipsis offered library management for a Plex library this fork has no server for. The slot now
+holds a **Catalogs** selector over the section's addon catalogs, which our own shim exposes as
+`Meta.Type` `catalogKey`; it is tab-dependent for free (movie catalogs on Movies, show catalogs on
+TV Shows). The Collections page itself is kept and still works by command, restored view or script.
+The authoritative change is old fork commit `e93158f16`, adapted to this tree's current APIs.
+
+Upstream seams touched (each reconciliation point for the next merge):
+
+- `plx_plex` library / `MetaType` plumbing and `plx_stremio` shim — the catalog key is a `Meta.Type`
+  `catalogKey`, not a Plex collection count.
+- `plx_data` browse — the store now supplies the section's catalog entries and the active catalog
+  to the header; the old probe's request/answer has no source here. The catalog's parse, landing,
+  validation and wire filter live in the fork-owned child module `browse/catalog.rs`; upstream
+  `browse/mod.rs` changes only by `mod catalog;`, the `CatalogEntry` re-export, two fields in
+  `SecState`, the call sites and the mechanical `catalogs: None` struct literals.
+- `plx_screens` `library/{header,toolbar,menu,mod}.rs` and `registry.rs` — the header's first stop
+  is Catalogs (label alone; the menu's check marks the catalog in force), Recommended follows, the
+  ellipsis menu is gone, and `LibraryLike::collections_count` no longer exists.
+- `rust-modules/src/app` — `collections_probe.rs` deleted with its `mod` declaration, the
+  `LibraryLike` implementation and its per-directory warm calls in `bridge.rs`, and the `collections`
+  visual-facts field in `plex_visual_inputs.rs`. The route rig now seeds the section's catalogs and
+  pushes the Collections page by command; the test whose only premise was the fabricated count is
+  gone (Catalogs visibility/label is asserted in the screens tier).
+
+#### Scrolled capsule addendum
+
+The same Catalogs change also makes the scrolled capsule name what the rows on screen are: the
+library, the catalog in force, the count, the sort and the active filter (for example
+`Films · Netflix Movies 115 · Popularity · Horror`). The criterion gained a filter word through
+`LibraryScreen::filter_value` in `screens/src/library/header.rs`, and the capsule's leading run is
+built by `capsule_words` in `screens/src/library/draw.rs`; `CapsuleText::get_keyed` now keys on the
+catalog as well. Both files are upstream-owned and carry inline `Fork Rofocale11:` markers, as do
+the two tests (`scroll_chrome_tests.rs`, `header_tests.rs`) that pin the new text and its rebuild
+rule. The shared capsule painter in `plx_ui` was not changed.
+
+### Non-commentable edits recorded here (docs-only agents notes)
+
+- **`locales/*/library_header.json` (12 files)** — `library_header.collections` replaced by
+  `library_header.catalogs`. Values for `be`, `de`, `es`, `fr`, `hu`, `it` and `pt` are copied
+  verbatim from the old fork's catalogs key; English carries the old fork's exact value and
+  translator description. `ca`, `nl`, `pl` and `ru` were not in the old fork's catalog at that
+  revision, so they use the English fallback `Catalogs` (the en description is the source text).
+  JSON cannot carry a `Fork Rofocale11:` marker.
+- **`rust-modules/screens/src/CLAUDE.md`** — the Library-header prose no longer says the right
+  cluster holds "Collections › and Recommended ›" or that library navigation lives in an ellipsis
+  menu; it now describes Catalogs/Recommended on the left, no ellipsis, and command-only access to
+  the Collections page. This Markdown prose has no comment syntax, so the fork reason is recorded
+  here.
+- **`docs/nuvio/FEATURE.md`** is not present in this checkout, so the old fork's new "Catalogs
+  control" feature paragraph has nowhere to land; if the file is reintroduced, port that paragraph
+  from `e93158f16`.
+- `docs/nuvio/ARCHITECTURE.md` makes no claim this change contradicts (its "Catalogs → PMS library
+  sections" line remains true); `docs/nuvio/AGENTS.md` needed no edit.

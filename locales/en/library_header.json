@@ -1,7 +1,7 @@
 {
-  "library_header.collections": {
-    "value": "Collections",
-    "description": "Library header control: opens the library's collections page. A count follows it after a middle dot once known (Collections · 12), so keep it to one short word."
+  "library_header.catalogs": {
+    "value": "Catalogs",
+    "description": "Library header control: opens the menu of addon catalogs this library can list (Netflix Movies, Top Rated, ...). It is the label alone \u2014 the menu\u2019s check marks the catalog in force \u2014 so keep it to one short word."
   },
   "library_header.recommended": {
     "value": "Recommended",

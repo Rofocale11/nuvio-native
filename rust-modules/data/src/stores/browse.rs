@@ -475,6 +475,16 @@ impl BrowseStore {
         crate::browse::seed_items_for_owner_test(&mut self.state, count);
     }
 
+    /// Fork Rofocale11: seed the catalogs the header dropdown lists and the one currently in force.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_catalogs_for_test(
+        &mut self,
+        catalogs: Vec<crate::browse::CatalogEntry>,
+        shown: Option<&str>,
+    ) {
+        crate::browse::seed_catalogs_for_owner_test(&mut self.state, catalogs, shown);
+    }
+
     /// [`seed_items_for_test`](Self::seed_items_for_test) with `count` collections: the listing a
     /// section answers on `type=18`.
     #[cfg(any(test, feature = "test-support"))]
@@ -751,6 +761,8 @@ pub enum QueryEdit {
     Unwatched(bool),
     Genre(Option<String>),
     LibraryType(LibraryType),
+    /// Fork Rofocale11: the Catalogs dropdown's choice. `None` resets to the server's default.
+    Catalog(Option<String>),
 }
 
 #[derive(Clone, Debug)]

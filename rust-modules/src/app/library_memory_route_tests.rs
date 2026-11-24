@@ -57,7 +57,10 @@ fn collections_restores_from_saved_preferences_for_the_same_profile() {
     let key = sections[0].key;
     assert_eq!(sections[FILM_CLUB].key, key, "both fixture servers use this PMS key");
     let collections = AppArg::LibraryCollections { section: u32::try_from(key).unwrap() };
-    w.open_from_header(8, collections.clone());
+    // Fork Rofocale11: the Collections page has no header control any more (Catalogs took the
+    // slot), so push it by command to keep the durable-view assertion.
+    w.open_collections();
+    assert!(w.d.top_arg() == Some(&collections), "premise: the Collections page is up");
     super::nav_tab(&mut w.d, &mut w.bridge.bridge(), HomeTab::Shows, None, None);
     w.frames(90);
     plx_base::storage_worker::drain_for_test();
@@ -136,7 +139,7 @@ fn the_collections_page_repays_its_loan_on_back_and_asks_again_for_the_library_s
     assert_eq!(listed(&w), (LibraryType::Primary, Some(film_club)), "premise: the switch landed on Film Club's films");
 
     // Its Collections page asks for ITS collections, not the ones the first library was lent.
-    w.open_from_header(8, AppArg::LibraryCollections { section: FILM_CLUB as u32 });
+    w.open_collections();
     w.frames(60);
     assert_eq!(listed(&w), (LibraryType::Collections, Some(film_club)), "the page asked again, for the library switched to");
 }

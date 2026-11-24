@@ -1,5 +1,6 @@
 //! A registered Library menu surface. Navigation owns its lifetime, phase, and input scope.
-use plx_data::browse::{LibraryType, GenreEntry, SecKind, SortEntry, SrcGroup, SrcRow};
+// Fork Rofocale11: `CatalogEntry` is the Type menu's row when the section advertised catalogs.
+use plx_data::browse::{CatalogEntry, LibraryType, GenreEntry, SecKind, SortEntry, SrcGroup, SrcRow};
 use crate::registry::{AppFx, AppMsg, LibraryLike, LibraryMenuArg, LibraryMenuKind};
 use plx_data::stores::browse::{BrowseCmd, DirectoryView, LibraryWork, QueryEdit, SectionAddress};
 use plx_data::stores::{StoreCmd, StoreId};
@@ -325,6 +326,9 @@ fn listing_kind(
 }
 
 /// The TYPE menu: every [`LibraryType`] the section's kind offers, the current one checked.
+/// Fork Rofocale11: only a section with no catalogs falls back to this; the catalog menu is
+/// [`type_draft_with_catalogs`]. Kept for those sections and for the menu's own tests.
+#[cfg(test)]
 fn type_draft(section_kind: SecKind, current: LibraryType) -> MenuDraft {
     let mut stamp = Stamp::default();
     let mut selected = None;
@@ -352,6 +356,65 @@ fn type_section(title: &str, section_kind: SecKind, current: LibraryType, offere
     stamp.tag(u8::from(section_kind == SecKind::Show));
     stamp.u32(current.code());
     section
+}
+
+/// The CATALOGS menu: one row per addon catalog the section advertised, the one in force checked,
+/// each pick a `QueryEdit::Catalog`. A section that advertised none gets the plain type list above
+/// instead — there is no empty catalog menu. No Collections row is offered: the owner chose to
+/// drop that entry point (the page still exists by command, restored view or script).
+// Fork Rofocale11: the old fork's `type_draft_with_catalogs`, adapted to this crate's i18n.
+fn type_draft_with_catalogs(
+    section_kind: SecKind,
+    current: LibraryType,
+    catalogs: &[CatalogEntry],
+    selected_catalog: Option<&str>,
+) -> MenuDraft {
+    let title = if catalogs.is_empty() {
+        plx_os::i18n::msg::browse_library_filter_by()
+    } else {
+        plx_os::i18n::msg::library_header_catalogs()
+    };
+    let mut section = MenuSection::new(title);
+    let mut selected = None;
+    let mut stamp = Stamp::default();
+    stamp.tag(13);
+    stamp.tag(u8::from(section_kind == SecKind::Show));
+    if catalogs.is_empty() {
+        stamp.u32(current.code());
+        for &kind in LibraryType::offered(section_kind) {
+            let identity = format!("type:{}", kind.code());
+            if kind == current { selected = Some(identity.clone()); }
+            section = choice(
+                section,
+                identity,
+                Action::Edit(QueryEdit::LibraryType(kind)),
+                Row::new(kind.title(section_kind)).checked(kind == current),
+            );
+        }
+    } else {
+        stamp.tag(1);
+        for catalog in catalogs {
+            stamp.str(&catalog.key);
+            stamp.str(&catalog.title);
+        }
+        let active = selected_catalog
+            .and_then(|key| catalogs.iter().find(|catalog| catalog.key == key))
+            .or_else(|| catalogs.iter().find(|catalog| catalog.active))
+            .or_else(|| catalogs.first());
+        stamp.str(active.map_or("", |catalog| catalog.key.as_str()));
+        for catalog in catalogs {
+            let identity = format!("catalog:{}", catalog.key);
+            let checked = active.is_some_and(|active| active.key == catalog.key);
+            if checked { selected = Some(identity.clone()); }
+            section = choice(
+                section,
+                identity,
+                Action::Edit(QueryEdit::Catalog(Some(catalog.key.clone()))),
+                Row::new(catalog.title.clone()).checked(checked),
+            );
+        }
+    }
+    MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
 }
 
 fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: bool) -> MenuDraft {
@@ -590,7 +653,13 @@ impl LibraryMenu {
         };
         let mut section = MenuSection::new(title);
         match self.kind {
-            LibraryMenuKind::Type => return type_draft(listing_kind(listing, directory), listing.library_type()),
+            // Fork Rofocale11: the Type menu is the section's catalog selector when it has any.
+            LibraryMenuKind::Type => return type_draft_with_catalogs(
+                listing_kind(listing, directory),
+                listing.library_type(),
+                listing.catalogs(),
+                listing.catalog(),
+            ),
             LibraryMenuKind::Sort => {
                 return sort_draft(listing.sorts(), listing.sort_index(), listing.sort_desc());
             }
@@ -861,7 +930,8 @@ impl<H: LibraryLike> Focusable<H> for LibraryMenu {
 /// row's words): the rows that are one of a kind are their word (`recheck`, `favourites`,
 /// `unwatched`, and the Filter page's `genre` drill-in); a row of a list is `<list>.<n>`, `n` its
 /// place among the rows of that list on the page now: `library.<n>` for the Sources list, `sort.<n>`,
-/// `type.<n>`, and `genre.<n>` on the Genre page, whose *All genres* row is `genre.all`. The
+/// `type.<n>`, `catalog.<n>` for the Catalogs menu, and `genre.<n>` on the Genre page, whose *All
+/// genres* row is `genre.all`. The
 /// identities of those lists carry a server's text (a sort key, a genre id, a library's address), which
 /// an id never holds, so their place is their name. An identity this does not know is `row.<n>`.
 fn row_path(form: &MenuTable, id: &String) -> A11yPath {
@@ -885,6 +955,8 @@ fn row_path(form: &MenuTable, id: &String) -> A11yPath {
         "sort" => ("sort", "sort:"),
         "type" => ("type", "type:"),
         "genre" => ("genre", "genre:"),
+        // Fork Rofocale11: a catalog row is named by its place, never by the addon's key/title.
+        "catalog" => ("catalog", "catalog:"),
         _ => return unknown(),
     };
     // the rows of this list above this one (the Genre page's *All genres* row is named, not counted)
@@ -1324,6 +1396,35 @@ impl LibraryLike for HostFixture {
         // The same checked row names a different menu in the other kind of library.
         assert_ne!(type_draft(SecKind::Movie, LibraryType::Collections).stamp,
             lay(type_draft(SecKind::Show, LibraryType::Collections)).stamp);
+    }
+
+    /// Fork Rofocale11: the catalog menu lists the section's catalogs, checks the catalog in force,
+    /// and binds every pick to a `QueryEdit::Catalog`. It never offers the Collections page: that
+    /// entry point was dropped with the fabricated count control.
+    #[test]
+    fn the_catalogs_menu_lists_catalogs_checks_the_active_one_and_picks_an_edit() {
+        use crate::library::tests::{test_catalogs, TEST_CATALOGS};
+        let catalogs = test_catalogs();
+        let draft = lay(type_draft_with_catalogs(SecKind::Movie, LibraryType::Primary, &catalogs,
+            Some(TEST_CATALOGS[1].0)));
+        assert_eq!(draft.sections[0].header, plx_os::i18n::msg::library_header_catalogs());
+        assert_eq!(draft.sections[0].rows.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(),
+            catalogs.iter().map(|catalog| catalog.title.as_str()).collect::<Vec<_>>());
+        assert_eq!(draft.sections[0].rows.iter().filter(|row| row.checked).count(), 1);
+        assert!(draft.sections[0].rows[1].checked, "the named catalog is checked");
+        assert_eq!(draft.selected, 1);
+        for (i, row) in draft.rows.iter().enumerate() {
+            assert!(matches!(&row.1, Action::Edit(QueryEdit::Catalog(Some(key)))
+                if key == &catalogs[i].key));
+        }
+        // A section that advertised none keeps the plain type list, with no Collections row.
+        let plain = lay(type_draft_with_catalogs(SecKind::Movie, LibraryType::Primary, &[], None));
+        assert_eq!(plain.sections[0].header, plx_os::i18n::msg::browse_library_filter_by());
+        assert_eq!(plain.sections[0].rows.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(),
+            ["Movies", "Collections"]);
+        // The active flag is the fallback when no key is in force yet.
+        let flagged = lay(type_draft_with_catalogs(SecKind::Movie, LibraryType::Primary, &catalogs, None));
+        assert_eq!(flagged.selected, 0);
     }
 
     #[test]

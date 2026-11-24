@@ -4,6 +4,7 @@
 //! private rect and scale helpers the screens' own tests read. One `Harness` drives either card
 //! set; `Set` says which, and the other screen stays idle.
 use super::*;
+use crate::library::tests::{test_catalogs, TEST_CATALOGS};
 use plx_machine::machine::{FocusRead, Host, InputOwner, PressRead, Tick};
 use plx_ui::cards::conformance::{CardHarness, Landing, Nb};
 use plx_ui::fixture::{FixtureArg, FixtureMeasure};
@@ -70,6 +71,9 @@ fn listing_of(rks: &[String]) -> plx_data::stores::browse::ListingSnapshot {
     plx_data::browse::view::ListingSnapshot::fixture(sid,
         rks.iter().map(|rk| Some(plx_data::pms::PmsMovie { sid, rk: rk.clone(), title: rk.clone(), ..Default::default() })).collect(),
         vec![("A".into(), rks.len() as i64)])
+        // Fork Rofocale11: the conformance harness's row carries the Catalogs control, not the
+        // withdrawn library-options pill.
+        .with_catalogs(test_catalogs(), Some(TEST_CATALOGS[0].0))
 }
 
 impl Harness {
@@ -517,7 +521,7 @@ pub(crate) fn library_conforms() -> plx_ui::a11y::Namespaces {
         let find = |text: &str| Focusable::<LibHost>::a11y_find(screen, &rel(text), &cx);
         assert_eq!(find("header.sort"), Some(SORTFILTER));
         assert_eq!(find("header.recommended"), Some(RECOMMENDED));
-        assert_eq!(find("header.libraries"), Some(MORE));
+        assert_eq!(find("header.catalogs"), Some(CATALOGS));
         for i in 0..5 {
             let elem = find(&format!("grid.card.{i}")).unwrap_or_else(|| panic!("card {i} resolves"));
             assert_eq!(Some(elem), screen.pair.detail.elem_at(i));

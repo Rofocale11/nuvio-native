@@ -33,6 +33,9 @@ struct ListingData {
     items: SecItems,
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
+    // Fork Rofocale11: the shim's catalogs and the one in force, published for the header dropdown.
+    catalogs: Arc<Vec<super::CatalogEntry>>,
+    catalog: Option<String>,
     letters: Arc<Vec<(String, i64)>>,
     /// Do `letters` describe the listing the query now asks for ([`super::SecState::letters_current`])?
     letters_current: bool,
@@ -76,6 +79,20 @@ impl ListingSnapshot {
     pub fn with_membership_stale(mut self) -> Self {
         if let Some(data) = &mut self.data {
             data.membership_stale = true;
+        }
+        self
+    }
+
+    /// The section's advertised catalogs and the one in force: fixture input for the Library
+    /// header's Catalogs control and its menu. A snapshot with none is a section that
+    /// advertised none.
+    // Fork Rofocale11: the shim exposes addon catalogs as Meta.Type entries; the old PMS
+    // Collections count this replaced had no value in the backend.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_catalogs(mut self, catalogs: Vec<super::CatalogEntry>, current: Option<&str>) -> Self {
+        if let Some(data) = &mut self.data {
+            data.catalogs = Arc::new(catalogs);
+            data.catalog = current.map(str::to_owned);
         }
         self
     }
@@ -217,6 +234,8 @@ impl ListingSnapshot {
                     default_desc: false,
                 }]),
                 genres: Arc::new(Vec::new()),
+                catalogs: Arc::new(Vec::new()),
+                catalog: None,
                 letters: Arc::new(letters),
                 letters_current: true,
                 bands: None,
@@ -291,6 +310,15 @@ impl<'a> ListingView<'a> {
     }
     pub fn genres(self) -> &'a [GenreEntry] {
         self.0.data.as_ref().map_or(&[], |s| s.genres.as_slice())
+    }
+    /// Fork Rofocale11: server-advertised catalogs for this section. Empty means the caller falls
+    /// back to the client's hardcoded `LibraryType` menu.
+    pub fn catalogs(self) -> &'a [super::CatalogEntry] {
+        self.0.data.as_ref().map_or(&[], |s| s.catalogs.as_slice())
+    }
+    /// The catalog in force, `None` for the server's default.
+    pub fn catalog(self) -> Option<&'a str> {
+        self.0.data.as_ref()?.catalog.as_deref()
     }
     /// The per-letter counts of THIS listing: empty while the list on hand was counted under other
     /// terms than the grid has now (or none has landed), so a stale list can never size a jump.
@@ -426,6 +454,8 @@ impl super::BrowseState {
                     items: state.items.clone(),
                     sorts: state.sorts.clone(),
                     genres: state.genres.clone(),
+                    catalogs: state.catalogs.clone(),
+                    catalog: state.catalog.clone(),
                     letters: state.shown_letters().unwrap_or(&state.letters).clone(),
                     letters_current: state.letters_current(),
                     bands: kind.and_then(|kind| state.shown_bands(kind)).cloned(),

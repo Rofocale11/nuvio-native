@@ -1,57 +1,43 @@
-//! The header row's elements: the page's controls, the Collections control's state, and which
-//! library the row names. The row's declaration is `header.rs`; its geometry, paint and motion are
-//! `plx_ui::page_header`.
+//! The header row's elements: the page's controls and which library the row names. The row's
+//! declaration is `header.rs`; its geometry, paint and motion are `plx_ui::page_header`.
 use super::*;
 
 /// The header's controls. Their ids sit beside the other page controls (`SORT`, `FILTER`, ...).
-pub(super) const COLLECTIONS: u32 = 8;
+// Fork Rofocale11: the fabricated "Collections · N" control is gone (the shim has no collections
+// count); its slot on the left of the row is the section's addon-catalog selector.
+pub(super) const CATALOGS: u32 = 8;
 pub(super) const RECOMMENDED: u32 = 9;
 pub(super) const SORTFILTER: u32 = 10;
 /// The Collections page's crumb root ("Films"): OK returns to the page below.
 pub(super) const CRUMB_ROOT: u32 = 11;
 
-/// What the Collections control knows about its count (`LibraryLike::collections_count`).
-///
-/// **"Collections" is on the row only with its count** (the #843 spec: it always shows its count),
-/// so only [`Self::Count`] puts it there. A bare "Collections" would be drawn for a library that has
-/// none, for the frames until its probe answers, and then withdrawn: the flash this enum's two
-/// other states prevent. The count the row holds is kept while the SAME library's probe reads
-/// nothing again (`LibraryScreen::refresh_header`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(super) enum CollectionsControl {
-    /// Not probed yet (or the probe learned nothing): the control is NOT on the row, though its
-    /// room in the cluster's budget is kept so the names do not repack when the count lands. A
-    /// count that lands later fades in through the row's `HeaderSwap`.
-    #[default]
-    Unknown,
-    Count(u32),
-    /// The probe found none, or the server refused it (HTTP 403): the control is not on the row,
-    /// though its room in the cluster's budget is kept, as for [`Self::Unknown`], so the names do
-    /// not repack when one of the two turns into the other.
-    Hidden,
-}
-
-impl CollectionsControl {
-    pub(super) fn of(answer: Option<Result<u32, crate::registry::Forbidden>>) -> Self {
-        match answer {
-            None => Self::Unknown,
-            Some(Ok(0) | Err(_)) => Self::Hidden,
-            Some(Ok(n)) => Self::Count(n),
-        }
-    }
-}
-
 impl LibraryScreen {
-    /// The controls on the row, left to right. The Collections control is on it only with a known
-    /// count: an unknown or hidden one is not.
+    /// The controls on the LEFT of the row, left to right: the Catalogs selector (which names the
+    /// catalog in force) and Recommended. They stand over the first poster rather than beside the
+    /// Sort & Filter control at the right edge. A section that advertised no catalogs has nothing
+    /// to pick and gets no selector.
+    // Fork Rofocale11: the left/right control split replaces the upstream Collections/Recommended/
+    // Sort row; the top Home/Movies/TV Shows tabs, not a library-options pill, are the switcher.
+    pub(super) fn left_controls(&self) -> &'static [u32] {
+        if self.listing == Listing::Collections { return &[]; }
+        if self.catalogs { &[CATALOGS, RECOMMENDED] } else { &[RECOMMENDED] }
+    }
+
+    /// The controls on the RIGHT of the row (the Sort & Filter menu).
+    pub(super) fn right_controls(&self) -> &'static [u32] {
+        if self.listing == Listing::Collections {
+            return if self.collections_sort { &[SORTFILTER] } else { &[] };
+        }
+        &[SORTFILTER]
+    }
+
+    /// Every focusable control on the row, in reading order: the left cluster then the right one.
+    /// The Collections page keeps its own crumb/sort row.
     pub(super) fn toolbar_elems(&self) -> &'static [u32] {
-        // The Collections page's row: the crumb (its own element, `CRUMB_ROOT`) and, only when the
-        // server declares two sorts, the one Sort control. No Collections, Recommended or menu.
-        if self.listing == Listing::Collections { return if self.collections_sort { &[SORTFILTER] } else { &[] }; }
-        if matches!(self.collections, CollectionsControl::Count(_)) { &[COLLECTIONS, RECOMMENDED, SORTFILTER] }
+        if self.listing == Listing::Collections { return self.right_controls(); }
+        if self.catalogs { &[CATALOGS, RECOMMENDED, SORTFILTER] }
         else { &[RECOMMENDED, SORTFILTER] }
     }
-
 
     pub(super) fn view_section<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> Option<usize> {
         let directory = H::directory(cx);

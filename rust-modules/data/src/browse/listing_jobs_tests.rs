@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! The guard that stays in the body of a listing read: a read that panics lands as the failure its
 //! kind already had, and the landing outside the guard is the store's own. And the settle of a read
 //! the runner refused: the next step finds the claim back and the refusal's record, consumes it, and
@@ -394,7 +396,7 @@ fn a_restored_genre_owes_the_letters_again() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: Vec::new(), total: 0, sorts: None, restored: None, genres: None,
-        genre: Some(GenreEntry { id: "7".into(), title: "Drama".into() }), resolved: Default::default(),
+        genre: Some(GenreEntry { id: "7".into(), title: "Drama".into() }), catalogs: None, resolved: Default::default(),
     }, |_| true);
     browse.adapter.page.claim(0);
     let _ = browse.pump();

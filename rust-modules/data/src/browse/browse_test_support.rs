@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! Shared fixtures and helpers for the `browse` module's test files split out below.
 
 use super::*;
@@ -411,7 +413,7 @@ pub(super) fn queue_page_from(
         items: Vec::new(),
         total: 0,
         sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     }, |_| true);
     browse.adapter.page.claim(0);
     let _outcome = browse.pump();
@@ -488,7 +490,7 @@ pub(super) fn land_page(browse: &mut TestBrowse, total: i64, items: usize) {
         items: (0..items).map(|_| PmsMovie::default()).collect(),
         total,
         sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true);
     let _outcome = browse.pump();
@@ -507,7 +509,7 @@ pub(super) fn land_page_with_sorts(browse: &mut TestBrowse, sorts: Vec<SortEntry
         items: Vec::new(),
         total: 0,
         sorts: Some(sorts), restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true);
     let _outcome = browse.pump();

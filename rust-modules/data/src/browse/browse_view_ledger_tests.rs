@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! A page read already in flight when a view-state edit is published lands carrying the pre-edit
 //! body; the ledger re-patches it. Every test here takes its stamp from the store's REAL request
 //! site (`maybe_spawn_owned`, `hubs_kick`) against a registered but unreachable server, so removing
@@ -42,7 +44,7 @@ fn a_page_read_in_flight_across_a_watched_edit_lands_watched() {
         items: vec![row(sid, "6"), row(sid, "7"), row(sid, "8")],
         total: 3,
         sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true); // the read's answer, as the server described it before the press
     let _ = browse.state.pump_owned(&browse.adapter);
@@ -145,7 +147,7 @@ fn a_re_list_keeps_the_rows_until_its_first_page_replaces_them() {
         items: vec![row(sid, "6"), row(sid, "8")],
         total: 2,
         sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
@@ -181,7 +183,7 @@ fn a_change_while_a_re_list_is_out_keeps_it_and_owes_one_more() {
         let r = PageResult {
             client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
             items: rks.iter().map(|rk| row(sid, rk)).collect(), total: rks.len() as i64,
-            sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+            sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
         };
         browse.adapter.page.post(r, |_| true);
         let _ = browse.state.pump_owned(&browse.adapter);
@@ -214,7 +216,7 @@ fn relist_regression_relist_invalidates_the_rail_counts() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: vec![row(sid, "7"), row(sid, "8")], total: 2,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     assert!(browse.state.states()[0].letters_owed(), "A's removed item changed every B offset: the old rail must be fetched again");
@@ -232,7 +234,7 @@ fn relist_regression_a_change_during_initial_load_is_not_lost() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen, sec: 0, start: 0,
         items: vec![row(sid, "old")], total: 1,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     let state = &browse.state.states()[0];
@@ -257,7 +259,7 @@ fn relist_regression_a_failed_first_page_with_a_change_owed_is_failed_and_not_lo
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen, sec: 0, start: 0,
         items: Vec::new(), total: -1,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     let state = &browse.state.states()[0];
@@ -284,7 +286,7 @@ fn relist_regression_a_failed_relist_keeps_the_held_grid_ready() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: Vec::new(), total: -1,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     let state = &browse.state.states()[0];
@@ -309,7 +311,7 @@ fn relist_regression_a_visible_window_across_pages_does_not_turn_to_skeletons() 
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: (0..PAGE).map(|i| row(sid, &format!("new-{i}"))).collect(), total: (2 * PAGE) as i64,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     assert!(browse.state.states()[0].items.get(PAGE + 5).is_some(),
@@ -320,7 +322,7 @@ fn relist_regression_a_visible_window_across_pages_does_not_turn_to_skeletons() 
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: PAGE,
         items: (PAGE..2 * PAGE).map(|i| row(sid, &format!("new-{i}"))).collect(), total: (2 * PAGE) as i64,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     assert_eq!(browse.state.states()[0].items.get(PAGE - 1).unwrap().rk, format!("new-{}", PAGE - 1));
@@ -344,7 +346,7 @@ fn relist_regression_a_shrinking_listing_loads_its_new_tail() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: PAGE,
         items: Vec::new(), total: 2,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     let state = &browse.state.states()[0];
@@ -354,7 +356,7 @@ fn relist_regression_a_shrinking_listing_loads_its_new_tail() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: vec![row(sid, "last-a"), row(sid, "last-b")], total: 2,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     assert_eq!(browse.state.states()[0].total, 2);
@@ -373,7 +375,7 @@ fn relist_regression_initial_load_can_continue_past_the_first_page() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: (0..PAGE).map(|i| row(sid, &i.to_string())).collect(), total: (2 * PAGE) as i64,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     browse.maybe_spawn();
@@ -398,7 +400,7 @@ fn relist_regression_a_failed_later_page_still_retains_notifications() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: PAGE,
         items: Vec::new(), total: -1,
-        sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+        sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
     }, |_| true);
     let _ = browse.state.pump_owned(&browse.adapter);
     assert_eq!(browse.state.states()[0].fetch, SecFetch::Failed);

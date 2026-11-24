@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! Section/page/directory discovery landing lifecycle: repoint, retoken, profile-reset
 //! staleness guards, blocking discovery, and single-flight reset.
 
@@ -325,7 +327,7 @@ fn page_failure_and_recovery_republish_directory_reachability() {
             },
             total,
             sorts: None, restored: None, genres: None, genre: None,
-            resolved: Default::default(),
+            catalogs: None, resolved: Default::default(),
         }, |_| true);
         browse.adapter.page.claim(0);
         let _outcome = browse.pump();

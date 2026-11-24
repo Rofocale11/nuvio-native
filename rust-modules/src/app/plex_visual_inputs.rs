@@ -23,7 +23,8 @@ pub(super) struct PlexVisualInputs {
     facts: u32,
     servers: Vec<ServerVisualInput>,
     preferences: Vec<u16>,
-    collections: Vec<((u16, u32, i64), Option<u32>)>,
+    // Fork Rofocale11: the fabricated Collections-count probe is gone, so its visual facts are no
+    // longer an input that can damage the Library header.
     dv: plx_os::devcaps::dv::DvProbe,
 }
 
@@ -39,7 +40,6 @@ impl PlexVisualInputs {
         }).collect();
         Self { current: plex::current_server(), roster: plex::server_roster_gen(),
             facts: plex::server_facts_gen(), servers,
-            collections: crate::app::collections_probe::visual_facts(),
             preferences: plx_media::route::preference_values(), dv: plx_os::devcaps::dv::probe() }
     }
 }

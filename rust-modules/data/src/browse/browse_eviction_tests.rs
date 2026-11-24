@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! Library grid eviction: `SecItems` keeps a few pages of a long listing loaded, and every index
 //! stays reachable because an evicted page is a hole that is fetched again when wanted.
 
@@ -202,7 +204,7 @@ fn the_grids_focus_index_reaches_the_landing_keep_rule() {
         adapter.page.post(PageResult {
             client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: far * PAGE,
             items: page_rows(far), total: TOTAL as i64, sorts: None, restored: None, genres: None, genre: None,
-            resolved: Default::default(),
+            catalogs: None, resolved: Default::default(),
         }, |_| true);
         assert!(state.pump_owned(&adapter).changed, "the page landed");
         let held = loaded(&state.states[sec].items);

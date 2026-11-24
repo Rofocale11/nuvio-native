@@ -64,17 +64,19 @@ use plx_ui::{Rect, Spring};
 use plx_ui::xfade::Xfade;
 use identity::{KeyRegistry, KeyRegion, region_of_elem};
 use layout::{Layout, Block, CONTENT_TOP};
-use toolbar::{CollectionsControl, COLLECTIONS, CRUMB_ROOT, RECOMMENDED, SORTFILTER};
+// Fork Rofocale11: the Catalogs control replaces the fabricated Collections count; the
+// library-options ("…") pill is gone, so `MORE` has no element and no menu.
+use toolbar::{CATALOGS, CRUMB_ROOT, RECOMMENDED, SORTFILTER};
 #[cfg(test)]
 use layout::COLS;
 use parts::{GridPart, RailPart, GRID_GROUP, RAIL_GROUP};
 use transactions::{PendingTransactions, SectionTarget, GridTarget, GridAction};
 
-/// The header row's group: the library names, Library options and the page's controls, one Left/Right path.
+/// The header row's group: the library names, the left controls and the page's right control,
+/// one Left/Right path.
 pub const LIBRARY_GROUP: GroupId = GroupId(0x4c49_4210);
 const STATUS_GROUP: GroupId = GroupId(0x4c49_4212);
 const RETRY: u32 = 3;
-const MORE: u32 = 4;
 /// "Connect without encryption?" over a failed source's read-out (`screens::plaintext_question`).
 const PLAINTEXT_GROUP: GroupId = GroupId(0x4c49_4213);
 const PLAINTEXT_CANCEL: u32 = 5;
@@ -233,10 +235,11 @@ pub struct LibraryScreen {
     values: bool,
     keys: KeyRegistry,
     pair: MasterDetail<RailPart, GridPart, Regions>,
-    /// The visible favorite names, the current library when outside those shortcuts, and the
-    /// persistent `MORE` action after the favorites, followed by any temporary visit.
+    /// The visible favorite names, the current library when outside those shortcuts, followed by
+    /// any temporary visit. Fork Rofocale11: no library-options (`MORE`) stop — the top tabs are
+    /// the switcher — but `folded` still records the favorites the row could not fit.
     libraries: Vec<(u32, usize)>,
-    /// The directory sections the fold hid behind Library options (what the Sources list shows).
+    /// The directory sections the left cluster's name budget hid.
     folded: Vec<u32>,
     /// The header row as `sync` last built it (`header.rs`): rebuilt only when [`Self::header_key`]
     /// moves (`RowCache`, the one rule the Recommended page and the Watchlist hold their row by).
@@ -247,22 +250,24 @@ pub struct LibraryScreen {
     /// them over: the capsule travels from the old stop to the new.
     header_capsules: plx_ui::widgets::TabStrip,
     header_pop: plx_ui::widgets::CtlPop<1>,
-    /// The row's content swap: the Collections count cross-fading in place when a rebuilt row
-    /// changes it, the control fading out when the same library's row loses it and in when its
-    /// count lands (or dissolving between two x when the count's digits move it). A library
-    /// SWITCH cuts instead: the control the old library had is not drawn on the new page. Held beside the capsules
-    /// for the same reason (a library switch replaces the row), but unlike them it is NOT hashed
-    /// into the canon: the capsules' position steers the next frame, while `collections` is no part
-    /// of the screen's shape (a recording never probes), so the swap has nothing to be a function of.
+    /// The row's content swap: the Catalogs value cross-fading in place when a rebuilt row changes
+    /// it, the control fading out when the same library's row loses it and in when it lands. A
+    /// library SWITCH cuts instead: the control the old library had is not drawn on the new page.
+    /// Held beside the capsules for the same reason (a library switch replaces the row), but unlike
+    /// them it is NOT hashed into the canon: the capsules' position steers the next frame, while
+    /// `catalogs` is no part of the screen's shape (a recording never probes), so the swap has
+    /// nothing to be a function of.
     header_swap: plx_ui::page_header::HeaderSwap,
     /// The library (server, section key) the row in `header` was built for: a rebuild for another
     /// library is a switch (`HeaderSwap::begin_switch`), for the same one the page's own row
     /// changing (`HeaderSwap::begin`). A projection, not canon.
     header_of: Option<(Option<plx_plex::plex::ServerId>, i64)>,
-    /// What the Collections control knows (`LibraryScreen::refresh_header` reads
-    /// `LibraryLike::collections_count` for the library on view each `sync`): the same library's
-    /// last count is held across a read of nothing, another library's never is.
-    collections: CollectionsControl,
+    /// Does the row carry the Catalogs control? `LibraryScreen::refresh_header` reads
+    /// `ListingView::catalogs` for the library on view each `sync`: the same library's last answer
+    /// is held across a read of nothing (the store holds one listing per section and a pushed page
+    /// re-points it), another library's never is.
+    // Fork Rofocale11: replaces the collections count with the addon-catalog selector.
+    catalogs: bool,
     /// The Collections page's header carries the Sort control (the server declared two or more
     /// sorts for the collections listing). A projection of `header`, read by `toolbar_elems`.
     collections_sort: bool,
@@ -369,7 +374,7 @@ impl LibraryScreen {
                 MasterDetailGroups { master: RAIL_GROUP, detail: GRID_GROUP },
                 MasterDetailPolicy::new(MasterSide::Right, Follow::Live), Regions,
             ),
-            libraries: Vec::new(), folded: Vec::new(), header: plx_ui::page_header::RowCache::new(), header_capsules: plx_ui::widgets::TabStrip::new(), header_pop: plx_ui::widgets::CtlPop::new(), header_swap: plx_ui::page_header::HeaderSwap::new(), header_of: None, collections: CollectionsControl::Unknown, collections_sort: false, collections_asked: None,
+            libraries: Vec::new(), folded: Vec::new(), header: plx_ui::page_header::RowCache::new(), header_capsules: plx_ui::widgets::TabStrip::new(), header_pop: plx_ui::widgets::CtlPop::new(), header_swap: plx_ui::page_header::HeaderSwap::new(), header_of: None, catalogs: false, collections_sort: false, collections_asked: None,
             type_before_collections: None, unfiltered: None, filtered: None,
             switched: false, enter_remembered: false, section: None, epoch: None, query: None, grid_reset_pending: false,
             layout, target_layout: layout,
@@ -411,25 +416,25 @@ impl LibraryScreen {
     #[cfg(any(test, feature = "test-support"))]
     pub fn toolbar_group(&self) -> GroupId { LIBRARY_GROUP }
 
-    /// The header row's stops in focus order, each named by what it is (`"library"`, `"collections"`,
+    /// The header row's stops in focus order, each named by what it is (`"library"`, `"catalogs"`,
     /// `"recommended"`, `"sort"`, `"crumb"`): the per-stop probe the app-tier route tables walk.
+    // Fork Rofocale11: "collections" is now "catalogs"; "more" is no longer a stop.
     #[cfg(any(test, feature = "test-support"))]
     pub fn probe_header_stops(&self) -> Vec<(&'static str, u32)> {
         self.header_elems().into_iter().map(|elem| (match elem {
-            toolbar::COLLECTIONS => "collections",
+            toolbar::CATALOGS => "catalogs",
             toolbar::RECOMMENDED => "recommended",
             toolbar::SORTFILTER => "sort",
             toolbar::CRUMB_ROOT => "crumb",
-            MORE => "more",
             _ => "library",
         }, elem)).collect()
     }
 
-    /// The library names on the row as `(element, section index)`, Library options not among them, and the
-    /// section indexes the Library options list holds: what the fold shows and what it hid.
+    /// The library names on the row as `(element, section index)`, and the section indexes the
+    /// row's name budget hid: what the fold shows and what it hid.
     #[cfg(any(test, feature = "test-support"))]
     pub fn probe_names(&self) -> (Vec<(u32, usize)>, Vec<u32>) {
-        (self.libraries.iter().filter(|(elem, _)| *elem != MORE).copied().collect(), self.folded.clone())
+        (self.libraries.clone(), self.folded.clone())
     }
 
     /// The rail: every letter (or, for a value sort, every band) as drawn with whether it is empty,
@@ -464,8 +469,8 @@ impl LibraryScreen {
     #[cfg(any(test, feature = "test-support"))]
     pub fn probe_header_builds(&self) -> u32 { self.header.builds() }
 
-    /// The library names on the header row as `(element, directory section index)`, the persistent
-    /// options stop last (its index is `usize::MAX`).
+    /// The library names on the header row as `(element, directory section index)`; no options
+    /// stop is among them.
     #[cfg(any(test, feature = "test-support"))]
     pub fn probe_libraries(&self) -> Vec<(u32, usize)> { self.libraries.clone() }
 
@@ -753,8 +758,7 @@ impl LibraryScreen {
     /// Seat the page's own focus in `group`; the library row seats the library on view.
     fn seat_on<H: LibraryLike>(&self, group: GroupId, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         if group == LIBRARY_GROUP {
-            if let Some((elem, _)) = self.libraries.iter().find(|(_, index)| Some(*index) == self.view_section(cx))
-                .or_else(|| self.libraries.iter().find(|(elem, _)| *elem == MORE)) {
+            if let Some((elem, _)) = self.libraries.iter().find(|(_, index)| Some(*index) == self.view_section(cx)) {
                 fx.remember(LIBRARY_GROUP, *elem);
             }
         }
@@ -1052,10 +1056,11 @@ impl LibraryScreen {
         // and none of them moves focus, so no `FocusMoved` will release it.
         self.provisional = None;
         self.placed.retain(|(_, placed)| *placed != elem);
-        // Options opens its menu; each favorite name requests a section transition.
+        // Each control opens its menu or page; each favorite name requests a section transition.
         match elem {
-            // The Collections page lists the library's collections (type 18).
-            COLLECTIONS => { self.open_listing(Listing::Collections, cx, fx); return Handled::Yes; }
+            // Fork Rofocale11: the Catalogs control opens the Type menu, which lists this section's
+            // addon catalogs when it advertised any (and the plain type list when it did not).
+            CATALOGS => { self.open_menu(crate::registry::LibraryMenuKind::Type, elem, cx, fx); return Handled::Yes; }
             // The Recommended page lists the server's hubs for the library.
             RECOMMENDED => { self.open_listing(Listing::Recommended, cx, fx); return Handled::Yes; }
             // The crumb's root link: back to the library page below.
@@ -1064,7 +1069,6 @@ impl LibraryScreen {
                 return Handled::Yes;
             }
             SORTFILTER => { self.open_menu(crate::registry::LibraryMenuKind::SortFilter, elem, cx, fx); return Handled::Yes; }
-            MORE => { self.open_menu(crate::registry::LibraryMenuKind::Sources, elem, cx, fx); return Handled::Yes; }
             _ => {}
         }
         if let Some((_, index)) = self.libraries.iter().find(|(key, _)| *key == elem) {
@@ -1148,6 +1152,8 @@ impl LibraryScreen {
             GridAction::Unwatched { desired } => plx_data::stores::browse::QueryEdit::Unwatched(desired),
             GridAction::Genre { id } => plx_data::stores::browse::QueryEdit::Genre(id),
             GridAction::LibraryType(kind) => plx_data::stores::browse::QueryEdit::LibraryType(kind),
+            // Fork Rofocale11: a catalog pick is the same deferred query edit as the other four.
+            GridAction::Catalog(key) => plx_data::stores::browse::QueryEdit::Catalog(key),
         }));
         if let Some(target) = selected {
             let query = query.filter(|(address, _)| *address == target).map(|(_, edit)| edit);
@@ -1202,9 +1208,11 @@ impl LibraryScreen {
             LibraryCmd::OpenMenu(kind) => {
                 use crate::registry::LibraryMenuKind as Kind;
                 let anchor = match kind {
-                    // The scripted single-purpose menus hang off the one control that replaced them.
+                    // Fork Rofocale11: the Type menu hangs off the Catalogs control; a section with
+                    // no catalogs falls back to the Sort & Filter control's plain type list.
+                    Kind::Type if self.catalogs => CATALOGS,
                     Kind::Type | Kind::Sort | Kind::Filter | Kind::SortFilter => SORTFILTER,
-                    Kind::Sources if self.libraries.iter().any(|(elem, _)| *elem == MORE) => MORE,
+                    // The library-options pill is gone, so its Sources menu has no header opener.
                     Kind::Sources | Kind::Genre => return Handled::No,
                 };
                 self.open_menu(kind, anchor, cx, fx);
@@ -1247,7 +1255,7 @@ impl LibraryScreen {
                     }
                     // OK on the next library's name, as the reader would press it (menus take 3/8).
                     3 | 8 => {
-                        let names: Vec<u32> = self.libraries.iter().filter(|(elem, _)| *elem != MORE).map(|(elem, _)| *elem).collect();
+                        let names: Vec<u32> = self.libraries.iter().map(|(elem, _)| *elem).collect();
                         let chosen = self.pending.section().map(|section| section.index).or(H::directory(cx).current());
                         let at = names.iter().position(|elem| self.libraries.iter().any(|(key, index)| key == elem && Some(*index) == chosen));
                         if let Some(&elem) = at.and_then(|at| names.get((at + 1) % names.len())) {
@@ -1406,6 +1414,8 @@ impl LibraryScreen {
                     QueryEdit::Unwatched(desired) => GridAction::Unwatched { desired: *desired },
                     QueryEdit::Genre(id) => GridAction::Genre { id: id.clone() },
                     QueryEdit::LibraryType(kind) => GridAction::LibraryType(*kind),
+                    // Fork Rofocale11: the Catalogs menu's pick, staged like every other query edit.
+                    QueryEdit::Catalog(key) => GridAction::Catalog(key.clone()),
                 };
                 if matches!(&action, GridAction::Unwatched { desired } if *desired == H::listing(cx).unwatched())
                     && self.pending.section().is_none() && self.address(cx) == Some(target)

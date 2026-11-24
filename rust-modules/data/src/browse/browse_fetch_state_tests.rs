@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! The three-state fetch machine (section, source, and the (source, section) table):
 //! Loading/Ready/Failed derivation and multi-source table identity.
 
@@ -54,7 +56,7 @@ fn a_seeded_listing_is_not_overwritten_by_the_request_that_was_out_when_it_was_s
         items: Vec::new(),
         total: -1,
         sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     }, |_| true);
     seed_items_for_owner_test(&mut browse.state, 37);
     let _outcome = browse.pump();

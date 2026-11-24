@@ -23,8 +23,9 @@ fn section(source: plx_plex::plex::ServerId, key: i64, index: usize, title: &str
 /// tier/state filter, and `LibraryScreen::sync` (mod.rs) filters favourites on `sid.is_some()`
 /// alone — neither a source's connection tier nor its probe state reaches the selector at all.
 /// So every `Location` (plus "no tier yet", `None`) crossed with every `SourceState` — 4x5 = 20
-/// cells — must draw the SAME outcome: no selector at F=1, and at F=2 exactly two pills whose
-/// labels never change with the cell. That invariance, not any one cell, is what this pins.
+/// cells — must draw the SAME outcome: one shortcut at F=1, and at F=2 exactly two shortcuts whose
+/// labels never change with the cell. Fork Rofocale11: the library-options pill is gone, so the
+/// row holds names only. That invariance, not any one cell, is what this pins.
 #[test]
 fn every_connection_tier_and_source_state_draws_the_same_selector() {
     let _guard = plx_base::testlock::serial();
@@ -40,18 +41,18 @@ fn every_connection_tier_and_source_state_draws_the_same_selector() {
 
     for tier in tiers {
         for state in states {
-            // F=1: a lone favorite keeps a shortcut and options, whatever the tier/state.
+            // F=1: a lone favorite keeps its one shortcut, whatever the tier/state.
             let mut fixture = Fixture::new();
             fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0,
                 vec![(sid_a, group("Cinema server", "", state, tier))],
                 vec![section(sid_a, 1, 0, "Cinema", true)]);
             let page = fixture.screen();
-            assert_eq!(page.libraries.len(), 2,
-                "tier={tier:?} state={state:?}: a single favorite keeps its name and Library options");
+            assert_eq!(page.libraries.len(), 1,
+                "tier={tier:?} state={state:?}: a single favorite keeps its name alone");
             assert!(page.layout.libraries,
                 "tier={tier:?} state={state:?}: the header row is always there, names or not");
 
-            // F=2: two favourites must draw exactly 2 pills, with labels that never move.
+            // F=2: two favourites must draw exactly 2 shortcuts, with labels that never move.
             let mut fixture = Fixture::new();
             fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0,
                 vec![(sid_a, group("Cinema server", "", state, tier)),
@@ -59,8 +60,8 @@ fn every_connection_tier_and_source_state_draws_the_same_selector() {
                 vec![section(sid_a, 1, 0, "Movies A", true), section(sid_b, 1, 1, "Movies B", false)]);
             let page = fixture.screen();
             let cx = fixture.cx(None);
-            assert_eq!(page.libraries.len(), 3,
-                "tier={tier:?} state={state:?}: two favourites must draw exactly 2 pills");
+            assert_eq!(page.libraries.len(), 2,
+                "tier={tier:?} state={state:?}: two favourites must draw exactly 2 shortcuts");
             assert_eq!(page.library_label(0, &cx), expected_a, "tier={tier:?} state={state:?}");
             assert_eq!(page.library_label(1, &cx), expected_b, "tier={tier:?} state={state:?}");
         }
@@ -74,7 +75,7 @@ fn every_connection_tier_and_source_state_draws_the_same_selector() {
 /// all any more — the only trace of "whose server" that reaches this layer is the handle
 /// `owner_credit` attaches (`servers.rs:247-290`: empty for your own/household server, the
 /// sharer's name otherwise) — so this table drives every shape ownership can take, at F=1 and
-/// F=2, and asserts the pill COUNT tracks F alone.
+/// F=2, and asserts the shortcut COUNT tracks F alone (no options stop any more).
 #[test]
 fn ownership_does_not_change_how_many_pills_are_drawn() {
     let _guard = plx_base::testlock::serial();
@@ -101,10 +102,10 @@ fn ownership_does_not_change_how_many_pills_are_drawn() {
         fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0,
             sources.clone(), vec![section(sources[0].0, 1, 0, "Movies", true)]);
         let page = fixture.screen();
-        assert_eq!(page.libraries.len(), 2, "{label}: F=1 keeps its name and Library options");
+        assert_eq!(page.libraries.len(), 1, "{label}: F=1 keeps its name alone");
 
         // F=2: one favourite per source when the roster has two; two libraries on the one source
-        // it has otherwise. Either way F becomes 2 and only the pill COUNT is asserted.
+        // it has otherwise. Either way F becomes 2 and only the shortcut COUNT is asserted.
         let sections: Vec<_> = if sources.len() >= 2 {
             sources.iter().enumerate()
                 .map(|(i, (source, _))| section(*source, 1, i, &format!("Movies {i}"), i == 0))
@@ -115,7 +116,7 @@ fn ownership_does_not_change_how_many_pills_are_drawn() {
         let mut fixture = Fixture::new();
         fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture_with_sources(1, 0, sources, sections);
         let page = fixture.screen();
-        assert_eq!(page.libraries.len(), 3, "{label}: F=2 must draw exactly 2 pills");
+        assert_eq!(page.libraries.len(), 2, "{label}: F=2 must draw exactly 2 shortcuts");
     }
 }
 
@@ -172,7 +173,7 @@ fn two_owned_servers_with_the_same_library_title_draw_two_identical_pills() {
         vec![section(a, 1, 0, "Movies", true), section(b, 1, 1, "Movies", false)]);
     let page = fixture.screen();
     let cx = fixture.cx(None);
-    assert_eq!(page.libraries.len(), 3);
+    assert_eq!(page.libraries.len(), 2);
     let label_a = page.library_label(0, &cx);
     let label_b = page.library_label(1, &cx);
     assert_eq!(label_a, "Movies");
@@ -197,7 +198,7 @@ fn an_unreachable_favourite_stays_in_the_selector() {
         vec![section(live, 1, 0, "Movies", true), section(dead, 1, 1, "Movies", false)]);
     let page = fixture.screen();
     let cx = fixture.cx(None);
-    assert_eq!(page.libraries.len(), 3, "the unreachable favourite still counts toward F");
+    assert_eq!(page.libraries.len(), 2, "the unreachable favourite still counts toward F");
     assert_eq!(page.library_label(1, &cx), "Movies friend",
         "the pill carries the owner handle only — no status word leaks into it");
 }

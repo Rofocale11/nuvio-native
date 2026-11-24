@@ -12,10 +12,10 @@
 //! was (`Bridge::library_selection` read only the plain grid), is a red row here.
 //!
 //! Rows are declarative: a mount, the keys, and where focus and the page on top should be, in the
-//! words `here` prints (`header:collections`, `grid:2,3`, `shelf:0,1`, `rail:M`, `nav:movies`, `menu:unwatched`).
+//! words `here` prints (`header:catalogs`, `grid:2,3`, `shelf:0,1`, `rail:M`, `nav:movies`, `menu:unwatched`).
 
 use super::*;
-use super::test_support::World;
+use super::test_support::{World, FILM_CLUB};
 use plx_data::browse::GenreEntry;
 use plx_data::stores::browse::SecKind;
 use plx_machine::machine::Chrome;
@@ -105,7 +105,7 @@ fn header_stop(w: &mut World, name: &str) {
     let elem = w.library().probe_header_stops().into_iter().find(|(stop, _)| *stop == name).unwrap().1;
     w.walk_header_to(elem);
 }
-fn library(w: &mut World) { w.open_library(); w.climb_into_header(); header_stop(w, "collections"); }
+fn library(w: &mut World) { w.open_library(); w.climb_into_header(); header_stop(w, "catalogs"); }
 
 fn press(key: Key, did: &str, top: &str, at: impl Into<String>) -> Step {
     Step { key, did: did.into(), top: top.into(), at: at.into(), prep: nothing }
@@ -192,6 +192,24 @@ fn run(rows: Vec<Row>) {
 
 // ---- data a performed request would have brought back -------------------------------------------
 
+/// Open the Collections page over the Library by its command. The page has no header control any
+/// more (the header's first stop is Catalogs), so its ways in are the command's: the dev `--screen`
+/// boot, a restored view, or a script.
+fn open_collections(w: &mut World) { w.open_collections(); }
+
+/// The Library, settled, with the Collections page on top (its listing unanswered).
+fn collections_page(w: &mut World) {
+    w.open_library();
+    w.open_collections();
+}
+
+/// The Collections page with its listing ANSWERED, so the page has taken its arrival seat in the
+/// first tile (an unanswered page is up but unseated, see r7).
+fn collections_seated(w: &mut World) {
+    collections_page(w);
+    collections_answered(w);
+}
+
 /// The Collections page's own listing answered: `n` collections.
 fn collections_answered(w: &mut World) {
     w.bridge.bridge().stores.browse.borrow_mut().seed_collections_for_test(12);
@@ -221,19 +239,18 @@ fn films_answered<const N: usize>(w: &mut World) {
 // ---- R7 + R8: Collections, and the chain to a film and back --------------------------------------
 
 #[test]
-fn the_collections_page_opens_from_its_control_and_back_returns_to_it() {
+fn back_from_the_collections_page_returns_to_the_library_header() {
     run(vec![Row {
         name: "r7-collections",
-        setup: library,
-        start: "header:collections",
+        setup: collections_page,
+        // The page is pushed by command with its listing unanswered: it seats on its status read,
+        // not on a tile. BACK is the container's from there, and it pops to the Library at the
+        // header stop the push left behind (a library name in this rig).
+        start: "status",
         steps: vec![
-            // The listing has not answered in this rig, so the page reads Failed and arrives on its
-            // Retry (the content region's first stop); BACK leaves the page from there.
-            press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
-            press(Key::Back, "content:Back", "library", "header:collections"),
-            // …and again: the control is still the one that opens it.
-            press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
-            press(Key::Back, "content:Back", "library", "header:collections"),
+            press(Key::Back, "content:Back", "library", "header:name*"),
+            // …and again: the page is still the one the command mounts.
+            after(open_collections, press(Key::Back, "content:Back", "library", "header:name*")),
         ],
         end: |w| {
             let mut fails = Vec::new();
@@ -250,21 +267,21 @@ fn the_collections_page_opens_from_its_control_and_back_returns_to_it() {
 fn a_collection_opens_from_the_collections_page_to_a_film_and_every_back_returns_to_where_it_left() {
     run(vec![Row {
         name: "r8-chain",
-        setup: library,
-        start: "header:collections",
+        setup: collections_page,
+        // Seated on its status read until its listing lands (see r7).
+        start: "status",
         steps: vec![
-            /* 0 */ press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
             // The answer lands under the page's own seat, which follows it into the first tile.
-            /* 1 */ after(collections_answered, press(Key::Right, "", "collections", "grid:0,1")),
-            /* 2 */ press(Key::Ok, "library:Detail", "collection", "page:0"),
+            /* 0 */ after(collections_answered, press(Key::Right, "", "collections", "grid:0,1")),
+            /* 1 */ press(Key::Ok, "library:Detail", "collection", "page:0"),
             // The screen opens on its header (elem 0) until its members arrive; its grid numbers
             // them from 4096, six to a row.
-            /* 3 */ after(members_answered, press(Key::Down, "", "collection", "page:4102")),
-            /* 4 */ press(Key::Right, "", "collection", "page:4103"),
-            /* 5 */ press(Key::Ok, "content:Push", "detail", "page:0"),
-            /* 6 */ press(Key::Back, "content:Back", "collection", "@5"),
-            /* 7 */ press(Key::Back, "content:Back", "collections", "@2"),
-            /* 8 */ press(Key::Back, "content:Back", "library", "@0"),
+            /* 2 */ after(members_answered, press(Key::Down, "", "collection", "page:4102")),
+            /* 3 */ press(Key::Right, "", "collection", "page:4103"),
+            /* 4 */ press(Key::Ok, "content:Push", "detail", "page:0"),
+            /* 5 */ press(Key::Back, "content:Back", "collection", "@4"),
+            /* 6 */ press(Key::Back, "content:Back", "collections", "@1"),
+            /* 7 */ press(Key::Back, "content:Back", "library", "header:name*"),
         ],
         end: no_checks,
     }]);
@@ -277,7 +294,7 @@ fn recommended_opens_a_film_and_back_returns_to_the_card_then_the_control() {
     run(vec![Row {
         name: "r9-recommended",
         setup: library,
-        start: "header:collections",
+        start: "header:catalogs",
         steps: vec![
             /* 0 */ press(Key::Right, "", "library", "header:recommended"),
             /* 1 */ press(Key::Ok, "library:OpenListing { listing: Recommended", "recommended", "shelf:0,0"),
@@ -298,21 +315,22 @@ fn the_crumb_root_pops_to_the_library_and_up_from_it_is_the_movies_pill() {
     run(vec![
         Row {
             name: "r10-crumb-collections",
-            setup: library,
-            start: "header:collections",
+            // Its listing answered, so the page stands in its content and the column above it is
+            // the crumb's (an unanswered page is up but unseated, see r7).
+            setup: collections_seated,
+            start: "grid:0,0",
             steps: vec![
-                press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
                 press(Key::Up, "", "collections", "header:crumb"),
                 press(Key::Up, "", "collections", "nav:movies"),
                 press(Key::Down, "", "collections", "header:crumb"),
-                press(Key::Ok, "content:Back", "library", "header:collections"),
+                press(Key::Ok, "content:Back", "library", "header:name*"),
             ],
             end: no_checks,
         },
         Row {
             name: "r10-crumb-recommended",
             setup: library,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: vec![
                 press(Key::Right, "", "library", "header:recommended"),
                 press(Key::Ok, "library:OpenListing { listing: Recommended", "recommended", "shelf:0,0"),
@@ -344,7 +362,9 @@ fn many_libraries(w: &mut World) {
     assert_eq!(folded, [6, 8, 10, 12], "premise: the folded libraries");
 }
 
-/// Picking a non-favorite changes the store and preserves the favorite shortcuts and opener.
+/// A non-favorite visit changes the store and preserves the favorite shortcuts. Fork Rofocale11:
+/// the deleted options menu used to return focus to the selected pill; with no menu, the equivalent
+/// read-out is the visited library's own name on the header.
 fn the_pick_kept_the_favorite_shortcuts(w: &mut World) -> Vec<String> {
     let (names, folded) = w.library().probe_names();
     let visible: Vec<_> = names.iter().map(|(_, index)| *index).collect();
@@ -353,7 +373,9 @@ fn the_pick_kept_the_favorite_shortcuts(w: &mut World) -> Vec<String> {
         fails.push(format!("temporary selection moved the favorite prefix: {visible:?}, folded {folded:?}"));
     }
     if w.bridge.bridge().stores.browse.borrow().current_for_test() != 2 { fails.push("the selected non-favorite is not on view".into()); }
-    if here(w) != "header:name2" { fails.push(format!("focus missed the selected pill: {}", here(w))); }
+    if !w.library().probe_libraries().iter().any(|(_, section)| *section == FILM_CLUB) {
+        fails.push(format!("the visited library is not named on the header: {visible:?}"));
+    }
     if w.d.surface_up() { fails.push("the menu is still up".into()); }
     fails
 }
@@ -368,42 +390,48 @@ fn nothing_was_picked(w: &mut World) -> Vec<String> {
     fails
 }
 
+/// Fork Rofocale11: the library-options ("…") pill and its Sources menu were removed — the top
+/// Home/Movies/TV Shows tabs are the switcher. The surviving behavior is the temporary visit: the
+/// header shows the non-favorite as its current-library name without moving the favorite shortcuts,
+/// and a fresh tab entry restores the favorite. Make that visit at the store, which is where the
+/// deleted menu's OK ended, and keep the assertions about the shortcuts and the restored view.
+fn visit_non_favorite(w: &mut World) {
+    w.bridge.bridge().browse_run(plx_data::stores::browse::BrowseCmd::SetCur(FILM_CLUB));
+    w.bridge.bridge().stores.browse.borrow_mut().seed_items_for_test(120);
+    w.frames(90);
+}
+
 #[test]
-fn library_options_selects_a_non_favorite_without_moving_shortcuts_and_back_selects_nothing() {
+fn a_non_favorite_visit_keeps_the_favorite_shortcuts_and_a_fresh_entry_selects_nothing() {
+    fn visited(w: &mut World) { many_libraries(w); visit_non_favorite(w); }
+    fn leave_and_return(w: &mut World) {
+        super::nav_tab(&mut w.d, &mut w.bridge.bridge(), HomeTab::Shows, None, None);
+        w.frames(90);
+        super::nav_tab(&mut w.d, &mut w.bridge.bridge(), HomeTab::Movies, None, None);
+        w.frames(90);
+    }
     run(vec![
         Row {
             name: "r5-pick",
-            setup: many_libraries,
-            start: "header:name0",
-            steps: vec![
-                press(Key::Right, "", "library", "header:name4"),
-                press(Key::Right, "", "library", "header:more"),
-                // The list holds the folded libraries (6, 8, 10, 12) as `section:<source>:<key>`.
-                press(Key::Ok, "library:Menu { kind: Sources", "library", "menu:section:1:1"),
-                press(Key::Ok, "", "library", "header:name2"),
-            ],
+            setup: visited,
+            start: "grid:0,0",
+            steps: Vec::new(),
             end: |w| { w.frames(90); the_pick_kept_the_favorite_shortcuts(w) },
         },
         Row {
             name: "r5-back",
-            setup: many_libraries,
-            start: "header:name0",
-            steps: vec![
-                press(Key::Right, "", "library", "header:name4"),
-                press(Key::Right, "", "library", "header:more"),
-                press(Key::Ok, "library:Menu { kind: Sources", "library", "menu:section:1:1"),
-                press(Key::Down, "", "library", "menu:section:1:11"),
-                press(Key::Back, "", "library", "header:more"),
-            ],
-            end: |w| { w.frames(90); nothing_was_picked(w) },
+            setup: visited,
+            start: "grid:0,0",
+            steps: Vec::new(),
+            end: |w| { leave_and_return(w); nothing_was_picked(w) },
         },
     ]);
 }
 
-/// **Every header opener stays the lifted, focused control while its menu is up** (design review
+/// **The header opener stays the lifted, focused control while its menu is up** (design review
 /// S12): the dispatcher names the page's element as the surface's lifted opener, the one decision
-/// the dispatcher's lift pass paints from, for the `+N` list as for Sort & Filter. The `+N` list named
-/// none, so its page capsule sat dimmed under the scrim.
+/// the dispatcher's lift pass paints from. Fork Rofocale11: the `+N` library-options opener and its
+/// Sources menu are gone (the top tabs are the switcher), so only Sort & Filter remains to pin.
 fn the_menu_lifts_its_opener(stop: &'static str) -> impl Fn(&mut World) -> Vec<String> {
     move |w: &mut World| {
         w.frames(30);
@@ -418,26 +446,14 @@ fn the_menu_lifts_its_opener(stop: &'static str) -> impl Fn(&mut World) -> Vec<S
 }
 
 #[test]
-fn the_plus_n_list_and_sort_filter_both_lift_their_opener() {
-    // `end` is a plain `fn`: one per stop, the closure's `stop` carried by the function's body.
-    fn plus_n(w: &mut World) -> Vec<String> { the_menu_lifts_its_opener("more")(w) }
+fn the_sort_filter_lifts_its_opener() {
+    // `end` is a plain `fn`: the closure's `stop` carried by the function's body.
     fn sort(w: &mut World) -> Vec<String> { the_menu_lifts_its_opener("sort")(w) }
     run(vec![
         Row {
-            name: "s12-plus-n",
-            setup: many_libraries,
-            start: "header:name0",
-            steps: vec![
-                press(Key::Right, "", "library", "header:name4"),
-                press(Key::Right, "", "library", "header:more"),
-                press(Key::Ok, "library:Menu { kind: Sources", "library", "menu:section:1:1"),
-            ],
-            end: plus_n,
-        },
-        Row {
             name: "s12-sort-filter",
             setup: library,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 let mut steps = to_sort_filter();
                 steps.push(press(Key::Ok, "library:Menu { kind: SortFilter", "library", "menu:unwatched"));
@@ -474,7 +490,7 @@ fn the_plus_n_list_and_sort_filter_both_lift_their_opener() {
 fn the_sort_filter_pill_is_the_lifts_alone_after_the_panel_and_the_glass_consumes_it() {
     let mut w = World::movies_library("route-sort-lift-order", false);
     w.climb_into_header();
-    header_stop(&mut w, "collections");
+    header_stop(&mut w, "catalogs");
     for (key, at) in [(Key::Right, "header:recommended"), (Key::Right, "header:sort")] {
         w.press(key);
         w.frames(30);
@@ -540,34 +556,14 @@ fn the_sort_filter_pill_is_the_lifts_alone_after_the_panel_and_the_glass_consume
     assert!(close.last().is_some_and(|a| *a >= 1.0), "and it ends whole: {close:?}");
 }
 
-/// **A library the server says has no collections has no Collections stop** (the rig's probe is
-/// seeded per section, `collections_probe::seed_for_test`, so the app tier models what the live
-/// probe reports): none, or a refusal (HTTP 403), puts nothing on the header, and the arrows walk
-/// Recommended then Sort & Filter. With the rig's count the control is the first stop.
-#[test]
-fn a_library_without_collections_has_no_collections_stop() {
-    use plx_plex::plex::collections::CollectionsCount;
-    for (name, answer, collections) in [
-        ("route-no-collections-none", CollectionsCount::Count(0), false),
-        ("route-no-collections-403", CollectionsCount::Forbidden, false),
-        ("route-no-collections-unknown", CollectionsCount::Unknown, false),
-        ("route-collections-some", CollectionsCount::Count(7), true),
-    ] {
-        let mut w = World::movies_library_answering(name, answer);
-        let stops: Vec<&str> = w.library().probe_header_stops().into_iter().map(|(stop, _)| stop).collect();
-        assert_eq!(stops.contains(&"collections"), collections, "{name}: the header's stops are {stops:?}");
-        w.climb_into_header();
-        header_stop(&mut w, if collections { "collections" } else { "recommended" });
-        assert_eq!(here(&w), if collections { "header:collections" } else { "header:recommended" }, "{name}");
-        w.press(Key::Right);
-        w.frames(10);
-        assert_eq!(here(&w), if collections { "header:recommended" } else { "header:sort" }, "{name}");
-    }
-}
+// Fork Rofocale11: `a_library_without_collections_has_no_collections_stop` is gone with the count
+// probe it tested. The header's first stop is now the addon Catalogs selector; its visibility and
+// label are asserted in the screens tier (`plx_screens` library header tests), which owns the
+// header's content, not this route tier.
 
 // ---- R6: Sort & Filter and the "N of M" read-out ---------------------------------------------------
 
-/// The Sort & Filter control, from the Library's arrival on the Collections control.
+/// The Sort & Filter control, from the Library's arrival on the Catalogs control.
 fn to_sort_filter() -> Vec<Step> {
     vec![
         press(Key::Right, "", "library", "header:recommended"),
@@ -578,7 +574,7 @@ fn to_sort_filter() -> Vec<Step> {
 fn with_genres(w: &mut World) {
     w.open_library();
     w.climb_into_header();
-    header_stop(w, "collections");
+    header_stop(w, "catalogs");
     let genre = |id: &str, title: &str| GenreEntry { id: id.into(), title: title.into() };
     w.bridge.bridge().stores.browse.borrow_mut().seed_query_choices_for_test(Vec::new(), vec![genre("g1", "Drama"), genre("g2", "Comedy")]);
     w.frames(30);
@@ -610,11 +606,11 @@ fn a_filter_shows_n_of_m_beside_the_control_and_clears_when_reset() {
         steps
     };
     run(vec![
-        Row { name: "r6-unwatched", setup: library, start: "header:collections", steps: unwatched(to_sort_filter()), end: no_checks },
+        Row { name: "r6-unwatched", setup: library, start: "header:catalogs", steps: unwatched(to_sort_filter()), end: no_checks },
         Row {
             name: "r6-genre",
             setup: with_genres,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 let mut steps = to_sort_filter();
                 steps.extend([
@@ -640,7 +636,7 @@ fn lettered(w: &mut World) {
     w.bridge.bridge().stores.browse.borrow_mut().seed_letter_counts_for_test(&[("A", 30), ("C", 30), ("M", 30), ("Z", 30)]);
     w.open_library();
     w.climb_into_header();
-    header_stop(w, "collections");
+    header_stop(w, "catalogs");
     w.frames(30);
 }
 
@@ -658,7 +654,7 @@ fn the_rail_is_entered_only_from_the_last_column_and_walks_over_empty_letters() 
         Row {
             name: "r11-walk",
             setup: lettered,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 let mut steps = vec![
                     // The page arrived on its first poster, so Down from the header returns to it.
@@ -685,7 +681,7 @@ fn the_rail_is_entered_only_from_the_last_column_and_walks_over_empty_letters() 
         Row {
             name: "r11-left-returns",
             setup: lettered,
-            start: "header:collections",
+            start: "header:catalogs",
             steps: {
                 // Down from the header returns to the cell Up left from, the page's first poster;
                 // column 3 is reached by walking.
@@ -714,11 +710,11 @@ fn the_rail_is_entered_only_from_the_last_column_and_walks_over_empty_letters() 
             // asks the server for the first letters of whatever type the page lists, collections
             // included), and so are its doors.
             name: "r11-collections",
-            setup: library,
-            start: "header:collections",
+            setup: collections_page,
+            // Seated on its status read until its listing lands (see r7).
+            start: "status",
             steps: {
                 let mut steps = vec![
-                    press(Key::Ok, "library:OpenListing { listing: Collections", "collections", "status"),
                     // The answer lands under the page's own seat, which follows it into the first tile.
                     after(collections_lettered, press(Key::Right, "", "collections", "grid:0,1")),
                 ];
@@ -758,18 +754,15 @@ fn the_three_library_pages_wear_one_route_word_and_the_tab_bar() {
     let mut w = World::new("r16-word");
     w.open_library();
     w.climb_into_header();
-    header_stop(&mut w, "collections");
     let mut fails = wears_the_library_route(&w, "the grid");
-    w.press(Key::Ok);
-    w.frames(40);
+    open_collections(&mut w);
     assert!(w.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is up");
     fails.extend(wears_the_library_route(&w, "Collections"));
     w.press(Key::Back);
     w.frames(60);
-    w.press(Key::Right);
-    w.press(Key::Ok);
-    w.frames(40);
-    assert!(w.on(&AppArg::LibraryRecommended { section: 0 }), "premise: the Recommended page is up");
+    // Back returns to the library name the push left focus on; Catalogs no longer opens a page,
+    // so walk to the Recommended stop (elem 9) and press OK there.
+    w.open_from_header(9, AppArg::LibraryRecommended { section: 0 });
     fails.extend(wears_the_library_route(&w, "Recommended"));
     assert!(fails.is_empty(), "\n{}", fails.join("\n"));
 }
@@ -779,21 +772,22 @@ fn opening_collections_again_does_not_stack_a_second_page() {
     let mut w = World::new("r16-twice");
     w.open_library();
     w.climb_into_header();
-    header_stop(&mut w, "collections");
     let base = w.d.nav.tabs.stack.depth();
-    // A double press: the second OK lands while the first push is still on its way.
-    w.tap(Key::Ok, 0);
-    w.tap(Key::Ok, 0);
+    // A double ask: the second lands while the first push is still on its way.
+    let open = |w: &mut World| Bridge::library_command(&mut w.d,
+        plx_screens::registry::LibraryCmd::OpenListing(plx_screens::library::Listing::Collections));
+    open(&mut w);
+    open(&mut w);
     w.frames(80);
     assert!(w.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is up, not {}", top(&w));
-    assert_eq!(w.d.nav.tabs.stack.depth(), base + 1, "two OKs opened one page");
+    assert_eq!(w.d.nav.tabs.stack.depth(), base + 1, "two asks opened one page");
     // One Back is home, and opening it afterwards leaves exactly one page again: nothing of the
     // first visit is left on the stack to be stacked upon.
     for visit in 0..2 {
         w.press(Key::Back);
         w.frames(60);
         assert_eq!((top(&w), w.d.nav.tabs.stack.depth()), ("library", base), "visit {visit}: one Back leaves the page");
-        w.press(Key::Ok);
+        open(&mut w);
         w.frames(60);
         assert_eq!((top(&w), w.d.nav.tabs.stack.depth()), ("collections", base + 1), "visit {visit}: the page opens once");
     }
@@ -876,19 +870,18 @@ fn a_non_favorite_visit_survives_child_returns_and_ends_when_leaving_library() {
         let mut w = World::new("temporary-library-visit");
         w.open_library();
         w.climb_into_header();
-        header_stop(&mut w, "more");
-        w.press(Key::Ok);
-        assert!(here(&w).starts_with("menu:section:1:1"));
-        w.press(Key::Ok);
-        w.frames(90);
+        // Fork Rofocale11: the library-options menu that used to select the non-favorite is gone;
+        // make the visit at the store, then check the navigation that surrounded that selection.
+        visit_non_favorite(&mut w);
         assert_eq!(w.bridge.stores().browse.borrow().current_for_test(), 2);
         super::open_settings_at(&mut w.d, plx_screens::family::SettingsPage::LibraryFavourites);
         w.frames(60);
         w.press(Key::Back);
         w.frames(90);
         assert_eq!(w.bridge.stores().browse.borrow().current_for_test(), 2, "Back from Settings preserves the visit");
-        header_stop(&mut w, "collections");
-        w.press(Key::Ok);
+        // The child used to be opened by OK on the Collections header control; that slot is
+        // Catalogs now, so push the Collections page by its command to keep the child-return check.
+        open_collections(&mut w);
         w.frames(40);
         w.press(Key::Back);
         w.frames(90);

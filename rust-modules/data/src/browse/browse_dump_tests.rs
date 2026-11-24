@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! Dump mode at the Browse sites (discovery, genre and letters directories, listing page, section
 //! hubs): each takes through its OWN mailbox's claim (`src_fetching`, `genres`, `letters`, `page`,
 //! `hubs.fetch`), with a dump-armed local gate and a worker that
@@ -95,7 +97,7 @@ fn dump_mode_a_page_request_out_lands_on_the_pump_that_runs_whatever_the_worker(
         worker.page.post(PageResult {
             client, token_gen, gen, sec: 0, start: 0,
             items: vec![PmsMovie { sid, ..Default::default() }], total: 1,
-            sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+            sorts: None, restored: None, genres: None, genre: None, catalogs: None, resolved: Default::default(),
         }, |_| true);
     });
     let gate = dump_gate();

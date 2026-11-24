@@ -343,9 +343,8 @@ impl plx_screens::registry::LibraryLike for AppHost {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> { cx.views.listing }
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> { cx.views.directory }
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> { cx.views.section_hubs }
-    fn collections_count(cx: &Cx<'_, Self>, section: usize) -> Option<Result<u32, plx_screens::registry::Forbidden>> {
-        super::collections_probe::count(cx.views.directory, section, cx.tick.ms)
-    }
+    // Fork Rofocale11: the shim has no real Collections count, so the fabricated probe and this
+    // LibraryLike method are gone; the header's slot is now the addon Catalogs selector.
     fn today(cx: &Cx<'_, Self>) -> Option<[i32; 3]> { cx.views.today }
 }
 
@@ -4061,12 +4060,8 @@ fn frame_ingest(
     // page is told of it in the frame that first draws it (`MetadataStore::pump_related`).
     rig.stores.metadata.pump_related();
     let (browse_changed, hubs_changed, search_changed) = rig.capture_views(d);
-    // A directory that just landed (or a server re-pointed at a new client) has every section's
-    // Collections count asked for now, so a library switch finds its answer already there
-    // (`collections_probe::warm`, one request at a time on one worker).
-    if super::collections_probe::warm_due(browse_changed) {
-        super::collections_probe::warm(rig.retained.directory.view(), tick.ms);
-    }
+    // Fork Rofocale11: no Collections count probe to warm on a directory change; the header now
+    // reads the section's addon catalogs straight from the listing.
     rig.capture_chrome(d);
     rig.deliver_home_commands(d);
     rig.deliver_library_commands(d);

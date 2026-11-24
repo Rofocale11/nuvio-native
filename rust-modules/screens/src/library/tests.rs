@@ -1,5 +1,19 @@
 use super::*;
 use plx_ui::fixture::FixtureMeasure;
+
+/// Fork Rofocale11: the catalogs this fixture's sections advertise, and one helper to build the
+/// `CatalogEntry` rows the header names and the Type menu lists.
+pub(super) const TEST_CATALOGS: [(&str, &str); 3] = [
+    ("cine/movie/top", "Popular"),
+    ("cine/movie/imdbRating", "Top Rated"),
+    ("netflix/movie", "Netflix Movies"),
+];
+pub(super) fn test_catalogs() -> Vec<plx_data::browse::CatalogEntry> {
+    TEST_CATALOGS.iter().enumerate().map(|(index, (key, title))| plx_data::browse::CatalogEntry {
+        key: (*key).to_string(), title: (*title).to_string(), active: index == 0,
+    }).collect()
+}
+
 use plx_ui::focus::{FocusEngine, Outcome};
 use plx_machine::machine::{Host, InputOwner, FocusRead, PressRead, Tick};
 use plx_ui::screen::ScreenArg;
@@ -43,9 +57,6 @@ impl LibraryLike for HostFixture {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> { cx.views.listing }
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> { cx.views.directory }
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a> { cx.views.hubs }
-    /// The fixture's libraries all hold collections, and their probe has said so: the Collections
-    /// control is on the row only with a known count, and these tests are about a row that has it.
-    fn collections_count(_cx: &Cx<'_, Self>, _section: usize) -> Option<Result<u32, crate::registry::Forbidden>> { Some(Ok(4)) }
 }
 const ENTRY: EntryId = EntryId(81);
 const OWNER: InputOwner = InputOwner::Entry(ENTRY);
@@ -799,7 +810,9 @@ fn published_library_projection_and_layout_enter_canonical_state() {
     page.target_layout.rows += 1;
     assert_ne!(prior, hash(&page), "target document geometry determines reveal and placement");
     let prior = hash(&page);
-    page.libraries.push((MORE, usize::MAX));
+    // Fork Rofocale11: the options stop is gone; a visible favorite name is the control whose
+    // presence is canonical state.
+    page.libraries.push((9999, 2));
     assert_ne!(prior, hash(&page), "bounded favorite window determines available controls");
     let prior = hash(&page);
     page.readout = Readout::Failed;
@@ -856,7 +869,7 @@ fn pending_semantic_commits_change_the_library_state_hash() {
 // harness wholesale rather than duplicating it, per the guide at the top of that file.
 pub(super) struct Fixture {
     stores: Option<plx_data::stores::Stores>,
-    listing: plx_data::stores::browse::ListingSnapshot,
+    pub(super) listing: plx_data::stores::browse::ListingSnapshot,
     pub(super) directory: plx_data::stores::browse::DirectorySnapshot,
     hubs: plx_data::stores::browse::HubsSnapshot,
     measure: FixtureMeasure,
@@ -1106,7 +1119,10 @@ impl Fixture {
         let sid = plx_plex::plex::ServerId::from_raw(0);
         let listing = plx_data::browse::view::ListingSnapshot::fixture(sid, (0..36).map(|i|
             Some(plx_data::pms::PmsMovie { sid, rk: format!("{}", i + 1), title: format!("s{i:04x}"), ..Default::default() })).collect(),
-            vec![("A".into(), 18), ("Z".into(), 18)]);
+            vec![("A".into(), 18), ("Z".into(), 18)])
+            // Fork Rofocale11: the fixture's section advertises catalogs, so the left row carries
+            // the Catalogs control (the old Collections count probe is gone).
+            .with_catalogs(test_catalogs(), Some(TEST_CATALOGS[0].0));
         let directory = plx_data::browse::view::DirectorySnapshot::fixture(1, 0, vec![
             plx_data::browse::view::SectionView { sid: Some(sid), key: 1, kind: SecKind::Movie,
                 row: plx_data::browse::SrcRow { section: 0, title: "Cinema".into(), pinned: true, current: true, ..Default::default() } }]);
@@ -1257,9 +1273,10 @@ fn sort_chosen_during_section_fade_commits_to_the_incoming_library() {
         }))) if *target == incoming && key == "titleSort")), "leaving flushes selection and semantic sort in one addressed store command");
 }
 
-/// A singleton keeps its direct shortcut and the Library options control.
+/// Fork Rofocale11: a singleton keeps its direct shortcut; the Library options ("…") control is
+/// gone, so the row holds names only.
 #[test]
-fn a_single_favourite_library_keeps_its_shortcut_and_options() {
+fn a_single_favourite_library_keeps_its_shortcut() {
     let _guard = plx_base::testlock::serial();
     let mut fixture = Fixture::new();
     fixture.directory = plx_data::browse::view::DirectorySnapshot::fixture(1, 0, vec![
@@ -1267,12 +1284,12 @@ fn a_single_favourite_library_keeps_its_shortcut_and_options() {
             kind: SecKind::Movie, row: plx_data::browse::SrcRow { section: 0, title: "Cinema".into(),
                 pinned: true, current: true, ..Default::default() } }]);
     let page = fixture.screen();
-    assert_eq!(page.libraries.len(), 2, "a library shortcut and options");
+    assert_eq!(page.libraries.len(), 1, "one library shortcut, no options stop");
     assert!(page.layout.libraries, "the header row is always reserved, names or not");
     let cx = fixture.cx(None);
     let mut groups = Vec::new();
     page.groups(&cx, &mut groups);
-    assert_eq!(page.header_elems().len(), page.toolbar_elems().len() + 2);
+    assert_eq!(page.header_elems().len(), page.toolbar_elems().len() + 1);
     let mut draw = DrawFrame::new(&cx, plx_ui::Painter::root());
     page.record_stops(&mut draw);
     let stops = draw.into_stops();
@@ -1299,7 +1316,7 @@ fn favorite_library_row_uses_shared_strip_geometry_and_incoming_type() {
     page.pending.request_section(SectionTarget { epoch: 1, index: 3,
         identity: LibrarySectionIdentity { sid, key: 4 }, kind: SecKind::Show });
     page.sync(&cx);
-    assert_eq!(page.libraries.iter().filter(|(elem, _)| *elem != MORE).map(|(_, section)| *section).collect::<Vec<_>>(), vec![2, 3],
+    assert_eq!(page.libraries.iter().map(|(_, section)| *section).collect::<Vec<_>>(), vec![2, 3],
         "the favorite row must not keep movie libraries beneath the incoming Shows type");
 }
 
@@ -1351,7 +1368,7 @@ fn the_page_glyph_and_the_librarys_live_tab_strip_never_overlap() {
     let mut solo = Fixture::new();
     solo.listing = solo.listing.clone().with_fetch(SecFetch::Failed, -1);
     let page = solo.screen();
-    assert_eq!(page.libraries.len(), 2, "a singleton keeps its shortcut and Library options");
+    assert_eq!(page.libraries.len(), 1, "a singleton keeps its shortcut alone");
     let cx = solo.cx(Some(page.key(RETRY)));
     let (caption, reason) = page.status_text(&cx);
     let overlay = page.status_overlay(&cx, &caption, reason.as_deref());

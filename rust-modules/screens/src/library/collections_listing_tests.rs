@@ -1,6 +1,8 @@
 // The Collections page as a mounted screen: it asks the store for the section's collections
 // (type 18), wears the crumb instead of the library header, captions its tiles with the member
 // count, and hands the section back to the full grid when left.
+// Fork Rofocale11: the deleted header control was Collections; on this fork the grid's first
+// control is Catalogs and the options (`MORE`) pill no longer exists, so neither can be a stop.
 use super::*;
 use plx_data::browse::LibraryType;
 use plx_machine::machine::{Edge, InputEvent, InputKind, Key, Source, Tick};
@@ -144,7 +146,7 @@ fn the_header_is_the_crumb_not_the_library_header() {
     run(&mut page, &fixture, ScreenEvent::Mount);
     assert!(page.libraries.is_empty(), "no library names on the page");
     assert_eq!(page.header_elems(), [toolbar::CRUMB_ROOT], "the crumb's root is the one stop; PMS declares one sort");
-    for gone in [COLLECTIONS, RECOMMENDED, SORTFILTER, MORE] {
+    for gone in [CATALOGS, RECOMMENDED, SORTFILTER] {
         assert!(!page.is_header_elem(gone), "{gone} is not on the Collections page's row");
     }
     let header = page.header.row().expect("the row is built");

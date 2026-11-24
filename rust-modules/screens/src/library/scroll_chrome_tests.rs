@@ -1,5 +1,7 @@
 //! The Library's use of the shared scroll chrome (`plx_ui::scroll_chrome`) and of the shared rest
 //! rule (`poster_grid::rest_scroll`, through its layout), and what a tucked page declares.
+// Fork Rofocale11: the scrolled capsule must also name the addon catalog and the active filter —
+// facts this fork has and upstream Plex does not — so the four items are pinned here.
 use plx_ui::scroll_capsule;
 
 /// A focused row below the first settles with its poster top where the first row's is at rest
@@ -26,6 +28,43 @@ fn a_focused_row_settles_at_the_first_rows_resting_y() {
 #[test]
 fn a_settled_row_is_clear_of_the_capsule() {
     assert!(super::layout::LIBRARY_GRID_TOP >= scroll_capsule::Y + scroll_capsule::H);
+}
+
+/// **The scrolled capsule says where the rows came from**: the library, the catalog in force, the
+/// count, the sort and the active filter. The sort was already there; a named catalog and a filter
+/// are now part of what the reader is looking at, so they belong on the same capsule.
+#[test]
+fn the_scroll_capsule_names_the_library_catalog_sort_and_filter() {
+    use plx_ui::screen::Screen;
+    let _g = plx_base::testlock::serial();
+    let mut fixture = super::tests::Fixture::new();
+    fixture.listing = fixture.listing.clone()
+        .with_catalogs(super::tests::test_catalogs(), Some(super::tests::TEST_CATALOGS[2].0))
+        .with_unwatched(true);
+    let mut page = fixture.screen();
+    let pitch = page.layout.grid_pitch();
+    page.scroll.jump(pitch);
+    page.scroll_target = pitch;
+    page.handoff.step(0.0, pitch, pitch, pitch, page.capsule_wanted());
+    let runs = plx_ui::draw_census::capture_runs(|| {
+        let cx = fixture.cx(None);
+        let mut frame = plx_ui::screen::DrawFrame::new(&cx, plx_ui::Painter::recording());
+        page.draw(&mut frame);
+    });
+    assert!(runs.iter().any(|run| run.text == "Cinema · Netflix Movies"),
+        "the library and the catalog in force: {:?}", runs.iter().map(|r| &r.text).collect::<Vec<_>>());
+    assert!(runs.iter().any(|run| run.text.ends_with(" · Unwatched")),
+        "the sort and the filter share the criterion run: {:?}", runs.iter().map(|r| &r.text).collect::<Vec<_>>());
+}
+
+/// The leading run is assembled in ONE place: the library's own name, a shared owner and the
+/// catalog in force, in that order, with the capsule's dot between them.
+#[test]
+fn the_capsule_name_joins_library_owner_and_catalog_in_one_place() {
+    assert_eq!(super::draw::capsule_words("Films", "", "", ""), "Films");
+    assert_eq!(super::draw::capsule_words("Films", "", "", "Netflix Movies"), "Films · Netflix Movies");
+    assert_eq!(super::draw::capsule_words("Films", "admin", "Cinema server", "Netflix Movies"),
+        "Films admin · Cinema server · Netflix Movies");
 }
 
 /// The paints one descriptive draw of `page` declares (`frame::backdrop::discover`: primitives are

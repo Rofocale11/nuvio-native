@@ -1,19 +1,24 @@
-//! The library page header (redesign spec, "Header"): the library names, the Library options and the
-//! page's controls (Collections › and Recommended › as places, a divider, then the sort control:
-//! icon, the chosen criterion, a down chevron, with "Sort & Filter" as its unshown name
-//! ([`HeaderItem::sort_control`], which the Collections page's Sort and the Watchlist's wear too); on the Collections page, the
-//! crumb and its Sort) on the ui
-//! [`PageHeader`], one focus row at y 148.
+//! The library page header (redesign spec, "Header"): the library names, then the Catalogs selector
+//! (naming the catalog in force) and Recommended on the LEFT, over the first poster; the divider and
+//! the sort control (icon, the chosen criterion, a down chevron, with "Sort & Filter" as its unshown
+//! name — [`HeaderItem::sort_control`], which the Collections page's Sort and the Watchlist's wear
+//! too) on the RIGHT; on the Collections page, the crumb and its Sort.
+//!
+//! Fork Rofocale11: the fabricated "Collections · N" control is gone, and the library-options ("…")
+//! pill was withdrawn entirely — the top Home/Movies/TV Shows tabs are the switcher. The Catalogs
+//! control takes the old left slot: it names the addon catalog in force, and its menu lists this
+//! tab's catalogs with the one in force checked.
 //!
 //! This file DECLARES the row: which names, which controls, which element each focusable item is.
 //! The row is built here, once per sync, as a ui [`HeaderRow`]; its layout, paint, motion and focus
 //! group are the ui's (`plx_ui::page_header`), the same ones the Collections, Recommended and
 //! Watchlist pages wear. The names are packed against the room the right cluster leaves
-//! (`PageHeader::layout`'s `left_budget`, sized from the cluster's widest case), so the names never
-//! shift when a value changes, the Collections answer (unknown, none, a count of up to three digits)
-//! included; a library whose count needs a fourth digit widens its own budget once; the
-//! controls inside the cluster stand by what they draw, one gap apart. The row's MOTION (`header_capsules`, `header_pop`) lives on the screen, not in the
-//! row: a library switch replaces the whole row, and the pill must travel across it.
+//! (`PageHeader::layout`'s `left_budget`, sized from the cluster's widest case) less the room the
+//! left controls need, so the names never shift when a value changes — the sort criterion, the
+//! filter read-out or the catalog title included. The widest catalog title reserves that room, so a
+//! long title moves nothing else. The controls stand by what they draw, one gap apart. The row's
+//! MOTION (`header_capsules`, `header_pop`) lives on the screen, not in the row: a library switch
+//! replaces the whole row, and the pill must travel across it.
 use super::*;
 use plx_machine::machine::Measure;
 use plx_ui::hstack::{self, Align, HStack};
@@ -31,24 +36,24 @@ pub(super) fn fit_name(title: &str, owner: &str, room: f32, measure: &dyn Measur
     measure.fit_line(title, room, size, false).to_string_lossy().into_owned()
 }
 
-/// The width the names `picks` (then, with `more_w`, the options after them) stand in, one
-/// [`page_header::GAP`] apart: the ui's own [`HStack::width`]. `PageHeader::layout` places the names
-/// with the same stack and the same gap, so what is packed here and where the names stand share the
-/// gap rule (not one construction: this takes measured widths, the layout takes spec items).
-fn names_w(widths: &[f32], picks: &[usize], more_w: Option<f32>) -> f32 {
-    let names: Vec<hstack::Item> = picks.iter().map(|&i| widths[i]).chain(more_w).map(hstack::Item::new).collect();
+/// The width the names `picks` stand in, one [`page_header::GAP`] apart: the ui's own
+/// [`HStack::width`]. `PageHeader::layout` places the names with the same stack and the same gap, so
+/// what is packed here and where the names stand share the gap rule (not one construction: this
+/// takes measured widths, the layout takes spec items).
+fn names_w(widths: &[f32], picks: &[usize]) -> f32 {
+    let names: Vec<hstack::Item> = picks.iter().map(|&i| hstack::Item::new(widths[i])).collect();
     HStack::new(&names, page_header::GAP, Align::Leading(0.0)).width()
 }
 
-/// Which of `n` names show when the row cannot hold them all (`budget` is text edge to text edge
-/// for names plus options). Keep a stable prefix of favorites, reserving room for the options
-/// action. Choosing another library never reorders these shortcuts.
-pub(super) fn pack_names(widths: &[f32], _selected: usize, budget: f32, more_w: f32, cap: usize) -> Vec<usize> {
+/// Which of `n` names show when the row cannot hold them all (`budget` is text edge to text edge).
+/// Keep a stable prefix of favorites: choosing another library never reorders these shortcuts.
+/// Fork Rofocale11: the library-options stop is gone, so nothing is reserved after the names.
+pub(super) fn pack_names(widths: &[f32], budget: f32, cap: usize) -> Vec<usize> {
     let mut picks = Vec::new();
     for i in 0..widths.len().min(cap) {
         let mut next = picks.clone();
         next.push(i);
-        if names_w(widths, &next, Some(more_w)) > budget { break; }
+        if names_w(widths, &next) > budget { break; }
         picks = next;
     }
     picks
@@ -101,6 +106,24 @@ impl LibraryScreen {
             _ => listing.sorts().get(listing.sort_index()),
         };
         sort.map_or(plx_os::i18n::msg::browse_library_title(), |sort| sort.label())
+    }
+
+    /// The active filter as words the scroll capsule can name beside the sort. A genre and
+    /// Unwatched can both be on, and the locale's own joined wording is used then, so the capsule
+    /// never invents a separator the reader has not seen in the filter menu.
+    // Fork Rofocale11: the Catalogs dropdown is tab-scoped, and a chosen catalog can carry a genre
+    // filter of its own; naming it on the capsule says what the rows on screen are filtered by.
+    pub(super) fn filter_value<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> Option<String> {
+        if !self.filter_active(cx) { return None; }
+        let listing = H::listing(cx);
+        let genre = listing.genre().map(|genre| genre.title.as_str()).filter(|title| !title.is_empty());
+        let unwatched = listing.unwatched();
+        match (genre, unwatched) {
+            (Some(genre), true) => Some(plx_os::i18n::msg::browse_library_genre_unwatched(genre)),
+            (Some(genre), false) => Some(genre.to_owned()),
+            (None, true) => Some(plx_os::i18n::msg::browse_library_unwatched().to_owned()),
+            (None, false) => None,
+        }
     }
 
     /// Is a genre or Unwatched filter in force (a queued edit included)? Only then does the row
@@ -180,10 +203,11 @@ impl LibraryScreen {
 
     /// The right cluster as it is now, and in its widest case (every value at its longest), which
     /// fixes the cluster's BUDGET so the room the library names may use does not change when a
-    /// value does.
+    /// value does. Only the sort control stands here now (with the filtered read-out before it):
+    /// Catalogs and Recommended moved to [`Self::header_left`], over the first poster.
+    // Fork Rofocale11: no Collections count, no place pills on the right.
     pub(super) fn header_right<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> (Vec<HeaderItem>, Vec<HeaderItem>) {
         use plx_os::i18n::msg;
-        let locale = plx_os::i18n::current();
         let mut right = Vec::new();
         let mut widest = Vec::new();
         if let Some(readout) = self.filtered_readout(cx) {
@@ -191,35 +215,9 @@ impl LibraryScreen {
             widest.push(item.clone());
             right.push(item);
         }
-        // The control is on the row only with its count: an unknown answer lays out as none (see
-        // [`CollectionsControl`]), so "Collections" is never drawn bare. The slot is the widest
-        // count the cluster's BUDGET allows for (THREE digits; a library whose count needs more
-        // widens only its own slot, here and in the widest case). It is no air inside the row: the
-        // control is placed by the text it draws, so the gap to "Recommended" is the row's one gap
-        // whatever the count is. The budget reserves it for EVERY answer, a library with none
-        // included: a cold cache reads Unknown for a round trip and then Hidden, and the names
-        // must not repack between the two (the room they pack into is measured once and never
-        // moves).
-        let slot_of = |count: u32| Some(locale.number(i64::from(count.max(999))));
-        let control = |value, slot| HeaderItem { value, value_slot: slot, ..place("collections", msg::library_header_collections()) };
-        match self.collections {
-            CollectionsControl::Count(count) => {
-                let slot = slot_of(count);
-                right.push(HeaderItem { selected_plate: self.listing == Listing::Collections,
-                    ..control(Some(locale.number(i64::from(count))), slot.clone()) });
-                widest.push(control(slot.clone(), slot));
-            }
-            CollectionsControl::Unknown | CollectionsControl::Hidden => {
-                let slot = slot_of(0);
-                widest.push(control(slot.clone(), slot));
-            }
-        }
-        right.push(HeaderItem { selected_plate: self.listing == Listing::Recommended,
-            ..place("recommended", msg::library_header_recommended()) });
-        widest.push(place("recommended", msg::library_header_recommended()));
         // The divider and the sort control draw what the criterion says, with no slot for it: the
-        // control ends at the row's edge and the places slide as the criterion's width changes. The
-        // widest criterion only sizes the room the library names may use.
+        // control ends at the row's edge and the criterion slides as its width changes. The widest
+        // criterion only sizes the room the library names may use.
         right.push(divider());
         widest.push(divider());
         let sort = self.sort_value(cx);
@@ -232,6 +230,47 @@ impl LibraryScreen {
         (right, widest)
     }
 
+    /// The catalog the grid is listing — the one the menu checks — or the server's first, which is
+    /// what the grid lists until a pick lands. `None` when the section advertised none.
+    // Fork Rofocale11: the old fork's `current_catalog` rule (active key, then the flagged entry,
+    // then the first) ported for the catalog selector.
+    pub(super) fn current_catalog<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> Option<String> {
+        let listing = H::listing(cx);
+        let catalogs = listing.catalogs();
+        let active = listing.catalog()
+            .and_then(|key| catalogs.iter().find(|catalog| catalog.key == key))
+            .or_else(|| catalogs.iter().find(|catalog| catalog.active))
+            .or_else(|| catalogs.first())?;
+        Some(active.title.clone())
+    }
+
+    /// The controls that stand on the LEFT of the row: the Catalogs selector, drawing the catalog
+    /// in force, then Recommended. Returned as (live, widest): the widest catalog title fixes the
+    /// room they need so the library names beside them are packed against a stable budget.
+    // Fork Rofocale11: the left cluster replaces the upstream Collections/Recommended places.
+    pub(super) fn header_left<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> (Vec<HeaderItem>, Vec<HeaderItem>) {
+        use plx_os::i18n::msg;
+        let mut live = Vec::new();
+        let mut widest = Vec::new();
+        if self.listing == Listing::Collections { return (live, widest); }
+        if self.catalogs {
+            let current = self.current_catalog(cx).unwrap_or_default();
+            let longest = H::listing(cx).catalogs().iter().map(|catalog| catalog.title.as_str())
+                .max_by(|a, b| page_header::cluster_width(&[item(*a)], cx.measure)
+                    .total_cmp(&page_header::cluster_width(&[item(*b)], cx.measure)))
+                .unwrap_or_default().to_owned();
+            live.push(HeaderItem { value: (!current.is_empty()).then_some(current), fold_glyph: true,
+                a11y: Some("catalogs"), ..item(msg::library_header_catalogs()) });
+            widest.push(HeaderItem { value: (!longest.is_empty()).then_some(longest), fold_glyph: true,
+                a11y: Some("catalogs"), ..item(msg::library_header_catalogs()) });
+        }
+        let recommended = HeaderItem { selected_plate: self.listing == Listing::Recommended,
+            ..place("recommended", msg::library_header_recommended()) };
+        live.push(recommended.clone());
+        widest.push(recommended);
+        (live, widest)
+    }
+
     /// A fingerprint of everything [`Self::refresh_header`] reads, cheap enough for every frame.
     fn header_key<H: LibraryLike>(&self, cx: &Cx<'_, H>) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -240,7 +279,8 @@ impl LibraryScreen {
         let directory = H::directory(cx);
         (std::ptr::from_ref(plx_os::i18n::current()) as usize).hash(&mut h);
         self.view_section(cx).hash(&mut h);
-        self.collections.hash(&mut h);
+        // Fork Rofocale11: the catalogs control and the catalog it names are row inputs.
+        self.catalogs.hash(&mut h);
         self.listing.hash(&mut h);
         self.listed.code().hash(&mut h);
         matches!(self.kind, SecKind::Movie).hash(&mut h);
@@ -253,40 +293,40 @@ impl LibraryScreen {
             listing.unwatched(), listing.genre().map(|genre| genre.id.as_str()), listing.total(),
             listing.fetch() == SecFetch::Ready, listing.sorts().len(), self.unfiltered.as_ref().map(|(_, total)| *total),
             self.filtered.as_ref().map(|(_, total)| *total)).hash(&mut h);
+        // Fork Rofocale11: the catalogs the section advertises and the one in force are what the
+        // left control draws; a pick already queued changes the name before the listing lands.
+        listing.catalogs().len().hash(&mut h);
+        for catalog in listing.catalogs() {
+            (catalog.key.as_str(), catalog.title.as_str(), catalog.active).hash(&mut h);
+        }
+        listing.catalog().hash(&mut h);
         match self.pending.grid().filter(|(target, _)| target.matches(listing)).map(|(_, action)| action) {
             Some(GridAction::Sort { key, desc }) => (1u8, key.as_str(), *desc).hash(&mut h),
             Some(GridAction::Unwatched { desired }) => (2u8, *desired).hash(&mut h),
             Some(GridAction::Genre { id }) => (3u8, id.as_deref()).hash(&mut h),
             Some(GridAction::LibraryType(kind)) => (4u8, kind.code()).hash(&mut h),
+            Some(GridAction::Catalog(key)) => (5u8, key.as_deref()).hash(&mut h),
             None => 0u8.hash(&mut h),
         }
         h.finish()
     }
 
-    /// Rebuild everything the header row is made of: the Collections control's state, the names
-    /// that fit (`self.libraries`), and the cached geometry.
+    /// Rebuild everything the header row is made of: whether it carries the Catalogs control, the
+    /// names that fit (`self.libraries`), and the cached geometry.
     ///
-    /// **The control is the answer for THIS library, and nothing else.** [`Self::view_section`] is
-    /// the library the row names (a switch's target from the moment it is chosen), so the answer
-    /// read is that library's and a switch never carries the one it left: while the new library's
-    /// count is not known the control is not on the row, and a count that lands later fades in
-    /// through the row's [`HeaderSwap`] (the probe is warmed for every library when the directory
-    /// lands, so it is usually known before the switch is drawn, and the control is then in the
-    /// new row's first frame). The control the library left is not drawn on the new one at all,
-    /// not even fading out ([`HeaderSwap::begin_switch`]). The one thing carried is this SAME
-    /// library's own last count across a read of nothing (see below), never another's.
+    /// **The control is on the row when the published listing advertised catalogs for its
+    /// section.** A section with none has nothing to pick and gets no control. The flag holds its
+    /// last answer for the SAME library: the Browse store holds one listing per section and a
+    /// pushed page (Collections, Recommended) re-points it, so a read of nothing for the library
+    /// the row already names is not news — without the hold the control dropped and returned on
+    /// Back. Across a switch it is another library's answer, so a control is only ever one this
+    /// library gave.
+    // Fork Rofocale11: the catalogs flag replaces the collections count and its hold rule.
     pub(super) fn refresh_header<H: LibraryLike>(&mut self, cx: &Cx<'_, H>) {
-        let view = self.view_section(cx);
-        let of = view.and_then(|index| H::directory(cx).sections().get(index)).map(|section| (section.sid, section.key));
-        let read = view.map_or(CollectionsControl::Unknown, |index| CollectionsControl::of(H::collections_count(cx, index)));
-        // The probe reading nothing AGAIN for the library the row already names (its server was
-        // re-pointed at a new client, so the cache missed for a round trip) is not news: the count
-        // the row has stays, with its focus stop, until an answer replaces it. Across a switch it
-        // never does (`of` is another library's), so a count is only ever one this library gave.
-        self.collections = match (read, self.collections) {
-            (CollectionsControl::Unknown, held @ CollectionsControl::Count(_)) if of == self.header_of => held,
-            (read, _) => read,
-        };
+        let of = self.view_section(cx).and_then(|index| H::directory(cx).sections().get(index))
+            .map(|section| (section.sid, section.key));
+        let read = !H::listing(cx).catalogs().is_empty();
+        self.catalogs = read || (of == self.header_of && self.catalogs);
         self.note_totals(cx);
         // `sync` runs every frame; the row (text measurement, packing) is rebuilt only when one
         // of the things it is made of changed.
@@ -303,12 +343,19 @@ impl LibraryScreen {
         self.header.install(key, row);
     }
 
-    /// The row of the Library page itself: the library names that fit, then the controls.
+    /// The row of the Library page itself: the library names that fit, then the left controls.
     fn names_header<H: LibraryLike>(&mut self, cx: &Cx<'_, H>) -> HeaderRow {
         let (right, widest) = self.header_right(cx);
+        let (left_controls, left_widest) = self.header_left(cx);
         let measure = cx.measure;
-        let budget = PageHeader::new(PageHeaderSpec { right: right.clone(), ..Default::default() }, &widest, measure)
-            .layout(SCR_W, measure).left_budget;
+        // The right cluster fixes this page's left budget; the controls standing at the left edge
+        // take their (widest) room out of it first, so the names packed below never run under them
+        // and no name repacks when the active catalog's title changes.
+        let probe = PageHeader::new(PageHeaderSpec { right: right.clone(), ..Default::default() }, &widest, measure)
+            .layout(SCR_W, measure);
+        let reserve = if left_widest.is_empty() { 0.0 }
+            else { page_header::cluster_width(&left_widest, measure) + page_header::GAP };
+        let budget = (probe.left_budget - reserve).max(0.0);
 
         self.libraries.clear();
         self.folded.clear();
@@ -324,16 +371,13 @@ impl LibraryScreen {
                     LIBRARY_GROUP, all.len());
                 all.push((elem, index));
             }
-            let more = HeaderItem { glyph: Some(plx_ui::icons::Icon::More), value_only: true, a11y: Some("libraries"),
-                ..item(plx_os::i18n::msg::browse_library_libraries()) };
-            let more_w = page_header::cluster_width(&[more.clone()], measure);
             // Reserve a current-library slot whenever the roster can require one. The same
             // reservation applies while a favorite is selected, so a visit never shifts or
             // displaces the favorite shortcuts. Shared measurement/elision bounds every label.
             let visit_slot = all.len() > 2 || directory.sections().iter().any(|section|
                 section.kind == directory.sections()[current].kind && !section.row.pinned);
             let slots = if visit_slot { 3.0 } else { 2.0 };
-            let name_budget = ((budget - more_w - slots * page_header::GAP) / slots).max(0.0);
+            let name_budget = ((budget - slots * page_header::GAP) / slots).max(0.0);
             let label = |section, room| {
                 let (title, owner) = self.library_name(section, cx);
                 fit_name(title, owner, room, measure)
@@ -341,9 +385,9 @@ impl LibraryScreen {
             let labels: Vec<String> = all.iter().map(|(_, section)| label(*section, name_budget)).collect();
             let widths: Vec<f32> = labels.iter().map(|label|
                 page_header::cluster_width(&[item(label.as_str())], measure)).collect();
-            let reserve = if visit_slot { name_budget + page_header::GAP } else { 0.0 };
-            let picks = pack_names(&widths, 0, budget - reserve, more_w, layout::MAX_LIBRARY_PILLS);
-            let current_room = (budget - names_w(&widths, &picks, Some(more_w)) - page_header::GAP).max(0.0);
+            let reserved = if visit_slot { name_budget + page_header::GAP } else { 0.0 };
+            let picks = pack_names(&widths, (budget - reserved).max(0.0), layout::MAX_LIBRARY_PILLS);
+            let current_room = (budget - names_w(&widths, &picks) - page_header::GAP).max(0.0);
             let current_label = label(current, current_room);
             self.folded = all.iter().enumerate().filter(|(i, (_, section))|
                 !picks.contains(i) && *section != current)
@@ -352,10 +396,6 @@ impl LibraryScreen {
                 left.push(HeaderItem { selected_plate: all[pick].1 == current, ..item(labels[pick].as_str()) });
                 self.libraries.push(all[pick]);
             }
-            // The menu belongs to the fixed shortcuts. Keep its opener in that same slot while
-            // the active visit comes and goes beside it.
-            left.push(more);
-            self.libraries.push((MORE, usize::MAX));
             if !self.libraries.iter().any(|(_, index)| *index == current) {
                 if let Some(sid) = directory.sections()[current].sid {
                     let elem = self.keys.register(LibraryIdentity::Library(LibrarySectionIdentity {
@@ -366,27 +406,30 @@ impl LibraryScreen {
                 }
             }
         }
+        // The controls stand after any names, so on the usual one-library page they sit at the
+        // left text edge, above the first poster. Fork Rofocale11: no library-options ("…") stop.
+        left.extend(left_controls);
+
         let page = PageHeader::new(PageHeaderSpec { left, right, ..Default::default() }, &widest, measure);
         let layout = page.layout(SCR_W, measure);
         self.header_row(page, layout)
     }
 
-    /// The built row: which element each focusable item of `layout` is. The names and options are
-    /// `self.libraries`, the controls are [`Self::toolbar_elems`] (the first focusable right item is
-    /// the first control, a read-out before it is no stop), the crumb's root is [`CRUMB_ROOT`] and
-    /// its page name, the title, is none.
+    /// The built row: which element each focusable item of `layout` is. The names are
+    /// `self.libraries`, then [`Self::left_controls`]; the right cluster is [`Self::right_controls`]
+    /// (a read-out before them and the divider among them are no stops); the crumb's root is
+    /// [`CRUMB_ROOT`] and its page name, the title, is none.
     fn header_row(&self, page: PageHeader, layout: page_header::HeaderLayout) -> HeaderRow {
-        let controls = self.toolbar_elems();
+        let names = self.libraries.len();
+        let left_controls = self.left_controls();
+        let right_controls = self.right_controls();
+        let first_control = page.spec().right.iter().position(|it| it.focusable).unwrap_or(0);
         let stops = layout.items.iter().enumerate().filter(|(_, rect)| rect.focusable).filter_map(|(index, rect)| {
             let elem = match rect.slot {
-                Slot::Left(i) => self.libraries.get(i).map(|(elem, _)| *elem),
-                Slot::Overflow => Some(MORE),
-                // The n-th FOCUSABLE right item is the n-th control: a read-out before them and the
-                // divider among them are no stops.
-                Slot::Right(i) => {
-                    let rank = page.spec().right[..i].iter().filter(|it| it.focusable).count();
-                    controls.get(rank).copied()
-                }
+                Slot::Left(i) => if i < names { self.libraries.get(i).map(|(elem, _)| *elem) }
+                    else { left_controls.get(i - names).copied() },
+                Slot::Overflow => None,
+                Slot::Right(i) => i.checked_sub(first_control).and_then(|i| right_controls.get(i).copied()),
                 Slot::CrumbRoot => Some(CRUMB_ROOT),
                 Slot::CrumbPage => None,
             };

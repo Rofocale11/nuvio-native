@@ -586,6 +586,10 @@ pub enum SecFetch {
 }
 
 pub mod bands;
+// Fork Rofocale11: one `mod` seam for the fork's addon-catalog state; the upstream sections
+// below only call into it, so a merge reconciles this line, not a scatter of inline blocks.
+mod catalog;
+pub use catalog::CatalogEntry;
 pub mod discovery_job;
 mod letters;
 pub mod listing_jobs;
@@ -637,6 +641,12 @@ struct SecState {
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
     genres_done: bool, // a genre fetch LANDED (even empty) — kick_genres won't ask again
+    // Fork Rofocale11: the shim's addon catalogs are the Movies/TV Shows header's type choices.
+    /// Server-advertised catalogs for this section. Empty = fall back to the upstream LibraryType
+    /// menu (ordinary PMS servers never send `catalogKey`).
+    catalogs: Arc<Vec<CatalogEntry>>,
+    /// The catalog in force, `None` = the server's default. Survives later sort/genre edits.
+    catalog: Option<String>,
     /// Is the live sort the viewer's CHOICE rather than merely what a failed restore left? False
     /// only after a first page that was asked to restore the saved sort and could not tell
     /// whether it had (the re-ask failed, or no menu came back): the library then shows the
@@ -893,6 +903,8 @@ impl Default for SecState {
             sorts: Arc::default(),
             genres: Arc::default(),
             genres_done: false,
+            catalogs: Arc::default(),
+            catalog: None,
             sort_resolved: true,
             genre_resolved: true,
             letters: Arc::default(),
@@ -969,6 +981,7 @@ impl SecState {
         if let Some(genre) = &self.genre {
             filters.push(("genre".into(), genre.id.clone()));
         }
+        self.catalog_filter(&mut filters); // Fork Rofocale11: catalog.rs owns this wire filter.
         filters
     }
 }
@@ -1883,9 +1896,16 @@ impl BrowseState {
         let state = &self.states[current];
         let library_type = state.library_type;
         // The letters are asked with the terms the grid's pages are, from the same source, and keyed
-        // by them; the genre list is scoped by the listing's type alone.
+        // by them. Fork Rofocale11: the shim's genre list belongs to the selected catalog, so the
+        // genre directory carries the catalog filter too, not just the listing's type.
         let (filters, letters) = match which {
-            listing_jobs::Directory::Genres => (library_type.type_terms(kind), None),
+            listing_jobs::Directory::Genres => {
+                let mut filters = library_type.type_terms(kind);
+                if let Some(catalog) = &state.catalog {
+                    filters.push(("catalog".into(), catalog.clone()));
+                }
+                (filters, None)
+            }
             listing_jobs::Directory::Letters => (state.query_filters(kind), Some(state.letters_key())),
             // The bands carry the page's terms too; the family is in the key the answer comes back with.
             listing_jobs::Directory::Bands => {
@@ -2016,6 +2036,8 @@ impl BrowseState {
                         }
                         landed
                     }
+                    // Fork Rofocale11: the header's catalog choice is a query edit like any other.
+                    Some(QueryEdit::Catalog(key)) => self.set_catalog(key),
                     None => true,
                 }
             }
@@ -3272,9 +3294,12 @@ impl BrowseState {
                                 if let Some(genre) = result.genre {
                                     state.genre = Some(Arc::new(genre));
                                 }
+                                state.land_catalogs(result.catalogs); // Fork Rofocale11: catalog.rs owns the landing.
                                 if let Some(sorts) = result.sorts {
                                     if state.sorts.is_empty() {
-                                        let sorts = if state.library_type == LibraryType::Primary {
+                                        let sorts = if state.library_type == LibraryType::Primary
+                                            && state.catalogs.is_empty()
+                                        {
                                             match kind {
                                                 Some(kind) => with_plays_sort(sorts, kind),
                                                 None => sorts,
@@ -3377,6 +3402,8 @@ struct ListingPage {
     genres: Option<Vec<GenreEntry>>,
     /// The remembered genre this page was filtered by, once the list proved it still exists.
     genre: Option<GenreEntry>,
+    // Fork Rofocale11: the shim's catalogs arrive on the first (includeMeta) page.
+    catalogs: Option<Vec<CatalogEntry>>,
     /// Whether each saved choice this page was asked to restore was settled one way or the other.
     resolved: Resolved,
 }
@@ -3402,7 +3429,7 @@ impl ListingPage {
     fn failed() -> Self {
         Self {
             items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
-            resolved: Resolved::default(),
+            catalogs: None, resolved: Resolved::default(),
         }
     }
 }
@@ -3477,6 +3504,8 @@ fn fetch_listing_page(
                     default_desc: sort.default_direction == "desc",
                 }).collect())
     });
+    // Fork Rofocale11: the catalog list travels on the same includeMeta page as the sort menu.
+    let catalogs = container.meta.as_ref().and_then(catalog::from_meta); // Fork Rofocale11: parse lives in catalog.rs.
     // **The order of the first page is ONE decision**, made against the menu it has just brought
     // back, and the page is re-asked in that order before anything is published — the unsorted
     // page never reaches the grid, so nothing reorders on screen:
@@ -3528,7 +3557,7 @@ fn fetch_listing_page(
     let total = if container.total_size > 0 || container.metadata.is_empty() { container.total_size }
         else { query.start + container.metadata.len() as i64 };
     let items = container.metadata.iter().map(|item| parse_item(item, sid)).collect();
-    ListingPage { items, total, sorts, restored, genres, genre, resolved }
+    ListingPage { items, total, sorts, restored, genres, genre, catalogs, resolved }
 }
 
 /// Bumped whenever the section table's SHAPE changes — a source's sections appended, or the whole
@@ -3562,6 +3591,8 @@ struct PageResult {
     /// See [`ListingPage::genres`] and [`ListingPage::genre`].
     genres: Option<Vec<GenreEntry>>,
     genre: Option<GenreEntry>,
+    // Fork Rofocale11: the shim's advertised catalogs travel with the page that discovered them.
+    catalogs: Option<Vec<CatalogEntry>>,
     /// See [`ListingPage::resolved`].
     resolved: Resolved,
 }
@@ -4028,6 +4059,13 @@ pub fn hold_listing_for_owner_test(adapter: &BrowseAdapter) {
     adapter.page.claim(0);
 }
 
+/// Fork Rofocale11: thin wrapper over `catalog::seed_for_owner_test`; keep the store's call site
+/// unchanged so the fork-owned module owns the behavior, not this upstream file.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_catalogs_for_owner_test(state: &mut BrowseState, catalogs: Vec<CatalogEntry>, shown: Option<&str>) {
+    catalog::seed_for_owner_test(state, catalogs, shown);
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn seed_items_for_owner_test(state: &mut BrowseState, n: usize) {
     plx_base::testlock::assert_held("browse's section table (seed_items_for_test)");
@@ -4488,7 +4526,7 @@ pub fn queue_page_failure_for_owner_test(
     adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: 0,
         items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
-        resolved: Default::default(),
+        catalogs: None, resolved: Default::default(),
     }, |_| true);
 }
 
@@ -4523,7 +4561,7 @@ pub fn spawn_owned_page_for_test(
         worker_adapter.page.post(PageResult {
             client, token_gen, gen, sec, start: 0,
             items: vec![PmsMovie { sid, title, ..Default::default() }],
-            total: 1, sorts: None, restored: None, genres: None, genre: None,
+            total: 1, sorts: None, restored: None, genres: None, genre: None, catalogs: None,
             resolved: Default::default(),
         }, |_| true);
         done_tx.send(()).expect("test receives worker completion");
@@ -4569,6 +4607,11 @@ mod reachability_tests;
 
 #[cfg(test)]
 mod library_type_tests;
+
+// Fork Rofocale11: catalog parsing and selection for the header's Catalogs dropdown.
+#[cfg(test)]
+#[path = "browse_catalog_tests.rs"]
+mod catalog_tests;
 
 #[cfg(test)]
 mod listing_job_tests;

@@ -157,6 +157,21 @@ pub struct Meta {
 /// when the v1.5 facet menu consumes it; DTOs here keep only consumed fields.)
 #[derive(Deserialize, Default)]
 pub struct MetaType {
+    // Fork Rofocale11: Nuvio's shim exposes each addon catalog as a `Meta.Type` row so the
+    // Movies/TV Shows header can offer a Catalogs dropdown. Real PMS omits these keys, which
+    // is what keeps the upstream LibraryType menu in force on ordinary servers.
+    /// Listing URL for this type/catalog, e.g. `/library/sections/1/all?catalog=…`.
+    #[serde(default)]
+    pub key: String,
+    /// Plex type id or an arbitrary catalog selector token. Kept as a string so a shim can carry
+    /// catalog keys without colliding with Plex's numeric type ids.
+    #[serde(rename = "type", default)]
+    pub type_id: String,
+    #[serde(default)]
+    pub title: String,
+    /// Shim extension: the stable catalog key this row selects. Empty on real PMS rows.
+    #[serde(rename = "catalogKey", default)]
+    pub catalog_key: String,
     #[serde(default, deserialize_with = "de_i64")]
     pub active: i64, // bool on the wire; de_i64 folds true/false/"1"
     #[serde(rename = "Sort", default)]

@@ -1,3 +1,5 @@
+// Fork Rofocale11: PageResult now carries the shim's advertised `catalogs`; the `catalogs: None`
+// fields in this file are mechanical additions to its struct literals.
 //! The Library's listing reads as store jobs: the grid's pages and the filter menus' value lists.
 //!
 //! A Browse step that wants a listing page, or a section's genre list, first-letter list or a value
@@ -532,7 +534,7 @@ fn finish_page_with(port: &BrowsePagePort, addr: Addr, client: &'static Client, 
     port.done(addr, BrowsePageAnswer(PageResult {
         client, token_gen: key.token, gen, sec, start, items: page.items, total: page.total,
         sorts: page.sorts, restored: page.restored, genres: page.genres, genre: page.genre,
-        resolved: page.resolved,
+        catalogs: page.catalogs, resolved: page.resolved,
     }));
 }
 

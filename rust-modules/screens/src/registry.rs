@@ -1551,19 +1551,9 @@ pub trait LibraryLike: AppLike<Memory = PageMemory> + ScreenInputsLike + Sized {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a>;
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a>;
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a>;
-    /// How many collections the directory's section `section` (an index into
-    /// `directory(cx).sections()`, which names the server as well as the section key) holds, from
-    /// the `type=18` `Size:0` probe of `/library/sections/{id}/all` (`totalSize`). `None` = not
-    /// known yet (the Collections control is then not on the row); `Some(Err(Forbidden))` = the
-    /// server answered HTTP 403 (hidden); `Some(Ok(0))` = none (hidden). Any section of the
-    /// directory may be asked about, not only the current one: the app warms them all when the
-    /// directory lands, so a switch finds its answer already there.
-    ///
-    /// CONTRACT FREEZE: a provided method so every existing host compiles; `AppHost`
-    /// (`src/app/bridge.rs`) implements it over the probe.
-    fn collections_count(_cx: &Cx<'_, Self>, _section: usize) -> Option<Result<u32, Forbidden>> {
-        None
-    }
+    // Fork Rofocale11: `collections_count` is gone with the fabricated Collections control. The
+    // section's addon catalogs arrive on the published `ListingView` (`catalogs()` / `catalog()`),
+    // so a screen reads no probe and asks the host nothing.
 
     /// **Today's calendar date** in the viewer's time zone, `[year, month, day]`: an INPUT the
     /// Library words its date values by ("Today", "Yesterday", "27 Oct" this year, "Oct 2024" any
@@ -1580,9 +1570,9 @@ pub trait LibraryLike: AppLike<Memory = PageMemory> + ScreenInputsLike + Sized {
     }
 }
 
-/// The server refused the collections listing (HTTP 401/403): the answer is final for the identity
-/// (credential) it was asked under, so it is kept distinct from "none yet" and from a count of
-/// zero.
+/// The server refused the old collections listing (HTTP 401/403). Fork Rofocale11: no screen
+/// reads a collections count any more; this type stays only until the application bridge drops its
+/// `collections_count` implementation too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Forbidden;
 
@@ -3077,7 +3067,10 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // showing page's lead ranked index and the addon name heading it, so a replay tells an addon list
 // from that addon's sources. Previous pin 0x0352_35c6_6aaa_9324; the committed replay anchors must
 // be re-recorded with `tools/plxnative-rec rerecord` before a scenario replay is trusted.
-const SCREEN_SHAPES_PIN: u64 = 0x2bcc_c48e_a227_da7e;
+// Fork Rofocale11: the Catalogs selector adds a fifth pending grid action
+// (`GridAction::Catalog{key:Option<str>}`), so `transactions::SHAPE` changed and the shape
+// fingerprint is re-baselined here (0x85ebfcad302c4b5) in the same edit as the shape itself.
+const SCREEN_SHAPES_PIN: u64 = 0x85eb_fcad_302c_4b5;
 
 #[cfg(test)]
 mod arg_tests {

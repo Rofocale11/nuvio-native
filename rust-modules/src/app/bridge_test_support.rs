@@ -174,7 +174,6 @@ pub(super) struct World {
 impl Drop for World {
     fn drop(&mut self) {
         plx_plex::plex::reset_servers_for_test();
-        crate::app::collections_probe::clear_seeds_for_test();
     }
 }
 
@@ -205,32 +204,26 @@ impl Drop for PreviewReset {
     fn drop(&mut self) { plx_media::player::preview::reset_for_test(); }
 }
 
-/// How many collections the rig's probe stands in for on every section it seeds (a server the rig
-/// has no network to ask): enough that the Library header's Collections control is on the row.
-pub(crate) const RIG_COLLECTIONS: u32 = 4;
+/// The catalogs the rig's Library sections advertise, and the one their listings show (the first):
+/// the header's Catalogs control is on the row, and its menu lists these. The old Collections-count
+/// probe fabricated its number and is gone (Fork Rofocale11).
+pub(crate) const RIG_CATALOGS: [(&str, &str); 2] = [("cine/movie/top", "Popular"), ("cine/movie/imdbRating", "Top Rated")];
 
-impl Bridge<'_> {
-    /// Seed the Collections probe's `answer` for every section of the directory captured now (the
-    /// probe never reaches a server under test, `collections_probe::seed_for_test`), replacing the
-    /// rig's earlier seeds: `Count(n)` puts the control on the Library header, `Count(0)` or
-    /// `Forbidden` takes it off, `Unknown` is a probe that has not answered.
-    pub(crate) fn seed_collections_for_test(&self, answer: plx_plex::plex::collections::CollectionsCount) {
-        for section in self.retained.directory.view().sections() {
-            if let Some(sid) = section.sid { crate::app::collections_probe::seed_for_test(sid, section.key, answer); }
-        }
-    }
+fn rig_catalogs() -> Vec<plx_data::browse::CatalogEntry> {
+    RIG_CATALOGS.iter().enumerate().map(|(i, (key, title))| plx_data::browse::CatalogEntry {
+        key: (*key).to_string(), title: (*title).to_string(), active: i == 0,
+    }).collect()
 }
 
 impl World {
-    /// The one entry of every constructor: the serial lock, the scratch session, and a registry and
-    /// collections probe reset ON ENTRY (not only on drop: a test that panics on purpose,
-    /// `#[should_panic]`, never reaches its own closing reset and leaves its servers for the next world).
+    /// The one entry of every constructor: the serial lock, the scratch session, and a registry
+    /// reset ON ENTRY (not only on drop: a test that panics on purpose, `#[should_panic]`, never
+    /// reaches its own closing reset and leaves its servers for the next world).
     fn lock(name: &str) -> (plx_base::testlock::Serial, plx_plex::plex::session::TempSession) {
         let serial = plx_base::testlock::serial();
         let session = plx_plex::plex::session::TempSession::new(name);
         session.watching(&format!("u-{name}"));
         plx_plex::plex::reset_servers_for_test();
-        crate::app::collections_probe::clear_seeds_for_test();
         (serial, session)
     }
 
@@ -264,10 +257,10 @@ impl World {
             bridge.browse_run(plx_data::stores::browse::BrowseCmd::ApplyPins(vec![(FILM_CLUB, true)]));
         }
         bridge.refresh_browse_directory();
-        bridge.seed_collections_for_test(plx_plex::plex::collections::CollectionsCount::Count(RIG_COLLECTIONS));
         bridge.browse_run(plx_data::stores::browse::BrowseCmd::SetCur(0));
         {
             let mut browse = bridge.stores.browse.borrow_mut();
+            browse.seed_catalogs_for_test(rig_catalogs(), Some(RIG_CATALOGS[0].0));
             if answered { browse.seed_items_for_test(120); } else { browse.hold_listing_for_test(); }
             if shelved {
                 browse.seed_shelves_for_test(0, &["One", "Two", "Three", "Four", "Five", "Six"], 3);
@@ -283,16 +276,6 @@ impl World {
     /// "Film Club" beside "Movies".
     pub(super) fn movies_library(name: &str, two_libraries: bool) -> World {
         let mut w = Self::build(name, two_libraries);
-        w.open_library();
-        w
-    }
-
-    /// The Movies library whose sections' Collections probe answered `answer` (a refusal, none, or a
-    /// count other than the rig's), settled: the header the rig's server would give a library with
-    /// that answer.
-    pub(super) fn movies_library_answering(name: &str, answer: plx_plex::plex::collections::CollectionsCount) -> World {
-        let mut w = Self::build(name, false);
-        w.bridge.bridge().seed_collections_for_test(answer);
         w.open_library();
         w
     }
@@ -321,19 +304,34 @@ impl World {
         w
     }
 
-    /// The Collections page, opened with OK on the Library header's Collections control, its own
-    /// listing held LOADING (the Library under it is answered, and the rig's probe is seeded with a count, so the control is there to press).
+    /// The Collections page, pushed by its command with its own listing held LOADING (the Library
+    /// under it is answered). The page no longer has a header control — the header's first stop is
+    /// Catalogs — so its ways in are the command's.
     pub(super) fn collections_loading(name: &str) -> World {
         let mut w = Self::movies_library(name, false);
         w.bridge.bridge().stores.browse.borrow_mut().hold_listing_for_test();
-        w.open_from_header(8, AppArg::LibraryCollections { section: 0 });
+        w.open_collections();
         w
     }
 
-    /// The Collections page, opened with OK on the Library header's Collections control.
+    /// Push the Collections page by its command and settle. Focus is climbed into the header first,
+    /// the seat the old control held, so BACK returns to it and a route can start where it always did.
+    pub(super) fn open_collections(&mut self) {
+        self.climb_into_header();
+        let section = {
+            let bridge = self.bridge.bridge();
+            let directory = bridge.retained.directory.view();
+            directory.sections().get(directory.current().unwrap_or(0)).map(|s| s.key as u32).unwrap_or(0)
+        };
+        super::show_page(&mut self.d, AppArg::LibraryCollections { section });
+        self.frames(60);
+    }
+
+    /// The Collections page, pushed by its command and settled.
     pub(super) fn collections(name: &str, two_libraries: bool) -> World {
         let mut w = Self::movies_library(name, two_libraries);
-        w.open_from_header(8, AppArg::LibraryCollections { section: 0 });
+        w.open_collections();
+        assert!(w.on(&AppArg::LibraryCollections { section: 0 }), "premise: the Collections page is on top");
         // The page asked the store for its own listing; its answer is what it shows.
         w.bridge.bridge().stores.browse.borrow_mut().seed_items_for_test(120);
         w.frames(60);
