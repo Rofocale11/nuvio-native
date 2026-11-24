@@ -382,6 +382,9 @@ pub(crate) struct MenuPlayAwait {
     /// A miss logs and leaves the stack as it is instead of opening the page: a launch link's key
     /// came from outside the app, so a page for it may not exist (`app::deeplink`).
     stay_on_miss: bool,
+    /// Fork Rofocale11: the name in the miss log. A Home hero's Resume waits on the same
+    /// continuation but is not a launch link, so it must not report one when the fetch fails.
+    miss_label: &'static str,
 }
 
 /// Which asynchronous load a [`MenuPlayAwait`] is waiting on. Both phases are polled by the one
@@ -404,13 +407,21 @@ impl MenuPlayAwait {
     fn new(sid: plx_plex::plex::ServerId, expect: String, season_index: Option<i64>, hud_ms: u32, now: u32) -> Self {
         Self {
             sid, expect, season_index, hud_ms, deadline: now.wrapping_add(12_000), phase: MenuPlayPhase::Detail,
-            open: false, stay_on_miss: false,
+            open: false, stay_on_miss: false, miss_label: "deeplink",
         }
     }
 
     /// The wait for a launch link's item (`app::deeplink`), its detail request just issued.
     pub(crate) fn for_link(sid: plx_plex::plex::ServerId, rk: String, open: bool, now: u32) -> Self {
         Self { open, stay_on_miss: true, ..Self::new(sid, rk, None, plx_screens::player::input::HUD_LINGER_MS, now) }
+    }
+
+    /// Fork Rofocale11: the wait for a Home hero's Resume. The shim's hub rows carry no
+    /// `Media`/`Part`, so playing the row directly refuses on an empty part — the press looked
+    /// inert. Detail's Resume plays the LOADED item instead; this wait loads the same detail
+    /// (no page is opened) and then plays the promoted source remembered for the resume point.
+    pub(crate) fn for_hero_resume(sid: plx_plex::plex::ServerId, rk: String, now: u32) -> Self {
+        Self { miss_label: "home hero resume", ..Self::for_link(sid, rk, false, now) }
     }
 }
 
@@ -557,7 +568,7 @@ pub(crate) unsafe fn menu_play_tick(
     let Some(wait) = menu_play_await.clone() else {
         return;
     };
-    let MenuPlayAwait { sid, ref expect, season_index, hud_ms, deadline, phase, open, stay_on_miss } = wait;
+    let MenuPlayAwait { sid, ref expect, season_index, hud_ms, deadline, phase, open, stay_on_miss, miss_label } = wait;
     // Something else already moved the app onto the player this frame (a different press, an
     // auto-advance) — the wait is moot and must not fire a second Play on top of it.
     if super::bridge::player(pages).is_some() {
@@ -591,7 +602,7 @@ pub(crate) unsafe fn menu_play_tick(
             super::bridge::open_detail(pages, bridge, sid, expect, None, None);
             return;
         }
-        if !play_door_open(ps, pa, pages, bridge, menu_play_await, (sid, expect, stay_on_miss), expired) {
+        if !play_door_open(ps, pa, pages, bridge, menu_play_await, (sid, expect, stay_on_miss, miss_label), expired) {
             return;
         }
         *menu_play_await = None;
@@ -614,7 +625,7 @@ pub(crate) unsafe fn menu_play_tick(
         *menu_play_await = None;
         if stay_on_miss {
             plx_base::eventlog::log(&format!(
-                "deeplink: not opened, rk={expect} ({})", if settled { "not returned" } else { "timed out" }));
+                "{miss_label}: not opened, rk={expect} ({})", if settled { "not returned" } else { "timed out" }));
             return;
         }
         // nothing playable / load failed — land on the page, through the transition. `season:
@@ -650,7 +661,7 @@ pub(crate) unsafe fn menu_play_tick(
             }
         }
     }
-    if !play_door_open(ps, pa, pages, bridge, menu_play_await, (sid, expect, stay_on_miss), expired) {
+    if !play_door_open(ps, pa, pages, bridge, menu_play_await, (sid, expect, stay_on_miss, miss_label), expired) {
         return;
     }
     *menu_play_await = None;
@@ -669,7 +680,7 @@ unsafe fn play_door_open(
     pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
     bridge: &mut super::bridge::Bridge,
     menu_play_await: &mut Option<MenuPlayAwait>,
-    (sid, expect, stay_on_miss): (plx_plex::plex::ServerId, &str, bool),
+    (sid, expect, stay_on_miss, miss_label): (plx_plex::plex::ServerId, &str, bool, &'static str),
     expired: bool,
 ) -> bool {
     if super::content::clear_engine_for_play(ps, pa, super::bridge::player(pages).is_some()) {
@@ -678,7 +689,7 @@ unsafe fn play_door_open(
     if expired {
         *menu_play_await = None;
         if stay_on_miss {
-            plx_base::eventlog::log(&format!("deeplink: not opened, rk={expect} (engine busy)"));
+            plx_base::eventlog::log(&format!("{miss_label}: not opened, rk={expect} (engine busy)"));
         } else {
             super::bridge::open_detail(pages, bridge, sid, expect, None, None);
         }

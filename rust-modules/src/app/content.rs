@@ -2735,6 +2735,13 @@ fn home_menu_from_deck(ret: &ReturnState<u32, PageMemory>) -> bool {
         HomeItemIdentity::Item { hub: HomeHubIdentity::ContinueWatching, .. }))
 }
 
+/// Fork Rofocale11: only a Home HERO with a real resume point takes the loaded-detail play path.
+/// A Continue Watching card's Play, and a hero Play with nothing to return to, keep the catalog
+/// row path (which is enough for them and avoids an unnecessary detail fetch).
+fn hero_resume_uses_loaded_detail(from_deck: bool, resume_ns: Option<i64>) -> bool {
+    !from_deck && resume_ns.is_some_and(|ns| ns > 0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn activate_home_item(app: &mut ScreenCommandApp<'_, '_>, source: MachineId, entry: EntryId,
     sid: plx_plex::plex::ServerId, rk: &str, resume_ns: Option<i64>, ret: ReturnState<u32, PageMemory>, now: u32,
@@ -2749,6 +2756,25 @@ fn activate_home_item(app: &mut ScreenCommandApp<'_, '_>, source: MachineId, ent
     // reach it (see `apply_item_action`'s note on `from_home`).
     let _ = (source, entry);
     let from_deck = home_menu_from_deck(&ret);
+    // Fork Rofocale11: a Home HERO's Resume must take the same path as Detail's Resume — play the
+    // LOADED item, not the catalog row. The shim's hub rows carry no `Media`/`Part`, so the row
+    // play below refuses on an empty part and the press does nothing; Detail resolves a real Part
+    // from `/library/metadata` and plays it. Load that detail here (no page is opened), then let
+    // the existing play-await continuation start the source the shim remembers for this resume
+    // point. A deck card's Play and a hero with no resume point keep the old row path.
+    if hero_resume_uses_loaded_detail(from_deck, resume_ns) {
+        app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::RequestDetail {
+            sid,
+            rk: rk.to_string(),
+        });
+        app.bridge.start_store_jobs();
+        *app.menu_play_await = Some(crate::app::input::MenuPlayAwait::for_hero_resume(
+            sid,
+            rk.to_string(),
+            now,
+        ));
+        return plx_machine::machine::AppCommandOutcome::Completed;
+    }
     unsafe { activate_deck_card(&mut app.player.session, &mut app.adapters.player, &item, from_deck,
         resume_ns.is_some(), HUD_LINGER_MS, Some(ret), &mut app.pages, &mut app.bridge,
         &mut app.menu_play_await, now); }
@@ -2866,5 +2892,22 @@ mod repair_replay_tests {
         let mut live = vec![PlayerReq::RepairSandbox, PlayerReq::Exit];
         assert!(!remove_replayed_repairs(&mut live, false, false));
         assert_eq!(live, vec![PlayerReq::RepairSandbox, PlayerReq::Exit]);
+    }
+}
+
+#[cfg(test)]
+mod home_hero_resume_tests {
+    use super::*;
+
+    /// Fork Rofocale11: the Home hero's Resume is the only Home play that must load the detail
+    /// item first — the shim's hub row has no Part, so the plain row play silently refuses.
+    #[test]
+    fn only_a_hero_resume_takes_the_loaded_detail_path() {
+        assert!(hero_resume_uses_loaded_detail(false, Some(600_000_000_000)));
+        assert!(!hero_resume_uses_loaded_detail(true, Some(600_000_000_000)),
+            "a Continue Watching card still plays its own row");
+        assert!(!hero_resume_uses_loaded_detail(false, Some(0)),
+            "a hero with no resume point has nothing to continue");
+        assert!(!hero_resume_uses_loaded_detail(false, None), "Detail is a different request");
     }
 }
