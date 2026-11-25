@@ -1804,7 +1804,11 @@ impl LoginScreen {
         let status = self.waiting_label();
         let right = qr_layout(layout, status, f.measure);
 
-        TextView::new("plex.tv/link", theme::size::TITLE, theme::TEXT_HEADING)
+        // Fork Rofocale11: this caption must name Nuvio, not plex.tv. The app still asks for
+        // /api/v2/pins/qr/{code}, but plx_pmsshim::shim_account answers it with a PNG of Nuvio's
+        // verification_uri_complete (from DEVICE_LOGIN_WEB_BASE_URL / TV_LOGIN_WEB_BASE_URL), so
+        // plex.tv/link was the wrong destination to show beside the QR.
+        TextView::new("nuvio.tv/link", theme::size::TITLE, theme::TEXT_HEADING)
             .bold()
             .h(HAlign::Center)
             .draw(p, right.url);

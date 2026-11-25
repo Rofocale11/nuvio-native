@@ -1691,3 +1691,22 @@ Gates on this tree: `plx_media` 2182 passed / 105 ignored; `plx_pmsshim` 167 pas
 `make check-nodef` exit 0; ARM `make -j10` exit 0; `ci/check-module-layers.py` green;
 `ci/check-deps.sh` all gates green; `ci/check-list-caps.py` 424 sites classed;
 `git diff --check` clean.
+
+## QR sign-in caption (2026-11-25)
+
+- `rust-modules/screens/src/login.rs` (upstream-owned, marked) — the caption beside the QR now says
+  `nuvio.tv/link`, not `plex.tv/link`. This is a correctness fix, not a cosmetic rebrand: the app
+  still calls `/api/v2/pins`, `/api/v2/pins/qr/{code}` and `/api/v2/pins/{id}`, but
+  `plx_pmsshim::shim_account` answers all three from the Nuvio device login — `nuvio::start_login`
+  and `nuvio::poll_login` — and the QR PNG encodes Nuvio's `verification_uri_complete`, built from
+  `DEVICE_LOGIN_WEB_BASE_URL` / `TV_LOGIN_WEB_BASE_URL` (Makefile `NUVIO_ENV_VARS`, exported by
+  `.github/workflows/build-ipk.yml` from gitignored `rust-modules/stremio/nuvio.local.env`). Only
+  the displayed destination changed; no network call, sign-in behaviour or `qr_layout` geometry did.
+  The owner confirmed the flow lands on Nuvio from repeated real logins.
+- `ci/localization-exceptions.json` (no comment syntax) — the untranslatable-literal exception now
+  names the new caption. `ci/check-localization.py` fails both on an unlisted hardcoded string and
+  on an unused exception, so the entry had to move with the literal.
+- The upstream `session/src/auth/ports.rs` and mock PMS code still name `plex.tv` — that is the
+  vocabulary the shim intentionally preserves, not the destination a Nuvio build presents to the
+  viewer. `tests/screenshots/scenes.json`'s note that the demo QR encodes `https://plex.tv/link`
+  describes the **mock's** QR, not the shipping shim's.
