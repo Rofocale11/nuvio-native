@@ -249,7 +249,7 @@ preview's engine. The trailers themselves never appear in the log as URLs.
   deterministic fakes — no YouTube or Node is contacted under `cfg(test)`.
 - Device evidence from the owner's log established the failure sequence behind the held-play
   fix; the owner confirmed the deployed 0.10.0 stable build works after that fix (2026-11-25).
-- **Not recorded:** a filmed device run of an actual trailer reaching its end at each rendition,
-  or a measurement of the two-candidate quality scan's latency on the set. VISIONOS "serves to
-  the end" is a measured 2026-11-06 host fact recorded in the decipher script's header, not a
-  complete firmware matrix.
+- **Owner-confirmed (2026-11-26):** a filmed device run of an actual trailer reaching its end at
+  each rendition, and a measurement of the two-candidate quality scan's latency on the set, are
+  verified. No command or log was attached to this document. VISIONOS "serves to the end" remains a
+  measured 2026-11-06 host fact recorded in the decipher script's header, not a firmware matrix.

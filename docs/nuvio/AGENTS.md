@@ -83,7 +83,10 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 - Prefer focused host gates over repeated full `make check` loops. After Rust edits also run
   `make check-nodef`; an ARM cross-build is required before claiming the target still builds.
 - The owner tests the TV. Acquire the TV lock for any device command; release it immediately after.
-  Never boot with a real account for screenshots — use `--guest`/mock and read the identity line.
+  Never boot with a real account for screenshots. Upstream's `--guest`/mock cannot do this on this
+  fork: the in-process shim short-circuits its identity and Home needs a stored Nuvio sign-in. Use
+  the `plxnative-nuviofake` synthetic mode below and read the identity line (see
+  `SYNTHETIC-DEBUG.md`).
 - No commit, push, merge, PR or deploy without the owner's explicit instruction in that session.
 
 ## Documents of record
@@ -106,3 +109,10 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 - `docs/nuvio/HANDOFF.md` — delivery history and known limitations. It opens with the current
   status; everything below the first section is the 2026-10-10 snapshot.
 - `docs/nuvio/MERGE-AUDIT.md` — upstream conflicts and non-commentable fork edits.
+- `docs/nuvio/SYNTHETIC-DEBUG.md` — the shared `plxnative-nuviofake` mode for deterministic debug
+  boots in the simulator and on the TV: how to arm and drive it (including fake ratingKeys and the
+  Streams picker paths), what stays inert, and the identity to grade.
+- `docs/nuvio/SCENARIOS.md` — fork-specific scenarios an agent can reproduce, classed as synthetic
+  boot, host/fixture, or real-account/TV, with the commands and the still-unverified surface.
+- `docs/nuvio/MERGE-REGRESSION.md` — the ordered post-upstream-merge gate: marker check, host gates,
+  ARM build, synthetic TV boot and Streams-picker acceptance, plus where to record the evidence.

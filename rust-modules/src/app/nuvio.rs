@@ -22,12 +22,35 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// Fork Rofocale11: the synthetic debug mode is a fork-owned child module; the upstream file
+// only gains this declaration and the small routed branches below.
+mod nuvio_debug;
+
 /// The loopback port the shim prefers. Fixed so the server's origin is the same every boot (the
 /// session and the per-server caches key on it); any free port if it is taken.
 const PORT: u16 = 32_420;
 
 static HANDLE: OnceLock<plx_pmsshim::Handle> = OnceLock::new();
-static BACKEND: OnceLock<Arc<plx_pmsshim::AddonBackend>> = OnceLock::new();
+static BACKEND: OnceLock<Arc<dyn plx_pmsshim::Backend>> = OnceLock::new();
+/// Latched by `boot()` so the boot gate can ask ONCE without a second trigger read.
+static SYNTHETIC: AtomicBool = AtomicBool::new(false);
+
+/// Fork Rofocale11: a synthetic boot takes the dev-PMS identity path instead of the Nuvio
+/// account sign-in, so an agent reaches a deterministic Home with no account in the way.
+pub(crate) fn synthetic_boot() -> bool { SYNTHETIC.load(Ordering::Relaxed) }
+
+/// Fork Rofocale11: called in `app::boot` BEFORE `session::load`, so even the canonical session
+/// reads the private empty store instead of the household's. `nuvio::boot()` then reuses it.
+pub(crate) fn prepare_store() {
+    let synthetic = nuvio_debug::enabled();
+    SYNTHETIC.store(synthetic, Ordering::Relaxed);
+    if synthetic {
+        match plx_nuvio_store::install_ephemeral() {
+            Ok(_) => log("nuvio: SYNTHETIC private redb store — household records untouched"),
+            Err(e) => log(&format!("nuvio: synthetic store unavailable: {e}")),
+        }
+    }
+}
 
 /// the persisted P2P switch, mirrored into a plain atomic for the frame thread.
 /// Screens ask for it before the shim exists (and on controlled boots with no shim at all), so the
@@ -182,6 +205,10 @@ fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
 /// reads its token/origin. A failure leaves the app as upstream (it will ask for a Plex sign-in),
 /// which is loud enough to notice and never worse than not starting.
 pub(crate) fn boot() {
+    // Fork Rofocale11: `prepare_store` latched this before the session was read. The second read
+    // keeps direct callers (host rigs) correct without touching the trigger a second time on TV.
+    let synthetic = synthetic_boot() || nuvio_debug::enabled();
+    SYNTHETIC.store(synthetic, Ordering::Relaxed);
     let data = data_dir();
     let _ = std::fs::create_dir_all(&data);
     let addons_path = data.join("addons.json");
@@ -194,7 +221,9 @@ pub(crate) fn boot() {
     };
     let mut fresh_import = false;
     let mut imported = None;
-    if import_path.is_file() {
+    // Fork Rofocale11: a synthetic boot does not read the household's imported addon set either;
+    // the FakeBackend ignores it, and the log must not name the viewer's addons.
+    if !synthetic && import_path.is_file() {
         if let Some(set) = import(&import_path) {
             log(&format!("nuvio: imported {} addon(s) from Nuvio: {}", set.addons.len(), describe(&set)));
             if !save_addons(&set, &addons_path) {
@@ -209,20 +238,34 @@ pub(crate) fn boot() {
             imported = Some(set);
         }
     }
-    let set = imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults);
-    log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
+    let set = if synthetic {
+        plx_stremio::AddonSet::default()
+    } else {
+        imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults)
+    };
+    if !synthetic {
+        log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
+    }
     // one store for the whole app. Published before the shim starts so the
     // shim's key table, watch state and account session land in the SAME file as the canonical
     // session record (the storage backend opens it lazily on its first call).
-    match plx_nuvio_store::install_default() {
-        Ok(_) => log("nuvio: single redb store opened"),
-        Err(e) => log(&format!("nuvio: redb store unavailable: {e}")),
+    // Fork Rofocale11: a synthetic boot already has a private empty store; never open the real one.
+    if synthetic {
+        log("nuvio: synthetic store in use — no household records opened");
+    } else {
+        match plx_nuvio_store::install_default() {
+            Ok(_) => log("nuvio: single redb store opened"),
+            Err(e) => log(&format!("nuvio: redb store unavailable: {e}")),
+        }
     }
     let settings_path = data.join("settings.json");
     let settings: Settings = plx_nuvio_store::get()
         .and_then(|s| s.get(plx_nuvio_store::Table::LocalSettings, "settings"))
         .and_then(|b| serde_json::from_slice(&b).ok())
         .or_else(|| {
+            // Fork Rofocale11: a synthetic boot takes defaults, never the install's P2P/torrent
+            // settings file. `config()` below forces P2P off regardless.
+            if synthetic { return None; }
             let from_file = std::fs::read(&settings_path).ok().and_then(|b| serde_json::from_slice(&b).ok());
             if let (Some(store), Some(value)) = (plx_nuvio_store::get(), from_file.as_ref()) {
                 if let Ok(bytes) = serde_json::to_vec(value) {
@@ -241,9 +284,14 @@ pub(crate) fn boot() {
         p2p_enabled: settings.p2p_enabled && plx_stremio::sbengine::available(),
         ..Default::default()
     };
+    // Fork Rofocale11: one devtrig chooses the fixed FakeBackend instead of the account's addon
+    // set, with a private empty store. The flag was latched before the session was read.
+    let cfg = nuvio_debug::config(cfg, synthetic);
     // the same decision is the frame-thread fallback until the shim is published.
     P2P_FALLBACK.store(cfg.p2p_enabled, Ordering::Relaxed);
-    let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
+    let selection = nuvio_debug::select(set, synthetic);
+    let backend = selection.backend.clone();
+    let addons = selection.addons.clone();
     let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT).or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));
     let handle = match started {
         Ok(h) => h,
@@ -283,8 +331,10 @@ pub(crate) fn boot() {
     log(&format!("nuvio: shim serving on {}", handle.origin()));
     let shim = handle.shim.clone();
     // A Nuvio sign-in (the QR screen) or a profile pick hands its addons over here.
-    {
-        let (backend, shim, path) = (backend.clone(), shim.clone(), addons_path.clone());
+    // Fork Rofocale11: no account sink under fake content — a profile pick must not replace the
+    // fixed catalog with the household's addon set.
+    if let Some(addons) = addons.clone() {
+        let (backend, shim, path) = (addons, shim.clone(), addons_path.clone());
         shim.clone().account.set_sink(Arc::new(move |set: plx_stremio::AddonSet| {
             log(&format!("nuvio: account addons: {}", describe(&set)));
             if !save_addons(&set, &path) {
@@ -299,7 +349,9 @@ pub(crate) fn boot() {
     // and `plx_pmsshim` backend. Settings cannot name pmsshim itself, so it reaches the installed
     // addon set through this registered control; a flip replaces the live backend set, records the
     // override in the shim's account prefs, and drops the caches that depended on the old set.
-    {
+    // Fork Rofocale11: Settings > Addons is inert under fake content; there is no addon set to
+    // flip and no account preference to record.
+    if let Some(addons) = addons.clone() {
         struct Ctl {
             backend: Arc<plx_pmsshim::AddonBackend>,
             shim: Arc<plx_pmsshim::shim_pms::Shim>,
@@ -331,13 +383,14 @@ pub(crate) fn boot() {
             }
         }
         plx_plex::plex::nuvio::register_addon_control(Arc::new(Ctl {
-            backend: backend.clone(),
+            backend: addons,
             shim: handle.shim.clone(),
         }));
     }
     // Fork Rofocale11: Settings > Profiles reaches the shim through this seam, the same way
-    // Settings > Addons reaches it. No screen may name `pmsshim` itself.
-    {
+    // Settings > Addons reaches it. No screen may name `pmsshim` itself. A synthetic boot has no
+    // account profile to read or write, so the whole control stays unregistered.
+    if !synthetic {
         struct Ctl;
         impl plx_plex::plex::nuvio_profiles::ProfileControl for Ctl {
             fn profiles(&self) -> Vec<plx_plex::plex::nuvio_profiles::ProfileView> {
@@ -366,48 +419,52 @@ pub(crate) fn boot() {
     let _ = BACKEND.set(backend.clone());
     let _ = HANDLE.set(handle);
     shim.warm();
-    // Off the boot path: manifests an import could not carry, and a streaming server on this TV.
-    let need_server = settings.enable_torrents && settings.torrent_server.is_none();
-    let _ = plx_base::task::spawn("nuvio-boot", move || {
-        if fresh_import {
-            let mut set = backend.snapshot();
-            if set.refresh_manifests(std::time::Duration::from_secs(20)) > 0 {
-                let _ = save_addons(&set, &addons_path);
-                backend.replace(set);
-                shim.addons_changed();
-                shim.warm();
-            }
-        }
-        // an addon added or deleted in the Nuvio ACCOUNT is invisible to the
-        // locally persisted set until we ask. One cheap row read (no manifest fetches): unchanged
-        // keeps the warm set and the durable catalog cache; changed re-loads through the same sink
-        // path a sign-in or profile pick uses, which clears the caches and re-warms Home.
-        if shim.account.signed_in() {
-            if let Some(fp) = shim.account.account_addons_fingerprint() {
-                match plx_nuvio_store::get()
-                    .and_then(|s| s.get(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp"))
-                {
-                    None => {
-                        // First run of this feature: seed the baseline from the set we booted with.
-                        if let Some(store) = plx_nuvio_store::get() {
-                            let _ = store.put(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp", fp.as_bytes());
-                        }
-                    }
-                    Some(old) if old != fp.as_bytes() => {
-                        log("nuvio: account addons changed — reloading addon set");
-                        shim.account.load_profile(None);
-                    }
-                    _ => {}
+    // Fork Rofocale11: the refresh/fingerprint/torrent worker is account work. A synthetic boot
+    // has neither an addon set nor an account session, so it never starts.
+    if let Some(addons) = addons {
+        // Off the boot path: manifests an import could not carry, and a streaming server on this TV.
+        let need_server = settings.enable_torrents && settings.torrent_server.is_none();
+        let _ = plx_base::task::spawn("nuvio-boot", move || {
+            if fresh_import {
+                let mut set = addons.snapshot();
+                if set.refresh_manifests(std::time::Duration::from_secs(20)) > 0 {
+                    let _ = save_addons(&set, &addons_path);
+                    addons.replace(set);
+                    shim.addons_changed();
+                    shim.warm();
                 }
             }
-        }
-        if need_server {
-            if let Some(s) = plx_stremio::torrent::probe_local_server() {
-                log("nuvio: streaming server found on this device; torrents enabled");
-                shim.set_torrent_server(Some(s));
+            // an addon added or deleted in the Nuvio ACCOUNT is invisible to the
+            // locally persisted set until we ask. One cheap row read (no manifest fetches): unchanged
+            // keeps the warm set and the durable catalog cache; changed re-loads through the same sink
+            // path a sign-in or profile pick uses, which clears the caches and re-warms Home.
+            if shim.account.signed_in() {
+                if let Some(fp) = shim.account.account_addons_fingerprint() {
+                    match plx_nuvio_store::get()
+                        .and_then(|s| s.get(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp"))
+                    {
+                        None => {
+                            // First run of this feature: seed the baseline from the set we booted with.
+                            if let Some(store) = plx_nuvio_store::get() {
+                                let _ = store.put(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp", fp.as_bytes());
+                            }
+                        }
+                        Some(old) if old != fp.as_bytes() => {
+                            log("nuvio: account addons changed — reloading addon set");
+                            shim.account.load_profile(None);
+                        }
+                        _ => {}
+                    }
+                }
             }
-        }
-    });
+            if need_server {
+                if let Some(s) = plx_stremio::torrent::probe_local_server() {
+                    log("nuvio: streaming server found on this device; torrents enabled");
+                    shim.set_torrent_server(Some(s));
+                }
+            }
+        });
+    }
 }
 
 /// The shim's view of `plx_nuvio_probe::probe_url`, with this TV's decode verdicts.

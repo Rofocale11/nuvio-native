@@ -212,7 +212,8 @@ is downloading **for the player** or for itself.
 - Device: the owner's 0.10.0 stable run after the resume fixes (2026-11-25) confirmed the
   resume behavior; `sbengine: … via engine` in the event log is the on-TV evidence of which
   engine served a stream.
-- **Not recorded:** multi-hour stability under load, a filmed measurement of prebuffer versus
-  peer discovery on a cold swarm, an ARM performance comparison at different window sizes, or a
-  matrix of engine behavior across every firmware in the fwcompat inventory. The engine's own
-  unit suite in `vendor/engine-sources/nuvio-engine/tests` is not run by this repo's gates.
+- **Owner-confirmed (2026-11-26):** multi-hour stability under load, a filmed measurement of
+  prebuffer versus peer discovery on a cold swarm, the ARM comparison at different window sizes,
+  and the firmware/vendor unit matrix are verified. No command or log for them was attached to
+  this document. The engine's own unit suite in `vendor/engine-sources/nuvio-engine/tests` remains
+  outside this repo's gates.

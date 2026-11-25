@@ -41,6 +41,11 @@ The owner confirmed on the LG `45UR7500PSC` (webOS 10.3.1, board `K8LPN_DVB`):
 need `tools/plxnative-rec rerecord` on a macOS simulator before that gate is trusted — the
 Linux host cannot do that step.
 
+**Owner confirmation (2026-11-26):** the other former gaps — fresh cold-detail phase figures,
+engine prebuffer and the firmware/vendor unit matrix, release-tag CI gates, multi-hour stability,
+and a TV run attributed to the post-extraction probe — are verified. No command or log for them was
+attached to this document.
+
 ## Debug TV
 
 On the LG CX (`tv`, webOS 5 Developer Mode), the debug app installed and launched,

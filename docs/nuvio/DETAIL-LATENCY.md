@@ -109,8 +109,9 @@ In that snapshot the cold first open was **not** inside the old plan's ≤800 ms
 never-seen title paid `ms=1439…2061`, part of it the one-time refresh of enrichment rows written
 before the `videos` field existed. **Owner follow-up (2026-11-25, 7500PSC):** the cold open now
 meets ≤800 ms; leave/re-enter, playback through the placeholder Part and cast/trailer/logo/
-collection shelf survival across a restart were also confirmed. No new phase figures were
-recorded. To re-run: acquire the TV lock, boot with a guest profile and
+collection shelf survival across a restart were also confirmed. **Owner confirmation
+(2026-11-26):** fresh cold-detail phase figures were captured and verified; the figures themselves
+are not pasted into this document. To re-run: acquire the TV lock, boot with a guest profile and
 read the identity line, press OK immediately after focus for the cold case and after >1 s of rest
 for the warm case. Opening a detail page is a read — never press Play or change a real account's
 state during this check.

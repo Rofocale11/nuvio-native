@@ -919,6 +919,12 @@ pub(crate) unsafe fn construct(
     // first. `peek_settled` would not do: it only reads the cache, which the session owner fills
     // after boot, so its first call answers "not yet". The seams `load` consults (`install_plex_seams`) are installed by
     // `enter_application`, before `boot`. A replay or captured boot brings its own session.
+    // Fork Rofocale11: a synthetic boot must install its PRIVATE empty store BEFORE this read,
+    // otherwise the household's session/preferences/watch state are loaded from nuvio.redb and the
+    // "synthetic" Home shows the viewer's own account and Continue Watching.
+    if initial.is_none() {
+        super::nuvio::prepare_store();
+    }
     let session = match &initial {
         Some(initial) => initial.session.persisted.clone(),
         None => plx_plex::plex::session::load(),
@@ -1066,6 +1072,10 @@ pub(crate) unsafe fn construct(
     // credential, so `dev_token` below is always non-empty here — but a Nuvio boot must still go
     // through the ACCOUNT authority to resume a sign-in and seat its one profile.
     let nuvio_local = plx_base::local_server::get().is_some();
+    // Fork Rofocale11: a synthetic debug boot has no Nuvio account to resume. It must take the
+    // dev-PMS identity path below so an agent reaches a deterministic Home instead of the QR
+    // sign-in screen. `nuvio::boot()` latched this from the same devtrig it used to pick FakeBackend.
+    let synthetic_boot = super::nuvio::synthetic_boot();
     // NO token is compiled into this binary. PMS access comes from the signed-in session,
     // or — for automated runs only (the regression harness, headless captures) — from the
     // /tmp/plxnative-token dev trigger. The value is NEVER logged (only that one is in effect).
@@ -1204,6 +1214,11 @@ pub(crate) unsafe fn construct(
     let dev_extras = captured_dev_sources(&dev_servers.unwrap_or_default());
     let session_init = match &initial {
         Some(initial) => initial.session.clone(),
+        // Fork Rofocale11: synthetic boots are deliberately DevPms boots. `captured_boot` cleans
+        // the persisted credentials, so even a TV with a signed-in household account cannot leak
+        // that identity into a headless run.
+        None if synthetic_boot => captured_session_for_boot(
+            session.clone(), dev_primary.clone(), dev_extras.clone()),
         // Fork Rofocale11: the shim's token must not turn a signed-in Nuvio boot into a dev boot.
         // Keeping the account authority is what lets the stored login seat its profile.
         None if nuvio_local => captured_nuvio_boot(session.clone(), dev_extras),
@@ -1260,7 +1275,9 @@ pub(crate) unsafe fn construct(
     // Fork Rofocale11: with the shim running, `dev_token` is always its PMS token, not a harness
     // identity. Taking the dev branch here would skip the account authority and leave nobody
     // seated, so a Nuvio boot resumes its stored sign-in (or opens the Nuvio QR sign-in) instead.
-    } else if !dev_token.is_empty() && !nuvio_local {
+    // A SYNTHETIC boot is the one exception: it has no account to resume, so it deliberately uses
+    // the shim's dev identity to reach Home. This is the only change to the upstream boot gate.
+    } else if !dev_token.is_empty() && (!nuvio_local || synthetic_boot) {
         // `Origin::http` names the assumption out loud: the host and port compiled into the
         // C shim are a plaintext address, with no scheme to read off them.
         //

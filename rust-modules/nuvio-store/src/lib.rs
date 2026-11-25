@@ -381,18 +381,22 @@ pub fn clear_table(table: Table) {
 /// The process-wide handle, installed once before any persistence call. Host tests that do not
 /// boot the app use `open_at` directly and leave this empty.
 static STORE: OnceLock<Arc<Store>> = OnceLock::new();
+/// Fork Rofocale11: a synthetic debug boot overrides ALL reads and writes with a private empty
+/// store, even if the shipping file was installed earlier in boot (the platform's storage seams
+/// can do that before the app's boot gate runs). `get`/`get_arc` consult this first.
+static EPHEMERAL: OnceLock<Arc<Store>> = OnceLock::new();
 
 pub fn install(store: Arc<Store>) -> Result<(), Arc<Store>> {
     STORE.set(store)
 }
 
 pub fn get() -> Option<&'static Store> {
-    STORE.get().map(|s| s.as_ref())
+    EPHEMERAL.get().or_else(|| STORE.get()).map(|s| s.as_ref())
 }
 
 /// The owning handle, for components that need to keep the store alive (`redb_backend`).
 pub fn get_arc() -> Option<Arc<Store>> {
-    STORE.get().cloned()
+    EPHEMERAL.get().or_else(|| STORE.get()).cloned()
 }
 
 /// Open the shipping file and publish it. Called once from Nuvio boot, before the shim starts, and
@@ -403,6 +407,21 @@ pub fn install_default() -> Result<Arc<Store>, String> {
     }
     let store = Store::open()?;
     let _ = install(store.clone());
+    Ok(store)
+}
+
+/// Fork Rofocale11: a synthetic debug boot installs a PRIVATE, empty store before anything reads
+/// the session. It is a separate redb file in this install's runtime root, deleted at every
+/// synthetic boot; the shipping `nuvio.redb` is never opened, so no household watch history,
+/// account session, key table, PIN or cache can be read or written by a headless run.
+pub fn install_ephemeral() -> Result<Arc<Store>, String> {
+    if let Some(store) = EPHEMERAL.get() {
+        return Ok(store.clone());
+    }
+    let path = paths::runtime_dir().join("nuvio-synthetic.redb");
+    let _ = std::fs::remove_file(&path);
+    let store = Store::open_at(&path)?;
+    let _ = EPHEMERAL.set(store.clone());
     Ok(store)
 }
 
@@ -418,6 +437,28 @@ mod tests {
             let dir = plx_base::testscratch::process_dir("nuvio-cache-test");
             Store::open_at(&dir.join("cache.redb")).unwrap()
         }).clone()
+    }
+
+    /// Fork Rofocale11: the synthetic store must be empty even when this machine's shipping
+    /// `nuvio.redb` holds a real account, and must never be that file.
+    #[test]
+    fn synthetic_store_starts_empty_and_is_not_the_shipping_file() {
+        // Plant a "household" record in an ordinary store FIRST: the override must still hide it.
+        let real = Store::open_at(
+            &plx_base::testscratch::process_dir("nuvio-synthetic-override-test").join("real.redb"),
+        ).expect("real store");
+        let _ = install(real.clone());
+        let _ = real.put(Table::AccountSession, "session", b"household-session");
+        let _ = real.put(Table::Watch, "state:1", b"household-watch");
+
+        let store = install_ephemeral().expect("private synthetic store");
+        assert!(get().expect("store").get(Table::AccountSession, "session").is_none());
+        assert!(get().expect("store").get(Table::Watch, "state:1").is_none());
+        assert!(store.get(Table::Watch, "state:1").is_none());
+        assert!(store.get(Table::AccountSession, "session").is_none());
+        assert_ne!(store.path, paths::nuvio_store_path());
+        let _ = store.put(Table::Watch, "state:1", b"this-boot-only");
+        assert_eq!(store.get(Table::Watch, "state:1").as_deref(), Some(&b"this-boot-only"[..]));
     }
 
     #[test]

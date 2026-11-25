@@ -21,10 +21,11 @@ except the replay-fixtures item at the end of this section. Confirmed on device:
   last-played-source resume, the in-app reset, and the cold detail open now inside ≤800 ms.
 - The dedicated `plx_nuvio_probe` sim-probe comparison is recorded as done.
 
-**Not verified and not covered by this update:** replay fixtures (`AltSourcesScreen::SHAPE` and
-the other shape pins need `tools/plxnative-rec rerecord` on a macOS simulator before
-`make check-replay` is trusted — the Linux host cannot do that step); multi-hour stability; and a
-TV playback run explicitly attributed to the post-extraction probe.
+**Still not verified:** replay fixtures only (`AltSourcesScreen::SHAPE` and the other shape pins
+need `tools/plxnative-rec rerecord` on a macOS simulator before `make check-replay` is trusted —
+the Linux host cannot do that step). **Owner confirmation (2026-11-26):** multi-hour stability and
+a TV playback run explicitly attributed to the post-extraction probe are verified; no log for them
+was attached to this document.
 
 **Resolution policy:** integrate both sides wherever they can coexist. The fork's
 version wins only where the two are semantically incompatible (app identity, the
@@ -34,6 +35,31 @@ trust). Every fork-originated block retained in a comment-capable file carries
 comment are listed here instead: locale JSON (strict `value`/`description` object
 shape), replay JSONL and manifests (hash-pinned recordings), `Cargo.lock`, and the
 Debian `control` file.
+
+**After every future upstream merge, run `MERGE-REGRESSION.md`** — static marker check, host gates,
+ARM build, then the synthetic TV boot and Streams-picker acceptance. Record the commands and their
+output here with the merged hash; a compile alone is not a passed merge.
+
+## Synthetic debug mode: one devtrig for sim and TV (2026-11-26)
+
+A network-free `FakeBackend` already existed in fork-owned `plx_pmsshim` but was reachable only
+from unit tests and `pmsshim-serve --fake`. It is now a boot-time choice for both the simulator
+and a debug TV, behind `plxnative-nuviofake`. Full contract: `docs/nuvio/SYNTHETIC-DEBUG.md`.
+
+New fork-owned files: `rust-modules/src/app/nuvio/nuvio_debug.rs` (child of the fork-owned `nuvio.rs`),
+`docs/nuvio/SYNTHETIC-DEBUG.md`. Fork-owned files changed: `nuvio.rs`, `nuvio-store/src/lib.rs`,
+`pmsshim/src/shim_core.rs`, `shim_pms.rs`, `shim_account.rs`, `bin/serve.rs` (unchanged) —
+`Config::synthetic`, `Account::new_synthetic` and the store's `EPHEMERAL` override make the account
+isolation explicit. `data_dir: None` alone was NOT enough: `WatchState`/`Keys`/caches read the
+global store handle regardless, and the first TV run showed the household's 12 Continue Watching
+rows. The override makes the loaded rows empty even if the real file was opened earlier in boot.
+
+**Upstream file touched:** `rust-modules/src/app/boot.rs` — three branch sites only, all carrying
+`Fork Rofocale11:` with a why: `prepare_store()` runs before `session::load` so the private empty
+store is installed before the household session can be read; the session-init choice keeps
+`captured_boot`'s DevPms authority for a synthetic boot; the boot-gate dev branch gains
+`|| synthetic_boot`. On a future upstream merge, take upstream's surrounding boot gate and reapply
+just these three conditions; do not replace the account path for ordinary boots.
 
 ## Fork-only locale keys live in `brand.json` (2026-11-25)
 
@@ -632,8 +658,8 @@ Point-in-time list (2026-11-23). Later sections and the current-status blocks at
 `VALIDATION.md` / `HANDOFF.md` supersede part of it: Dolby Vision P8 playback, seek and
 pause/resume were later confirmed by the owner on debug and stable installs. The dedicated
 sim-probe comparison was confirmed on the 7500PSC on 2026-11-25 (see the device verification
-update at the top of this file). Multi-hour stability and a TV playback run explicitly
-attributed to the post-extraction probe are still not recorded in these docs.
+update at the top of this file). Multi-hour stability and a TV playback run attributed to the
+post-extraction probe were confirmed by the owner on 2026-11-26 (no log attached here).
 
 
 ## Fourteenth pass — the torrent engine and trailer service
@@ -1070,7 +1096,8 @@ carries `libsbengine.so`, `libswresample-plx.so.7` and an Opus-enabled `libavcod
 `NEEDED libswresample-plx.so.7` is satisfied; its version is 0.10.0 with the stable app id, and
 `ipk.sha256` matches the package. The run log shows `TMDB_API_KEY: ***` and no key-shaped strings.
 Release-only gates (ELF, size budget, font hinting, webosbrew, firmware matrix and the release
-attach) are skipped by design on `workflow_dispatch`; they still need a pushed `v*` tag run.
+attach) were skipped by design on this `workflow_dispatch` run; the owner confirmed on 2026-11-26
+that they are verified separately (no tag-run log attached here).
 
 ## Home hero dissolve port (Fork Rofocale11)
 

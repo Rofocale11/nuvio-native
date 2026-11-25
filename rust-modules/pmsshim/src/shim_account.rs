@@ -49,6 +49,9 @@ pub struct Account {
     /// The token handed to the app in place of a plex.tv account token.
     token: String,
     origin: Mutex<String>,
+    /// Fork Rofocale11: synthetic boots have no account. They start signed out, and the routes
+    /// that would write account state (sign-out, sign-in) refuse instead.
+    synthetic: bool,
 }
 
 #[derive(Default)]
@@ -100,6 +103,18 @@ impl Account {
             let _ = write_session_doc(&value);
             Some(value)
         });
+        Self::from_stored(dir, token, stored, false)
+    }
+
+    /// Fork Rofocale11: a synthetic boot must start signed out even when this TV has a real
+    /// household session in the single store. It answers the same local routes but never reads
+    /// that session, never writes the prefs/PIN tables and never starts a Nuvio login.
+    pub fn new_synthetic(dir: Option<&std::path::Path>, token: &str) -> Account {
+        Self::from_stored(dir, token, None, true)
+    }
+
+    fn from_stored(dir: Option<&std::path::Path>, token: &str, stored: Option<Value>, synthetic: bool) -> Account {
+        let file = dir.map(|d| d.join("nuvio-session.json"));
         let session = stored.as_ref().and_then(session_from_json);
         let profile = stored.as_ref().and_then(|v| v["profile_id"].as_str()).filter(|s| s.parse::<u32>().is_ok_and(|n| n > 0)).map(str::to_string);
         let prefs = stored.as_ref().and_then(|v| v.get("preferences").and_then(|p| p.as_object()).cloned()).unwrap_or_default();
@@ -116,6 +131,7 @@ impl Account {
             pin_reset: Mutex::new(None),
             token: token.to_string(),
             origin: Mutex::new(String::new()),
+            synthetic,
         }
     }
 
@@ -247,6 +263,11 @@ impl Account {
     }
 
     pub fn sign_out(&self) {
+        // Fork Rofocale11: a synthetic boot has no account to sign out. Without this guard a
+        // screen's Sign out row would clear the REAL install's preferences and TV PINs.
+        if self.synthetic {
+            return;
+        }
         {
             let mut context = self.library.lock().unwrap_or_else(|e| e.into_inner());
             *self.session.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -369,6 +390,11 @@ impl Account {
     }
 
     fn create_pin(&self) -> Response {
+        // Fork Rofocale11: no Supabase login from a synthetic boot. The QR screen is not part of
+        // this mode and a headless run must not start a sign-in on the owner's behalf.
+        if self.synthetic {
+            return Response::json_status(501, &json!({"error": "sign-in unavailable in synthetic mode"}));
+        }
         match plx_stremio::nuvio::start_login() {
             Ok(login) => {
                 let id = self.next_pin.fetch_add(1, Ordering::Relaxed);
@@ -821,6 +847,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test dir");
         dir
+    }
+
+    /// Fork Rofocale11: a synthetic boot on a TV with a signed-in household account must not
+    /// inherit that identity, start a login, or push progress to it.
+    #[test]
+    fn synthetic_account_is_signed_out_and_cannot_write_account_state() {
+        let dir = temp_dir();
+        let account = super::Account::new_synthetic(Some(&dir), "tok");
+        assert!(!account.signed_in(), "synthetic boots never inherit a stored session");
+        assert!(account.push_watch_progress(&[]).is_err(), "no session means no account push");
+
+        let req = crate::shim_http::Request {
+            method: "POST".into(),
+            path: "/api/v2/pins".into(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        let response = account.handle(&req, &["pins"]);
+        assert_eq!(response.status, 501, "a headless run must not start a real sign-in");
     }
 
     /// The answer shape the CLIENT parses (`plex::account::HomeUsers` has one field, `users`). A

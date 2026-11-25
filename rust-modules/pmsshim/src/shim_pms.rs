@@ -2843,6 +2843,8 @@ impl Shim {
         let cfg_ts = cfg.torrent_server.clone();
         let cfg_p2p = cfg.p2p_enabled;
         let cfg_token = cfg.token.clone();
+        // Fork Rofocale11: captured with the other Config fields before `cfg` moves into the Shim.
+        let cfg_synthetic = cfg.synthetic;
         let initial_fp = addons_fingerprint(backend.as_ref());
         let initial_ns = catalog_namespace(backend.as_ref());
         Shim {
@@ -2891,7 +2893,13 @@ impl Shim {
             content_gen: AtomicU64::new(0),
             catalog_gen: AtomicU64::new(0),
             me: std::sync::OnceLock::new(),
-            account: crate::shim_account::Account::new(dir.as_deref(), &cfg_token),
+            // Fork Rofocale11: synthetic boots must not load a stored account session from redb;
+            // they have no account at all. `new_synthetic` keeps the same routes but starts signed out.
+            account: if cfg_synthetic {
+                crate::shim_account::Account::new_synthetic(dir.as_deref(), &cfg_token)
+            } else {
+                crate::shim_account::Account::new(dir.as_deref(), &cfg_token)
+            },
         }
     }
 
@@ -2969,7 +2977,9 @@ impl Shim {
     /// Mirror one item's resume point to the account. A paused or stopped report is a real change
     /// and goes at once; a playing one at most once per [`WATCH_PUSH_INTERVAL`].
     fn push_watch_progress(&self, rk: i64, offset_ms: i64, duration_ms: i64, state: &str) {
-        if !self.account.signed_in() {
+        // Fork Rofocale11: a synthetic boot never writes the household's viewing record, even if
+        // an account session was left in the one store by an earlier real sign-in.
+        if self.cfg.synthetic || !self.account.signed_in() {
             return;
         }
         let mut pushes = self.watch_pushes.lock().unwrap_or_else(|e| e.into_inner());
@@ -3014,6 +3024,11 @@ impl Shim {
     /// Pull the account's resume points and merge them into the local watch state, so Continue
     /// Watching draws what another device played. Runs off the caller's thread.
     pub fn pull_account_watch(&self) {
+        // Fork Rofocale11: defense in depth for the synthetic mode — the boot path already skips
+        // the watch sink, but a profile route must not be able to start a pull either.
+        if self.cfg.synthetic {
+            return;
+        }
         let Some(me) = self.me.get().and_then(|w| w.upgrade()) else {
             return;
         };

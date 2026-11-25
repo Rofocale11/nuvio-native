@@ -30,6 +30,10 @@ pub struct Config {
     /// loopback read deadline is 15 s, so this wait is what keeps a slow catalog from being
     /// reported as a dead server; the rest arrives in the background and the library re-reads.
     pub catalog_wait: Duration,
+    /// Fork Rofocale11: a synthetic debug boot serves the fixed `FakeBackend` and must NEVER read
+    /// or write the Nuvio account (watch progress included), even when a household session is
+    /// stored on the same TV. Off by default; set only by the app's devtrig-gated boot path.
+    pub synthetic: bool,
 }
 
 impl Default for Config {
@@ -42,6 +46,7 @@ impl Default for Config {
             stream_grace: Duration::from_millis(2500),
             token: "nuvionative-local".into(),
             catalog_wait: Duration::from_secs(3),
+            synthetic: false,
         }
     }
 }
@@ -72,19 +77,25 @@ pub fn start_on(backend: Arc<dyn Backend>, cfg: Config, host: &str, port: u16) -
     let listener = TcpListener::bind((host, port))?;
     let port = listener.local_addr()?.port();
     let token = cfg.token.clone();
+    // Fork Rofocale11: the synthetic decision is captured before `cfg` moves into the Shim.
+    let synthetic = cfg.synthetic;
     let shim = Arc::new(crate::shim_pms::Shim::new(backend, cfg));
     shim.bind_self();
     shim.account.set_origin(&format!("http://127.0.0.1:{port}"));
-    // Continue Watching is account-backed: merge the account's resume points at boot, and again
-    // whenever the profile changes (a profile's history is its own).
-    let s3 = shim.clone();
-    shim.account.set_watch_sink(Arc::new(move |index| {
-        // Switch the LOCAL row before pulling the account's resume points: the two belong to
-        // the same profile, or a pick merges one viewer's progress into another's state.
-        s3.watch.set_profile(index);
-        s3.pull_account_watch();
-    }));
-    shim.pull_account_watch();
+    // Fork Rofocale11: Continue Watching is account-backed. In synthetic mode it stays local —
+    // a headless run on a signed-in TV must not merge (or later write) the household's history.
+    if !synthetic {
+        // Continue Watching is account-backed: merge the account's resume points at boot, and again
+        // whenever the profile changes (a profile's history is its own).
+        let s3 = shim.clone();
+        shim.account.set_watch_sink(Arc::new(move |index| {
+            // Switch the LOCAL row before pulling the account's resume points: the two belong to
+            // the same profile, or a pick merges one viewer's progress into another's state.
+            s3.watch.set_profile(index);
+            s3.pull_account_watch();
+        }));
+        shim.pull_account_watch();
+    }
     let s2 = shim.clone();
     let handler: Arc<crate::shim_http::Handler> = Arc::new(move |req: &crate::shim_http::Request| s2.handle(req));
     std::thread::Builder::new().name("pmsshim".into()).spawn(move || crate::shim_http::serve(listener, handler))?;
