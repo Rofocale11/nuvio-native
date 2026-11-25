@@ -3623,6 +3623,21 @@ impl Shim {
         same_addon && same_name && same_size && same_height
     }
 
+    /// Fork Rofocale11: resolve a Part id's arrival index into a playable `Stream`. The id is
+    /// minted at detail time as `rk * PART_STRIDE + arrival_index`; a resume after a restart
+    /// rebuilds the slot, and a different addon arrival order can leave that index out of range —
+    /// which answered 502 "stream no longer available" on an otherwise valid resume. The slot's own
+    /// stream at that index still wins when present (it honours an explicit in-session pick); only
+    /// when that index is absent do we resolve the remembered source from the FRESH ranking by its
+    /// stable identity, which survives re-signed debrid URLs and reordered torrent arrivals.
+    fn part_stream(ranked: &[(usize, Classified)], by_index: Option<Stream>, last: Option<&LastStream>) -> Option<Stream> {
+        if by_index.is_some() {
+            return by_index;
+        }
+        last.and_then(|last| ranked.iter().find(|(_, c)| Self::matches_last(c, last)))
+            .map(|(_, c)| c.stream.clone())
+    }
+
     /// Re-order a fresh ranking, promoting the remembered source ahead of the
     /// best-ranked stream — unless the viewer already picked inside the slot.
     fn promote_last_stream(
@@ -6120,6 +6135,11 @@ impl Shim {
             };
             return Some((row, Some(Ok(probe)), Duration::ZERO));
         }
+        // Fork Rofocale11: the detail page is where a viewer resumes from. Open the remembered
+        // torrent here, before the Play press, so its kept swarm is already dialling when the
+        // stream is requested. Best-effort and silent for a non-torrent source or a title with no
+        // resume point; the engine call is on its own thread (see `warm_remembered_torrent`).
+        let _ = self.warm_remembered_torrent(rk);
         let ident = self.keys.ident(rk);
         let fallback = if ident.is_none() {
             self.tmdb_fallback_movie(rk)
@@ -7305,22 +7325,32 @@ impl Shim {
             .q("ratingKey")
             .and_then(|v| v.parse().ok())
             .unwrap_or(-1);
+        Response::json(&json!({"ok": self.warm_remembered_torrent(rk)}))
+    }
+
+    /// Fork Rofocale11: best-effort open of the torrent remembered for a resume point, so the
+    /// engine restores its kept swarm (metadata + saved peers) and starts dialling BEFORE Play.
+    /// Shared by the `/nuvio/warm` endpoint and the detail read, which is the page a viewer
+    /// resumes from. Silent for a title with no resume point, no remembered torrent, or a
+    /// non-torrent source; the engine call runs on its own thread because `open` takes the engine
+    /// mutex and neither the shim's request thread nor the loop may wait behind it.
+    fn warm_remembered_torrent(&self, rk: i64) -> bool {
         if rk < 0 || !self.p2p_enabled() {
-            return Response::json(&json!({"ok": false}));
+            return false;
         }
         let watch = self.watch.get(rk);
         if watch.offset_ms <= 0 {
-            return Response::json(&json!({"ok": false}));
+            return false;
         }
         let Some(hash) = watch.last_stream.and_then(|last| last.info_hash) else {
-            return Response::json(&json!({"ok": false}));
+            return false;
         };
         if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Response::json(&json!({"ok": false}));
+            return false;
         }
         let ih = hash.to_ascii_lowercase();
         let tag = ih[..12].to_string();
-        let spawned = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("p2p-warm".into())
             .spawn(move || {
                 let ok = plx_stremio::sbengine::warm(&ih);
@@ -7333,8 +7363,7 @@ impl Shim {
                     }
                 ));
             })
-            .is_ok();
-        Response::json(&json!({"ok": spawned}))
+            .is_ok()
     }
 
     fn catalog_listing(
@@ -7748,14 +7777,18 @@ impl Shim {
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&rk)
                 .cloned();
-            slot.and_then(|s| {
+            let by_index = slot.and_then(|s| {
                 s.state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .streams
                     .get(idx)
                     .cloned()
-            })
+            });
+            // Fork Rofocale11: a Part index minted before a restart can be stale when this slot
+            // is rebuilt in a different arrival order. Fall back to the remembered source's
+            // stable identity in the fresh ranking rather than answering 502 on a valid resume.
+            Self::part_stream(&ranked, by_index, self.watch.get(rk).last_stream.as_ref())
         };
         // A Part id is a stream's arrival index: the player asks for the
         // Media it was given. Preferring the remembered stream here would
@@ -8936,6 +8969,31 @@ mod account_progress_tests {
         let mut out = vec![(0usize, best), (1usize, pinned)];
         Shim::promote_last_stream(&mut out, Some(&last), false);
         assert_eq!(out[0].1.info.label, "pinned");
+    }
+
+    /// Fork Rofocale11: a resume whose Part id encodes an arrival index the rebuilt slot no
+    /// longer has used to answer 502. The remembered source's stable identity resolves it from
+    /// the fresh ranking, while a stream still present at that index keeps priority (an explicit
+    /// in-session pick must not be overridden by the memory).
+    #[test]
+    fn a_stale_part_index_resolves_the_remembered_source_from_fresh_ranking() {
+        let remembered = classified("pinned", "https://x/pinned.mkv", None, "pinned");
+        let other = classified("other", "https://x/other.mkv", None, "other");
+        let last = Shim::last_stream_of(&remembered);
+        let other_stream = other.stream.clone();
+        let ranked = vec![(0usize, other), (1usize, remembered)];
+
+        let resolved = Shim::part_stream(&ranked, None, Some(&last))
+            .expect("a stale index must resolve from the fresh ranking");
+        assert_eq!(resolved.name.as_deref(), Some("pinned"));
+
+        // A stream still at the encoded index wins — an explicit pick is not overwritten.
+        let picked = Shim::part_stream(&ranked, Some(other_stream), Some(&last))
+            .expect("the slot's own stream must win");
+        assert_eq!(picked.name.as_deref(), Some("other"));
+
+        // Nothing remembered and nothing at the index: still no stream (the caller's 502).
+        assert!(Shim::part_stream(&ranked, None, None).is_none());
     }
 
     #[test]

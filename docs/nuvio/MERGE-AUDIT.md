@@ -1551,3 +1551,44 @@ reviewed re-pin of `ci/proofs/platform-generated-enums.json` and its `CERTIFICAT
 `ci/readonly_generated.py`, with a new review entry naming the brand hook. The new fork module was
 added to `[os]` in `ci/module-layers.ini`. No enum producer, include namespace, catalogue grammar
 or manifest/lock certificate changed; the two other pinned certificates were left alone.
+
+## Three resume bugs (Fork Rofocale11, 2026-11-25)
+
+A failing regression was written and observed failing before each fix. Every Rust edit carries an
+inline `Fork Rofocale11:` marker; this section is the merge record the fork rules also require.
+
+- `rust-modules/src/app/content.rs` — `hero_resume_uses_loaded_detail` now answers true for any
+  Home Play with a resume point, not just the hero. A Continue Watching card's Play loads the
+  CARD's detail, so an episode card resumes that exact episode at its own offset instead of being
+  refused on the part-less hub row. `hold_feature` takes `&mut PlaybackSession` and calls
+  `plx_media::route::cancel_play`: the engine may still be held by a halted trailer preview, and a
+  held play issues no `request_play`, so the preview's resolve is still the current generation when
+  it lands and is applied as a full play before the app's `is_preview()` guard can discard it
+  (`playing item: rk=<trailer>` then a 404 and fps 0 in the owner's event log).
+- `rust-modules/src/app/input.rs` — `MenuPlayAwait::for_hero_resume` became `for_home_resume` with
+  a `from_deck` flag used only to name the right surface in the miss log; the item menu's Play
+  Trailer hold passes the session through to `hold_feature`.
+- `rust-modules/pmsshim/src/shim_pms.rs` (fork-wholesale shim) — `part_stream` resolves a stale Part
+  arrival index from the fresh ranking by `last_stream` identity when the rebuilt slot has nothing
+  at that index; a stream still present there wins, so an explicit in-session pick is never
+  overridden. `warm_remembered_torrent` factors the `/nuvio/warm` body and is now called from the
+  detail read — the page a viewer resumes from — so the remembered swarm starts dialling before
+  Play. No new durable state; `last_stream` and the engine's own state dir remain the sole homes.
+- `rust-modules/media/src/route/decision_resolve_route_tests.rs` (test-only) — pins that a
+  superseded preview landing is dropped at `pump_play`'s generation gate and installs no trailer
+  `PlayingItem`.
+
+Why these are upstream edits rather than new fork files: each change is a branch or a helper inside
+the function that already owns the decision (`activate_home_item`, `hold_feature`, the shim's part
+route and the app's preview wait). Extracting them into child modules would add a `mod` plus an
+indirection without removing the upstream branch, so the edits were kept to the minimum and marked.
+Where a fork-owned home existed already — the shim, ported wholesale — the helper lives there.
+The tests are the durable pin; no new crate, module layer, wire identifier or persisted record was
+introduced.
+
+### Non-commentable edits recorded here
+
+- `ci/list-caps.ini` — re-keyed `[pmsshim/src/shim_pms.rs::warm_torrent]` to
+  `[pmsshim/src/shim_pms.rs::warm_remembered_torrent]`, the symbol that now holds the 12-hex
+  log-tag slice. Same `not-a-list` class and reason; no cap was added or removed. The re-key is
+  required because `ci/check-list-caps.py` matches cap sites by symbol.

@@ -201,10 +201,19 @@ pub(super) fn halt_preview_now(
 /// (an ordinary page Play, and the item menu's Play Trailer) must hold through here rather
 /// than call `request_play`/`start_playback` directly.
 pub(super) fn hold_feature(
+    ps: &mut plx_media::route::PlaybackSession,
     play: plx_screens::registry::PlayIntent,
     resume_ns: i64,
     ret: Option<ReturnState<u32, PageMemory>>,
 ) {
+    // Fork Rofocale11: a held play means the engine is still occupied by a trailer preview that
+    // `clear_engine_for_play` has just halted. That preview's resolve may still be in flight:
+    // holding issues no `request_play`, so PLAY_GEN has not advanced and `pump_play` would apply
+    // the trailer's landing as a FULL play (its PlayingItem is installed before the app's
+    // `is_preview()` guard can discard it) — the Resume then plays/stalls on the trailer. Supersede
+    // that resolve now so its late landing is dropped at the generation gate. The held play gets a
+    // fresh generation when it drains through `drain_held_feature`.
+    plx_media::route::cancel_play(ps);
     HELD_FEATURE.with(|slot| {
         *slot.borrow_mut() = Some(HeldFeature {
             play,
@@ -452,7 +461,8 @@ mod held_feature_tests {
     }
 
     fn install_held(play: PlayIntent) {
-        hold_feature(play, 0, Some(ReturnState::default()));
+        let mut ps = plx_media::route::PlaybackSession::default();
+        hold_feature(&mut ps, play, 0, Some(ReturnState::default()));
     }
 
     /// The post-accept half of [`request_play_intent`] / [`drain_held_feature`]. A full
@@ -557,7 +567,8 @@ mod held_feature_tests {
     #[test]
     fn a_none_ret_round_trips_through_the_held_queue_unchanged() {
         let _g = plx_base::testlock::serial();
-        hold_feature(trailer_play(plx_data::metadata::TRAILER_CONTEXT), 0, None);
+        let mut ps = plx_media::route::PlaybackSession::default();
+        hold_feature(&mut ps, trailer_play(plx_data::metadata::TRAILER_CONTEXT), 0, None);
         let held_ret_is_none = HELD_FEATURE.with(|slot| slot.borrow().as_ref().map(|h| h.ret.is_none()));
         assert_eq!(
             held_ret_is_none,
@@ -691,7 +702,7 @@ fn content_command(app: &mut ScreenCommandApp<'_, '_>, source: MachineId, reques
             ContentReq::Play { play, resume_ns } => {
                 let mounted = bridge::player(&app.pages).is_some();
                 if !clear_engine_for_play(&mut app.player.session, &mut app.adapters.player, mounted) {
-                    hold_feature(play, resume_ns, Some(ret));
+                    hold_feature(&mut app.player.session, play, resume_ns, Some(ret));
                     return AppCommandOutcome::Completed;
                 }
                 // The PAGE decided which item; the LOOP performs the request, because
@@ -2735,11 +2746,14 @@ fn home_menu_from_deck(ret: &ReturnState<u32, PageMemory>) -> bool {
         HomeItemIdentity::Item { hub: HomeHubIdentity::ContinueWatching, .. }))
 }
 
-/// Fork Rofocale11: only a Home HERO with a real resume point takes the loaded-detail play path.
-/// A Continue Watching card's Play, and a hero Play with nothing to return to, keep the catalog
-/// row path (which is enough for them and avoids an unnecessary detail fetch).
-fn hero_resume_uses_loaded_detail(from_deck: bool, resume_ns: Option<i64>) -> bool {
-    !from_deck && resume_ns.is_some_and(|ns| ns > 0)
+/// Fork Rofocale11: any Home Play with a real resume point — a hero OR a Continue Watching card —
+/// takes the loaded-detail play path. The shim's hub rows carry no `Media`/`Part`, so playing a row
+/// directly refuses on an empty part and the press does nothing; Detail resolves a real Part and the
+/// exact resume offset. For a Continue Watching episode card the loaded detail is THAT episode's, so
+/// the press resumes that episode, never the show's next-up. A Play with no resume point keeps the
+/// ordinary row path.
+fn hero_resume_uses_loaded_detail(_from_deck: bool, resume_ns: Option<i64>) -> bool {
+    resume_ns.is_some_and(|ns| ns > 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2756,22 +2770,24 @@ fn activate_home_item(app: &mut ScreenCommandApp<'_, '_>, source: MachineId, ent
     // reach it (see `apply_item_action`'s note on `from_home`).
     let _ = (source, entry);
     let from_deck = home_menu_from_deck(&ret);
-    // Fork Rofocale11: a Home HERO's Resume must take the same path as Detail's Resume — play the
-    // LOADED item, not the catalog row. The shim's hub rows carry no `Media`/`Part`, so the row
-    // play below refuses on an empty part and the press does nothing; Detail resolves a real Part
-    // from `/library/metadata` and plays it. Load that detail here (no page is opened), then let
-    // the existing play-await continuation start the source the shim remembers for this resume
-    // point. A deck card's Play and a hero with no resume point keep the old row path.
+    // Fork Rofocale11: a Home Resume — a hero's OR a Continue Watching card's — must take the same
+    // path as Detail's Resume: play the LOADED item, not the catalog row. The shim's hub rows carry
+    // no `Media`/`Part`, so the row play below refuses on an empty part and the press does nothing;
+    // Detail resolves a real Part from `/library/metadata` and plays it. For a card that is an
+    // episode, the detail fetched here is that episode's own, so the press resumes THAT episode
+    // rather than the show's next-up. Load that detail (no page is opened), then let the existing
+    // play-await continuation start the source the shim remembers for this resume point.
     if hero_resume_uses_loaded_detail(from_deck, resume_ns) {
         app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::RequestDetail {
             sid,
             rk: rk.to_string(),
         });
         app.bridge.start_store_jobs();
-        *app.menu_play_await = Some(crate::app::input::MenuPlayAwait::for_hero_resume(
+        *app.menu_play_await = Some(crate::app::input::MenuPlayAwait::for_home_resume(
             sid,
             rk.to_string(),
             now,
+            from_deck,
         ));
         return plx_machine::machine::AppCommandOutcome::Completed;
     }
@@ -2899,15 +2915,21 @@ mod repair_replay_tests {
 mod home_hero_resume_tests {
     use super::*;
 
-    /// Fork Rofocale11: the Home hero's Resume is the only Home play that must load the detail
-    /// item first — the shim's hub row has no Part, so the plain row play silently refuses.
+    /// Fork Rofocale11: a Continue Watching card's Play with a real resume point must load the
+    /// CARD'S detail before playing — the shim's hub row has no Part, so the plain row play silently
+    /// refuses and the press does nothing. Loading the card's own detail plays that exact episode
+    /// at its own offset, never the show's next-up. The hero already takes this path; a deck card
+    /// must take it too.
     #[test]
-    fn only_a_hero_resume_takes_the_loaded_detail_path() {
-        assert!(hero_resume_uses_loaded_detail(false, Some(600_000_000_000)));
-        assert!(!hero_resume_uses_loaded_detail(true, Some(600_000_000_000)),
-            "a Continue Watching card still plays its own row");
+    fn a_continue_watching_card_resume_takes_the_loaded_detail_path() {
+        assert!(hero_resume_uses_loaded_detail(false, Some(600_000_000_000)),
+            "a hero Resume loads its detail");
+        assert!(hero_resume_uses_loaded_detail(true, Some(600_000_000_000)),
+            "a Continue Watching card's resume must load the card's detail, not play its part-less row");
         assert!(!hero_resume_uses_loaded_detail(false, Some(0)),
             "a hero with no resume point has nothing to continue");
+        assert!(!hero_resume_uses_loaded_detail(true, Some(0)),
+            "a card with no resume point has nothing to continue");
         assert!(!hero_resume_uses_loaded_detail(false, None), "Detail is a different request");
     }
 }

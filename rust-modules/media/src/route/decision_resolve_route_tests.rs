@@ -75,6 +75,46 @@ fn expired_uri_landing_retires_its_unstarted_logical_resource_once() {
     plx_plex::plex::reset_servers_for_test();
 }
 
+/// Fork Rofocale11: a Resume pressed while a trailer preview is mid-resolve is HELD
+/// (`app::content::hold_feature`) until the preview releases the engine. A held play issues no
+/// `request_play`, so the preview's resolve is still the CURRENT generation when its landing
+/// arrives — `pump_play` would call `apply_plan` on it and install the trailer's `PlayingItem`
+/// before the app's `is_preview()` guard can discard it. The observed event log reads
+/// `playing item: rk=<trailer>` after a Resume press, then a 404 and a stalled player. The app
+/// supersedes the preview's resolve with `cancel_play` when it holds the play; this pins that
+/// the late landing is dropped at the generation gate and never applies the trailer as a film.
+#[test]
+fn a_superseded_preview_landing_cannot_install_the_trailer_playing_item() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = super::test_support::fresh_registry(&mut ps);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    // The preview's resolve is in flight at this generation; `cancel_play` bumps it past this.
+    let preview_gen = PLAY_GEN.load(Ordering::SeqCst);
+    let plan = Plan {
+        sid: plx_plex::plex::ServerId::UNSET,
+        playing: Some(plx_data::metadata::PlayingItem {
+            rk: "trailer".into(),
+            ..plx_data::metadata::PlayingItem::with_subs(Vec::new())
+        }),
+        ..Default::default()
+    };
+    // The Resume is held over the preview: the app supersedes the preview's resolve now.
+    cancel_play(&mut ps);
+    // Its landing still arrives, carrying the now-stale generation.
+    *PLAY_SLOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(PlayLanding {
+        gen: preview_gen,
+        trace_generation: 0,
+        contract_revision: desired_contract_revision(),
+        candidate_purpose: CandidatePurpose::NewCandidate,
+        plan,
+        rk: "trailer".into(),
+    });
+    assert!(pump_play(&mut ps, &mut meta).is_none(),
+        "the trailer's stale landing must be dropped, not applied as a film");
+    assert!(meta.view().playing().is_none(),
+        "no trailer PlayingItem may be installed after the Resume superseded it");
+}
+
 #[test]
 fn same_source_intent_keeps_spent_candidates_across_effective_audio_and_failed_retry() {
     use super::super::backend_policy::{BackendPolicy, OfferId};

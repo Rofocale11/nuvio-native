@@ -416,12 +416,17 @@ impl MenuPlayAwait {
         Self { open, stay_on_miss: true, ..Self::new(sid, rk, None, plx_screens::player::input::HUD_LINGER_MS, now) }
     }
 
-    /// Fork Rofocale11: the wait for a Home hero's Resume. The shim's hub rows carry no
-    /// `Media`/`Part`, so playing the row directly refuses on an empty part — the press looked
-    /// inert. Detail's Resume plays the LOADED item instead; this wait loads the same detail
-    /// (no page is opened) and then plays the promoted source remembered for the resume point.
-    pub(crate) fn for_hero_resume(sid: plx_plex::plex::ServerId, rk: String, now: u32) -> Self {
-        Self { miss_label: "home hero resume", ..Self::for_link(sid, rk, false, now) }
+    /// Fork Rofocale11: the wait for a Home Resume — a hero's OR a Continue Watching card's. The
+    /// shim's hub rows carry no `Media`/`Part`, so playing the row directly refuses on an empty part
+    /// — the press looked inert. Detail's Resume plays the LOADED item instead; this wait loads the
+    /// same detail (no page is opened) and then plays the promoted source remembered for the resume
+    /// point. `from_deck` only names the miss in the log: the two surfaces reach here through the
+    /// same `HomeReq::Play`, but a card's title is not the hero's.
+    pub(crate) fn for_home_resume(sid: plx_plex::plex::ServerId, rk: String, now: u32, from_deck: bool) -> Self {
+        Self {
+            miss_label: if from_deck { "continue watching card resume" } else { "home hero resume" },
+            ..Self::for_link(sid, rk, false, now)
+        }
     }
 }
 
@@ -1149,7 +1154,7 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
             // (`ContentReq::Play` in `app::content`), so this takes the same hold-until-released
             // path rather than calling `request_play`/`start_playback_with` directly.
             if !super::content::clear_engine_for_play(ps, pa, super::bridge::player(pages).is_some()) {
-                super::content::hold_feature(intent, 0, None);
+                super::content::hold_feature(ps, intent, 0, None);
                 return;
             }
             if !super::content::request_play_intent(ps, bridge.metadata_mut(), &intent) {
