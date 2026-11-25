@@ -527,9 +527,9 @@ pub fn transport_mark(
 //  * the support facts (version · firmware · set · failure code) — one dim footer line at the
 //    foot of the screen, always; there is no *Details* control.
 
-/// The subscription's name in the one note that states it ("This server has no Plex Pass"). A
-/// product name, so it is not translated.
-const PLEX_PASS: &str = "Plex Pass";
+/// Fork Rofocale11: the fork has no Plex account and no subscription tier, so the README note must
+/// not name an upstream product. Plain words, not a translated product name.
+const SUBSCRIPTION: &str = "premium features";
 
 /// Everything the failure read-out draws, resolved once from the live failure. The draw, the
 /// pointer stops and the key ladder all build it the same way, so the row a click lands on is the
@@ -627,7 +627,7 @@ impl FailureReadout {
         let policy = e.kind == FailureKind::PlaybackPolicy && !e.detail.is_empty();
         let reason: &str = if policy { &e.detail } else { e.readout };
         let note: Option<String> = if e.no_pass {
-            Some(plx_os::i18n::msg::widgets_failure_no_pass(PLEX_PASS))
+            Some(plx_os::i18n::msg::widgets_failure_no_pass(SUBSCRIPTION))
         } else if policy || e.detail.is_empty() {
             None
         } else {

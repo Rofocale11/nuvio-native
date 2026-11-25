@@ -642,7 +642,8 @@ mod tests {
         let locale = plx_os::i18n::LocaleContext::resolve(plx_os::i18n::Preference::Be, None, None, None, None);
         let question = plx_os::i18n::msg::settings_consent_delete_question_in(&locale);
         let body = plx_os::i18n::msg::settings_consent_delete_scope_in(&locale);
-        assert!(body.contains("серверы Plex") && body.contains("Sentry") && body.contains("PostHog"));
+        // Fork Rofocale11: the fork has no Plex servers; the delete disclosure now names Nuvio Native.
+        assert!(body.contains("Nuvio Native") && body.contains("Sentry") && body.contains("PostHog"));
         let question_view = DecisionAlert::question_view(question).with_measure(&measure);
         let body_view = DecisionAlert::body_view(body).with_measure(&measure);
         assert!(!question_view.truncates(BODY_W));

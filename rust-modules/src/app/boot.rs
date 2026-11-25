@@ -936,8 +936,10 @@ pub(crate) unsafe fn construct(
     // The title is furniture a television never draws (no window manager, no decoration) and
     // the first thing a desktop shows, so the two builds spell it differently: the device keeps
     // the process-shaped name every log, `pidof` recipe and skill already uses.
+    // Fork Rofocale11: the simulator window is user-visible; the device name below stays the
+    // lowercase process name that logs, pidof recipes and skills already use.
     #[cfg(feature = "hostsim")]
-    let title = c"PlxNative";
+    let title = c"Nuvio Native";
     #[cfg(not(feature = "hostsim"))]
     let title = c"plxnative";
     // A frame dump's drawable is exactly the window's size in points: it is the one desktop window

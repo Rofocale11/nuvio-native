@@ -931,7 +931,8 @@ fn support_line_of(i: &plx_os::tv::device::Info, hw: &plx_os::tv::device::Hardwa
     let set: &str = if set.is_empty() { plx_os::i18n::msg::settings_login_unknown_device() } else { &set };
     format!(
         "{} {} · {} · {} · {}",
-        plx_plex::plex::identity::PRODUCT,
+        // Fork Rofocale11: the support line is user-facing; the wire product name is unchanged.
+        plx_os::brand::UI_PRODUCT,
         plx_plex::plex::identity::version(),
         plx_os::i18n::webos_release_line(i),
         set,
@@ -3658,10 +3659,11 @@ mod tests {
             hw_revision: String::new(),
         };
         let line = support_line_of(&i, &hw, FailureKind::TvPipeline);
+        // Fork Rofocale11: the user-facing product name, not the wire identifier.
         assert_eq!(
             line,
             format!(
-                "PlxNative {} · webOS 4.10.2 · 43LM6300PVB · m3r · tv_pipeline",
+                "Nuvio Native {} · webOS 4.10.2 · 43LM6300PVB · m3r · tv_pipeline",
                 plx_plex::plex::identity::version()
             )
         );
@@ -3978,7 +3980,8 @@ mod tests {
             "{}",
             e.panel
         );
-        assert!(e.panel.contains("server has no Plex Pass"), "{}", e.panel);
+        // Fork Rofocale11: the fork's failure copy names no product tier.
+        assert!(e.panel.contains("no usable video transcode target was found"), "{}", e.panel);
         assert!(e.no_pass, "the read-out draws the capsule from this flag");
         // …and never as a cause — h264 encoding is free everywhere (audit row 1). The read-out
         // reason carries no Pass words at all: the capsule line states the fact separately.
@@ -4314,7 +4317,7 @@ mod tests {
         );
         assert!(e.no_pass, "so the read-out draws the capsule…");
         assert!(
-            e.panel.contains("server has no Plex Pass"),
+            e.panel.contains("no usable video transcode target was found"),
             "…and the panel states the fact: {}",
             e.panel
         );

@@ -869,11 +869,26 @@ pub fn discover(root: &Path, specs: &[LanguageSpec]) -> Result<Vec<Catalog>, Vec
     if errors.is_empty() { Ok(catalogs) } else { Err(errors) }
 }
 
+#[cfg(test)]
 pub fn build(root: &Path, out: &Path) -> Result<(), Vec<String>> {
+    build_with(root, out, |_| Ok(()))
+}
+
+/// Fork Rofocale11: `build` is also compiled into the host tests as `i18n::catalog_tests`, where a
+/// build-script sibling module does not exist. The transformation is therefore passed in: the
+/// build script supplies the brand hook, the tests keep the upstream no-op behaviour.
+pub fn build_with(
+    root: &Path,
+    out: &Path,
+    rebrand: impl FnOnce(&mut [Catalog]) -> Result<(), Vec<String>>,
+) -> Result<(), Vec<String>> {
     let text = std::fs::read_to_string(root.join("languages.json"))
         .map_err(|e| vec![format!("locales/languages.json: {e}; every UI language is registered there ({GUIDE})")])?;
     let specs = parse_registry(&text)?;
     let mut catalogs = discover(root, &specs)?;
+    // Fork Rofocale11: rebrand before compile() so upstream's key/placeholder checks still run on
+    // the strings that actually ship. Any surviving Plex word is a build error, not a UI surprise.
+    rebrand(&mut catalogs)?;
     let at = catalogs.iter().position(|c| c.spec.tag == "en").expect("registry requires en");
     let source = catalogs.remove(at);
     let generated = compile(&source, &catalogs)?;

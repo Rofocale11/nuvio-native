@@ -462,7 +462,8 @@ fn header(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::Diag, n
             plx_os::devcaps::dv::capability().compact_display(),
             &vh.to_string(),
             &os,
-            plx_plex::plex::identity::PRODUCT,
+            // Fork Rofocale11: the user-facing name; identity::PRODUCT stays the wire value.
+            plx_os::brand::UI_PRODUCT,
             plx_plex::plex::identity::version(),
             &vw.to_string(),
         ),
@@ -3210,13 +3211,14 @@ mod tests {
     #[test]
     fn the_server_row_states_the_pass_tristate_without_guessing() {
         use plx_plex::plex::serverinfo::Subscription as S;
+        // Fork Rofocale11: the fork has no subscription tier; the read-out names the app instead.
         assert_eq!(
             server_line("1.43.3.10861-cd85035e7", S::Yes),
-            "1.43.3 · Plex Pass"
+            "1.43.3 · Nuvio"
         );
         assert_eq!(
             server_line("1.43.3.10861-cd85035e7", S::No),
-            "1.43.3 · no Plex Pass"
+            "1.43.3"
         );
         // fetch never landed: version and subscription are stored together, so empty = unqueried
         assert_eq!(server_line("", S::Unknown), "not yet queried");

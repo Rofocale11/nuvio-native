@@ -847,7 +847,8 @@ fn support_line(offer: &auth::owner::IncidentOffer) -> String {
     let discovery = discovery.map_or(String::new(), |line| format!(" \u{b7} {line}"));
     format!(
         "{} {} \u{b7} {} \u{b7} {} \u{b7} {}{} \u{b7} {}",
-        plx_plex::plex::identity::PRODUCT,
+        // Fork Rofocale11: the support line is user-facing; the wire product name is unchanged.
+        plx_os::brand::UI_PRODUCT,
         plx_plex::plex::identity::version(),
         plx_os::i18n::webos_release_line(plx_os::tv::device::info()),
         set,

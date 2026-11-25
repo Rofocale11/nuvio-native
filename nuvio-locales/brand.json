@@ -1,0 +1,233 @@
+{
+  "replace": [
+    [
+      "PLXNATIVE",
+      "NUVIO NATIVE"
+    ],
+    [
+      "PlxNative",
+      "Nuvio Native"
+    ],
+    [
+      "plxnative.com/troubleshooting/#playback-reports-jail_missing_rtkmem",
+      "github.com/Rofocale11/nuvio-native/issues"
+    ],
+    [
+      "support@plxnative.com",
+      "github.com/Rofocale11/nuvio-native/issues"
+    ],
+    [
+      "https://www.plex.tv/about/privacy-legal/",
+      "https://github.com/Rofocale11/nuvio-native"
+    ],
+    [
+      "https://github.com/plxnative/plx-native",
+      "https://github.com/Rofocale11/nuvio-native"
+    ],
+    [
+      "github.com/plxnative/plx-native",
+      "github.com/Rofocale11/nuvio-native"
+    ],
+    [
+      "plxnative/plx-native",
+      "Rofocale11/nuvio-native"
+    ],
+    [
+      "plex.tv",
+      "Nuvio"
+    ],
+    [
+      "PLEX",
+      "NUVIO"
+    ],
+    [
+      "Plex",
+      "Nuvio"
+    ]
+  ],
+  "override": {
+    "settings.about.body": {
+      "en": "Version {version}\nBuild {build}\n\nNuvio Native — a fork of PlxNative (GPL-3.0-or-later)\nUpstream © Gleb Linnik and contributors\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nPosters by BetterPosters (btttr.cc); Rotten Tomatoes scores come from that addon.\n\nNuvio Native is independent and is not affiliated with Plex or LG.",
+      "es": "Versión {version}\nCompilación {build}\n\nNuvio Native — una bifurcación de PlxNative (GPL-3.0-or-later)\nCódigo original © Gleb Linnik y colaboradores\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nCarteles de BetterPosters (btttr.cc); las puntuaciones de Rotten Tomatoes provienen de ese addon.\n\nNuvio Native es independiente y no está afiliada a Plex ni a LG.",
+      "be": "Версія {version}\nЗборка {build}\n\nNuvio Native — форк PlxNative (GPL-3.0-or-later)\nАрыгінальны код © Gleb Linnik і ўдзельнікі праекта\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nПостары ад BetterPosters (btttr.cc); ацэнкі Rotten Tomatoes пастаўляе гэты дадатак.\n\nNuvio Native — незалежная праграма, не звязаная з Plex або LG.",
+      "ca": "Versió {version}\nBuild {build}\n\nNuvio Native — una bifurcació de PlxNative (GPL-3.0-or-later)\nCodi original © Gleb Linnik i col·laboradors\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nCartells de BetterPosters (btttr.cc); les puntuacions de Rotten Tomatoes provenen d'aquest addon.\n\nNuvio Native és independent i no està afiliada a Plex ni a LG.",
+      "fr": "Version {version}\nBuild {build}\n\nNuvio Native — un fork de PlxNative (GPL-3.0-or-later)\nCode amont © Gleb Linnik et les contributeurs\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nAffiches par BetterPosters (btttr.cc) ; les notes Rotten Tomatoes proviennent de cet addon.\n\nNuvio Native est indépendante et n'est affiliée ni à Plex ni à LG.",
+      "it": "Versione {version}\nBuild {build}\n\nNuvio Native — un fork di PlxNative (GPL-3.0-or-later)\nCodice originale © Gleb Linnik e collaboratori\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nLocandine di BetterPosters (btttr.cc); i punteggi Rotten Tomatoes provengono da questo addon.\n\nNuvio Native è indipendente e non è affiliata a Plex o LG.",
+      "pt": "Versão {version}\nBuild {build}\n\nNuvio Native — um fork do PlxNative (GPL-3.0-or-later)\nCódigo original © Gleb Linnik e colaboradores\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nCartazes da BetterPosters (btttr.cc); as classificações Rotten Tomatoes vêm desse addon.\n\nA Nuvio Native é independente e não está afiliada à Plex nem à LG.",
+      "de": "Version {version}\nBuild {build}\n\nNuvio Native — ein Fork von PlxNative (GPL-3.0-or-later)\nUrsprünglicher Code © Gleb Linnik und Mitwirkende\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nPoster von BetterPosters (btttr.cc); die Rotten-Tomatoes-Werte stammen von diesem Addon.\n\nNuvio Native ist unabhängig und weder mit Plex noch mit LG verbunden.",
+      "hu": "Verzió {version}\nBuild {build}\n\nNuvio Native — a PlxNative elágazása (GPL-3.0-or-later)\nEredeti kód © Gleb Linnik és közreműködők\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nPoszterek: BetterPosters (btttr.cc); a Rotten Tomatoes pontszámok ettől a kiegészítőtől származnak.\n\nA Nuvio Native független, és nem kapcsolódik a Plexhez vagy az LG-hez.",
+      "ru": "Версия {version}\nСборка {build}\n\nNuvio Native — форк PlxNative (GPL-3.0-or-later)\nОригинальный код © Gleb Linnik и участники проекта\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nПостеры от BetterPosters (btttr.cc); оценки Rotten Tomatoes предоставляет этот надстрой.\n\nNuvio Native — независимое приложение, не связанное с Plex или LG.",
+      "pl": "Wersja {version}\nBuild {build}\n\nNuvio Native — fork PlxNative (GPL-3.0-or-later)\nOryginalny kod © Gleb Linnik i współtwórcy\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nPlakaty od BetterPosters (btttr.cc); oceny Rotten Tomatoes pochodzą z tego dodatku.\n\nNuvio Native jest niezależna i nie jest powiązana z Plex ani LG.",
+      "nl": "Versie {version}\nBuild {build}\n\nNuvio Native — een fork van PlxNative (GPL-3.0-or-later)\nOorspronkelijke code © Gleb Linnik en bijdragers\n\ngithub.com/Rofocale11/nuvio-native\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.\nwww.themoviedb.org\n\nPosters van BetterPosters (btttr.cc); Rotten Tomatoes-scores komen van die addon.\n\nNuvio Native is onafhankelijk en niet verbonden met Plex of LG."
+    },
+    "settings.legal.privacy.responsible_body": {
+      "en": "Nuvio Native contributors are responsible only for data this app stores locally and for optional reports you choose to share. Upstream PlxNative is © Gleb Linnik and contributors.",
+      "es": "Los colaboradores de Nuvio Native son responsables solo de los datos que esta app guarda localmente y de los informes opcionales que decides compartir. PlxNative, el proyecto original, es © Gleb Linnik y colaboradores.",
+      "be": "Удзельнікі Nuvio Native адказваюць толькі за даныя, якія гэта праграма захоўвае лакальна, і за неабавязковыя справаздачы, якія вы вырашылі даслаць. Арыгінальны PlxNative © Gleb Linnik і ўдзельнікі.",
+      "ca": "Els col·laboradors de Nuvio Native són responsables només de les dades que aquesta app desa localment i dels informes opcionals que decideix compartir. El PlxNative original és © Gleb Linnik i col·laboradors.",
+      "fr": "Les contributeurs de Nuvio Native sont responsables uniquement des données que cette app stocke localement et des rapports facultatifs que vous choisissez de partager. PlxNative, le projet d'origine, est © Gleb Linnik et contributeurs.",
+      "it": "I contributori di Nuvio Native sono responsabili solo dei dati che questa app memorizza localmente e delle segnalazioni opzionali che scegli di condividere. Il PlxNative originale è © Gleb Linnik e collaboratori.",
+      "pt": "Os colaboradores da Nuvio Native são responsáveis apenas pelos dados que esta app guarda localmente e pelos relatórios opcionais que decidir partilhar. O PlxNative original é © Gleb Linnik e colaboradores.",
+      "de": "Die Mitwirkenden von Nuvio Native sind nur für die lokal gespeicherten Daten und für optional geteilte Berichte verantwortlich. Das ursprüngliche PlxNative ist © Gleb Linnik und Mitwirkende.",
+      "hu": "A Nuvio Native közreműködői csak azért az adatért felelnek, amelyet ez az alkalmazás helyben tárol, és azokért az opcionális jelentésekért, amelyeket Ön megosztani dönt. Az eredeti PlxNative © Gleb Linnik és közreműködők.",
+      "ru": "Участники Nuvio Native отвечают только за данные, которые приложение хранит локально, и за дополнительные отчёты, которые вы решаете отправить. Оригинальный PlxNative © Gleb Linnik и участники.",
+      "pl": "Współtwórcy Nuvio Native odpowiadają tylko za dane przechowywane lokalnie przez tę aplikację oraz za opcjonalne raporty, które zdecydujesz się udostępnić. Oryginalny PlxNative to © Gleb Linnik i współtwórcy.",
+      "nl": "De bijdragers van Nuvio Native zijn alleen verantwoordelijk voor de gegevens die deze app lokaal opslaat en voor de optionele rapporten die je besluit te delen. Het oorspronkelijke PlxNative is © Gleb Linnik en bijdragers."
+    },
+    "settings.legal.privacy.plex_body": {
+      "en": "Nuvio Native uses your Nuvio account and the Stremio addons you configure. Metadata and artwork come from TMDB and BetterPosters. Your account provider handles the data sent to it; this app's developer does not receive it.",
+      "es": "Nuvio Native usa tu cuenta de Nuvio y los addons de Stremio que configuras. Los metadatos y las carátulas proceden de TMDB y BetterPosters. Tu proveedor de cuenta gestiona los datos que recibe; el desarrollador de esta app no los recibe.",
+      "be": "Nuvio Native выкарыстоўвае ваш уліковы запіс Nuvio і дадатак Stremio, якія вы наладзілі. Метаданыя і малюнкі паступаюць ад TMDB і BetterPosters. Ваш правайдэр уліковага запісу апрацоўвае даныя, якія яму адпраўляюцца; распрацоўшчык гэтай праграмы іх не атрымлівае.",
+      "ca": "Nuvio Native utilitza el teu compte de Nuvio i els addons d'Stremio que configures. Les dades i les imatges provenen de TMDB i BetterPosters. El proveïdor del teu compte gestiona les dades que rep; el desenvolupador d'aquesta app no les rep.",
+      "fr": "Nuvio Native utilise votre compte Nuvio et les addons Stremio que vous configurez. Les métadonnées et les images proviennent de TMDB et BetterPosters. Votre fournisseur de compte traite les données qu'il reçoit ; le développeur de cette app ne les reçoit pas.",
+      "it": "Nuvio Native usa il tuo account Nuvio e gli addon Stremio che configuri. Metadati e immagini provengono da TMDB e BetterPosters. Il tuo fornitore dell'account gestisce i dati che riceve; lo sviluppatore di questa app non li riceve.",
+      "pt": "A Nuvio Native usa a sua conta Nuvio e os addons Stremio que configura. Os metadados e as imagens vêm da TMDB e da BetterPosters. O seu provedor de conta trata os dados que recebe; o desenvolvedor desta app não os recebe.",
+      "de": "Nuvio Native verwendet dein Nuvio-Konto und die Stremio-Addons, die du einrichtest. Metadaten und Bilder stammen von TMDB und BetterPosters. Dein Kontoprovider verarbeitet die an ihn gesendeten Daten; der Entwickler dieser App erhält sie nicht.",
+      "hu": "A Nuvio Native a Nuvio-fiókodat és a beállított Stremio-kiegészítőket használja. A metaadatok és képek a TMDB-ről és a BetterPostersről származnak. A fiókod szolgáltatója kezeli a neki küldött adatokat; az alkalmazás fejlesztője nem kapja meg őket.",
+      "ru": "Nuvio Native использует вашу учётную запись Nuvio и настроенные вами надстройки Stremio. Метаданные и изображения поступают от TMDB и BetterPosters. Поставщик вашей учётной записи обрабатывает отправленные ему данные; разработчик этого приложения их не получает.",
+      "pl": "Nuvio Native korzysta z Twojego konta Nuvio i skonfigurowanych dodatków Stremio. Metadane i grafiki pochodzą z TMDB i BetterPosters. Dostawca Twojego konta przetwarza wysyłane do niego dane; twórca tej aplikacji ich nie otrzymuje.",
+      "nl": "Nuvio Native gebruikt je Nuvio-account en de Stremio-addons die je instelt. Metagegevens en afbeeldingen komen van TMDB en BetterPosters. Je accountprovider verwerkt de gegevens die het ontvangt; de ontwikkelaar van deze app ontvangt ze niet."
+    },
+    "settings.legal.privacy.servers_body": {
+      "en": "To browse and play streams, Nuvio Native talks to the addons you configured. Those addon operators handle the requests; this app's developer does not receive them.",
+      "es": "Para explorar y reproducir flujos, Nuvio Native se comunica con los addons que configuraste. Sus operadores gestionan las solicitudes; el desarrollador de esta app no las recibe.",
+      "be": "Каб праглядаць і прайграваць патоку, Nuvio Native звяртаецца да дадаткаў, якія вы наладзілі. Іх аператары апрацоўваюць запыты; распрацоўшчык гэтай праграмы іх не атрымлівае.",
+      "ca": "Per explorar i reproduir fluxos, Nuvio Native es comunica amb els addons que has configurat. Els seus operadors gestionen les peticions; el desenvolupador d'aquesta app no les rep.",
+      "fr": "Pour parcourir et lire des flux, Nuvio Native communique avec les addons que vous avez configurés. Leurs opérateurs traitent les requêtes ; le développeur de cette app ne les reçoit pas.",
+      "it": "Per esplorare e riprodurre flussi, Nuvio Native comunica con gli addon che hai configurato. I loro operatori gestiscono le richieste; lo sviluppatore di questa app non le riceve.",
+      "pt": "Para navegar e reproduzir fluxos, a Nuvio Native comunica-se com os addons que configurou. Os seus operadores tratam os pedidos; o desenvolvedor desta app não os recebe.",
+      "de": "Um Streams zu durchsuchen und abzuspielen, kommuniziert Nuvio Native mit den von dir eingerichteten Addons. Die Betreiber verarbeiten die Anfragen; der Entwickler dieser App erhält sie nicht.",
+      "hu": "A streamek böngészéséhez és lejátszásához a Nuvio Native a beállított kiegészítőkkel kommunikál. Azok üzemeltetői kezelik a kéréseket; az alkalmazás fejlesztője nem kapja meg őket.",
+      "ru": "Для просмотра и воспроизведения потоков Nuvio Native обращается к настроенным вами надстройкам. Их операторы обрабатывают запросы; разработчик этого приложения их не получает.",
+      "pl": "Aby przeglądać i odtwarzać strumienie, Nuvio Native komunikuje się ze skonfiguranymi dodatkami. Ich operatorzy obsługują żądania; twórca tej aplikacji ich nie otrzymuje.",
+      "nl": "Om streams te doorzoeken en af te spelen communiceert Nuvio Native met de addons die je hebt ingesteld. Hun exploitanten verwerken de verzoeken; de ontwikkelaar van deze app ontvangt ze niet."
+    },
+    "settings.legal.privacy.contact_body": "Privacy questions: github.com/Rofocale11/nuvio-native/issues",
+    "settings.legal.trademarks.body": {
+      "en": "TMDB and the TMDB logo are trademarks of The Movie Database. BetterPosters is a third-party Stremio addon. LG and webOS are trademarks of LG Electronics Inc.\n\nNuvio Native is an independent, unofficial fork of PlxNative (GPL-3.0-or-later, © Gleb Linnik and contributors). It is not affiliated with, endorsed by or sponsored by Plex, Inc., LG Electronics Inc. or The Movie Database.",
+      "es": "TMDB y el logo de TMDB son marcas de The Movie Database. BetterPosters es un addon de Stremio de terceros. LG y webOS son marcas de LG Electronics Inc.\n\nNuvio Native es una bifurcación independiente y no oficial de PlxNative (GPL-3.0-or-later, © Gleb Linnik y colaboradores). No está afiliada a, respaldada por ni patrocinada por Plex, Inc., LG Electronics Inc. ni The Movie Database.",
+      "be": "TMDB і лагатып TMDB з'яўляюцца гандлёвымі маркамі The Movie Database. BetterPosters — старонні дадатак Stremio. LG і webOS з'яўляюцца гандлёвымі маркамі LG Electronics Inc.\n\nNuvio Native — незалежны неафіцыйны форк PlxNative (GPL-3.0-or-later, © Gleb Linnik і ўдзельнікі). Ён не звязаны з Plex, Inc., LG Electronics Inc. або The Movie Database і не падтрымліваецца імі.",
+      "ca": "TMDB i el logotip de TMDB són marques de The Movie Database. BetterPosters és un addon de Stremio de tercers. LG i webOS són marques de LG Electronics Inc.\n\nNuvio Native és una bifurcació independent i no oficial de PlxNative (GPL-3.0-or-later, © Gleb Linnik i col·laboradors). No està afiliada a, avalada ni patrocinada per Plex, Inc., LG Electronics Inc. ni The Movie Database.",
+      "fr": "TMDB et le logo TMDB sont des marques de The Movie Database. BetterPosters est un addon Stremio tiers. LG et webOS sont des marques de LG Electronics Inc.\n\nNuvio Native est un fork indépendant et non officiel de PlxNative (GPL-3.0-or-later, © Gleb Linnik et contributeurs). Il n'est affilié à, approuvé ni sponsorisé par Plex, Inc., LG Electronics Inc. ou The Movie Database.",
+      "it": "TMDB e il logo TMDB sono marchi di The Movie Database. BetterPosters è un addon Stremio di terze parti. LG e webOS sono marchi di LG Electronics Inc.\n\nNuvio Native è un fork indipendente e non ufficiale di PlxNative (GPL-3.0-or-later, © Gleb Linnik e collaboratori). Non è affiliata a, approvata né sponsorizzata da Plex, Inc., LG Electronics Inc. o The Movie Database.",
+      "pt": "A TMDB e o logótipo TMDB são marcas da The Movie Database. A BetterPosters é um addon Stremio de terceiros. A LG e a webOS são marcas da LG Electronics Inc.\n\nA Nuvio Native é um fork independente e não oficial do PlxNative (GPL-3.0-or-later, © Gleb Linnik e colaboradores). Não está afiliada à Plex, Inc., à LG Electronics Inc. nem à The Movie Database, não sendo por elas aprovada nem patrocinada.",
+      "de": "TMDB und das TMDB-Logo sind Marken von The Movie Database. BetterPosters ist ein Addon von Drittanbietern für Stremio. LG und webOS sind Marken von LG Electronics Inc.\n\nNuvio Native ist ein unabhängiger, inoffizieller Fork von PlxNative (GPL-3.0-or-later, © Gleb Linnik und Mitwirkende). Er ist weder mit Plex, Inc., LG Electronics Inc. oder The Movie Database verbunden noch von ihnen unterstützt oder gesponsert.",
+      "hu": "A TMDB és a TMDB logó a The Movie Database védjegyei. A BetterPosters egy harmadik féltől származó Stremio-kiegészítő. Az LG és a webOS az LG Electronics Inc. védjegyei.\n\nA Nuvio Native a PlxNative független, nem hivatalos elágazása (GPL-3.0-or-later, © Gleb Linnik és közreműködők). Nem kapcsolódik a Plex, Inc.-hez, az LG Electronics Inc.-hez vagy a The Movie Database-hez, és nem is támogatják, illetve szponzorálják.",
+      "ru": "TMDB и логотип TMDB являются товарными знаками The Movie Database. BetterPosters — сторонняя надстройка Stremio. LG и webOS являются товарными знаками LG Electronics Inc.\n\nNuvio Native — независимый неофициальный форк PlxNative (GPL-3.0-or-later, © Gleb Linnik и участники). Он не связан с Plex, Inc., LG Electronics Inc. или The Movie Database и не одобрен ими.",
+      "pl": "TMDB i logo TMDB są znakami towarowymi The Movie Database. BetterPosters to zewnętrzny dodatek Stremio. LG i webOS są znakami towarowymi LG Electronics Inc.\n\nNuvio Native jest niezależnym, nieoficjalnym forkiem PlxNative (GPL-3.0-or-later, © Gleb Linnik i współtwórcy). Nie jest powiązana z Plex, Inc., LG Electronics Inc. ani The Movie Database, nie jest przez nie popierana ani sponsorowana.",
+      "nl": "TMDB en het TMDB-logo zijn handelsmerken van The Movie Database. BetterPosters is een addon van een derde partij voor Stremio. LG en webOS zijn handelsmerken van LG Electronics Inc.\n\nNuvio Native is een onafhankelijke, officieuze fork van PlxNative (GPL-3.0-or-later, © Gleb Linnik en bijdragers). Het is niet verbonden met, goedgekeurd door of gesponsord door Plex, Inc., LG Electronics Inc. of The Movie Database."
+    },
+    "settings.legal.contact.body": {
+      "en": "Privacy questions may be opened as an issue at github.com/Rofocale11/nuvio-native/issues.\n\nSecurity vulnerabilities may be reported privately through GitHub Security Advisories for Rofocale11/nuvio-native. Please do not include account tokens, addon URLs or personal media information in a report.",
+      "es": "Las preguntas sobre privacidad pueden abrirse como incidencia en github.com/Rofocale11/nuvio-native/issues.\n\nLas vulnerabilidades de seguridad pueden comunicarse de forma privada mediante GitHub Security Advisories para Rofocale11/nuvio-native. No incluyas tokens de cuenta, URLs de addons ni información personal en el informe.",
+      "be": "Пытанні па прыватнасці можна адправіць як issue на github.com/Rofocale11/nuvio-native/issues.\n\nПраблемы бяспекі можна паведаміць прыватна праз GitHub Security Advisories для Rofocale11/nuvio-native. Не ўключайце ў справаздачу токены ўліковага запісу, адрасы дадаткаў або асабістую інфармацыю.",
+      "ca": "Les preguntes sobre privadesa es poden obrir com a incidència a github.com/Rofocale11/nuvio-native/issues.\n\nLes vulnerabilitats de seguretat es poden comunicar de manera privada mitjançant GitHub Security Advisories per a Rofocale11/nuvio-native. No hi incloguis tokens de compte, URL d'addons ni informació personal.",
+      "fr": "Les questions de confidentialité peuvent être ouvertes sous forme d'issue sur github.com/Rofocale11/nuvio-native/issues.\n\nLes vulnérabilités de sécurité peuvent être signalées privément via GitHub Security Advisories pour Rofocale11/nuvio-native. N'incluez pas de jetons de compte, d'URL d'addons ou d'informations personnelles dans un rapport.",
+      "it": "Le domande sulla privacy possono essere aperte come issue su github.com/Rofocale11/nuvio-native/issues.\n\nLe vulnerabilità di sicurezza possono essere segnalate in privato tramite GitHub Security Advisories per Rofocale11/nuvio-native. Non includere token dell'account, URL di addon o informazioni personali nella segnalazione.",
+      "pt": "As questões de privacidade podem ser abertas como uma issue em github.com/Rofocale11/nuvio-native/issues.\n\nAs vulnerabilidades de segurança podem ser reportadas de forma privada através do GitHub Security Advisories para Rofocale11/nuvio-native. Não inclua tokens de conta, URLs de addons nem informações pessoais no relatório.",
+      "de": "Datenschutzfragen können als Issue unter github.com/Rofocale11/nuvio-native/issues eröffnet werden.\n\nSicherheitslücken können privat über GitHub Security Advisories für Rofocale11/nuvio-native gemeldet werden. Bitte keine Kontotokens, Addon-URLs oder persönlichen Informationen in die Meldung aufnehmen.",
+      "hu": "A magánélettel kapcsolatos kérdéseket issue-ként lehet feltenni a github.com/Rofocale11/nuvio-native/issues oldalon.\n\nA biztonsági sebezhetőségeket privát módon lehet jelenteni a Rofocale11/nuvio-native GitHub Security Advisories szolgáltatásán. Kérjük, ne adjon meg fiókokat, kiegészítő URL-eket vagy személyes adatokat a jelentésben.",
+      "ru": "Вопросы о конфиденциальности можно отправить как issue на github.com/Rofocale11/nuvio-native/issues.\n\nУязвимости безопасности можно сообщить приватно через GitHub Security Advisories для Rofocale11/nuvio-native. Не включайте в отчёт токены учётной записи, адреса надстроек или личную информацию.",
+      "pl": "Pytania o prywatność można zgłosić jako issue na github.com/Rofocale11/nuvio-native/issues.\n\nLuki w zabezpieczeniach można zgłosić prywatnie przez GitHub Security Advisories dla Rofocale11/nuvio-native. Nie umieszczaj w raporcie tokenów konta, adresów dodatków ani danych osobowych.",
+      "nl": "Privacyvragen kunnen als issue worden geopend op github.com/Rofocale11/nuvio-native/issues.\n\nBeveiligingskwetsbaarheden kunnen privé worden gemeld via GitHub Security Advisories voor Rofocale11/nuvio-native. Neem geen accounttokens, addon-URL's of persoonlijke informatie op in een rapport."
+    },
+    "settings.legal.opensource.body": {
+      "en": "Nuvio Native is a fork of PlxNative, licensed GPL-3.0-or-later. Upstream copyright (c) 2026 Gleb Linnik and contributors is preserved; fork changes are © Nuvio Native contributors. You may modify and redistribute under these terms. There is no warranty, to the extent permitted by law.\n\nThird-party components retain their own licences. The package includes THIRD-PARTY-NOTICES.md and licence texts for the Rust runtime and crates, FFmpeg, Sentry Native, libunwind, NanoSVG, fonts and icons.",
+      "es": "Nuvio Native es una bifurcación de PlxNative, licenciada bajo GPL-3.0-or-later. Se conserva el copyright original (c) 2026 de Gleb Linnik y colaboradores; los cambios del fork son © colaboradores de Nuvio Native. Puedes modificarla y redistribuirla con estos términos. No hay garantía, en la medida permitida por la ley.\n\nLos componentes de terceros conservan sus propias licencias. El paquete incluye THIRD-PARTY-NOTICES.md y los textos de licencia del entorno y crates de Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, fuentes e iconos.",
+      "be": "Nuvio Native — форк PlxNative пад ліцэнзіяй GPL-3.0-or-later. Арыгінальнае аўтарскае права (c) 2026 Gleb Linnik і ўдзельнікі захавана; змены форка © удзельнікі Nuvio Native. Вы можаце змяняць і распаўсюджваць яго на гэтых умовах. Гарантыі няма, наколькі гэта дазволена законам.\n\nСтароннія кампаненты захоўваюць уласныя ліцэнзіі. Пакет змяшчае THIRD-PARTY-NOTICES.md і тэксты ліцэнзій для Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, шрыфтоў і іконкаў.",
+      "ca": "Nuvio Native és una bifurcació de PlxNative, amb llicència GPL-3.0-or-later. Es conserva el copyright original (c) 2026 de Gleb Linnik i col·laboradors; els canvis del fork són © col·laboradors de Nuvio Native. Pots modificar-la i redistribuir-la amb aquests termes. No hi ha garantia, en la mesura permesa per la llei.\n\nEls components de tercers conserven les seves llicències. El paquet inclou THIRD-PARTY-NOTICES.md i els textos de llicència de Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, fonts i icones.",
+      "fr": "Nuvio Native est un fork de PlxNative, sous licence GPL-3.0-or-later. Le copyright amont (c) 2026 Gleb Linnik et contributeurs est conservé ; les modifications du fork sont © contributeurs de Nuvio Native. Vous pouvez le modifier et le redistribuer selon ces termes. Aucune garantie n'est fournie, dans la mesure permise par la loi.\n\nLes composants tiers conservent leurs propres licences. Le paquet inclut THIRD-PARTY-NOTICES.md et les textes de licence de Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, des polices et des icônes.",
+      "it": "Nuvio Native è un fork di PlxNative, con licenza GPL-3.0-or-later. Il copyright originale (c) 2026 Gleb Linnik e collaboratori è preservato; le modifiche del fork sono © contributori di Nuvio Native. Puoi modificarlo e redistribuirlo secondo questi termini. Non c'è garanzia, entro i limiti consentiti dalla legge.\n\nI componenti di terze parti mantengono le proprie licenze. Il pacchetto include THIRD-PARTY-NOTICES.md e i testi di licenza di Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, font e icone.",
+      "pt": "A Nuvio Native é um fork do PlxNative, licenciado sob GPL-3.0-or-later. O copyright original (c) 2026 Gleb Linnik e colaboradores é preservado; as alterações do fork são © colaboradores da Nuvio Native. Pode modificá-lo e redistribuí-lo sob estes termos. Não há garantia, na medida permitida por lei.\n\nOs componentes de terceiros mantêm as suas próprias licenças. O pacote inclui THIRD-PARTY-NOTICES.md e os textos de licença do Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, fontes e ícones.",
+      "de": "Nuvio Native ist ein Fork von PlxNative unter GPL-3.0-or-later. Das ursprüngliche Urheberrecht (c) 2026 Gleb Linnik und Mitwirkende bleibt erhalten; die Änderungen des Forks sind © Mitwirkende von Nuvio Native. Du darfst es unter diesen Bedingungen ändern und weiterverbreiten. Es gibt keine Gewähr, soweit gesetzlich zulässig.\n\nKomponenten von Drittanbietern behalten ihre eigenen Lizenzen. Das Paket enthält THIRD-PARTY-NOTICES.md sowie Lizenztexte für Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, Schriften und Symbole.",
+      "hu": "A Nuvio Native a PlxNative GPL-3.0-or-later licenciájú elágazása. Az eredeti szerzői jog (c) 2026 Gleb Linnik és közreműködők megmarad; az elágazás módosításai © a Nuvio Native közreműködői. E feltételek mellett módosíthatja és terjesztheti. A jogszabályok által lehetővé tett mértékben nincs garancia.\n\nA harmadik féltől származó összetevők saját licenceiket tartják meg. A csomag tartalmazza a THIRD-PARTY-NOTICES.md-t és a Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, betűkészletek és ikonok licencszövegeit.",
+      "ru": "Nuvio Native — форк PlxNative под лицензией GPL-3.0-or-later. Оригинальное авторское право (c) 2026 Gleb Linnik и участники сохранено; изменения форка © участники Nuvio Native. Вы можете изменять и распространять его на этих условиях. Гарантий нет, насколько это допускает закон.\n\nСторонние компоненты сохраняют свои лицензии. Пакет содержит THIRD-PARTY-NOTICES.md и тексты лицензий Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, шрифтов и иконок.",
+      "pl": "Nuvio Native to fork PlxNative na licencji GPL-3.0-or-later. Oryginalne prawa autorskie (c) 2026 Gleb Linnik i współtwórcy zostają zachowane; zmiany w forku są © współtwórców Nuvio Native. Możesz go modyfikować i rozpowszechniać na tych warunkach. Nie ma gwarancji, w zakresie dozwolonym przez prawo.\n\nKomponenty stron trzecich zachowują własne licencje. Pakiet zawiera THIRD-PARTY-NOTICES.md oraz teksty licencji Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, czcionek i ikon.",
+      "nl": "Nuvio Native is een fork van PlxNative onder GPL-3.0-or-later. Het oorspronkelijke auteursrecht (c) 2026 Gleb Linnik en bijdragers blijft behouden; de wijzigingen in de fork zijn © bijdragers van Nuvio Native. Je mag het onder deze voorwaarden wijzigen en verspreiden. Er is geen garantie, voor zover de wet dit toestaat.\n\nOnderdelen van derden behouden hun eigen licenties. Het pakket bevat THIRD-PARTY-NOTICES.md en de licentieteksten voor Rust, FFmpeg, Sentry Native, libunwind, NanoSVG, lettertypen en pictogrammen."
+    },
+    "settings.consent.delete_scope": {
+      "en": "This signs out and removes Nuvio Native data stored on this television. It does not delete data already sent to your Nuvio account, Sentry or PostHog.",
+      "es": "Esto cierra la sesión y elimina los datos de Nuvio Native guardados en este televisor. No elimina los datos ya enviados a tu cuenta de Nuvio, Sentry o PostHog.",
+      "be": "Гэта выведе з уліковага запісу і выдаліць даныя Nuvio Native на гэтым тэлевізары. Яно не выдаляе даныя, ужо дасланыя ў ваш уліковы запіс Nuvio, Sentry або PostHog.",
+      "ca": "Això tanca la sessió i elimina les dades de Nuvio Native desades en aquest televisor. No elimina les dades ja enviades al teu compte de Nuvio, Sentry o PostHog.",
+      "fr": "Cela déconnecte et supprime les données de Nuvio Native stockées sur ce téléviseur. Cela ne supprime pas les données déjà envoyées à votre compte Nuvio, à Sentry ou à PostHog.",
+      "it": "Questo disconnette e rimuove i dati di Nuvio Native memorizzati su questa TV. Non elimina i dati già inviati al tuo account Nuvio, a Sentry o PostHog.",
+      "pt": "Isto termina a sessão e remove os dados da Nuvio Native guardados nesta televisão. Não elimina os dados já enviados para a sua conta Nuvio, Sentry ou PostHog.",
+      "de": "Dadurch wird abgemeldet und die auf diesem Fernseher gespeicherten Nuvio Native-Daten entfernt. Bereits an dein Nuvio-Konto, Sentry oder PostHog gesendete Daten werden nicht gelöscht.",
+      "hu": "Ez kijelentkeztet, és eltávolítja a Nuvio Native ezen a televízión tárolt adatait. Nem törli a Nuvio-fiókodhoz, a Sentryhez vagy a PostHoghoz már elküldött adatokat.",
+      "ru": "Это выход из учётной записи и удаление данных Nuvio Native на этом телевизоре. Данные, уже отправленные в вашу учётную запись Nuvio, Sentry или PostHog, не удаляются.",
+      "pl": "To wylogowuje i usuwa dane Nuvio Native przechowywane na tym telewizorze. Nie usuwa danych już wysłanych do Twojego konta Nuvio, Sentry ani PostHog.",
+      "nl": "Hiermee word je uitgelogd en worden de Nuvio Native-gegevens op deze tv verwijderd. Gegevens die al naar je Nuvio-account, Sentry of PostHog zijn verstuurd, worden niet verwijderd."
+    },
+    "browse.home.failed": {
+      "en": "Can’t reach your addons",
+      "es": "No se puede acceder a tus addons",
+      "be": "Не ўдалося злучыцца з вашымі дадаткамі",
+      "ca": "No es pot accedir als teus addons",
+      "fr": "Impossible d'accéder à vos addons",
+      "it": "Impossibile raggiungere i tuoi addon",
+      "pt": "Não é possível aceder aos seus addons",
+      "de": "Deine Addons sind nicht erreichbar",
+      "hu": "A kiegészítők nem érhetők el",
+      "ru": "Не удалось подключиться к вашим надстройкам",
+      "pl": "Nie można połączyć się z Twoimi dodatkami",
+      "nl": "Je addons zijn niet bereikbaar"
+    },
+    "browse.diagnostics.plex_pass": "{version} · Nuvio",
+    "browse.diagnostics.no_plex_pass": "{version}",
+    "widgets.panel.audio_only_no_pass": "stream sent audio only — no usable video transcode target was found",
+    "settings.playback.dolby_vision.copy": {
+      "en": "Auto uses Dolby Vision when the TV supports it. Off plays the HDR10 layer instead. Files with no HDR10 layer may not play.",
+      "es": "Auto usa Dolby Vision cuando el TV lo admite. Off reproduce la capa HDR10. Los archivos sin capa HDR10 pueden no reproducirse.",
+      "be": "Аўта выкарыстоўвае Dolby Vision, калі тэлевізар яго падтрымлівае. Выкл прайгравае пласт HDR10. Файлы без пласта HDR10 могуць не прайгравацца.",
+      "ca": "Auto utilitza Dolby Vision quan el TV ho admet. Off reprodueix la capa HDR10. Els fitxers sense capa HDR10 poden no reproduir-se.",
+      "fr": "Auto utilise le Dolby Vision quand le TV le prend en charge. Off lit la couche HDR10. Les fichiers sans couche HDR10 peuvent ne pas être lisibles.",
+      "it": "Auto usa il Dolby Vision quando la TV lo supporta. Off riproduce il livello HDR10. I file senza livello HDR10 potrebbero non essere riproducibili.",
+      "pt": "Auto usa Dolby Vision quando a TV o suporta. Off reproduz a camada HDR10. Ficheiros sem camada HDR10 podem não reproduzir.",
+      "de": "Auto verwendet Dolby Vision, wenn der Fernseher es unterstützt. Off spielt die HDR10-Ebene ab. Dateien ohne HDR10-Ebene werden möglicherweise nicht abgespielt.",
+      "hu": "Az Auto a Dolby Visiont használja, ha a TV támogatja. A Ki a HDR10 réteget játssza le. A HDR10 réteg nélküli fájlok lehet, hogy nem játszhatók le.",
+      "ru": "Авто использует Dolby Vision, если телевизор его поддерживает. Выкл воспроизводит слой HDR10. Файлы без слоя HDR10 могут не воспроизводиться.",
+      "pl": "Auto używa Dolby Vision, gdy telewizor go obsługuje. Wyłącz odtwarza warstwę HDR10. Pliki bez warstwy HDR10 mogą się nie odtwarzać.",
+      "nl": "Auto gebruikt Dolby Vision als de tv dit ondersteunt. Uit speelt de HDR10-laag af. Bestanden zonder HDR10-laag worden mogelijk niet afgespeeld."
+    },
+    "widgets.menu.quality_converted_note": {
+      "en": "This video needs conversion to play here.",
+      "es": "Este vídeo necesita conversión.",
+      "be": "Гэта відэа патрабуе канвертацыі.",
+      "ca": "Aquest vídeo necessita conversió.",
+      "fr": "Cette vidéo nécessite une conversion.",
+      "it": "Questo video richiede una conversione.",
+      "pt": "Este vídeo precisa de conversão.",
+      "de": "Dieses Video benötigt eine Konvertierung.",
+      "hu": "A videó lejátszásához átkódolás kell.",
+      "ru": "Нужно преобразование видео.",
+      "pl": "Ten film wymaga konwersji.",
+      "nl": "Deze video moet worden omgezet."
+    },
+    "widgets.tracks.enh_note_burn": "Subtitles stay on. The picture may look a little softer.",
+    "widgets.tracks.enh_reason_not_analyzed": "Not ready for this video yet.",
+    "widgets.tracks.enh_reason_converting": "Not available while this video is being prepared.",
+    "widgets.tracks.enh_reason_not_copyable": "This can’t be added to this video right now.",
+    "widgets.tracks.enh_reason_refused": "Couldn’t turn this on for this video.",
+    "settings.libraries.more": "Catalogs you leave out stay available on your other devices.",
+    "settings.hud.newer_format": {
+      "be": "Патрэбна новейшая версія",
+      "ca": "Cal una versió més recent"
+    },
+    "settings.language.restart_hint": {
+      "es": "Mantén {key} para cerrar y reabrir la app.",
+      "fr": "Maintenez {key} pour fermer puis rouvrir l’app.",
+      "it": "Tieni {key} per chiudere e riaprire l’app.",
+      "ru": "Удерживайте {key} для выхода и повторного входа.",
+      "pl": "Przytrzymaj {key}, aby zamknąć i otworzyć program.",
+      "nl": "Houd {key} ingedrukt om de app te herstarten."
+    },
+    "browse.auth.plaintext_remote": {
+      "fr": "Nuvio n’a répondu que sans chiffrement, depuis un autre réseau. Vérifiez l’accès à distance."
+    },
+    "browse.auth.insecure": {
+      "nl": "Je Nuvio-server is gevonden, maar niet via HTTPS bereikbaar. Controleer de beveiligde verbinding en probeer opnieuw."
+    }
+  },
+  "add": {}
+}

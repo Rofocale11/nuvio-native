@@ -20,6 +20,8 @@
 //! tests build it. The application crate enables it in `[dev-dependencies]` only, so no shipped
 //! build sees it.
 
+// Fork Rofocale11: the user-facing product name, kept off the wire so the shim's PMS dialect is untouched.
+pub mod brand;
 pub mod devcaps; // what this SoC decodes — the TV's own codec table, read once at boot (the capability profile + direct-play gate derive from it)
 pub mod i18n;
 pub mod imgcache; // bounded persistent artwork cache shared by every image source

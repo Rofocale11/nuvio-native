@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 
 #[path = "build_support/catalog.rs"]
 mod catalog;
+// Fork Rofocale11: brand copy lives in fork-owned nuvio-locales/, not in upstream locale files, so
+// an upstream merge cannot reintroduce Plex wording or freeze upstream translations behind ours.
+#[path = "build_support/catalog_brand.rs"]
+mod catalog_brand;
 #[path = "../build_support/install_identities.rs"]
 mod install_identities;
 
@@ -24,8 +28,14 @@ fn main() {
     println!("cargo:rerun-if-changed=build_support/catalog.rs");
     println!("cargo:rerun-if-changed=../build_support/install_identities.rs");
     println!("cargo:rerun-if-changed=../../locales");
-    if let Err(mut errors) =
-        catalog::build(Path::new("../../locales"), &PathBuf::from(std::env::var_os("OUT_DIR").unwrap()))
+    println!("cargo:rerun-if-changed=../../nuvio-locales");
+    // Fork Rofocale11: the brand hook lives in a build-script-only child module; the transformation
+    // is passed in so catalog.rs stays compilable as the host tests' `i18n::catalog_tests`.
+    if let Err(mut errors) = catalog::build_with(
+        Path::new("../../locales"),
+        &PathBuf::from(std::env::var_os("OUT_DIR").unwrap()),
+        catalog_brand::apply,
+    )
     {
         errors.sort();
         for e in &errors {

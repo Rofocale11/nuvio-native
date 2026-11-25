@@ -593,7 +593,8 @@ fn a_failed_library_section_and_a_failed_home_share_the_verdict_and_the_row() {
         let cx = fixture.cx(Some(page.key(RETRY)));
         let (caption, reason) = page.status_text(&cx);
         if owner.is_empty() {
-            assert_eq!(caption.to_str().unwrap(), "Can\u{2019}t reach your Plex server");
+            // Fork Rofocale11: Home and Library share the addon wording.
+            assert_eq!(caption.to_str().unwrap(), "Can\u{2019}t reach your addons");
         }
         let library = page.status_overlay(&cx, &caption, reason.as_deref());
         let (lv, hv) = (library.verdict_band_measured(cx.measure), home.verdict_band_measured(cx.measure));

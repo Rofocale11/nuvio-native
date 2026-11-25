@@ -22,12 +22,17 @@ use plx_ui::Rect;
 use super::family::{form_activate, form_focus, form_right_target, InnerHost, SettingsPage};
 use super::registry::word;
 
+// Fork Rofocale11: TMDB requires its logo in About/Credits. The child owns the SVG and its paint;
+// this file only opts the shared display-only picture slot in, so the upstream diff is a mod and a
+// header builder call.
+mod legal_tmdb;
+
 
 
 /// **The one contact address the application prints.**
-/// `every_document_prints_only_the_one_contact_address` scans the documents for stray `@`s;
-/// `screens::consent` imports it.
-pub const CONTACT_EMAIL: &str = "support@plxnative.com";
+/// Fork Rofocale11: the fork has no upstream support mailbox, so the single contact point is the
+/// project's GitHub Issues. `screens::consent` imports it for the consent ID pages.
+pub const CONTACT_URL: &str = "github.com/Rofocale11/nuvio-native/issues";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -544,13 +549,21 @@ impl Screen<InnerHost> for DocumentPage {
             // the guide and its code are the content column (they travel under a push), the header the narrative one
             let layout = guide.draw(f.list_painter(), document_frame, f.measure);
             if let Some(qr) = &self.qr { qr.draw(f.list_painter(), layout.code); }
-            Header::new(self.layout, Some(self.crumb), self.title, self.subtitle)
-                .paint(f.narrative_painter(), f.measure);
+            let mut header = Header::new(self.layout, Some(self.crumb), self.title, self.subtitle);
+            if self.state.which == WHICH_ABOUT {
+                header = header.with_picture(&legal_tmdb::MARK);
+            }
+            header.paint(f.narrative_painter(), f.measure);
             return;
         }
+        let about = self.state.which == WHICH_ABOUT;
         let Self { reader, crumb, title, subtitle, body, entry, layout, .. } = self;
+        let mut header = Header::new(*layout, Some(crumb), title, subtitle);
+        if about {
+            header = header.with_picture(&legal_tmdb::MARK);
+        }
         let mut v = DocumentScreen::new(
-            Header::new(*layout, Some(crumb), title, subtitle),
+            header,
             reader,
             body.as_ref(),
             GroupId(0),
@@ -624,26 +637,14 @@ mod tests {
         }
     }
 
-    /// **No document may print an address other than [`CONTACT_EMAIL`].** Written against the
-    /// personal address these pages used to carry: a support address that reaches only some of
-    /// the screens is worse than none, because the reader cannot tell which one is current. The
-    /// scan is for `@` rather than for the old address, so the NEXT stray address fails too.
+    /// **No document may print an email address.** Fork Rofocale11: the fork's one contact point is
+    /// the GitHub Issues URL, so a stray `@` is now a wrong address rather than an alternate one.
     #[test]
     fn every_document_prints_only_the_one_contact_address() {
         for page in Page::ALL {
-            let local_len = CONTACT_EMAIL.find('@').expect("CONTACT_EMAIL has a local part");
-            for (i, _) in page.body().match_indices('@') {
-                let tail = i
-                    .checked_sub(local_len)
-                    .map(|start| &page.body()[start..])
-                    .unwrap_or("");
-                assert!(
-                    tail.starts_with(CONTACT_EMAIL),
-                    "{:?} prints an address that is not CONTACT_EMAIL",
-                    page.title()
-                );
-            }
+            assert!(!page.body().contains('@'), "{:?} prints an email address", page.title());
         }
+        assert!(Page::Contact.body().contains(CONTACT_URL), "the Contact page prints the fork contact");
     }
 
     /// **The policy must describe the build it ships in.** These assertions pin CLAIMS, not
@@ -751,10 +752,13 @@ mod tests {
 
     #[test]
     fn plex_boundary_is_explicit() {
-        assert!(PRIVACY.contains(
-            "Plex processes information received by those services under Plex’s own Privacy Policy"
-        ));
-        assert!(PRIVACY.contains("https://www.plex.tv/about/privacy-legal/"));
+        // Fork Rofocale11: no upstream Plex services are described any more. The policy names the
+        // Nuvio account, the Stremio addons and the two artwork providers, and points at this repo.
+        assert!(PRIVACY.contains("Stremio addons"));
+        assert!(PRIVACY.contains("TMDB"));
+        assert!(PRIVACY.contains("BetterPosters"));
+        assert!(!PRIVACY.to_ascii_lowercase().contains("plex"), "the policy describes no Plex service");
+        assert!(PRIVACY.contains("github.com/Rofocale11/nuvio-native"));
         assert!(!TRADEMARKS.contains("used under licence"));
     }
 

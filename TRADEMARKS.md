@@ -10,14 +10,16 @@ is stated in `LICENSING.md`; this trademark guidance remains separate.
 
 ## Trademarks and brand assets
 
-The name **PlxNative** and the PLX logo and splash artwork — `assets/logo-master.png`,
-`assets/splash-master.png`, and the `pkg/icon*.png` / `pkg/largeIcon.png` / `pkg/splash.png` cut
-from them — identify this project. They are **not** licensed for use as the identity of a derived
-or redistributed work.
+The name **PlxNative** and the PLX logo and splash artwork — `assets/logo-master.png` and
+`assets/splash-master.png` — identify the upstream project. They are **not** licensed for use as
+the identity of a derived or redistributed work.
 
-You may fork and redistribute this software under the GPL-3.0-or-later terms; please do so under your own name
-and mark, so that users can tell the two apart. This is the usual reservation made by projects that
-ship an identity along with their code, and it restricts nothing else.
+<!-- Fork Rofocale11: Nuvio Native ships under its own mark; the PLX masters above are retained as
+upstream source material and are not used as this fork's identity. Recorded in MERGE-AUDIT.md. -->
+**Nuvio Native** is a fork. Its launcher icon, large icon and splash (`pkg/icon.png`,
+`pkg/largeIcon.png`, `pkg/splash.png`) carry the Nuvio mark, not the PLX artwork. The name PlxNative
+is used here only to identify the upstream source and its copyright holder, as the GPL requires;
+no PLX mark is used to present this fork.
 
 This reservation rests on **trademark** — on the marks identifying the origin of this application —
 and is deliberately not framed as a copyright claim. The master images were produced with a
@@ -37,6 +39,17 @@ well as in this repository.
 This is an unofficial, third-party client. It is **not** affiliated with, endorsed by, or sponsored
 by Plex GmbH or Plex, Inc. "Plex" is their trademark and is used here only to describe what this
 software interoperates with.
+
+## Third-party data and artwork attribution (Fork Rofocale11)
+
+Nuvio Native uses The Movie Database (TMDB) API for metadata and artwork and BetterPosters
+(`btttr.cc`) for hub posters. TMDB and the TMDB logo are trademarks of The Movie Database;
+BetterPosters is a third-party Stremio addon. The app's About page carries the required notice:
+
+> This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+and a link to <https://www.themoviedb.org>. Posters by BetterPosters are credited there too; Rotten
+Tomatoes scores on those posters come from that addon, not from an official Rotten Tomatoes API.
 
 ## Other marks
 

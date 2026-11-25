@@ -69,7 +69,7 @@ fn each_identifier_document_shows_only_its_own_identifier() {
     let analytics_doc = analytics_id_document();
     assert!(errors_doc.contains(&errors_id) && !errors_doc.contains(&analytics_id));
     assert!(analytics_doc.contains(&analytics_id) && !analytics_doc.contains(&errors_id));
-    assert!(errors_doc.contains(CONTACT_EMAIL) && analytics_doc.contains(CONTACT_EMAIL));
+    assert!(errors_doc.contains(CONTACT_URL) && analytics_doc.contains(CONTACT_URL));
 
     consent::install(consent::apply(&Consent::default(), false, false, || None));
     assert!(errors_id_document().starts_with("NO CRASH REPORT ID"));

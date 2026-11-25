@@ -10,6 +10,17 @@ Nuvio Native browses and plays Stremio addon streams through an in-process PMS-d
 product. Never reintroduce a plex.tv account flow, a Plex server list, a Play Version disc for a
 Nuvio item, or upstream's sign-in copy. Nuvio addon sources belong in the **Streams** menu only.
 
+## Brand and attribution
+
+The product is **Nuvio Native**. No user-facing string may describe it as a Plex client, name a Plex
+server/account as something the viewer uses, or print `PlxNative` except as upstream attribution.
+Brand copy lives in the fork-owned `nuvio-locales/brand.json`, applied by
+`rust-modules/os/build_support/catalog_brand.rs` during the catalog build — never edit an upstream
+`locales/<tag>/*.json` file for branding. The About page must keep the exact TMDB notice, the TMDB
+mark and the BetterPosters credit, and state that this is a fork of PlxNative under GPL-3.0-or-later
+with upstream's © Gleb Linnik attribution intact. Wire identifiers (`X-Plex-*`, `ratingKey`, PMS
+routes, `plx_plex::identity::PRODUCT`) stay upstream's: rebranding must not change a byte on the wire.
+
 ## Mark every upstream file you touch
 
 For any file owned upstream that this fork edits, put the literal string `Fork Rofocale11:` in a

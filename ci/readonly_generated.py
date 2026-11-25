@@ -15,7 +15,8 @@ from readonly_dependencies import _local_sha, _sha, _json, _manifest_paths, _con
 # Fork Rofocale11: re-derived for the fork workspace after adding the Nuvio crates; the
 # production sources and enum grammar are unchanged, only the pinned manifests/lock hashes moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'platform-generated-enums.json'
-CERTIFICATE_SHA256 = '11e8d0749919df7a63957bf6a4a0269a49d00d6a0d3743bc6a27311e7252dba9'
+# Fork Rofocale11: re-pinned for the build-script brand hook; enum producer and grammar unchanged.
+CERTIFICATE_SHA256 = '3f6c60811b4d0a6fbe97d5b1301b09a5ebc7048b4cdebfd411578f9880f574e6'
 SOURCES = ['os/Cargo.toml', 'os/src/lib.rs', 'os/src/i18n/mod.rs',
            'os/build.rs', 'os/build_support/catalog.rs', 'build_support/install_identities.rs',
            'machine/src/lib.rs', 'machine/src/machine.rs']
@@ -75,7 +76,8 @@ def produce_certificate(root):
                        'PR1366: PressRead identity/live/active and owned-present sibling/test modules; canonical machine child and doc-only u32 newtype producer unchanged',
                        'PR1385: Canon byte-feed loops inlined (impl Canon and canon_tests only, FNV-1a byte stream unchanged); newtype macro and its ten u32 invocations unchanged',
                        'UI FIFO on PR1385: AppCommandId(u64), AppCommandOutcome and generic AppCommand<F,R> appended after unchanged doc-only newtype producer and its ten u32 invocations; none certified as generated declarations',
-                       'Owned runtime: HoldHintRead/Event, ModalRead, PageImageRead, Cx/Fx projections, AppEffect partition and PresentationAuthority/Receipt added outside the unchanged doc-only newtype macro and ten u32 invocations; Arc-bearing receipts and effect contracts are not certified; canonical include namespace unchanged'],
+                       'Owned runtime: HoldHintRead/Event, ModalRead, PageImageRead, Cx/Fx projections, AppEffect partition and PresentationAuthority/Receipt added outside the unchanged doc-only newtype macro and ten u32 invocations; Arc-bearing receipts and effect contracts are not certified; canonical include namespace unchanged',
+                       'Fork Rofocale11: the build script passes a fork-owned brand transform into catalog::build_with before compile(); the enum producer, include namespace and catalogue grammar are unchanged'],
             'assumptions': __doc__.splitlines()}
 
 

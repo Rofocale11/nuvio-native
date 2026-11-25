@@ -1487,3 +1487,67 @@ arms), `stremio/src/nuvio.rs` (three fingerprint helpers), `pmsshim/src/{lib,shi
 (module, field/init, seeding and write on fill, namespace recompute, account probe), and
 `src/app/nuvio.rs` (boot probe in the existing `nuvio-boot` task). `ci/module-layers.ini` registers
 the new shim module; no locale key changed.
+
+## User-facing rebrand to Nuvio Native (Fork Rofocale11, 2026-11-25)
+
+**No upstream locale file was edited.** That is the whole point: a key-by-key copy of ~120 strings
+into fork JSON would freeze upstream wording, and every one of those lines would conflict at the
+next upstream locale change. Instead:
+
+- `nuvio-locales/brand.json` (fork-owned data) holds ordered substring replacements, a small keyed
+  override map and the honest identity paragraphs, in all 12 shipped languages.
+- `rust-modules/os/build_support/catalog_brand.rs` (new fork-owned child module) applies them after
+  upstream's `discover()` and before its `compile()`, so upstream's key/placeholder/plural checks
+  still run on the strings that ship. A final scan fails the build if any string INHERITED from a
+  locale still names Plex. Overridden strings are reviewed fork text: they may say "fork of
+  PlxNative" and "not affiliated with Plex" as required attribution.
+- Upstream surface: `os/build.rs` (one `#[path]` mod, one `rerun-if-changed`, one call) and
+  `os/build_support/catalog.rs` (`build_with` takes a hook; `build` stays a `#[cfg(test)]` wrapper
+  because this file is also compiled as `i18n::catalog_tests`). All marked.
+
+Hardcoded UI lines, each with a `Fork Rofocale11:` marker: `screens/src/legal.rs` (`CONTACT_URL`
+now the project's GitHub Issues, its test rewritten, `mod legal_tmdb`, `Header::with_picture` in
+both draw branches), `screens/src/consent.rs` and `screens/src/consent_document_tests.rs` (the
+rename), `appkit/src/player_hud/state.rs` (`PLEX_PASS` → `SUBSCRIPTION` = "premium features"),
+`src/app/diagnostics.rs`, `media/src/player/mod.rs` and `screens/src/login.rs` (support/diagnostics
+read-outs use the new `plx_os::brand::UI_PRODUCT`), `src/app/boot.rs` (hostsim window title only;
+the device keeps the lowercase process name). `pkg/appinfo.json`'s `appDescription` lost its
+PlxNative mention (JSON cannot carry a marker).
+
+New fork-owned files: `os/src/brand.rs` (user-facing product name), `os/src/lib.rs` has the one
+marked `mod` line, `screens/src/legal/legal_tmdb.rs` (the shared `PictureSlot` that draws the mark),
+and `assets/nuvio/tmdb_logo.svg`. The mark is the **unmodified official SVG** from
+<https://www.themoviedb.org/about/logos-attribution> (the owner downloaded it; sha256
+`5bdc75aaebeb75dc7ae79426ddd9be3b2be1e342510f8202baf6bffa71d7f5c4`), drawn at its native
+190.24 × 81.52 aspect and tinted with `theme::TEXT_SECONDARY`. TMDB requires the logo in
+About/Credits together with the exact notice, which the `settings.about.body` override prints in
+all 12 languages. Replacing the asset needs no code change as long as the viewBox aspect is updated
+in `legal_tmdb.rs` if a different mark is chosen.
+
+The wire identity is deliberately untouched: `plx_plex::plex::identity::PRODUCT` remains
+`PlxNative` for `X-Plex-Product`, and every PMS header, route and `ratingKey` stays as upstream
+wrote it. This app does not use a Plex server, but it still speaks the dialect that lets the
+upstream player work.
+
+`TRADEMARKS.md` was corrected: the shipped icons/splash are the Nuvio mark (commit `e5f6726b7`),
+not PLX artwork, and the PLX name and marks remain upstream's. Upstream `LICENSE`, `LICENSING.md`,
+`THIRD-PARTY-NOTICES.md` and copyright lines were not modified.
+
+The upstream tests that pinned old copy were updated with markers: `screens/src/{home,library}/tests.rs`
+and `ui/src/decision_alert.rs` (failure/consent wording), `media/src/player/mod.rs` (support line
+and the no-subscription failure note), `src/app/diagnostics.rs` (Server row's three arms) and
+`screens/src/legal.rs` (the contact point and the privacy-boundary assertions), and
+`rust-modules/tests/host_interface.rs` (the simulator window title). The longer product
+name also exceeded four measured fit columns, so short overrides were added only for the affected
+languages: `settings.hud.newer_format` (`be`, `ca`), `settings.language.restart_hint`
+(`es`, `fr`, `it`, `ru`, `pl`, `nl`), `browse.auth.plaintext_remote` (`fr`),
+`browse.auth.insecure` (`nl`) and `widgets.menu.quality_converted_note` (all twelve). The Privacy
+document's Plex-service paragraph was rewritten to name only the Nuvio account, the Stremio addons,
+TMDB and BetterPosters; the only upstream product names left in the UI are the required GPL fork
+attribution and the non-affiliation sentence in About/Legal.
+
+Because the build script and catalog compiler are pinned executable sources, their change required a
+reviewed re-pin of `ci/proofs/platform-generated-enums.json` and its `CERTIFICATE_SHA256` in
+`ci/readonly_generated.py`, with a new review entry naming the brand hook. The new fork module was
+added to `[os]` in `ci/module-layers.ini`. No enum producer, include namespace, catalogue grammar
+or manifest/lock certificate changed; the two other pinned certificates were left alone.

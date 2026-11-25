@@ -5,7 +5,7 @@
   "type": "native",
   "main": "plxnative",
   "title": "Nuvio Native",
-  "appDescription": "Native Stremio-addon client (Nuvio-compatible), built on PlxNative",
+  "appDescription": "Native Stremio-addon client for Nuvio",
   "icon": "icon.png",
   "largeIcon": "largeIcon.png",
   "iconColor": "#0d101e",
