@@ -94,6 +94,10 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 - `docs/nuvio/TMDB.md` — the TMDB client contract and the artwork order: TMDB backdrop/logo
   first, BetterPosters posters by resolved IMDb id, metahub art fallback-only.
 - `docs/nuvio/PLAYBACK.md` — probe, route and shim playback contract.
+- `docs/nuvio/TRAILERS.md` — trailer ids, Node decipher, MPD/Feed demux, autoplay and full-trailer
+  modes, and the held-play supersede rule.
+- `docs/nuvio/TORRENT-ENGINE.md` — the `libsbengine.so` / Nuvio Engine layers, budgets, stream
+  resolve, warm and settings.
 - `docs/nuvio/DETAIL-LATENCY.md` — detail-page phase timings, what is measured on TV and what is
   still over target.
 - `docs/nuvio/WATCH-PROGRESS.md` — account mirror: IMDb identity, push/pull RPCs and Home refresh.

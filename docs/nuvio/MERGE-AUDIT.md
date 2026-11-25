@@ -1592,3 +1592,38 @@ introduced.
   `[pmsshim/src/shim_pms.rs::warm_remembered_torrent]`, the symbol that now holds the 12-hex
   log-tag slice. Same `not-a-list` class and reason; no cap was added or removed. The re-key is
   required because `ci/check-list-caps.py` matches cap sites by symbol.
+
+## Trailer cache eviction and stale comments (Fork Rofocale11, 2026-11-25)
+
+All three touched files are fork-owned (added by fork commits), so no upstream `Fork Rofocale11:`
+marker is required; this section is the durable record.
+
+- `rust-modules/pmsshim/src/shim_trailer.rs` — `TrailerCache::insert` now drops expired rows and
+  evicts the oldest surviving id at the 256-entry cap instead of `clear()`-ing the whole table.
+  The old policy discarded every still-valid 30-minute answer after about 21 titles (12
+  candidates each), so browsing back re-paid a Node spawn for each trailer. A new test pins that
+  only the oldest id leaves and that re-inserting an existing id does not evict anything.
+- `rust-modules/pmsshim/src/shim_trailer.rs`, `rust-modules/pmsshim/src/shim_pms.rs`,
+  `rust-modules/stremio/src/sbengine.rs` — corrected comments that named a `GOOGLEVIDEO_WINDOW`
+  constant and a Node-child fallback, neither of which exists in this tree. The proxy field is
+  now described as unused (`publish_trailer` passes no BaseURL overrides, so `dash_urls()` has no
+  production caller); `docs/nuvio/TRAILERS.md` and `docs/nuvio/TORRENT-ENGINE.md` were aligned.
+- `rust-modules/pmsshim/src/shim_pms.rs` — `trailer_tracks_reachable` now keeps a 60-second verdict
+  per (video, audio) pair, so the detail publish and the player's Part request do not repeat four
+  googlevideo range asks (the device log showed `dash pair served to its end` twice on a cache
+  hit). A new test pins that the second publish reuses the verdict. The short TTL preserves the
+  gate's throttle-detection job; long-lived positive answers stay in the separate RAM
+  `TrailerCache`. `docs/nuvio/TRAILERS.md` records the new TTL.
+
+## Autoplay dwell trial: 2 s → 1 s → 2 s (Fork Rofocale11, 2026-11-25)
+
+- `rust-modules/media/src/player/preview.rs` (upstream `plx_media`) — `DWELL_S` was tried at 1.0
+  with an inline `Fork Rofocale11:` marker, then restored to 2.0 after the owner's device run.
+  The full event log showed `preview: start` before `trailer: node resolved` in the cold runs: at
+  1 s the dwell is shorter than the prefetch, so the wait moved from the dwell into `dwell_ms`
+  without reducing detail-open-to-picture time, and spent the 14 process-lifetime `CYCLE_BUDGET`
+  admitted Loads sooner. 0 was never tried for the same reason. The final constant matches
+  upstream; the comment records the trial and why it was reverted. The two-timer fetch/reveal
+  design in `docs/trailer-ux-plan.md` §2.1 remains unimplemented.
+- `rust-modules/pmsshim/src/shim_pms.rs` (fork-owned) and `docs/nuvio/TRAILERS.md` — the comments
+  and table rows were taken to 1 s during the trial and returned to 2 s with the constant.

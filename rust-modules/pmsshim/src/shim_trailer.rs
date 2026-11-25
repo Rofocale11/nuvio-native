@@ -16,12 +16,11 @@
 //! `continuous`.
 //!
 //! The DASH pair's bytes come straight from the signed googlevideo URLs; there
-//! is no proxy hop and no UA override. What those URLs refuse is the request
-//! shape, not the identity: a GET with no `Range` header or an open-ended
-//! `bytes=N-` answers `403`, a bounded window answers `206`. `curlio` states
-//! the window (`GOOGLEVIDEO_WINDOW`) and continues it, so the manifest needs no
+//! is no proxy hop and no UA override. The MPD's BaseURLs are those URLs and the
+//! shared HTTPS Range transport fetches their byte ranges; the manifest needs no
 //! rewriting. [`TrailerProxy`] and `js-service/trailer-proxy.js` stay in the
-//! tree, unused for track bytes.
+//! tree, unused for track bytes: `publish_trailer` passes no BaseURL overrides
+//! and `TrailerProxy::dash_urls` has no production caller.
 //!
 //! Design notes (docs/nuvio/ARCHITECTURE.md trailer rule, Node `v16.20.2` floor):
 //! - Dependency-injected as `TrailerResolver` so tests use a fake and never
@@ -578,10 +577,27 @@ impl TrailerCache {
 
     pub fn insert(&self, youtube_id: &str, answer: Option<TrailerResolved>) {
         let mut g = self.rows.lock().unwrap_or_else(|e| e.into_inner());
-        if g.len() >= MAX_ENTRIES && !g.contains_key(youtube_id) {
-            g.clear();
+        let now = Instant::now();
+        if !g.contains_key(youtube_id) {
+            // Drop rows whose TTL has already run out first: a positive answer holds signed
+            // URLs that can no longer be used, a negative one is a long-forgotten blip.
+            g.retain(|_, (at, answer)| {
+                at.elapsed() < if answer.is_some() { POS_TTL } else { NEG_TTL }
+            });
+            // Evict ONE row, the oldest surviving id. Clearing the whole table at the cap
+            // threw away every still-valid 30-minute answer after ~21 titles (12 trailers
+            // each), so browsing back paid a fresh Node spawn for each trailer.
+            if g.len() >= MAX_ENTRIES {
+                if let Some(oldest) = g
+                    .iter()
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(id, _)| id.clone())
+                {
+                    g.remove(&oldest);
+                }
+            }
         }
-        g.insert(youtube_id.to_string(), (Instant::now(), answer));
+        g.insert(youtube_id.to_string(), (now, answer));
     }
 }
 
@@ -938,6 +954,28 @@ mod tests {
         assert_eq!(cache.get("a"), Some(Some(resolved())));
         assert_eq!(cache.get("b"), Some(None));
         assert_eq!(cache.get("missing"), None);
+    }
+
+    #[test]
+    fn a_full_cache_evicts_only_the_oldest_entry() {
+        let cache = TrailerCache::new();
+        for i in 0..MAX_ENTRIES {
+            cache.insert(&format!("id-{i}"), Some(resolved()));
+        }
+        cache.insert("new", Some(resolved()));
+        assert_eq!(cache.get("id-0"), None, "the oldest id should be evicted");
+        for i in 1..MAX_ENTRIES {
+            assert_eq!(
+                cache.get(&format!("id-{i}")),
+                Some(Some(resolved())),
+                "every other still-valid answer must survive"
+            );
+        }
+        assert_eq!(cache.get("new"), Some(Some(resolved())));
+        // Updating an existing id at the cap is not an eviction.
+        cache.insert("id-1", Some(resolved()));
+        assert_eq!(cache.get("id-2"), Some(Some(resolved())));
+        assert_eq!(cache.rows.lock().unwrap().len(), MAX_ENTRIES);
     }
 
     #[test]

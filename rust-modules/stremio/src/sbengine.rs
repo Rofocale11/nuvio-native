@@ -16,7 +16,9 @@
 //! (9.2 and later) depending on release. With both linked in, `tools/fwcompat.py`
 //! grades one `.so` OK on every release in its inventory (1.2 to 11.2, current sets
 //! included). Where `dlopen` still fails (a firmware we have never graded, a missing
-//! file) load reports `NoLibrary` and torrent playback stays on the node child.
+//! file), or the table's `api()` is not version 4, `available()` is false for the
+//! process: `torrent_server()` returns `None` and `shim_media::rank` drops every
+//! torrent and magnet stream. There is no Node fallback on that install.
 //!
 //! # Build
 //!

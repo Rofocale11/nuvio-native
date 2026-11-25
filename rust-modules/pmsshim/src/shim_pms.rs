@@ -676,6 +676,12 @@ pub struct Shim {
     /// fetched to its END before the DASH `Media` is published — see
     /// [`trailer_tracks_reachable`](Self::trailer_tracks_reachable).
     trailer_reach: Mutex<Option<crate::shim_probe::Reacher>>,
+    /// Short-lived tail-reach verdicts `(video, audio) -> (at, ok)` for the DASH gate. The detail
+    /// publish and the player's Part request ask the same pair seconds apart; without this the
+    /// second one repeats four googlevideo round trips (`dash pair served to its end` twice in
+    /// the device log). The TTL is deliberately short: the gate exists to catch a URL that starts
+    /// throttling, so a pass must be re-earned within a minute.
+    trailer_reach_verdicts: Mutex<HashMap<(String, String), (Instant, bool)>>,
     /// Trailer Part targets `part_id -> resolved CDN URL` (the 360p muxed fallback
     /// beside a DASH pair, and the muxed row when there is no DASH pair). A DASH
     /// Part instead maps `part_id -> MPD XML` in `trailer_dash`; `part()` checks
@@ -683,9 +689,8 @@ pub struct Shim {
     trailer_parts: Mutex<HashMap<i64, String>>,
     /// Trailer DASH manifests `part_id -> MPD XML` (see [`dash_manifest`]). The
     /// Part itself is `file.mpd` and answers 200 `application/dash+xml`; the
-    /// MPD's BaseURLs are the signed googlevideo URLs themselves — `curlio`
-    /// states the bounded window those URLs require (see `GOOGLEVIDEO_WINDOW`
-    /// in `media/src/curlio.rs`), and `trailer_proxy` carries no track bytes.
+    /// MPD's BaseURLs are the signed googlevideo URLs themselves; the shared
+    /// HTTPS Range transport fetches them and `trailer_proxy` carries no bytes.
     trailer_dash: Mutex<HashMap<i64, String>>,
     /// `youtubeId -> resolved candidate` for [`crate::shim_trailer::resolve_cached`],
     /// with the 30-min/60-s TTL split [`crate::shim_trailer::TrailerCache`] owns.
@@ -702,13 +707,11 @@ pub struct Shim {
     /// tests swap in a fake. A `Box<dyn>` keeps the spawn machinery behind one
     /// trait so the shim stays testable without Node.
     trailer_resolver: Box<dyn crate::shim_trailer::TrailerResolver>,
-    /// The persistent Node proxy child (`TrailerProxy`): IOS-UA loopback hop
-    /// for the DASH pair's bytes. Lazy (`NotStarted` until the first DASH
-    /// trailer) and degraded to direct googlevideo when it cannot start.
-    // Unused after the direct-libcurl switch (track bytes now go via curlio's
-    // googlevideo UA override; the Node proxy child's TLS/egress 403'd on TV).
-    // Kept so the child and its docs/tests stay in the tree for a future
-    // re-enable without a re-add.
+    /// The old Node proxy child (`TrailerProxy`): an IOS-UA loopback hop for
+    /// the DASH pair's bytes, lazy until the first call to `dash_urls`.
+    // Unused after the direct googlevideo switch: `publish_trailer` passes no
+    // BaseURL overrides, so no production path asks the proxy for URLs. Kept so
+    // the child and its docs/tests stay in the tree for a future re-enable.
     #[allow(dead_code)]
     trailer_proxy: crate::shim_trailer::TrailerProxy,
     /// Torrent markers resolved on a streaming server (`/create`), by marker + ratingKey.
@@ -1152,8 +1155,8 @@ fn xml_escape(s: &str) -> String {
 /// `media/src/dash.rs` parses: two AdaptationSets (video then audio), each
 /// with one `SegmentBase` (init + index ranges) and one `Representation`
 /// whose `BaseURL` is the signed googlevideo URL itself (`video_url`/`audio_url`
-/// overrides exist for tests). The transport, not the manifest, handles what
-/// those URLs require: see `GOOGLEVIDEO_WINDOW` in `media/src/curlio.rs`.
+/// overrides exist for tests). The shared HTTPS Range transport fetches the
+/// byte ranges; the manifest itself needs no rewriting.
 ///
 /// Played by the Rust DASH engine (`media/src/dash.rs` + `ff.rs dash_demux`),
 /// which opens each track's BaseURL as a seekable progressive fMP4 source
@@ -2869,6 +2872,7 @@ impl Shim {
             permits: (Mutex::new(CATALOG_PARALLEL), Condvar::new()),
             probes: crate::shim_probe::ProbeCache::default(),
             trailer_reach: Mutex::new(None),
+            trailer_reach_verdicts: Mutex::new(HashMap::new()),
             trailer_parts: Mutex::new(HashMap::new()),
             trailer_dash: Mutex::new(HashMap::new()),
             trailer_cache: crate::shim_trailer::TrailerCache::new(),
@@ -4511,6 +4515,19 @@ impl Shim {
     /// The two tracks are checked together: each is head→tail on its own, so serialising them
     /// would spend four round trips where two are enough.
     fn trailer_tracks_reachable(&self, video: &str, audio: &str) -> bool {
+        let key = (video.to_string(), audio.to_string());
+        let ttl = Duration::from_secs(60);
+        {
+            let mut g = self
+                .trailer_reach_verdicts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            g.retain(|_, (at, _)| now.duration_since(*at) < ttl);
+            if let Some((_, ok)) = g.get(&key) {
+                return *ok;
+            }
+        }
         let reach = self
             .trailer_reach
             .lock()
@@ -4544,12 +4561,18 @@ impl Shim {
             let a = check("audio", audio);
             (v.join().unwrap_or(false), a)
         });
-        if ok.0 && ok.1 {
-            plx_base::eventlog::log("trailer: dash pair served to its end");
-            true
-        } else {
-            false
+        let ok = ok.0 && ok.1;
+        {
+            let mut g = self
+                .trailer_reach_verdicts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            g.insert(key, (Instant::now(), ok));
         }
+        if ok {
+            plx_base::eventlog::log("trailer: dash pair served to its end");
+        }
+        ok
     }
 
     /// Muxed trailer probe: `mp4`/`mov` + `h264` + decodable `aac`. Hard-gated
@@ -10743,6 +10766,36 @@ mod trailer_tests {
         let row = shim.trailer_row(parent).expect("the dash row");
         assert_eq!(row["Media"].as_array().unwrap().len(), 2);
         assert_eq!(shim.part(dash_part_id).status, 200, "the MPD is registered");
+    }
+
+    /// A detail publish and the player's Part request ask the same pair within seconds. The
+    /// gate is four googlevideo round trips, so the second publish must reuse the verdict —
+    /// but only briefly, or a URL that starts throttling would stay published for 30 minutes.
+    #[test]
+    fn a_second_publish_of_the_same_pair_reuses_the_reach_verdict() {
+        let (shim, parent) = parent_with_trailer();
+        let mut shim = Arc::try_unwrap(shim).ok().expect("single owner");
+        shim.trailer_resolver = Box::new(FixedResolver {
+            resolved: Some(dash_resolved()),
+        });
+        shim.probes
+            .set_prober(Arc::new(|_url: &str, _deadline| Ok(ok_probe("mp4", "h264"))));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        shim.set_trailer_reacher(Arc::new(move |_url: &str, at: i64, _deadline| {
+            if at == 0 {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(42_000_000)
+        }));
+        let shim = Arc::new(shim);
+        assert!(shim.trailer_row(parent).is_some(), "first publish");
+        assert!(shim.trailer_row(parent).is_some(), "second publish");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "one gate pass = one head ask per track; the second publish must not repeat it"
+        );
     }
 
     /// A 2160p VP9 pair (the level a 4K-capable codec table unlocks) must be

@@ -56,6 +56,12 @@ pub const CYCLE_BUDGET: u32 = 14;
 /// autoplay feel responsive (Apple TV/Netflix hover-preview territory), matching a browsing pause
 /// rather than a long, deliberate stop.
 ///
+/// Fork Rofocale11: a 1.0 s trial was reverted after the device log showed `preview: start` while
+/// the prefetch's Node decipher was still in flight — the shorter gate moved the wait into
+/// `dwell_ms` without reducing detail-open-to-picture time, and spent the 14 process-lifetime
+/// [`CYCLE_BUDGET`] Loads sooner. 2.0 gives the prefetch more overlap; 0 would spend one Load on
+/// every browsed-past hero and exhaust the budget for the run.
+///
 /// **This is the documented fallback of a two-option design, not the option that was fully
 /// investigated.** `docs/trailer-ux-plan.md` §2.1 asks whether the felt latency (`dwell + Load
 /// time`) can be cut further by decoupling when the fetch STARTS from when the frame is REVEALED —
