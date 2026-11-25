@@ -144,6 +144,10 @@ natively keeps using its own decoder, because the app arm only fires when there 
 path. A stream that is unprobed, has undecodable video, or has no playable audio at all is still
 refused by the shim as before.
 
+**Verified on the 7500PSC (owner, 2026-11-25):** DTS, TrueHD and Opus tracks each played through
+that in-app stereo PCM path. This set has no native path for those tracks, so this is an
+observation on this set — not a rule that overrides a TV's native decoder.
+
 ### Dolby Vision on the CX
 
 With the probe's `dovi` record in the PMS fields, `Dovi::presentation` behaves as on a Plex server:
@@ -152,8 +156,8 @@ remux, `el=true`) is refused** ("dual-layer") — the buffer feed carries one el
 **Decision (lead/playback): the player keeps upstream's rule; the shim does this:** to play a P7
 remux as HDR10 instead, the shim must **omit `DOVIELPresent`/all DOVI keys for a
 P7 stream whose `bl_compat` is 6 or 1 (HDR10 base)** — the route then direct-plays it as plain
-HEVC; the decoder ignores the EL NAL units (layer id > 0) and shows the HDR10 base layer. This is
-unverified on the CX; see the TV checklist.
+HEVC; the decoder ignores the EL NAL units (layer id > 0) and shows the HDR10 base layer. This was unverified on
+the CX; the owner confirmed the fallback on the 7500PSC on 2026-11-25.
 
 ### Subtitles
 
@@ -218,21 +222,27 @@ subtitle cues. Native UI screenshots do not include the video plane and are supp
 while it is bound, so they cannot prove visible subtitle compositing.
 
 The user also confirmed stable Home, 4K Dolby Vision playback, seeking, pause/resume
-and visible English subtitles with the physical remote. P7 HDR10 fallback remains
-unverified. Fresh follow-up release QR approval reached the local server and loaded
-account addons. English audio default behavior is host-tested; physical confirmation
-on a newly started stream remains pending.
+and visible English subtitles with the physical remote. P7 HDR10 fallback was still
+unverified at that snapshot. Fresh follow-up release QR approval reached the local server and
+loaded account addons. English audio default behavior was host-tested then; the owner confirmed
+both it and the P7 fallback on the 7500PSC on 2026-11-25 (see Current tree below).
 See `VALIDATION.md`
 for the stable install's final checks.
 
-## Current tree (2026-11-24, HEAD `eef501647`)
+## Current tree (2026-11-25, HEAD `9e215acce`)
 
-The contracts above still describe the shipped path. The current 0.10.0 stable build
+The contracts above still describe the shipped path. The 0.10.0 stable build from `84a00aa68`
 (Addons page, P2P switch default ON, three hidden Playback rows) was deployed with
 `make FLAVOR=stable RELEASE=1 deploy` — `verify-deploy: 50 files match` — and the owner
-confirmed it works. On that exact committed tree `make check` reported **146 steps — all ok**;
-`plx_plex` 826/826, `plx_screens` 2347/2347 and the app crate 1503/1503. The three
-`transcoder.rs` lossy-gate failures mentioned in older validation notes were fixed by the
-`make check` alignment pass and no longer occur. Still unverified on device: the P7 HDR10
-base-layer fallback, a dedicated sim-probe comparison after the `plx_nuvio_probe` extraction,
-and a newly started stream's English audio default.
+confirmed it works. On `84a00aa68` `make check` reported **146 steps — all ok**; `plx_plex`
+839/839, `plx_screens` 2347/2347 and the app crate 1491/1491. The three `transcoder.rs`
+lossy-gate failures mentioned in older validation notes were fixed by the `make check`
+alignment pass. No full gate run is recorded for `e0b584c0c` or `9e215acce`.
+
+Owner device verification (2026-11-25, 7500PSC): the P7 HDR10 fallback, the dedicated
+`plx_nuvio_probe` sim-probe comparison, the English audio default on a newly started stream,
+visible subtitles, DTS/TrueHD/Opus in-app stereo PCM decode, the Catalogs selector, explicit
+addon failures, warm catalog/subtitle caches across relaunch, and the remaining playback and
+persistence items listed in `VALIDATION.md` are all confirmed. The cold detail open now meets
+≤800 ms. **Still not verified:** replay fixtures — they need `tools/plxnative-rec rerecord` on
+a macOS simulator before `make check-replay` is trusted.

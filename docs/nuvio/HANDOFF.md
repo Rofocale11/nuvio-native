@@ -1,12 +1,12 @@
 # Nuvio Native handoff (2026-10-10)
 
-## Current status (HEAD `eef501647`, 2026-11-24)
+## Current status (HEAD `9e215acce`, 2026-11-25)
 
 Everything from "Build and TV" below is the original 2026-10-10 snapshot, kept as history. The
-shipped tree is `nuvio-native` at `eef501647` in https://github.com/Rofocale11/nuvio-native; the
+shipped tree is `nuvio-native` at `9e215acce` in https://github.com/Rofocale11/nuvio-native; the
 authoritative old fork is https://github.com/Rofocale11/nuvio-native-old (branch `nuvio-native`)
-at `83339172d`. This last port was not pushed, tagged, PR'd or released. Current facts that
-supersede the snapshot:
+at `83339172d`. This was not pushed, tagged, PR'd or released. Current facts that supersede the
+snapshot:
 
 - Version **0.10.0**, app id `com.nuvionative.app` (debug `.debug`); all packaging witnesses
   agree and `requiredPermissions` is empty. IPKs: `pkg/com.nuvionative.app_0.10.0_arm.ipk` and
@@ -19,15 +19,23 @@ supersede the snapshot:
   and Settings > Addons lists/flips installed addons; Default quality, Direct Play and Playback
   engine rows are hidden, not deleted. A torrent/debrid diagnostics panel replaced the inert
   playback-controller placeholders.
-- On the committed tree `make check` reported **146 steps — all ok** (harness 753 tests), with
-  `plx_screens` 2347/2347, app crate 1503/1503, `plx_plex` 826/826, `plx_data` 1663/1663,
-  `plx_pmsshim` 159/159, `plx_net` 338/338, `plx_os` 427/427, `plx_nuvio_store` 6/6 and
-  `plx_stremio` 54/54. `make check-nodef` and a 32-bit ARM cross-build passed. The three
-  `transcoder.rs` opus failures below were fixed by the `make check` alignment pass.
-- The stable 0.10.0 build was deployed with `make FLAVOR=stable RELEASE=1 deploy`
-  (`verify-deploy: 50 files match`) and the owner confirmed it works. Still open: P7 HDR10
-  fallback, cross-device watch sync on a real account, a cold detail open inside 800 ms, a
-  dedicated sim-probe comparison after the `plx_nuvio_probe` extraction, and an in-app reset.
+- Three commits after the last documented tree: `84a00aa68` (Catalogs selector in the
+  Movies/TV Shows header), `e0b584c0c` (explicit addon failures, catalog/subtitle warm caches)
+  and `9e215acce` (GC fixture flake fix). The last recorded full `make check` was on
+  `84a00aa68`: **146 steps — all ok** (app 1491, `plx_screens` 2347, `plx_data` 1667,
+  `plx_plex` 839, harness 2501). No full gate run is recorded for the two commits after it;
+  the local stable IPK and deployed set predate both.
+- The stable 0.10.0 build from `84a00aa68` was deployed with `make FLAVOR=stable RELEASE=1 deploy`
+  (`verify-deploy: 50 files match`) and the owner confirmed it works.
+- On 2026-11-25 the owner confirmed on the `45UR7500PSC` all previously open device items:
+  DTS/TrueHD/Opus in-app stereo PCM decode in Auto (no native path on this set), the Catalogs
+  selector and capsules, addon failures and catalog/subtitle cache warmth across relaunch,
+  the P7 HDR10 fallback, cross-device watch sync on a real account, audio and rating defaults,
+  English audio, visible subtitles, redb relaunch/reboot persistence, prime rate and floors,
+  hold `reason=time`, the 30 s decision, the Streams picker, the HUD logo, last-played resume
+  and the in-app reset. The cold detail open now meets ≤800 ms and the `plx_nuvio_probe`
+  sim-probe comparison is done. **Not verified:** replay fixtures need `tools/plxnative-rec
+  rerecord` on a macOS simulator before `make check-replay` is trusted.
 
 Repo / current fork: https://github.com/Rofocale11/nuvio-native. Commit as
 `Rofocale11 <131918567+Rofocale11@users.noreply.github.com>` with no AI
@@ -127,15 +135,17 @@ callback gate reporting `dropped=0`. See `docs/nuvio/MERGE-AUDIT.md` for the exa
 evidence and its scope (HDR10, not DV P8; no seek/resume cases in this run). At that
 point the extraction itself still needed a sim probe and one TV playback run; later
 debug and stable installs shipped it and the owner confirmed the current stable build
-works, but a dedicated sim-probe comparison is still not recorded here.
+works. The dedicated sim-probe comparison was confirmed on the 7500PSC on 2026-11-25
+(see Current status).
 
 ## Stable TV observation
 
 The user confirmed Home, 4K Dolby Vision playback, seek, pause/resume and visible
 English subtitles on the stable build before the audio/login/rating follow-up.
 A fresh approval on the follow-up release reached the local server and loaded the
-account addons. Physical checks of the new audio default and rating setting remain
-pending; do not treat the stream probe as proof of playback.
+account addons. At that time physical checks of the new audio default and rating setting
+remained pending; the stream probe was not proof of playback. Owner confirmed both on the
+7500PSC on 2026-11-25 (see Current status).
 
 ## BetterPosters / My List delivery
 
@@ -156,7 +166,8 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
   `/:timeline` into the Nuvio account and pulls other devices' resume points back, with IMDb-first
   identity, a 60 s playing throttle and a newer-wins merge. Home re-reads its hubs when a real merge
   bumps the shim's content generation, and a lane seated on an empty first answer adopts the cards
-  that arrive later. See `WATCH-PROGRESS.md`; cross-device sync is not yet verified on a real account.
+  that arrive later. See `WATCH-PROGRESS.md`; cross-device sync was confirmed on a real account
+  on the 7500PSC on 2026-11-25 (see Current status).
 - The prior stable QR attempt authenticated but failed discovery with
   `discovery_insecure_only`. A host regression reproduces that failure and passes
   with the registered-shim fix. Fresh stable approval reached the server and loaded

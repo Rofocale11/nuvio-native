@@ -1,21 +1,43 @@
 # Nuvio Native validation — 2026-10-10
 
-## Current status (HEAD `eef501647`, 2026-11-24)
+## Current status (HEAD `9e215acce`, 2026-11-25)
 
 The dated sections below are historical snapshots; this section describes the shipped tree.
-On the exact committed tree `make check` reported **146 steps — all ok**, with the Python
-harness at 753 tests (`OK (skipped=4)`). Focused crate results now are `plx_screens` 2347/2347,
-app crate 1503/1503, `plx_plex` 826/826, `plx_data` 1663/1663, `plx_pmsshim` 159/159,
-`plx_net` 338/338, `plx_os` 427/427, `plx_nuvio_store` 6/6 and `plx_stremio` 54/54.
-`make check-nodef`, a 32-bit ARM cross-build and `ci/check-package.py` are green. The three
-`transcoder.rs` opus failures noted below were fixed by the `make check` alignment pass.
+The branch is `nuvio-native`. The last recorded full `make check` was on `84a00aa68` and
+reported **146 steps — all ok** (app 1491 passed, `plx_screens` 2347, `plx_data` 1667,
+`plx_plex` 839, harness 2501 passed); the two commits after it, `e0b584c0c` (explicit addon
+failures and catalog/subtitle warm caches) and `9e215acce` (GC fixture flake fix), have no
+recorded full-gate run. The local stable IPK and the deployed set still predate both.
 
 Every durable record now lives in one `nuvio.redb` (no DB8 helper, no permission grant), with
-self-heal for unreadable canonical records and a 50 MiB cache-only soft budget. The current
-0.10.0 stable package was deployed with `make FLAVOR=stable RELEASE=1 deploy` —
-`verify-deploy: 50 files match` — and the owner confirmed it works. Still open: cross-device
-watch sync on a real account, the P7 HDR10 base-layer fallback, a cold detail open inside
-800 ms, and a dedicated sim-probe comparison after the `plx_nuvio_probe` extraction.
+self-heal for unreadable canonical records and a 50 MiB cache-only soft budget. The 0.10.0
+stable package built from `84a00aa68` was deployed with `make FLAVOR=stable RELEASE=1 deploy`
+(`verify-deploy: 50 files match`) and the owner confirmed it works.
+
+### Device verification on the 7500PSC (owner, 2026-11-25)
+
+The owner confirmed on the LG `45UR7500PSC` (webOS 10.3.1, board `K8LPN_DVB`):
+
+- DTS, TrueHD and Opus tracks each decode in the app to stereo 48 kHz PCM in Auto, because
+  this set has no native path for those tracks. This closes the codec item in `PLAYBACK.md`.
+  Recorded as an observation on this set, not as a rule that overrides a native decoder.
+- The Catalogs selector in the Movies/TV Shows header, its capsule and the Collections
+  fallback (`84a00aa68`); explicit addon failures, and catalog/subtitle caches staying warm
+  across a TV relaunch (`e0b584c0c`).
+- Every previously open device item: the P7 HDR10 base-layer fallback, cross-device watch
+  sync on a real account, the new audio default and rating setting, the English audio default
+  on a newly started stream, visible subtitle compositing, relaunch/reboot persistence of
+  Settings, addons, My List and watch state, the startup-prime 1.2× rate and 3 s floor, the
+  3 s progressive hold's `reason=time`, the 30 s deadline-only `/decision`, the two-level
+  Streams picker's native playback and slide animation, the HUD logo on device, the
+  last-played-source resume, and the in-app reset.
+- The cold first detail open now meets the ≤800 ms target, and the dedicated
+  `plx_nuvio_probe` sim-probe comparison is done. No new phase figures were captured in this
+  update; the `ms=1439…2061` figures below belong to the earlier snapshot.
+
+**Still not verified:** `make check-replay` against rerecorded fixtures. The replay anchors
+need `tools/plxnative-rec rerecord` on a macOS simulator before that gate is trusted — the
+Linux host cannot do that step. No full gate run is recorded for `9e215acce` either.
 
 ## Debug TV
 
@@ -99,8 +121,9 @@ A fresh QR approval then logged `authorized — discovering server`, reached the
 registered Nuvio server, installed its PMS client and loaded the account's addons.
 The previous `discovery_insecure_only` failure no longer occurred. A newly selected
 source probed as HEVC 3840×1604, 23.976 fps, Dolby Vision, two audio tracks and three
-embedded subtitles. That probe alone does not establish playback or English audio.
-Physical confirmation of the new audio default and rating setting is still pending.
+embedded subtitles. That probe alone does not establish playback or English audio. Later (2026-11-25) the owner
+confirmed the new audio default and rating setting, playback and English audio on the 7500PSC;
+see Current status.
 
 ## Single redb store, no DB8 helper (2026-11-22)
 
@@ -120,7 +143,8 @@ Evidence on this tree:
 - Simulator rebuilt and booted twice from a fresh runtime: `state/nuvio/shim/nuvio.redb` created,
   no errors.
 - Debug build deployed to `com.nuvionative.app.debug` on the set with the owner's HDMI override;
-  `verify-deploy` matched 47 files. **Not launched or driven after deploy.**
+  `verify-deploy` matched 47 files. **Not launched or driven after that deploy** — later debug
+  and stable builds were launched and driven; the 2026-11-25 confirmation is in Current status.
 
 Three known limits, not claimed as verified:
 
@@ -132,15 +156,15 @@ Three known limits, not claimed as verified:
   pass fixed the expectations; `plx_plex` is 826/0 at `eef501647`.
 
 At that time the owner still needed to check relaunch persistence of a Settings pick, and that
-addons, My List and watch state load after the switch. The later stable deploy was confirmed
-working, but a dedicated relaunch-persistence check is not recorded in these docs.
+addons, My List and watch state load after the switch. Later (2026-11-25) the owner confirmed
+all four on the 7500PSC; see Current status.
 
 ## Limitations
 
 <!-- Fork Rofocale11: DTS/TrueHD conversion was listed here as follow-up work; it is now
      implemented for Auto (in-app stereo PCM) and must be re-checked on every merge. -->
-See `HANDOFF.md`: watch state/key table and account backend session persistence
-across TV reboot and the P7 HDR10 fallback remain unverified. The configured torrent service
+Watch state/key table and account backend session persistence across TV reboot and the P7 HDR10
+fallback were confirmed on the 7500PSC on 2026-11-25 (see Current status). The configured torrent service
 from this snapshot has been replaced by the in-process C engine with a Settings P2P switch
 (default ON). RT scores require metadata supplied by an addon; MDBList
 was not configured or tested here.
@@ -180,5 +204,6 @@ The final stable package was built from `6e9c2acc` with `FLAVOR=stable RELEASE=1
 Its package/ELF assertions passed, installation payload hash matched, launch logged
 `features=release`, four addons restored from DB8, and Home loaded 41 shelves.
 The stable library endpoint reported the original one saved title. No fresh physical
-playback/subtitle check was run on this artwork/list follow-up; the earlier stable
-viewer confirmation and login observations above remain the playback evidence.
+playback/subtitle check was run on that artwork/list follow-up at the time; the earlier stable
+viewer confirmation and login observations above remained the playback evidence until the
+owner's 7500PSC confirmation on 2026-11-25 (see Current status).

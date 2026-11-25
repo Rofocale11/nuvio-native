@@ -104,11 +104,12 @@ presence alone no longer proves a network call; the phase times do.
 
 **Status of the old acceptance gate.** The warm target **is** met on device: the verified run
 above logged `ms=84…282` for movie and series re-opens (`related_ms=5…233`), inside ≤300 ms.
-The cold first open is **not** inside the old plan's ≤800 ms target — a never-seen title paid
-`ms=1439…2061`, part of it the one-time refresh of enrichment rows written before the `videos`
-field existed. A leave/re-enter case against that same target is not recorded in these docs, and
-that run did not check playback through the placeholder Part or cast/trailer/logo/collection
-shelf survival across a restart. To re-run: acquire the TV lock, boot with a guest profile and
+In that snapshot the cold first open was **not** inside the old plan's ≤800 ms target — a
+never-seen title paid `ms=1439…2061`, part of it the one-time refresh of enrichment rows written
+before the `videos` field existed. **Owner follow-up (2026-11-25, 7500PSC):** the cold open now
+meets ≤800 ms; leave/re-enter, playback through the placeholder Part and cast/trailer/logo/
+collection shelf survival across a restart were also confirmed. No new phase figures were
+recorded. To re-run: acquire the TV lock, boot with a guest profile and
 read the identity line, press OK immediately after focus for the cold case and after >1 s of rest
 for the warm case. Opening a detail page is a read — never press Play or change a real account's
 state during this check.

@@ -150,7 +150,8 @@ record** — a stable identity of the stream each resume point last played:
 - Deletions are a zero position, not a row delete (see Push).
 - Nothing is pushed while signed out. Host tests validate the RPC shapes; the push/pull contract
   follows Nuvio's own clients (WebOS `js/core/profile/watchProgressSyncService.js`, Android
-  `core/sync/WatchProgressSyncService.kt`) and is not yet verified against a live account on the TV.
+  `core/sync/WatchProgressSyncService.kt`). Later (2026-11-25): owner verified it against a live
+  account on the 7500PSC in both directions; see `VALIDATION.md`.
 
 ## Verification
 
@@ -168,6 +169,6 @@ Host tests (`make test-crate C=plx_pmsshim`, `C=plx_stremio`, `C=plx_data`, plus
 - `shim_pms::account_progress_tests::a_remembered_source_promotes_but_an_explicit_pick_or_a_missing_source_wins`.
 - `app::run::account_content_tests` — a merge is owed once and only after a server exists.
 
-Not verified on the TV against a real account. A device check should play past a few minutes on the
-TV, then open the same title in the Nuvio webOS app and confirm the position carried, and the
-reverse.
+**Verified on the 7500PSC (owner, 2026-11-25)** against a real account, in both directions: play
+past a few minutes on the TV, then open the same title in the Nuvio webOS app and confirm the
+position carried, and the reverse. See `VALIDATION.md`.

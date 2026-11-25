@@ -5,6 +5,28 @@ Merge of `upstream/main` (`plxnative/plx-native@0a1edc61`) into the fork on
 `a296450a` imported that exact tree). 663 upstream commits, 2,288 files changed;
 45 files had true conflicts and are recorded here.
 
+## Device verification update (owner, 2026-11-25)
+
+Every "no device verification", "no TV deploy" and "still needs a TV run" note in the dated
+sections below is superseded by the owner's confirmation on the LG `45UR7500PSC` (webOS 10.3.1),
+except the replay-fixtures item at the end of this section. Confirmed on device:
+
+- DTS, TrueHD and Opus tracks in Auto decode in-app to stereo 48 kHz PCM (this set has no native
+  path for them); the Catalogs selector and capsules, explicit addon failures, and catalog/
+  subtitle caches staying warm across a relaunch (`84a00aa68`, `e0b584c0c`).
+- P7 HDR10 base-layer fallback, cross-device watch sync on a real account, audio/rating/English
+  defaults, visible subtitles, redb relaunch/reboot persistence, the startup prime's 1.2× rate
+  and 3 s floor, the progressive hold's `reason=time`, the 30 s deadline-only `/decision`, the
+  two-level Streams picker's native playback and slide animation, the HUD logo, the
+  last-played-source resume, the in-app reset, and the cold detail open now inside ≤800 ms.
+- The dedicated `plx_nuvio_probe` sim-probe comparison is recorded as done.
+
+**Not verified and not covered by this update:** replay fixtures (`AltSourcesScreen::SHAPE` and
+the other shape pins need `tools/plxnative-rec rerecord` on a macOS simulator before
+`make check-replay` is trusted — the Linux host cannot do that step); multi-hour stability; and a
+TV playback run explicitly attributed to the post-extraction probe. No full `make check` run is
+recorded for `9e215acce` either.
+
 **Resolution policy:** integrate both sides wherever they can coexist. The fork's
 version wins only where the two are semantically incompatible (app identity, the
 in-process PMS shim, Nuvio account/My List/rating-source behavior, public-root TLS
@@ -362,7 +384,8 @@ generation polling this tree lacked). Every upstream-owned Rust file touched car
   document of record and the delivery note here instead of inline markers.
 
 Verification: focused host tests for `plx_stremio`, `plx_pmsshim`, `plx_data` and the app crate
-pass; `cargo check --workspace` green. Cross-device behaviour on a real account is not yet verified.
+pass; `cargo check --workspace` green. Cross-device behaviour on a real account was not yet
+verified at this snapshot; the owner confirmed it on the 7500PSC on 2026-11-25 (see top of file).
 
 ## Last played source is local (Fork Rofocale11)
 
@@ -548,9 +571,10 @@ the old fork's shim behavior is authoritative for future merges.
 
 Point-in-time list (2026-11-23). Later sections and the current-status blocks at the top of
 `VALIDATION.md` / `HANDOFF.md` supersede part of it: Dolby Vision P8 playback, seek and
-pause/resume were later confirmed by the owner on debug and stable installs. Multi-hour
-stability, a dedicated sim-probe comparison and a TV playback run explicitly attributed to the
-post-extraction probe are still not recorded in these docs.
+pause/resume were later confirmed by the owner on debug and stable installs. The dedicated
+sim-probe comparison was confirmed on the 7500PSC on 2026-11-25 (see the device verification
+update at the top of this file). Multi-hour stability and a TV playback run explicitly
+attributed to the post-extraction probe are still not recorded in these docs.
 
 
 ## Fourteenth pass — the torrent engine and trailer service
@@ -723,9 +747,9 @@ fixtures need `tools/plxnative-rec rerecord` on a macOS simulator** before `make
 trusted; the Linux host cannot do that step. Host evidence for the change: 33 focused `alt_sources`
 tests (including six pinned two-level tests, the all-language fit test and the title-band pop),
 a Detail test that a pick emits a Play effect, full nextest 1495/1495, `make check-nodef`, module
-layers, `check-deps`, ledger ratchet. Native playback and the slide animation still need a TV run
-under the TV lock; the host suite proves the state transitions and effect payloads, not device
-frame pacing.
+layers, `check-deps`, ledger ratchet. Native playback and the slide animation needed a TV run at
+this snapshot; the owner confirmed both on the 7500PSC on 2026-11-25 (see top of file). The replay
+fixtures remain unverified.
 
 **Post-deploy fix — BACK no longer snaps the addon list to the top.** `AltSourcesScreen::reconcile`
 fell back to `form.opening_key()` when the engine's focus key was from the page that had just been
@@ -896,7 +920,8 @@ never stage. The one upstream test encoding the old "hold stands forever" policy
 holds; that is the requested trade-off, not a fix for the source bitrate.
 
 Verified after this change: 368 `plx_play_feed` tests and 2500 `plx_media` hostsim tests, plus
-`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy yet.
+`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy at this
+snapshot; later device confirmation is recorded at the top of this file.
 
 **Thirty-second deadline-only Nuvio `/decision` (2026-11-24, follow-up).** A cold torrent can hold
 the shim's `/decision` with no bytes while the engine finds peers. The Nuvio decision already had a
@@ -911,7 +936,8 @@ together. No new fork crate or file is involved in this change.
 
 Verified: `plx_plex` 834 passed with the three pre-existing lossy-gate profile-list failures (an
 extra `opus` codec, unrelated to this change), `plx_play_feed` 368, `plx_media` hostsim 2500, plus
-`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy yet.
+`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy at this
+snapshot; later device confirmation is recorded at the top of this file.
 
 **`build-ipk.yml` is now this fork's sole IPK/release workflow (2026-11-24).** The new fork-owned
 `.github/workflows/build-ipk.yml` is ported from the old fork: a `v*` tag builds the ARM engine and
