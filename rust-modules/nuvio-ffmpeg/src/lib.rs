@@ -1055,25 +1055,38 @@ pub fn ver(v: c_uint) -> String {
 /// Kept separate from the version check that follows it because the two failures are different
 /// facts about the television and deserve different log lines: "there is no libavformat here at
 /// all" versus "there is one and it is the wrong major".
+type FfmpegLoader = fn(Option<&std::path::Path>) -> plx_base::dynlib::Loaded;
+
+/// Fork Rofocale11: the four required bundled libraries in DT_NEEDED order — avutil <- swresample
+/// <- avcodec <- avformat. Kept in step with `plx_media_codecs::ffi`'s table: both boot the same
+/// files with RTLD_GLOBAL, and a wrong order fails only on the TV's first playback after boot.
+const FFMPEG_LOAD_ORDER: &[(&str, FfmpegLoader)] = &[
+    ("avutil", avutil::load),
+    ("swresample", swresample::load),
+    ("avcodec", avcodec::load),
+    ("avformat", avformat::load),
+];
+
 pub fn load_libraries() -> bool {
     // The bundled FFmpeg lives beside the binary, which is on no library search path — so it is
     // opened by ABSOLUTE PATH. That is not a convenience: webOS 11.2.0 ships FFmpeg 6 itself, and
     // a bare SONAME there could open the television's copy instead of ours.
     let dir = Some(plx_base::paths::app_dir());
 
-    // DEPENDENCY ORDER, and it is load-bearing. libavformat NEEDs libavcodec NEEDs libavutil by
-    // SONAME, and these libraries carry no rpath (FFmpeg's configure evals its flags, so
-    // -Wl,-rpath,$ORIGIN does not survive — see ci/build-ffmpeg.sh). Loading a dependency FIRST
-    // with RTLD_GLOBAL puts it in the global scope under its SONAME, so when the next library
+    // DEPENDENCY ORDER, and it is load-bearing. libavformat NEEDs libavcodec NEEDs swresample
+    // NEEDs libavutil by SONAME, and these libraries carry no rpath (FFmpeg's configure evals its
+    // flags, so -Wl,-rpath,$ORIGIN does not survive — see ci/build-ffmpeg.sh). Loading a dependency
+    // FIRST with RTLD_GLOBAL puts it in the global scope under its SONAME, so when the next library
     // names it the loader finds the one we just opened rather than searching the system paths and
     // finding the TV's. Open libavformat first and that guarantee is gone.
+    //
+    // Fork Rofocale11: avutil MUST come before swresample. The app directory is not on the loader's
+    // search path, so opening swresample first made dlopen fail on its NEEDED libavutil-plx.so.61;
+    // avcodec then failed on swresample and avformat on avcodec. The demux gate stayed closed until
+    // a later probe re-booted with avutil already global — the first hero-resume then just spun.
     let mut ok = true;
-    for (what, verdict) in [
-        ("swresample", swresample::load(dir)), // Fork Rofocale11: before avcodec — its NEEDED depends on this
-        ("avutil", avutil::load(dir)),
-        ("avcodec", avcodec::load(dir)),
-        ("avformat", avformat::load(dir)),
-    ] {
+    for (what, load) in FFMPEG_LOAD_ORDER {
+        let verdict = load(dir);
         match verdict {
             plx_base::dynlib::Loaded::Ok(soname) => {
                 plx_base::eventlog::log(&format!("ff: bound {what} -> {soname}"))
@@ -1244,5 +1257,20 @@ pub fn probe(url: &str) {
             !av_bsf_get_by_name(an.as_ptr()).is_null()
         ));
         avformat_close_input(&mut fmt);
+    }
+}
+
+#[cfg(test)]
+mod load_order_tests {
+    use super::*;
+
+    /// Same table as `plx_media_codecs::ffi`: keep avutil ahead of everything that NEEDs it, or
+    /// the first boot on the TV binds only avutil and the demux gate refuses the first playback.
+    #[test]
+    fn dependencies_load_before_their_dependents() {
+        let at = |name: &str| FFMPEG_LOAD_ORDER.iter().position(|(n, _)| *n == name).unwrap();
+        assert!(at("avutil") < at("swresample"), "swresample needs libavutil-plx.so.61");
+        assert!(at("swresample") < at("avcodec"), "avcodec needs libswresample-plx.so.7");
+        assert!(at("avcodec") < at("avformat"), "avformat needs libavcodec-plx.so.63");
     }
 }

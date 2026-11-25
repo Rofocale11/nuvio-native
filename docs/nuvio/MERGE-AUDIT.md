@@ -35,6 +35,38 @@ comment are listed here instead: locale JSON (strict `value`/`description` objec
 shape), replay JSONL and manifests (hash-pinned recordings), `Cargo.lock`, and the
 Debian `control` file.
 
+## First-playback stall after boot: FFmpeg load order (2026-11-25)
+
+Owner-reported: resume from the big Home hero sometimes sat on "Buffering…" while the torrent
+downloaded normally; pressing Back to the detail page and hitting Continue played immediately.
+Two device logs pin it. Both show the same startup failure — `ff: swresample is MISSING`, avutil
+bound, `avcodec is MISSING`, `avformat is MISSING`, then `ff: FFmpeg unavailable` — and both later
+bind all four during a stream probe. The working run visited a detail page and ran its trailer
+probe *before* first playback; the stalled run went hero → player directly. The demux then logged
+`demux: refusing — bundled FFmpeg ABI is not the one built for`, pushed EOS at true EOF and
+handed the spinner no data while `sbengine` reported `delivered=0MB` against `got=35MB`.
+
+- `rust-modules/media-codecs/src/ffi.rs` (upstream-owned, marked) and
+  `rust-modules/nuvio-ffmpeg/src/lib.rs` (fork-owned duplicate, kept in step): the fork's Opus
+  commit `7c5064a7b` inserted `swresample` at the head of the four-library load list. But the
+  shipped ARM libraries' DT_NEEDED chain is avutil ← swresample ← avcodec ← avformat, the app
+  directory is not on the loader's search path and the libraries carry no rpath, so the first
+  `dlopen` of swresample cannot resolve `libavutil-plx.so.61`. The cascade leaves `ABI_OK` false
+  until a later probe re-boots with avutil already `RTLD_GLOBAL` — which is why the failure looked
+  intermittent and route-dependent. The load list now opens avutil first; a pinned const and a
+  `dependencies_load_before_their_dependents` unit test in both crates keep the order honest.
+- This is a boot-order fix, not a change to the demux, the torrent engine or the hero card: no
+  geometry, route or playback policy moved. The token from the first boot was avutil alone being
+  bound in both logs, and the second boot's successful four-library bind is the proof that the
+  payload itself is deployed correctly.
+- **Device-verified (owner, 2026-11-25):** the reordered build's first boot logs
+  `ff: bound avutil`, `swresample`, `avcodec`, `avformat` in that order with no MISSING line, then
+  `ff: avformat=63.1.102 avcodec=63.1.102 avutil=61.1.102`. A hero-resume in that same session
+  went straight to playback: `ff: open status=200`, demux AUs fed (`feed v#… reply=O`),
+  `primed: … profile=Resume -> Play`, `sink: displayed`, and `feed: presented (plane shows the
+  picture)`. No `demux: refusing`, no `EOS pushed at true EOF`, and the engine reported
+  `delivered=2MB` against `got=2MB`. The route-dependent stall is closed on this set.
+
 ## Build / CI / packaging
 
 | File | Integrated from upstream | Kept from fork / why |
