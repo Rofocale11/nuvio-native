@@ -17,10 +17,11 @@ import json
 import re
 import tarfile
 
-# Fork Rofocale11: re-derived from the reviewed serde_json 1.0.154 archive for the fork workspace;
-# the crate's source/grammar and locked dependency set are unchanged, only manifest/lock hashes moved.
+# Fork Rofocale11: re-derived from the reviewed serde_json 1.0.154 archive (checksum verified against
+# Cargo.lock) after adding the plx_nuvio_ffmpeg workspace member. The crate's source/grammar and
+# locked dependency set are unchanged; only the root/media manifests and the lock hash moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'serde-json-immutable.json'
-CERTIFICATE_SHA256 = 'f5a5d2c6399d99baff1db7513725801fb34d19cda5acd3e3be85329e19f65285'
+CERTIFICATE_SHA256 = '561a31f9f2e455c00359c3e3e8caa943eaa01af1e075cbae7b31ac5781a1c241'
 SCHEMA = 'plx.readonly.locked-json.v1'
 REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index'
 SUPPORTED = ['alloc', 'arbitrary_precision', 'default', 'float_roundtrip', 'raw_value', 'std', 'unbounded_depth']

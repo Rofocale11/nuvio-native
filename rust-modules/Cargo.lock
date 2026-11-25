@@ -840,6 +840,7 @@ dependencies = [
  "plx_media",
  "plx_media_codecs",
  "plx_net",
+ "plx_nuvio_ffmpeg",
  "plx_os",
  "plx_play_feed",
  "plx_playback_contract",
@@ -874,6 +875,14 @@ dependencies = [
 [[package]]
 name = "plx_nuvio_dash"
 version = "0.0.0"
+
+[[package]]
+name = "plx_nuvio_ffmpeg"
+version = "0.0.0"
+dependencies = [
+ "plx_base",
+ "plx_media_codecs",
+]
 
 [[package]]
 name = "plx_nuvio_probe"

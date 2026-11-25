@@ -40,6 +40,10 @@ members = [
     # Fork Rofocale11: strict SegmentBase MPD parser for the shim's synthesized trailer DASH. Pure Rust;
     # the physical demux that consumes it lives beside the Feed backend in plx_play_feed.
     "nuvio-dash",
+    # Fork Rofocale11: the low-level FFmpeg core upstream deleted when it moved the demuxer into
+    # plx_play_feed. It lived in upstream's media/src/ff.rs (+1364 lines) until it moved here; the
+    # upstream file now keeps only a glob re-export and a boot shim.
+    "nuvio-ffmpeg",
 ]
 resolver = "2"
 

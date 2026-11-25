@@ -29,7 +29,7 @@ crate-type = ["rlib"]
 # behaviour here, not plumbing: the quality-override, track-name, playurl and forced-route triggers
 # read their files through `plx_base::devtrig`, which is compile-time `None` without it, and
 # 130-odd `cfg`s select the dev surface.
-devtriggers = ["plx_play_feed/devtriggers", "plx_media_codecs/devtriggers", "plx_base/devtriggers", "plx_machine/devtriggers", "plx_net/devtriggers", "plx_os/devtriggers", "plx_plex/devtriggers", "plx_telemetry/devtriggers", "plx_data/devtriggers"]
+devtriggers = ["plx_play_feed/devtriggers", "plx_media_codecs/devtriggers", "plx_base/devtriggers", "plx_machine/devtriggers", "plx_net/devtriggers", "plx_os/devtriggers", "plx_plex/devtriggers", "plx_telemetry/devtriggers", "plx_data/devtriggers", "plx_nuvio_ffmpeg/devtriggers"]
 # `plx_play_feed::ffi_host` (the simulator's `VideoSink`, which lives in `plx_play_feed`) replaces the
 # platform webOS port's native sink (Starfish/ACB) under the media tests' Feed; a simulator build names
 # the application's `play-feed` too (ci/test_sim_backend.py). The simulator's decoded picture (its
@@ -48,6 +48,9 @@ test-support = ["plx_media_codecs/test-support", "plx_base/test-support", "plx_m
 [dependencies]
 plx_playback_contract = { path = "../playback-contract" }
 plx_media_codecs = { path = "../media-codecs" }
+# Fork Rofocale11: the retained low-level FFmpeg core moved out of this crate's ff.rs so an
+# upstream merge cannot drag 1300 fork lines into every edit of that file (docs/nuvio/MERGE-AUDIT.md).
+plx_nuvio_ffmpeg = { path = "../nuvio-ffmpeg" }
 plx_base = { path = "../base" }
 plx_machine = { path = "../machine" }
 plx_os = { path = "../os" }

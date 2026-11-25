@@ -66,7 +66,9 @@ TOOLCHAIN = pinned()  # the repo's one toolchain
 # symlinked into the throwaway workspace or cargo cannot resolve the manifest's `plx_nuvio_probe` edge.
 # `nuvio-dash` is the trailer demux crate plx_play_feed depends on; the same rule applies to its path
 # dependency, or the throwaway resolve fails on a missing manifest.
-WORKSPACE_FILES = (".cargo", "Cargo.lock", "build.rs", "build_support", "src", "storage", "base", "machine", "net", "os", "gfx", "ui", "plex", "telemetry", "data", "session", "media", "playback-contract", "play-uri", "play-feed", "media-codecs", "appkit", "screens", "shell-sdl", "platform-webos", "platform-desktop", "owp", "stremio", "pmsshim", "nuvio-probe", "nuvio-store", "nuvio-dash")
+# Fork Rofocale11: `nuvio-ffmpeg` holds the low-level FFmpeg core that moved out of upstream's
+# media/src/ff.rs. plx_media path-depends on it, so the throwaway workspace must symlink it too.
+WORKSPACE_FILES = (".cargo", "Cargo.lock", "build.rs", "build_support", "src", "storage", "base", "machine", "net", "os", "gfx", "ui", "plex", "telemetry", "data", "session", "media", "playback-contract", "play-uri", "play-feed", "media-codecs", "appkit", "screens", "shell-sdl", "platform-webos", "platform-desktop", "owp", "stremio", "pmsshim", "nuvio-probe", "nuvio-store", "nuvio-dash", "nuvio-ffmpeg")
 
 
 def offences(unit_graph=None, metadata=None, crate=CRATE):

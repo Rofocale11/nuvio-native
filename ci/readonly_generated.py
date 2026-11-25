@@ -15,8 +15,9 @@ from readonly_dependencies import _local_sha, _sha, _json, _manifest_paths, _con
 # Fork Rofocale11: re-derived for the fork workspace after adding the Nuvio crates; the
 # production sources and enum grammar are unchanged, only the pinned manifests/lock hashes moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'platform-generated-enums.json'
-# Fork Rofocale11: re-pinned for the build-script brand hook; enum producer and grammar unchanged.
-CERTIFICATE_SHA256 = '3f6c60811b4d0a6fbe97d5b1301b09a5ebc7048b4cdebfd411578f9880f574e6'
+# Fork Rofocale11: re-pinned for the build-script brand hook and again for the plx_nuvio_ffmpeg
+# workspace member; enum producer and grammar unchanged, only the pinned manifest/lock hashes moved.
+CERTIFICATE_SHA256 = '795150a2377dd6b0f2fec09879d1b0e410351b09d6efaeb7269009bd1587f9fa'
 SOURCES = ['os/Cargo.toml', 'os/src/lib.rs', 'os/src/i18n/mod.rs',
            'os/build.rs', 'os/build_support/catalog.rs', 'build_support/install_identities.rs',
            'machine/src/lib.rs', 'machine/src/machine.rs']

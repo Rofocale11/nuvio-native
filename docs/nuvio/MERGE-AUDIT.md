@@ -78,7 +78,7 @@ Debian `control` file.
 | `rust-modules/Cargo.toml` | New `plx_shell_sdl` member | `plx_stremio` + `plx_pmsshim` — addon backend and loopback shim feed the player's probed decision. |
 | `rust-modules/Cargo.lock` (no comments) | Upstream's resolved versions, `indexmap`, `plx_shell_sdl` | Fork's `image-webp`, `plx_stremio`, `plx_pmsshim` entries — same local-crate reason. |
 | `rust-modules/data/src/metadata.rs` | Upstream's `fetch_playing_item_choosing`, `PlayedVersion`, new test modules | Fork's `nuvio_rating_preference_tests` — IMDb/RT scores live on the cached detail and the canonical session picks the provider. **Dropped:** the fork's `playing_item_from_metadata` body, which depended on removed APIs. |
-| `rust-modules/media/src/ff.rs` | Upstream's move of the demuxer into `plx_play_feed` | Whole fork probe/binding core including `ff::probe` — third-party addon streams are probed with bundled libavformat and unsupported media is refused, not loaded with guessed codecs. **Follow-up:** old imports (`crate::aq::AuQueue`, `crate::player::threads::SendPtr`) need porting. |
+| `rust-modules/media/src/ff.rs` | Upstream's move of the demuxer into `plx_play_feed` | The fork's retained low-level FFmpeg core now lives in `plx_nuvio_ffmpeg` (see "Extract the retained FFmpeg core" below); this upstream file keeps only a glob re-export and a boot shim. The probe itself is `plx_nuvio_probe`. |
 | `rust-modules/media/src/route/plan.rs` | Git's non-conflicted changes | Whole fork `build_stream` — shim `/decision` first, probed Media replaces guessed codecs, `Quality::Original` because the shim has no transcoder. **Follow-up:** port to upstream's new metadata/playqueue APIs. |
 | `rust-modules/net/src/net.rs` | `RedirectFloor` doc rewrite | `diagnostic_peer()` — reduces addon/debrid URLs to scheme+authority before logging so per-request tokens and credentials are never written. |
 | `rust-modules/plex/src/plex/session.rs` | Flattened `Preferences` refactor, `plx_os` rename, new enums/tests | `rating_source` across struct/defaults/constructors/accessors and its DB8 round-trip test — upstream has no rating-provider key, so a pick would be lost on reload. |
@@ -133,6 +133,9 @@ All of these carry `// Fork Rofocale11:` comments inline. Re-check each on every
   "no DTS/TrueHD conversion" limitation.
 
 ## Post-merge port to upstream APIs (plx_media)
+
+Superseded for `ff.rs` by "Extract the retained FFmpeg core" at the end of this file: the low-level
+core described below is no longer in that upstream file. The `ff_subs.rs` note still stands.
 
 The fork's retained FFmpeg core needed adapting to the APIs upstream moved:
 - `media/src/ff.rs`: unconditional std/FFI imports (upstream had them `#[cfg(test)]`
@@ -189,9 +192,10 @@ All adaptations carry `// Fork Rofocale11:` comments.
   `PLXNATIVE_APP_DIR=$(pwd)/pkg PLXNATIVE_RUNTIME_DIR=/tmp/plxnative-sim` launch,
   the sim logs `ff: bound avutil/avcodec/avformat/swscale -> ...-host.so.*` and
   lands 336 items / 28 shelves from 11 addons, with no redirect refusals.
-  The fork's probe has its OWN ABI table in `media/src/ff.rs`; it needed the same
-  host candidate names, or `ff::probe` refused every addon stream even though
-  `media-codecs` reported FFmpeg bound. A direct sim launch also needs the
+  The fork's retained low-level table now carries its own host candidate names in
+  `nuvio-ffmpeg/src/lib.rs` (the probe uses `plx_media_codecs::ffi` directly), or
+  the ABI probe refused every addon stream even though `media-codecs` reported
+  FFmpeg bound. A direct sim launch also needs the
   `/tmp/plxnative-sim/plxnative-token` dev-token trigger, otherwise it boots the
   plex.tv sign-in flow instead of registering the Nuvio shim.
   `ci/stage-host-ffmpeg.sh` remains macOS-only (`.dylib` + `install_name_tool`),
@@ -260,9 +264,9 @@ the same `plx_net` byte-range source with the same `credential_transport_allowed
 policy as `media::curlio::PlexAuthorization`, bound locally to avoid a dependency
 from the probe back up into the media layer.
 
-**Not in this change:** the older duplicate ABI table still in `ff.rs` is also used
-by the retained `Venc` capture path and by the media FFmpeg tests. Removing it means
-migrating those callers to `plx_media_codecs::ffi` and is a separate, larger change.
+**Superseded:** the older duplicate ABI table is no longer in `ff.rs`. It is now in
+`plx_nuvio_ffmpeg`, where the retained `Venc` capture path and the media FFmpeg tests
+reach it through one glob re-export; see "Extract the retained FFmpeg core" below.
 
 Gates: `cargo check --workspace --all-features` clean; `plx_nuvio_probe` unit tests
 3/3; `ci/check-module-layers.py` green (new `[nuvio_probe]` layer, mounted via
@@ -864,7 +868,7 @@ has no transcoder. No encoder code is involved.
   declares `opus_decoder_deps="swresample"`; without it configure silently sets
   `CONFIG_OPUS_DECODER=0` despite `--enable-decoder=opus` and `avcodec_find_decoder` refuses the
   track. The rebuilt library carries `libavcodec/opus/dec.o`.
-- `media-codecs/src/ffi.rs` and `media/src/ff.rs` — a `swresample` dynlib table and one extra item in
+- `media-codecs/src/ffi.rs` and `media/src/ff.rs` (the latter's table now in `nuvio-ffmpeg/src/lib.rs`) — a `swresample` dynlib table and one extra item in
   the dependency-ordered `load_libraries()` loop, before `avcodec`. The new `libavcodec` carries
   `NEEDED libswresample-plx.so.7`; without opening it first with RTLD_GLOBAL, `dlopen(RTLD_NOW)`
   failed and the existing loader reported it misleadingly as "avcodec is MISSING from the app
@@ -964,8 +968,8 @@ or deploy was made for this change.
 
 **Ship libswresample with the Opus decoder (2026-11-24, follow-up).** `ci/build-ffmpeg.sh` enables
 the swresample dependency of FFmpeg 9's native Opus decoder, and `media-codecs/src/ffi.rs` /
-`media/src/ff.rs` open `libswresample-plx.so.7` with `RTLD_GLOBAL` before `libavcodec`, but the
-Makefile's `FFMPEG_SONAMES` never staged that library — so a clean IPK carried a `libavcodec` with
+`media/src/ff.rs` (now `nuvio-ffmpeg/src/lib.rs`) open `libswresample-plx.so.7` with `RTLD_GLOBAL`
+before `libavcodec`, but the Makefile's `FFMPEG_SONAMES` never staged that library — so a clean IPK carried a `libavcodec` with
 `NEEDED libswresample-plx.so.7` and no such file. A GitHub-built package would therefore have had
 the Opus build flag and the loader entry but no working decoder. Upstream edits, all marked:
 `Makefile` adds the SONAME to `FFMPEG_SONAMES`, to the deploy-time FFmpeg retirement glob and to
@@ -1627,3 +1631,63 @@ marker is required; this section is the durable record.
   design in `docs/trailer-ux-plan.md` §2.1 remains unimplemented.
 - `rust-modules/pmsshim/src/shim_pms.rs` (fork-owned) and `docs/nuvio/TRAILERS.md` — the comments
   and table rows were taken to 1 s during the trial and returned to 2 s with the constant.
+
+## Extract the retained FFmpeg core into `plx_nuvio_ffmpeg` (Fork Rofocale11, 2026-11-25)
+
+`upstream/main` at `0a1edc61` has an 88-line `rust-modules/media/src/ff.rs` (a facade over
+`plx_media_codecs::ffi` plus test-module declarations). The fork's copy had grown to 1,442 lines:
+upstream deleted the low-level core when it moved the physical demuxer into `plx_play_feed`, and
+Nuvio kept it for the dev MPEG1/TS encoder, the verified struct offsets, the Dolby Vision side-data
+reader and the ABI boot/ffprobe gates. Every upstream edit of that file was therefore a conflict
+over ~1,300 fork lines. The extraction completes the move that `ci/module-layers.ini` already
+claimed for the probe.
+
+- **New fork-owned crate** `rust-modules/nuvio-ffmpeg` (`plx_nuvio_ffmpeg`), mounted as the
+  `nuvio_ffmpeg` layer (`uses = base media_codecs`, both downward): the runtime-bound FFmpeg symbol
+  table (now `pub`, so media's `use super::*` tests still reach the wrappers), pointer-width offset
+  constants, `parse_dovi_conf`/`dovi_conf`/track-name and stream accessors, the `Venc` capture
+  encoder, `boot`'s library/ABI gate and the `/tmp/plxnative-ffprobe` smoke test. It keeps its own
+  `dynlib!` table because `plx_media_codecs::ffi`'s wrappers are `pub(crate)` and cannot be named
+  from another crate (`base/src/dynlib.rs` documents the two forms).
+- **`rust-modules/media/src/ff.rs` (upstream-owned)** shrinks to 129 lines; its fork delta against
+  `0a1edc61` is now **+50/−9** (was **+1364/−10**). The remaining delta is one glob re-export
+  (`pub use plx_nuvio_ffmpeg::*;`), a `pub fn boot()` shim that keeps the
+  only upward call (`crate::curlio::boot()`) in media, test-only C/atomic imports, and marked
+  comments. The upstream `pub use plx_media_codecs::{SpeedDecoder, Venc}` line stays partially:
+  `SpeedDecoder` is kept, `Venc` comes from the fork glob as before. No upstream test module was
+  rewritten; all 15 `#[path]`/`use super::*` modules are byte-identical to the baseline.
+- **Dead code removed rather than moved**: media's copy of `begin_ass_sources` (no callers; the live
+  one is `plx_play_feed::ff::begin_ass_sources` and needed `crate::player` internals) and the
+  unused `SEEK_*` constants. `set_feed_audio`, `pushed_any` and `majors` remain in the fork crate
+  because they are part of the retained ABI surface and cost nothing there.
+- **Wiring**: workspace member, `plx_media` dependency, `plx_nuvio_ffmpeg/devtriggers` on the media
+  and root feature lists, and a `[nuvio_ffmpeg]` layer with a `nuvio_ffmpeg` edge from `[media]`.
+  `Cargo.lock` (no comment syntax) gained the `plx_nuvio_ffmpeg` package entry.
+- `ci/list-caps.ini` — re-keyed the four ASS attachment caps to
+  `[nuvio-ffmpeg/src/lib.rs::…]` and dropped the `media/src/ff.rs::begin_ass_sources` section: the
+  media copy had no caller and was removed, while the live demux-side site in `play-feed/src/ff.rs`
+  was never a declared cap site. The four `class = work` entries and their reasons are unchanged.
+- `ci/test_no_host_staticlib.py` (upstream-owned, marked) and `Makefile` — a new workspace member
+  must be added to the mutation harness's `WORKSPACE_FILES` symlink list and to `RUST_INPUTS`, or the
+  throwaway workspace cannot resolve `plx_media`'s new path dependency and `make check` fails four
+  staticlib tests with "failed to read .../nuvio-ffmpeg/Cargo.toml". This is a hardcoded-list cost
+  of adding a crate, not a dirty-tree artefact: committing would not have fixed it. Focused checks
+  after the fix: `ci/check-rust-inputs.py` ok (25 path crates), `ci/test_no_host_staticlib.py` 13/13.
+- **Proof certificates (JSON, no comment syntax)** — re-derived
+  `ci/proofs/serde-json-immutable.json` from the checksum-verified serde_json 1.0.154 archive and
+  `ci/proofs/platform-generated-enums.json` from the reviewed local producers, and re-pinned
+  `CERTIFICATE_SHA256` in `ci/readonly_dependencies.py` and `ci/readonly_generated.py`. The first
+  regeneration was needed because both certificates hash the workspace manifests and lockfile, which
+  gained the new crate; the five `make check` failures (`check-machine-shape`, its test,
+  `test_transition_arguments` and both readonly tests) were all downstream of the stale serde-json
+  proof, not defects in `SessionMachine` — the same five scripts pass on a pristine HEAD worktree.
+  The generated proof was rewritten in the original key order/indent to keep the diff to four hash
+  lines. Review: enum grammar, source list and crate source are unchanged; only manifest/lock hashes
+  and the new `nuvio-ffmpeg/Cargo.toml` entry moved.
+- The earlier prose in this file that placed the duplicate ABI table or `ff::probe` in `ff.rs`
+  described the pre-extraction tree and has been corrected above.
+
+Gates on this tree: `plx_media` 2182 passed / 105 ignored; `plx_pmsshim` 167 passed / 2 ignored;
+`make check-nodef` exit 0; ARM `make -j10` exit 0; `ci/check-module-layers.py` green;
+`ci/check-deps.sh` all gates green; `ci/check-list-caps.py` 424 sites classed;
+`git diff --check` clean.
