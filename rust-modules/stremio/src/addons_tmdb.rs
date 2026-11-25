@@ -2,7 +2,7 @@
 //! trailers, person pages, franchise shelves). This is a Nuvio-only enrichment source: upstream
 //! PlxNative talks to Plex, not TMDB, so there is no equivalent module to extend.
 //!
-//! Fork Rofocale11: added as a fork-owned metadata client. The shim needs one HTTP request per
+//! added as a fork-owned metadata client. The shim needs one HTTP request per
 //! detail row (`append_to_response=credits,recommendations,images,videos`) and a 15-minute cache,
 //! so this module owns both rather than teaching the addon protocol layer about TMDB.
 
@@ -26,7 +26,7 @@ fn shared_cache() -> Arc<ResponseCache> {
 
 /// One in-flight fetch per cache key. A detail prefetch and the click it warmed both miss the
 /// cache for the same title; the second must wait for the download already running, not start a
-/// second one. Fork Rofocale11: upstream's `plx_base::flight` does not exist in this fork, so this
+/// second one. upstream's `plx_base::flight` does not exist in this fork, so this
 /// is a small local Condvar-based single-flight scoped to this module's cache keys.
 struct Flight {
     done: Mutex<bool>,
@@ -78,7 +78,7 @@ pub struct TmdbCast {
 
 /// One crew/cast row of a person's combined credits. The kind is per row (`media_type`), and the
 /// title fields follow it: `title`/`release_date` for a film, `name`/`first_air_date` for a show.
-/// Fork Rofocale11: the old fork carried these so a filmography row shows the WORK's poster and
+/// the old fork carried these so a filmography row shows the WORK's poster and
 /// synopsis; the merge reduced them to the person's profile path and name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -99,7 +99,7 @@ pub struct TmdbCredit {
 }
 
 impl TmdbCredit {
-    /// Fork Rofocale11: this credit as the film it is, for the row builders that speak TmdbMovie.
+    /// this credit as the film it is, for the row builders that speak TmdbMovie.
     pub fn movie(&self) -> TmdbMovie {
         TmdbMovie {
             id: self.id,
@@ -112,7 +112,7 @@ impl TmdbCredit {
         }
     }
 
-    /// Fork Rofocale11: this credit as the show it is; TMDB spells a show's fields differently.
+    /// this credit as the show it is; TMDB spells a show's fields differently.
     pub fn show(&self) -> TmdbShow {
         TmdbShow {
             id: self.id,
@@ -126,7 +126,7 @@ impl TmdbCredit {
     }
 }
 
-/// Fork Rofocale11: a TMDB genre, used by the Library sort/filter baseline and recommendation rows.
+/// a TMDB genre, used by the Library sort/filter baseline and recommendation rows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TmdbGenre {
@@ -148,13 +148,13 @@ pub struct TmdbCollectionRef {
 pub struct TmdbMovie {
     pub id: u64,
     pub title: String,
-    /// Fork Rofocale11: a recommendation/filmography row's synopsis; the merge dropped it.
+    /// a recommendation/filmography row's synopsis; the merge dropped it.
     pub overview: Option<String>,
     pub release_date: Option<String>,
     pub runtime: Option<u32>,
     pub backdrop_path: Option<String>,
     pub poster_path: Option<String>,
-    /// Fork Rofocale11: Genre tags on a TMDB-only recommendation row.
+    /// Genre tags on a TMDB-only recommendation row.
     pub genres: Vec<TmdbGenre>,
     pub belongs_to_collection: Option<TmdbCollectionRef>,
 }
@@ -176,7 +176,7 @@ pub struct TmdbCollection {
 pub struct TmdbShow {
     pub id: u64,
     pub name: String,
-    /// Fork Rofocale11: restoration of the old fork's show shape.
+    /// restoration of the old fork's show shape.
     pub overview: Option<String>,
     pub first_air_date: Option<String>,
     pub backdrop_path: Option<String>,
@@ -187,7 +187,7 @@ pub struct TmdbShow {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TmdbPerson {
-    /// Fork Rofocale11: TMDB's person id, restored from the old fork's type.
+    /// TMDB's person id, restored from the old fork's type.
     pub id: u64,
     pub name: String,
     pub biography: String,
@@ -253,7 +253,7 @@ pub struct TmdbShowRecommendations {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TmdbMovieDetails {
-    /// Fork Rofocale11: the old fork's nested shape. `TmdbMovie` already carries the About text,
+    /// the old fork's nested shape. `TmdbMovie` already carries the About text,
     /// Genre tags and collection reference the flattened version duplicated.
     #[serde(flatten)]
     pub movie: TmdbMovie,
@@ -266,7 +266,7 @@ pub struct TmdbMovieDetails {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TmdbShowDetails {
-    /// Fork Rofocale11: the old fork's nested shape, matching `TmdbMovieDetails`.
+    /// the old fork's nested shape, matching `TmdbMovieDetails`.
     #[serde(flatten)]
     pub show: TmdbShow,
     pub credits: TmdbCredits,
@@ -337,7 +337,7 @@ fn direct_tmdb_id(id: &str) -> Option<u64> {
 // ---- client ----------------------------------------------------------------------------------
 
 impl TmdbClient {
-    /// Fork Rofocale11: the old fork's constructor — `None` when no key is configured, so a caller
+    /// the old fork's constructor — `None` when no key is configured, so a caller
     /// can skip the lookup entirely instead of checking `configured()`.
     pub fn from_env() -> Option<Self> {
         let client = Self::new();
@@ -428,7 +428,7 @@ impl TmdbClient {
             return Ok(Some(parsed));
         }
         if !id.starts_with("tt") {
-            // Fork Rofocale11: the old fork fell back to the movie lookup for any non-IMDb id —
+            // the old fork fell back to the movie lookup for any non-IMDb id —
             // a bare numeric id or `tmdb:<n>` is a series just as much as a film.
             return self.movie_id(&id);
         }
@@ -436,32 +436,32 @@ impl TmdbClient {
         Ok(tv_from_find(&found))
     }
 
-    /// Fork Rofocale11: the old fork's separate cast call, retained for callers that do not need a
+    /// the old fork's separate cast call, retained for callers that do not need a
     /// full details answer.
     pub fn credits(&self, movie_id: u64) -> Result<Vec<TmdbCast>> {
         let response: TmdbCredits = self.get(&format!("/movie/{movie_id}/credits"))?;
         Ok(response.cast)
     }
 
-    /// Fork Rofocale11: cast-only filmography, as the old `/library/people/{id}/media` used it.
+    /// cast-only filmography, as the old `/library/people/{id}/media` used it.
     pub fn person_credits(&self, person_id: u64) -> Result<Vec<TmdbCredit>> {
         let response: TmdbCombinedCredits = self.get(&format!("/person/{person_id}/combined_credits"))?;
         Ok(response.cast)
     }
 
-    /// Fork Rofocale11: the old alias kept for callers that spoke the generic name.
+    /// the old alias kept for callers that spoke the generic name.
     pub fn external_ids(&self, movie_id: u64) -> Result<Option<String>> {
         self.movie_external_ids(movie_id)
     }
 
-    /// Fork Rofocale11: the old standalone trailer-list call. Current details fold `videos` into
+    /// the old standalone trailer-list call. Current details fold `videos` into
     /// their `append_to_response`, so this is a cached single-path helper, not a new request shape.
     pub fn videos(&self, movie_id: u64) -> Result<Vec<TmdbVideo>> {
         let response: TmdbVideos = self.get(&format!("/movie/{movie_id}/videos"))?;
         Ok(response.results)
     }
 
-    /// Fork Rofocale11: the old standalone recommendations call.
+    /// the old standalone recommendations call.
     pub fn recommendations(&self, movie_id: u64) -> Result<Vec<TmdbMovie>> {
         let response: TmdbRecommendations = self.get(&format!("/movie/{movie_id}/recommendations"))?;
         Ok(response.results)

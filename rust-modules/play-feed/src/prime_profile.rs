@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the old fork's four-profile, rate-gated startup prime.
+//! the old fork's four-profile, rate-gated startup prime.
 //!
 //! The old fork held the first Play until the stream had both enough playable media AND a pipe
 //! filling faster than playback consumes it. A fixed depth alone is not proof: a 3 s buffer
@@ -129,7 +129,7 @@ pub(crate) fn prime_gate_ready(profile: PrimeProfile, f: PrimeFacts) -> bool {
         return f.video_ns > 0;
     }
 
-    // Fork Rofocale11: the deeper floors are justified by the rate proof. Where there is no rate
+    // the deeper floors are justified by the rate proof. Where there is no rate
     // controller — segmented HLS keeps its own runway certificate, and rigs have no demux tail —
     // the accepted-data floors are the start decision, exactly as before this port. Applying a
     // film's 3 s floor to a reload whose seek target was already consumed stalls the scrub.

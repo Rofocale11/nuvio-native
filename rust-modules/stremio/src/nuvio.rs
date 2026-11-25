@@ -457,7 +457,7 @@ pub fn addon_set_fingerprint(addons: &[crate::model::Addon]) -> String {
     }).collect())
 }
 
-/// Fork Rofocale11: a cheap boot-time probe for account-side addon changes — ONE REST read of the
+/// a cheap boot-time probe for account-side addon changes — ONE REST read of the
 /// profile's addon rows, no manifest fetches. A change is then handled by the existing
 /// [`addons`] path, which does fetch manifests. A fault is not a change: the caller must treat
 /// `Err` as "keep the persisted set", never as "the account is now empty".
@@ -694,7 +694,7 @@ fn library_write(profile: &str, meta: &crate::model::Meta, saved: bool) -> Resul
     }
 }
 
-// Fork Rofocale11: account watch progress. Nuvio's own clients write these rows through the same
+// account watch progress. Nuvio's own clients write these rows through the same
 // Supabase backend as My List; the shim mirrors `/:timeline` into it and pulls other devices' rows
 // back. These are the household's viewing record — never log a raw response.
 /// One title's resume point. `last_watched` and the positions are unix milliseconds / durations in

@@ -95,7 +95,7 @@ pub fn request_status(
         hdrs.push("Content-Type: application/json".to_string());
     }
     hdrs.extend(headers.iter().cloned());
-    // Fork Rofocale11: upstream's net guard refuses a redirect-following request that carries ANY
+    // upstream's net guard refuses a redirect-following request that carries ANY
     // caller header, because libcurl re-sends custom headers to the Location target (an
     // `Authorization`/`apikey` line would reach that host). This door predates that guard and adds
     // `Accept`/`Content-Type` to every addon GET. Benign addon calls therefore use the same

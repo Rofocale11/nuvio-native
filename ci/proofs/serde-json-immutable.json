@@ -383,9 +383,9 @@
       "media/Cargo.toml": "0f548367da129ce3b7e3e7a9bf85a446025b5908a7b1c96209809504e3fc0c19",
       "net/Cargo.toml": "bfdb3a08200642eeeafc9762733718c407529f26dce8a7b90665bc77ac928171",
       "nuvio-dash/Cargo.toml": "5858a8709ee28f9ec3cf574944c03788f0b258a054e6708e44ebf3aee1519fd6",
-      "nuvio-ffmpeg/Cargo.toml": "487fd96911d05c1c70737900547ebbf84160825363fb30763cfbe25144ad75ad",
-      "nuvio-probe/Cargo.toml": "fdd2a8aaddd6caa018caef411a8fff5df5b1b8a0628e0953050de37a14b53178",
-      "nuvio-store/Cargo.toml": "801d6eae4f386f544c7885ceb874e858bd2ea3f15fbc145d7d7a602f1caa93e0",
+      "nuvio-ffmpeg/Cargo.toml": "2e8225a33a3d79815acfcd95a44a82ec56bf6e45f75bb3f131a3da56f092d1da",
+      "nuvio-probe/Cargo.toml": "4683ea4564ad32e1fa992629728da44dc167a4cbb23eecc941b1e7fdbe383d65",
+      "nuvio-store/Cargo.toml": "f74917f3e7887c29421eeba622cfa8a6dbac9654bf4c214d010706598ce1a7db",
       "os/Cargo.toml": "e2169633b235f37f5c85998bcc39347a5aa0c4da0b1144805138418a8dfd9eb9",
       "owp/Cargo.toml": "2c1354bce16b34f0d006fc04cd4c8eb22ef91f00063b53a1113e32f475ecae33",
       "platform-desktop/Cargo.toml": "d8b6237952dda5e052d16f10215cacb2ea6b581e094a9db2eada59b92aea4c58",
@@ -394,7 +394,7 @@
       "play-uri/Cargo.toml": "48528dd164a910a32f5396ab8f5bc4c6c13f6fd5f1136ee080f8424fe663280b",
       "playback-contract/Cargo.toml": "bde335ea645552d4f7481b007b80204ecb5bb592caaca22af58a8361cd050dcf",
       "plex/Cargo.toml": "2646e980b06b4900c144edd175ef81edbe64d6f7e49689aa17e64937b1565160",
-      "pmsshim/Cargo.toml": "acd94d92430b36898c4a7a4b5d9dc14ac770a96cc064124ec8dd611e3b2f1365",
+      "pmsshim/Cargo.toml": "49267c30480c0d8111c9fecea77afb512f6853abd0da3216fecedeca7c64e0e1",
       "screens/Cargo.toml": "cd42484a49fac394244ebc7b81f30f7e4f9a31cdf7bc1ace5c3fae21afd6d511",
       "session/Cargo.toml": "ecb49fc9f44177be6de36715ad70845b8929799cdbeb5ce9d6939be741704db0",
       "shell-sdl/Cargo.toml": "9bccdb0abdb2ce9afdc030af9454117ed53884f9b50e1ee35a21bcfe6459e9a1",
@@ -407,12 +407,12 @@
       "Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -422,12 +422,12 @@
       "data/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -437,12 +437,12 @@
       "media/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -452,21 +452,21 @@
       "net/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
             ],
-            "optional": true,
-            "version": "1"
+            "optional": true
           },
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -476,12 +476,12 @@
       "os/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           },
           {
             "version": "1"
@@ -494,12 +494,12 @@
       "owp/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -509,12 +509,12 @@
       "platform-webos/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -524,12 +524,12 @@
       "play-feed/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -539,12 +539,12 @@
       "play-uri/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -554,12 +554,12 @@
       "plex/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -569,27 +569,27 @@
       "pmsshim/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
         "lib": "pmsshim/src/lib.rs",
-        "lib_sha256": "67f00098d0ae73bfc492ae96ed9ea5d26fd01c0bb4f1b3921a0e88fb48bc882c"
+        "lib_sha256": "d8f2ad39039bb068b69675831883e97c5af73a3ad265d30ebebbe06fe337426f"
       },
       "screens/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -599,12 +599,12 @@
       "session/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -614,12 +614,12 @@
       "storage/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           },
           {
             "version": "1"
@@ -632,27 +632,27 @@
       "stremio/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
         "lib": "stremio/src/lib.rs",
-        "lib_sha256": "5e44876d430969738d3f1f05ce10f82f5dc1c6b3e9a854c096aed51e77f13dfe"
+        "lib_sha256": "15d1bd780f6294d36727de3bbacba48ef74364b99e5051849bfe8f8d49fa5d5b"
       },
       "telemetry/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",
@@ -662,12 +662,12 @@
       "ui/Cargo.toml": {
         "dependency": [
           {
+            "version": "1",
             "default-features": false,
             "features": [
               "alloc",
               "std"
-            ],
-            "version": "1"
+            ]
           }
         ],
         "edition": "2021",

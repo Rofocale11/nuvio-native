@@ -38,7 +38,7 @@ if [ ! -f "$HOST_SO" ]; then
     echo "host-engine-check: building the host engine and its seeder"
 fi
 
-# Fork Rofocale11: this host's system OpenSSL is 4.x, whose opaque ASN1 structs do not compile
+# this host's system OpenSSL is 4.x, whose opaque ASN1 structs do not compile
 # with libtorrent 2.0.12. Build the same pinned 1.1.1w statically for the host from the archive
 # ci/deps.py already cached for the ARM engine build, and force CMake to use it.
 HOST_OSSL="$OUT/openssl-prefix"
@@ -176,5 +176,5 @@ PATH="$HOME/.cargo/bin:$PATH" \
 cleanup_seed
 trap - EXIT
 
-# Fork Rofocale11: the upstream transport test this script also ran in the old fork does not
+# the upstream transport test this script also ran in the old fork does not
 # exist in this tree; the two engine checks above are the ones that exercise the ported stack.

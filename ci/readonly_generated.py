@@ -15,9 +15,10 @@ from readonly_dependencies import _local_sha, _sha, _json, _manifest_paths, _con
 # Fork Rofocale11: re-derived for the fork workspace after adding the Nuvio crates; the
 # production sources and enum grammar are unchanged, only the pinned manifests/lock hashes moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'platform-generated-enums.json'
-# Fork Rofocale11: re-pinned for the build-script brand hook and again for the plx_nuvio_ffmpeg
-# workspace member; enum producer and grammar unchanged, only the pinned manifest/lock hashes moved.
-CERTIFICATE_SHA256 = '795150a2377dd6b0f2fec09879d1b0e410351b09d6efaeb7269009bd1587f9fa'
+# Fork Rofocale11: re-pinned for the build-script brand hook, the plx_nuvio_ffmpeg member, and again
+# when the fork marker tokens were removed from the four fork-owned manifests (comment text only —
+# no crate, dependency, producer or grammar change).
+CERTIFICATE_SHA256 = '3009f53e3b6d78491c078f3cffe0d178a9f9c8dc590fc5ca54d238bcf47f0609'
 SOURCES = ['os/Cargo.toml', 'os/src/lib.rs', 'os/src/i18n/mod.rs',
            'os/build.rs', 'os/build_support/catalog.rs', 'build_support/install_identities.rs',
            'machine/src/lib.rs', 'machine/src/machine.rs']
@@ -78,7 +79,8 @@ def produce_certificate(root):
                        'PR1385: Canon byte-feed loops inlined (impl Canon and canon_tests only, FNV-1a byte stream unchanged); newtype macro and its ten u32 invocations unchanged',
                        'UI FIFO on PR1385: AppCommandId(u64), AppCommandOutcome and generic AppCommand<F,R> appended after unchanged doc-only newtype producer and its ten u32 invocations; none certified as generated declarations',
                        'Owned runtime: HoldHintRead/Event, ModalRead, PageImageRead, Cx/Fx projections, AppEffect partition and PresentationAuthority/Receipt added outside the unchanged doc-only newtype macro and ten u32 invocations; Arc-bearing receipts and effect contracts are not certified; canonical include namespace unchanged',
-                       'Fork Rofocale11: the build script passes a fork-owned brand transform into catalog::build_with before compile(); the enum producer, include namespace and catalogue grammar are unchanged'],
+                       'Fork Rofocale11: the build script passes a fork-owned brand transform into catalog::build_with before compile(); the enum producer, include namespace and catalogue grammar are unchanged',
+                       'Fork Rofocale11: marker tokens removed from fork-owned workspace manifests; comment text only, no crate, dependency, producer or grammar change'],
             'assumptions': __doc__.splitlines()}
 
 

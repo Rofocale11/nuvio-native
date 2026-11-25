@@ -74,7 +74,7 @@ fn session_from_json(v: &Value) -> Option<plx_stremio::nuvio::Session> {
     })
 }
 
-/// Fork Rofocale11: the whole session document (token, profile, preferences) is one row in the
+/// the whole session document (token, profile, preferences) is one row in the
 /// single redb file, never a second JSON file.
 fn read_session_doc() -> Option<Value> {
     plx_nuvio_store::get()?
@@ -152,7 +152,7 @@ impl Account {
         self.session.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
-    /// Fork Rofocale11: compare the signed-in account's addon rows with the set we booted from.
+    /// compare the signed-in account's addon rows with the set we booted from.
     /// One cheap REST read, NO manifest fetches; `None` when signed out or when the backend could
     /// not be reached — a fault is not a change and must not clear a warm cache. The caller
     /// compares this with the fingerprint written when the set was last applied.
@@ -548,7 +548,7 @@ fn activate_loaded_profile<F>(
         return;
     }
     if let Ok(addons) = addons {
-        // Fork Rofocale11: remember the ACCOUNT's addon fingerprint BEFORE local enable/disable
+        // remember the ACCOUNT's addon fingerprint BEFORE local enable/disable
         // overrides are applied. The boot probe reads the account's rows and must compare like
         // with like, or a viewer's local toggle would force a full account re-fetch every launch.
         let account_fp = plx_stremio::nuvio::addon_set_fingerprint(&addons);
@@ -610,7 +610,7 @@ mod tests {
     }
     use std::sync::atomic::AtomicU64;
 
-    /// Fork Rofocale11: the old tests gave each case its own files. The one redb store is
+    /// the old tests gave each case its own files. The one redb store is
     /// process-wide, so take the shared serial lock and clear the table under test instead.
     fn install_test_store() {
         static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -800,7 +800,7 @@ fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
 }
 
 
-/// Fork Rofocale11: the session document is one row in the single redb file. The JSON shape is
+/// the session document is one row in the single redb file. The JSON shape is
 /// unchanged, so a session migrated from the old file means exactly what it did before.
 fn save_session_file(
     session: Option<&plx_stremio::nuvio::Session>,

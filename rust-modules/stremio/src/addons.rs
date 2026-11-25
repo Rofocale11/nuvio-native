@@ -417,7 +417,7 @@ pub fn builtin_opensubtitles() -> Addon {
     Addon { transport_url: OPENSUBTITLES_URL.into(), manifest: parse_manifest(v).expect("builtin manifest"), disabled: false, display_name: None }
 }
 
-/// Fork Rofocale11: the builtin OpenSubtitles v3 addon's candidates for one item. This is the
+/// the builtin OpenSubtitles v3 addon's candidates for one item. This is the
 /// player's on-demand Search read, independent of the installed addon set; `None` is a transport
 /// fault, `Some(empty)` is the provider's answer that it has nothing. The shim's subtitle search
 /// route uses it so a search still works when the user has no subtitle addon installed.

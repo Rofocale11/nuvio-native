@@ -11,7 +11,7 @@
 //! this context's clock and the playhead.
 
 use super::*;
-// Fork Rofocale11: upstream's `pts_ns` moved to plx_media_codecs::subtitle_extract, whose ABI types
+// upstream's `pts_ns` moved to plx_media_codecs::subtitle_extract, whose ABI types
 // are a distinct copy of the table this retained fork core keeps. Compute the same rebasing from
 // this module's own table instead of casting opaque packet/stream pointers across the two copies.
 unsafe fn pts_ns(pkt: *const AVPacket, st: *mut AVStream) -> i64 {
@@ -271,7 +271,7 @@ impl SubCue<'_> {
     /// Hand the cue to the render store. `ass_generation` is the `ass_source::begin` token an
     /// `Ass` cue is pushed under; the other kinds ignore it.
     pub(super) fn push(self, ass_generation: u64) {
-        // Fork Rofocale11: upstream folded the old `player::push_subtitle_cue` into the typed
+        // upstream folded the old `player::push_subtitle_cue` into the typed
         // `ass_source::push_text`/`push` and added a retention record plus a packet identity to
         // both. The fork's own cue enum has no identity field, so derive it from the packet bytes
         // exactly as `subtitle_cue::SubCue::Text` does; an unknown playhead means no cue may be

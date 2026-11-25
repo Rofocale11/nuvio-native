@@ -1,4 +1,4 @@
-//! Fork Rofocale11: permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C).
+//! permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C).
 //!
 //! Cinemeta usually sends `moviedb_id`, but not every addon does. The `/find` fallback answers a
 //! question that never changes — an IMDb id names one film or one show forever — yet the old code

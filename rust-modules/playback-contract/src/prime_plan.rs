@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the route's three startup-prime facts, in a neutral contract type.
+//! the route's three startup-prime facts, in a neutral contract type.
 //!
 //! The old fork's four-profile gate needs to know, at the moment the physical Load is prepared,
 //! whether this is a trailer preview, whether there is an unpresented resume target, and whether

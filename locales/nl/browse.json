@@ -273,14 +273,5 @@
   "browse.clock.key_changed": "De sleutel van je server is gewijzigd. Verbind de tv één keer met internet zodat de app hem opnieuw kan controleren.",
   "browse.detail.mark_episode_watched": "Aflevering markeren als bekeken",
   "browse.detail.mark_episode_unwatched": "Aflevering markeren als niet bekeken",
-  "browse.detail.minutes_left": "Nog {minutes} min",
-  "browse.streams.loading": "Finding streams…",
-  "browse.streams.empty": "No playable streams found.",
-  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
-  "browse.streams.other": "Other sources",
-  "browse.list.add": "Add to My List",
-  "browse.list.remove": "Remove from My List",
-  "browse.list.saving": "Syncing My List…",
-  "browse.list.retry": "Retry My List",
-  "browse.list.signin": "Sign in for My List"
+  "browse.detail.minutes_left": "Nog {minutes} min"
 }

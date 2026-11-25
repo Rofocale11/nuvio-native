@@ -30,10 +30,10 @@ pub mod shim_subtitle_cache;
 pub mod shim_subs;
 pub mod shim_trailer;
 pub mod shim_core;
-// Fork Rofocale11: catalog pages survive a TV relaunch for one 15-minute window, keyed by the addon
+// catalog pages survive a TV relaunch for one 15-minute window, keyed by the addon
 // fingerprint and the installed manifests' catalog declarations so a change always misses.
 pub mod shim_catalog_cache;
-// Fork Rofocale11: permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C). A new fork-owned
+// permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C). A new fork-owned
 // file keeps the only upstream edit in shim_pms.rs to visibility and four routed call sites.
 pub mod shim_tmdb_ids;
 

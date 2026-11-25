@@ -620,10 +620,10 @@ pub struct Shim {
     /// the `More Like This`/franchise data `related_hub` builds — persisted so a restart does not
     /// pay for it again.
     enrich: Arc<EnrichCache>,
-    /// Fork Rofocale11: subtitle candidates, cached in the one store. Faults stay in memory so a
+    /// subtitle candidates, cached in the one store. Faults stay in memory so a
     /// provider outage is never persisted as "no subtitles for this title".
     subtitle_cache: Arc<crate::shim_subtitle_cache::SubtitleCache>,
-    /// Fork Rofocale11: the addon set the shim saw at construction. The boot path re-applies the
+    /// the addon set the shim saw at construction. The boot path re-applies the
     /// same set and calls `addons_changed()` before the first read; clearing there threw away the
     /// meta rows the durable cache had just loaded. Only a real change may drop the caches.
     addons_fp: Mutex<Option<Vec<(String, bool)>>>,
@@ -631,7 +631,7 @@ pub struct Shim {
     /// it was warming would otherwise each ask the addon for the same title.
     meta_flight: crate::shim_flight::Flight,
     catalogs: Mutex<HashMap<(String, Option<String>), Arc<Mutex<CatalogCache>>>>,
-    /// Fork Rofocale11: durable catalog pages. Keyed by `catalog_ns`, which changes with the
+    /// durable catalog pages. Keyed by `catalog_ns`, which changes with the
     /// addon set and the manifests' catalog declarations, so a configuration change can never
     /// read a stale row; content staleness is bounded by the 15-minute TTL.
     catalog_cache: crate::shim_catalog_cache::CatalogCache,
@@ -1255,7 +1255,7 @@ fn preview_from_meta(meta: &Meta, id: &str) -> MetaPreview {
 
 /// The TMDB id lookups the resolvers need, so a test can prove an id that the meta already
 /// carries never reaches the network.
-// Fork Rofocale11: `pub(crate)` so the fork's permanent-id wrapper can implement this seam from its
+// `pub(crate)` so the fork's permanent-id wrapper can implement this seam from its
 // own file instead of growing the upstream shim with a cache that never expires.
 pub(crate) trait TmdbIdLookup {
     fn movie_id(&self, id: &str) -> plx_stremio::model::Result<Option<u64>>;
@@ -2813,7 +2813,7 @@ struct AccountIdentity {
     episode: Option<i64>,
 }
 
-/// Fork Rofocale11: the addon-set fingerprint comes from the `Backend` seam, so the real
+/// the addon-set fingerprint comes from the `Backend` seam, so the real
 /// `AddonBackend` can report its transport urls and `disabled` flags (catalog keys alone miss a
 /// catalog-less addon such as OpenSubtitles) while test backends fall back to their catalogs.
 /// Captured at `Shim::new` so the first `addons_changed()` after boot sees no change.
@@ -2821,7 +2821,7 @@ fn addons_fingerprint(backend: &dyn Backend) -> Vec<(String, bool)> {
     backend.addons_fingerprint()
 }
 
-/// Fork Rofocale11: the namespace for durable catalog pages. It changes when the addon set changes
+/// the namespace for durable catalog pages. It changes when the addon set changes
 /// (Settings or account) OR when an installed manifest adds/renames a catalog or changes its genre
 /// options, so a stale row from a different configuration can never be read. A catalog's CONTENT
 /// changing is not observable without asking the addon; the 15-minute TTL bounds that instead.
@@ -3201,7 +3201,7 @@ impl Shim {
 
     /// Drop every cache that depends on the addon set (after Settings changed it).
     pub fn addons_changed(&self) {
-        // Fork Rofocale11: the boot path applies the session's addon set and calls this before the
+        // the boot path applies the session's addon set and calls this before the
         // first request. With an unchanged fingerprint that call must NOT clear the meta rows just
         // loaded from the durable cache — that was the cold-open regression of DETAIL-LATENCY 2A.
         let fp = addons_fingerprint(self.backend.as_ref());
@@ -3214,7 +3214,7 @@ impl Shim {
         }
         self.metas.clear();
         self.enrich.clear();
-        // Fork Rofocale11: a different addon set may offer different subtitles — and a provider
+        // a different addon set may offer different subtitles — and a provider
         // that was down under the old set must be asked at once under the new one.
         self.subtitle_cache.clear();
         self.poster_fallbacks
@@ -3225,7 +3225,7 @@ impl Shim {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        // Fork Rofocale11: a new addon set (Settings OR the Nuvio account) gets a new catalog
+        // a new addon set (Settings OR the Nuvio account) gets a new catalog
         // namespace, so no durable row from the old set can be read. Dropping them also keeps the
         // 50 MiB budget from being spent on rows that can never be hit.
         *self.catalog_ns.write().unwrap_or_else(|e| e.into_inner()) = catalog_namespace(self.backend.as_ref());
@@ -3332,7 +3332,7 @@ impl Shim {
                 c.lock().unwrap_or_else(|e| e.into_inner()).at.elapsed() < CATALOG_TTL
             });
             if !fresh {
-                // Fork Rofocale11: seed from the one durable window before starting any fetch. A
+                // seed from the one durable window before starting any fetch. A
                 // relaunch with unchanged addons then answers Home from redb, not from the addons.
                 let seeded = self.catalog_cache.get(&durable_key).map(|answer| {
                     let age = Duration::from_secs(now_secs().saturating_sub(answer.at) as u64);
@@ -3546,7 +3546,7 @@ impl Shim {
         self.release();
         if !stale && (!failed || added) {
             if !failed {
-                // Fork Rofocale11: a SUCCESSFUL fill is durable for one 15-minute window, so the
+                // a SUCCESSFUL fill is durable for one 15-minute window, so the
                 // next TV launch answers from redb. A failed fill is never written, and a fill
                 // that outlived an addon change (`stale`) must not publish old rows.
                 let (rows, exhausted) = {
@@ -3627,7 +3627,7 @@ impl Shim {
         same_addon && same_name && same_size && same_height
     }
 
-    /// Fork Rofocale11: resolve a Part id's arrival index into a playable `Stream`. The id is
+    /// resolve a Part id's arrival index into a playable `Stream`. The id is
     /// minted at detail time as `rk * PART_STRIDE + arrival_index`; a resume after a restart
     /// rebuilds the slot, and a different addon arrival order can leave that index out of range —
     /// which answered 502 "stream no longer available" on an otherwise valid resume. The slot's own
@@ -4161,7 +4161,7 @@ impl Shim {
         if let Some(cached) = self.enrich.get(&type_, &id) {
             // A row written before the related shelf was kept has no recommendations in it: treat
             // it as incomplete and refresh it, so an upgraded install converges after one open.
-            // Fork Rofocale11: a row written before the raw `videos` were kept is incomplete too —
+            // a row written before the raw `videos` were kept is incomplete too —
             // refresh it once so the trailer shelf stops paying TMDB again on every later open.
             if cached.related.is_some() && cached.videos.is_some() {
                 cached.apply(row);
@@ -4179,7 +4179,7 @@ impl Shim {
             }
             return;
         };
-        // Fork Rofocale11: an IMDb id maps to one TMDB id forever; persist any `/find` answer so a
+        // an IMDb id maps to one TMDB id forever; persist any `/find` answer so a
         // later open (or a restart) never pays that call again. The moviedb_id fast path and the
         // fallback order inside the resolvers are unchanged.
         let persistent = crate::shim_tmdb_ids::PersistentIdLookup::new(&client);
@@ -4236,7 +4236,7 @@ impl Shim {
                 }
             }
         };
-        // Fork Rofocale11: keep the raw videos beside the rendered Extras. The `/extras` route
+        // keep the raw videos beside the rendered Extras. The `/extras` route
         // and the play-time picker ask for trailer ids again on every detail open; without this
         // they re-fetch the SAME TMDB details the enrichment already paid for.
         learned.videos = videos.clone();
@@ -4282,7 +4282,7 @@ impl Shim {
         // gives those a shelf. Host tests never reach YouTube/TMDB here; the
         // in-hand `trailer_candidates_from_videos` is what they exercise.
         if with_alternates || out.is_empty() {
-            // Fork Rofocale11: the enrichment row already holds the TMDB `videos` answer that
+            // the enrichment row already holds the TMDB `videos` answer that
             // `enrich_row` fetched and paid for. Use it before any network call — the shelf and the
             // play-time picker both ask for trailer ids on every detail open, and re-fetching the
             // whole details object twice was the main cost of a warm open. This read is local, so
@@ -5392,7 +5392,7 @@ impl Shim {
         let meta = self.meta("movie", &id);
         let imdb_id = meta.as_ref().and_then(|meta| meta.imdb_id.clone());
         let moviedb_id = meta.as_ref().and_then(|meta| meta.moviedb_id);
-        // Fork Rofocale11: the related shelf follows the same permanent mapping as enrich_row.
+        // the related shelf follows the same permanent mapping as enrich_row.
         let persistent = crate::shim_tmdb_ids::PersistentIdLookup::new(client);
         resolve_tmdb_movie_id(&persistent, &id, imdb_id.as_deref(), moviedb_id)
     }
@@ -5415,7 +5415,7 @@ impl Shim {
         let meta = self.meta("series", &id);
         let imdb_id = meta.as_ref().and_then(|meta| meta.imdb_id.clone());
         let moviedb_id = meta.as_ref().and_then(|meta| meta.moviedb_id);
-        // Fork Rofocale11: the related shelf follows the same permanent mapping as enrich_row.
+        // the related shelf follows the same permanent mapping as enrich_row.
         let persistent = crate::shim_tmdb_ids::PersistentIdLookup::new(client);
         resolve_tmdb_series_id(&persistent, &id, imdb_id.as_deref(), moviedb_id)
     }
@@ -6158,7 +6158,7 @@ impl Shim {
             };
             return Some((row, Some(Ok(probe)), Duration::ZERO));
         }
-        // Fork Rofocale11: the detail page is where a viewer resumes from. Open the remembered
+        // the detail page is where a viewer resumes from. Open the remembered
         // torrent here, before the Play press, so its kept swarm is already dialling when the
         // stream is requested. Best-effort and silent for a non-torrent source or a title with no
         // resume point; the engine call is on its own thread (see `warm_remembered_torrent`).
@@ -7351,7 +7351,7 @@ impl Shim {
         Response::json(&json!({"ok": self.warm_remembered_torrent(rk)}))
     }
 
-    /// Fork Rofocale11: best-effort open of the torrent remembered for a resume point, so the
+    /// best-effort open of the torrent remembered for a resume point, so the
     /// engine restores its kept swarm (metadata + saved peers) and starts dialling BEFORE Play.
     /// Shared by the `/nuvio/warm` endpoint and the detail read, which is the page a viewer
     /// resumes from. Silent for a title with no resume point, no remembered torrent, or a
@@ -7808,7 +7808,7 @@ impl Shim {
                     .get(idx)
                     .cloned()
             });
-            // Fork Rofocale11: a Part index minted before a restart can be stale when this slot
+            // a Part index minted before a restart can be stale when this slot
             // is rebuilt in a different arrival order. Fall back to the remembered source's
             // stable identity in the fresh ranking rather than answering 502 on a valid resume.
             Self::part_stream(&ranked, by_index, self.watch.get(rk).last_stream.as_ref())
@@ -8361,7 +8361,7 @@ mod enrich_cache_tests {
                 roles: Some(json!([{"name": "Cached Actor"}])),
                 extras: Some(json!({"Video": [{"title": "Cached Trailer"}]})),
                 related: Some(RelatedSource::Movies(Vec::new())),
-                // Fork Rofocale11: raw videos are part of a complete row now — the trailer shelf
+                // raw videos are part of a complete row now — the trailer shelf
                 // reads them instead of re-fetching TMDB on every detail open.
                 videos: Some(plx_stremio::addons_tmdb::TmdbVideos::default()),
                 ..Default::default()
@@ -8994,7 +8994,7 @@ mod account_progress_tests {
         assert_eq!(out[0].1.info.label, "pinned");
     }
 
-    /// Fork Rofocale11: a resume whose Part id encodes an arrival index the rebuilt slot no
+    /// a resume whose Part id encodes an arrival index the rebuilt slot no
     /// longer has used to answer 502. The remembered source's stable identity resolves it from
     /// the fresh ranking, while a stream still present at that index keeps priority (an explicit
     /// in-session pick must not be overridden by the memory).
@@ -9137,7 +9137,7 @@ fn blur_colors(seed: &str) -> serde_json::Value {
 mod poster_provider_tests {
     use super::*;
 
-    /// Fork Rofocale11: keep the old fork's poster rule intact — the provider's identity is the
+    /// keep the old fork's poster rule intact — the provider's identity is the
     /// item's own id. A `tmdb:` id keeps the addon's artwork; a `tt…` id gets a BetterPoster.
     #[test]
     fn the_items_own_id_is_the_poster_lookup_identity() {
@@ -9850,7 +9850,7 @@ mod content_generation_tests {
         assert_eq!(shim.content_generation(), before + 1);
     }
 
-    /// Fork Rofocale11: at boot the account sink re-applies the persisted set before the first
+    /// at boot the account sink re-applies the persisted set before the first
     /// request. That is not an addon change — clearing there threw away the rows `MetaCache` had
     /// just loaded from the durable store (DETAIL-LATENCY Stage 2A).
     #[test]
@@ -11142,7 +11142,7 @@ mod trailer_tests {
 
     #[test]
     fn synthetic_movie_show_extras_nonempty_from_live_fetch() {
-        // Fork Rofocale11: the one redb store is process-wide, so an unrelated test's cached meta
+        // the one redb store is process-wide, so an unrelated test's cached meta
         // for the same synthetic id must not shadow this fixture's live answer.
         plx_nuvio_store::clear_table(plx_nuvio_store::Table::MetaCache);
         plx_nuvio_store::clear_table(plx_nuvio_store::Table::EnrichCache);
@@ -11180,7 +11180,7 @@ mod trailer_tests {
         );
     }
 
-    /// Fork Rofocale11: the shelf and the play-time picker both ask for trailer ids on a warm
+    /// the shelf and the play-time picker both ask for trailer ids on a warm
     /// detail open. They must come from the raw TMDB videos the enrichment row already paid for,
     /// not from a second live `movie_details` call (that was ~1.5 s of `related_ms` per open).
     #[test]

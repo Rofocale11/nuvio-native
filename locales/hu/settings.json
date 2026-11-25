@@ -155,14 +155,6 @@
   "settings.playback.section": "Lejátszás",
   "settings.playback.title": "Videó és lejátszás",
   "settings.playback.detail": "Feliratok, HDR és lejátszás.",
-  "settings.playback.p2p": "P2P Streaming",
-  "settings.playback.p2p_enable": "Enable P2P",
-  "settings.playback.p2p_enable.detail": "Offer torrents in the Source Picker.",
-  "settings.playback.p2p_on": "On",
-  "settings.playback.p2p_off": "Off",
-  "settings.addons.section": "Addons",
-  "settings.addons.title": "Addons",
-  "settings.addons.detail": "Enable or disable installed addons for this session",
   "settings.audio.title": "Hang és feliratok",
   "settings.audio.detail": "A Plex-fiókkal szinkronizált nyelvi beállítások.",
   "settings.playback.quality": "Alapértelmezett minőség",
@@ -410,9 +402,5 @@
   "settings.audio.group_subtitles": "Feliratok",
   "settings.audio.group_look": "Megjelenés",
   "settings.playback.overridden_value": "Felülírva",
-  "settings.audio.page_copy": "Az hang- és feliratnyelvi beállítások szinkronizálódnak a Plex-fiókoddal. A lejátszási beállítások profilonként érvényesek.",
-  "settings.ratings.title": "Rating source",
-  "settings.ratings.copy": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
-  "settings.ratings.imdb": "IMDb",
-  "settings.ratings.tomatoes": "Rotten Tomatoes"
+  "settings.audio.page_copy": "Az hang- és feliratnyelvi beállítások szinkronizálódnak a Plex-fiókoddal. A lejátszási beállítások profilonként érvényesek."
 }

@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the Nuvio **Streams** drill-in inside the player's `…` popover.
+//! the Nuvio **Streams** drill-in inside the player's `…` popover.
 //!
 //! This is a child module of [`super`] so the merge surface in the upstream menu stays a handful
 //! of marked routing branches: everything that is Nuvio-specific — the ranked stream list, the

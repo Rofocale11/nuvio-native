@@ -29,7 +29,7 @@ const PORT: u16 = 32_420;
 static HANDLE: OnceLock<plx_pmsshim::Handle> = OnceLock::new();
 static BACKEND: OnceLock<Arc<plx_pmsshim::AddonBackend>> = OnceLock::new();
 
-/// Fork Rofocale11: the persisted P2P switch, mirrored into a plain atomic for the frame thread.
+/// the persisted P2P switch, mirrored into a plain atomic for the frame thread.
 /// Screens ask for it before the shim exists (and on controlled boots with no shim at all), so the
 /// fallback must never read redb or load the engine from the frame loop. Boot seeds it from the
 /// Settings record; the storage worker updates it alongside the shim when the user flips the row.
@@ -41,14 +41,14 @@ pub(crate) fn handle() -> Option<&'static plx_pmsshim::Handle> {
     HANDLE.get()
 }
 
-/// Fork Rofocale11: the shim bumps this only when an account pull actually merged a resume point.
+/// the shim bumps this only when an account pull actually merged a resume point.
 /// Home polls it and re-reads its hubs once per observed value; the baseline is captured before the
 /// first `/hubs`, not when the `App` literal is built, so a merge racing that fetch is not lost.
 pub(crate) fn content_generation() -> Option<u64> {
     handle().map(|h| h.shim.content_generation())
 }
 
-/// Fork Rofocale11: the live P2P decision for the frame thread. The shim owns the switch once it
+/// the live P2P decision for the frame thread. The shim owns the switch once it
 /// exists (a Settings change takes effect without a restart); before then the boot-seeded atomic
 /// answers, so no screen ever reads redb or loads the engine from the frame loop.
 pub(crate) fn p2p_enabled() -> bool {
@@ -56,7 +56,7 @@ pub(crate) fn p2p_enabled() -> bool {
         .unwrap_or_else(|| P2P_FALLBACK.load(Ordering::Relaxed))
 }
 
-/// Fork Rofocale11: persist the Settings P2P row in the ONE redb store and apply it to the running
+/// persist the Settings P2P row in the ONE redb store and apply it to the running
 /// shim. Called from the preferences executor on the retained storage worker, never the frame
 /// thread. The whole `Settings` value is written back to the SAME key, so the two existing fields
 /// keep their on-disk shape while an install without `p2pEnabled` gains the ON default. The reply
@@ -80,13 +80,13 @@ pub(crate) fn set_p2p_enabled(on: bool) -> bool {
     durable
 }
 
-/// Fork Rofocale11: the data root now lives in `plx_base::paths` so the app, the shim and the
+/// the data root now lives in `plx_base::paths` so the app, the shim and the
 /// in-process storage backend all resolve the SAME single redb file without a circular edge.
 fn data_dir() -> PathBuf {
     plx_base::paths::nuvio_data_dir()
 }
 
-/// Fork Rofocale11: an install that predates the Settings P2P row has no `p2pEnabled` key. It
+/// an install that predates the Settings P2P row has no `p2pEnabled` key. It
 /// defaults ON so existing installs keep the engine-gated torrent behavior they have today; only
 /// an explicit write can turn it off. The other two fields keep their exact on-disk spelling.
 fn default_p2p_enabled() -> bool { true }
@@ -96,13 +96,13 @@ fn default_p2p_enabled() -> bool { true }
 struct Settings {
     torrent_server: Option<String>,
     enable_torrents: bool,
-    // Fork Rofocale11: the Settings P2P switch lives in this same one-redb value; an absent key
+    // the Settings P2P switch lives in this same one-redb value; an absent key
     // reads ON (see `default_p2p_enabled`) so an older install keeps its torrents.
     #[serde(default = "default_p2p_enabled")]
     p2p_enabled: bool,
 }
 
-// Fork Rofocale11: a derived `Default` would set `p2p_enabled: false` and disagree with the serde
+// a derived `Default` would set `p2p_enabled: false` and disagree with the serde
 // field default, so a fresh install (no redb record and no settings.json) would silently lose
 // torrents. The hand-written impl keeps the two doors in agreement: absent key OR absent record
 // both mean ON, while the other two fields keep their ordinary derived values.
@@ -211,7 +211,7 @@ pub(crate) fn boot() {
     }
     let set = imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults);
     log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
-    // Fork Rofocale11: one store for the whole app. Published before the shim starts so the
+    // one store for the whole app. Published before the shim starts so the
     // shim's key table, watch state and account session land in the SAME file as the canonical
     // session record (the storage backend opens it lazily on its first call).
     match plx_nuvio_store::install_default() {
@@ -235,13 +235,13 @@ pub(crate) fn boot() {
     let cfg = plx_pmsshim::Config {
         data_dir: Some(data.join("shim")),
         torrent_server: settings.torrent_server.clone(),
-        // Fork Rofocale11: the persisted Settings switch is now authoritative, but the engine is
+        // the persisted Settings switch is now authoritative, but the engine is
         // still the only streaming path, so a build without libsbengine.so never lists picks it
         // cannot play. An absent `p2pEnabled` key deserializes ON, preserving today's behavior.
         p2p_enabled: settings.p2p_enabled && plx_stremio::sbengine::available(),
         ..Default::default()
     };
-    // Fork Rofocale11: the same decision is the frame-thread fallback until the shim is published.
+    // the same decision is the frame-thread fallback until the shim is published.
     P2P_FALLBACK.store(cfg.p2p_enabled, Ordering::Relaxed);
     let backend = Arc::new(plx_pmsshim::AddonBackend::new(set));
     let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT).or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));
@@ -252,7 +252,7 @@ pub(crate) fn boot() {
             return;
         }
     };
-    // Fork Rofocale11: Nuvio-only switch — in Auto, DTS/TrueHD/Opus that this TV cannot decode
+    // Nuvio-only switch — in Auto, DTS/TrueHD/Opus that this TV cannot decode
     // are converted by the app to stereo 48 kHz PCM instead of refused. Upstream Plex builds do
     // not call this, so their behavior is untouched across merges.
     plx_os::devcaps::fork_enable_auto_convert();
@@ -271,7 +271,7 @@ pub(crate) fn boot() {
     // serves some signed URLs only up to a prefix, and such a pair passes the probe and then fails
     // mid-playback (see `Shim::trailer_tracks_reachable`).
     handle.shim.set_trailer_reacher(trailer_reacher());
-    // Fork Rofocale11: DTS/TrueHD/Opus are converted by the app in Auto when this TV has no
+    // DTS/TrueHD/Opus are converted by the app in Auto when this TV has no
     // native path, so the shim's stream ranking must not mark those tracks unplayable.
     handle.shim.set_audio_codecs(
         plx_os::devcaps::caps().audio.split(',')
@@ -295,7 +295,7 @@ pub(crate) fn boot() {
             shim.warm();
         }));
     }
-    // Fork Rofocale11: the old fork's addon-enable seam, adapted to this tree's single redb store
+    // the old fork's addon-enable seam, adapted to this tree's single redb store
     // and `plx_pmsshim` backend. Settings cannot name pmsshim itself, so it reaches the installed
     // addon set through this registered control; a flip replaces the live backend set, records the
     // override in the shim's account prefs, and drops the caches that depended on the old set.
@@ -350,7 +350,7 @@ pub(crate) fn boot() {
                 shim.warm();
             }
         }
-        // Fork Rofocale11: an addon added or deleted in the Nuvio ACCOUNT is invisible to the
+        // an addon added or deleted in the Nuvio ACCOUNT is invisible to the
         // locally persisted set until we ask. One cheap row read (no manifest fetches): unchanged
         // keeps the warm set and the durable catalog cache; changed re-loads through the same sink
         // path a sign-in or profile pick uses, which clears the caches and re-warms Home.
@@ -383,7 +383,7 @@ pub(crate) fn boot() {
 }
 
 /// The shim's view of `plx_nuvio_probe::probe_url`, with this TV's decode verdicts.
-/// Fork Rofocale11: the probe used to live in upstream's `media::ff::probe`; it is now the
+/// the probe used to live in upstream's `media::ff::probe`; it is now the
 /// fork-owned plx_nuvio_probe crate so a merge cannot reintroduce the conflict or a second ABI table.
 /// The shim's view of a trailer track's byte-offset reach: open `url` at `at` with a PRIVATE
 /// transfer (not the one the player's `ACTIVE` holds, so asking never disturbs playback) and
@@ -438,13 +438,13 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                     codec: a.codec.clone(),
                     profile: a.profile,
                     channels: a.channels,
-                    // Fork Rofocale11: the old shim publishes the file's sample rate as PMS
+                    // the old shim publishes the file's sample rate as PMS
                     // `samplingRate`; the player's AC3/PCM lanes read it.
                     sample_rate: a.sample_rate,
                     language: a.language.clone(),
                     title: a.title.clone(),
                     default: a.default,
-                    // Fork Rofocale11: "decodable" also covers a track the app converts to
+                    // "decodable" also covers a track the app converts to
                     // stereo PCM itself in Auto when the TV has no native path for it. Without
                     // this the shim refuses DTS/TrueHD/Opus before the player ever opens them.
                     decodable: caps.audio_supports(&a.codec, i64::from(a.channels))
@@ -460,7 +460,7 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
     })
 }
 
-/// Fork Rofocale11: test-only seam for the frame-thread fallback; the bridge publication test
+/// test-only seam for the frame-thread fallback; the bridge publication test
 /// drives the switch without booting a shim or touching the process-wide store.
 #[cfg(test)]
 pub(crate) fn set_p2p_fallback_for_test(on: bool) { P2P_FALLBACK.store(on, Ordering::Relaxed); }
@@ -469,7 +469,7 @@ pub(crate) fn set_p2p_fallback_for_test(on: bool) { P2P_FALLBACK.store(on, Order
 mod tests {
     use super::*;
 
-    /// Fork Rofocale11: an install whose settings.json predates the switch must keep torrents on,
+    /// an install whose settings.json predates the switch must keep torrents on,
     /// while an explicit off survives the write-back. This pins the on-disk shape of the one redb
     /// LocalSettings value the storage worker rewrites as a whole.
     #[test]

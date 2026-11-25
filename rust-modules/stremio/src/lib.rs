@@ -21,7 +21,7 @@ pub use classify::{classify_stream, StreamInfo};
 
 pub mod nuvio;
 
-// Fork Rofocale11: TMDB enrichment has no upstream equivalent — upstream feeds the Plex API, not
+// TMDB enrichment has no upstream equivalent — upstream feeds the Plex API, not
 // Stremio addons. The in-process shim codes against `plx_stremio::TmdbClient` and the public types
 // below; keep this re-export stable for that lane.
 pub mod addons_tmdb;
@@ -32,7 +32,7 @@ pub use addons_tmdb::*;
 pub mod addon_http;
 pub use addon_http as http;
 
-// Fork Rofocale11: the in-process C torrent engine, ported from the old fork. It is the only
+// the in-process C torrent engine, ported from the old fork. It is the only
 // streaming engine on device; the Node `server.js` fallback is retired.
 pub mod sbengine;
 

@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the delivery column's Nuvio-specific rows.
+//! the delivery column's Nuvio-specific rows.
 //!
 //! The upstream diagnostics panel describes a Plex adaptive session: its right column is nine
 //! controller rows, and a URI playback that has no controller shows nine `unknown` placeholders.
@@ -16,7 +16,7 @@ use plx_os::i18n::msg;
 use plx_stremio::sbengine::EngineStats;
 use plx_ui::widgets::Field;
 
-/// Fork Rofocale11: the three-way delivery column. A torrent gets the swarm block, a live adaptive
+/// the three-way delivery column. A torrent gets the swarm block, a live adaptive
 /// session keeps the upstream controller rows, and everything else (a debrid or addon link) gets the
 /// short block that says what such a route actually knows. Adapted from the old fork's `model_rows`;
 /// the only boundary change is the `now` argument the parent already has on its sampling clock.
@@ -69,7 +69,7 @@ pub(super) fn model_rows(ps: &PlaybackSession, d: &Diag, now: u32) -> Vec<Field>
     v
 }
 
-/// Fork Rofocale11: the DELIVERY column while a torrent plays — what the swarm and the local engine
+/// the DELIVERY column while a torrent plays — what the swarm and the local engine
 /// are doing, in the slots the adaptive model would otherwise spend on "controller idle"
 /// placeholders. Rates are engine-wide, which during a play is this title's own downloading plus
 /// the window it is keeping resident.

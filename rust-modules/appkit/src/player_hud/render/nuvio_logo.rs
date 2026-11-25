@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the now-playing clear logo in the player HUD.
+//! the now-playing clear logo in the player HUD.
 //!
 //! Upstream's HUD package format has no logo slot: its only image cell binds `info.still`, and
 //! `title.main` is a text cell. Under the Nuvio shim the addon's own `logo` is published as the

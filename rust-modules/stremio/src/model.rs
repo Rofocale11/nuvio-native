@@ -219,13 +219,13 @@ pub struct Meta {
     /// IMDb id when the meta's own id is not one (`tmdb:…` catalogs carry it here).
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub imdb_id: Option<String>,
-    // Fork Rofocale11: Cinemeta carries TMDB's numeric id here; the shim reads it before paying
+    // Cinemeta carries TMDB's numeric id here; the shim reads it before paying
     // a `/find` round trip. Upstream's Plex-only model has no equivalent field. The lenient
     // deserializer keeps both the number and string wire shapes harmless.
     #[serde(rename = "moviedb_id", deserialize_with = "crate::lenient::opt_u64")]
     pub moviedb_id: Option<u64>,
     pub trailers: Vec<serde_json::Value>,
-    /// Fork Rofocale11: the old fork's trailer candidates from addon meta. Empty for addons that
+    /// the old fork's trailer candidates from addon meta. Empty for addons that
     /// do not send the field; the shim reads it before falling back to TMDB videos.
     pub trailer_streams: Vec<serde_json::Value>,
     pub behavior_hints: serde_json::Value,
@@ -298,7 +298,7 @@ pub struct Subtitle {
     pub id: Option<String>,
     pub url: String,
     pub lang: String,
-    /// Fork Rofocale11: OpenSubtitles v3's release name (`movieReleaseName`), the identity the
+    /// OpenSubtitles v3's release name (`movieReleaseName`), the identity the
     /// shim compares an installed sidecar by, as on a real PMS (`docs/pms-api.md` §8).
     #[serde(deserialize_with = "crate::lenient::opt_string")]
     pub movie_release_name: Option<String>,
@@ -311,7 +311,7 @@ pub struct Subtitle {
 }
 
 impl Subtitle {
-    /// Fork Rofocale11: the release name this candidate is identified by, or empty when the addon
+    /// the release name this candidate is identified by, or empty when the addon
     /// named nothing.
     pub fn release_title(&self) -> String {
         let named = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);

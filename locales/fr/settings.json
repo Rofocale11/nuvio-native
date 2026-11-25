@@ -157,14 +157,6 @@
   "settings.playback.section": "Lecture",
   "settings.playback.title": "Vidéo et lecture",
   "settings.playback.detail": "Sous-titres, HDR et lecture.",
-  "settings.playback.p2p": "P2P Streaming",
-  "settings.playback.p2p_enable": "Enable P2P",
-  "settings.playback.p2p_enable.detail": "Offer torrents in the Source Picker.",
-  "settings.playback.p2p_on": "On",
-  "settings.playback.p2p_off": "Off",
-  "settings.addons.section": "Addons",
-  "settings.addons.title": "Addons",
-  "settings.addons.detail": "Enable or disable installed addons for this session",
   "settings.audio.title": "Audio et sous-titres",
   "settings.audio.detail": "Préférences de langue synchronisées avec votre compte Plex.",
   "settings.playback.quality": "Qualité par défaut",
@@ -413,9 +405,5 @@
   "settings.audio.group_subtitles": "Sous-titres",
   "settings.audio.group_look": "Apparence",
   "settings.playback.overridden_value": "Remplacée",
-  "settings.audio.page_copy": "Les préférences de langue audio et sous-titres sont synchronisées avec votre compte Plex. Les réglages de lecture sont propres à chaque profil.",
-  "settings.ratings.title": "Rating source",
-  "settings.ratings.copy": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
-  "settings.ratings.imdb": "IMDb",
-  "settings.ratings.tomatoes": "Rotten Tomatoes"
+  "settings.audio.page_copy": "Les préférences de langue audio et sous-titres sont synchronisées avec votre compte Plex. Les réglages de lecture sont propres à chaque profil."
 }

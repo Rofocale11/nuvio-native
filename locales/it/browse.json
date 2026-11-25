@@ -285,14 +285,5 @@
   "browse.clock.key_changed": "La chiave del tuo server è cambiata. Collega la TV a Internet una volta per consentire all'app di verificarla di nuovo.",
   "browse.detail.mark_episode_watched": "Segna episodio come visto",
   "browse.detail.mark_episode_unwatched": "Segna episodio come non visto",
-  "browse.detail.minutes_left": "{minutes} min rimanenti",
-  "browse.streams.loading": "Finding streams…",
-  "browse.streams.empty": "No playable streams found.",
-  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
-  "browse.streams.other": "Other sources",
-  "browse.list.add": "Add to My List",
-  "browse.list.remove": "Remove from My List",
-  "browse.list.saving": "Syncing My List…",
-  "browse.list.retry": "Retry My List",
-  "browse.list.signin": "Sign in for My List"
+  "browse.detail.minutes_left": "{minutes} min rimanenti"
 }

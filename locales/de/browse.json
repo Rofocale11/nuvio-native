@@ -273,14 +273,5 @@
   "browse.clock.key_changed": "Der Schlüssel deines Servers hat sich geändert. Verbinde den Fernseher einmal mit dem Internet, damit die App ihn neu prüfen kann.",
   "browse.detail.mark_episode_watched": "Episode als gesehen markieren",
   "browse.detail.mark_episode_unwatched": "Episode als ungesehen markieren",
-  "browse.detail.minutes_left": "Noch {minutes} Min.",
-  "browse.streams.loading": "Finding streams…",
-  "browse.streams.empty": "No playable streams found.",
-  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
-  "browse.streams.other": "Other sources",
-  "browse.list.add": "Add to My List",
-  "browse.list.remove": "Remove from My List",
-  "browse.list.saving": "Syncing My List…",
-  "browse.list.retry": "Retry My List",
-  "browse.list.signin": "Sign in for My List"
+  "browse.detail.minutes_left": "Noch {minutes} Min."
 }

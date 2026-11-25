@@ -1,4 +1,4 @@
-//! **Fork Rofocale11: the retained low-level FFmpeg core** — the runtime-bound symbol table,
+//! **the retained low-level FFmpeg core** — the runtime-bound symbol table,
 //! verified 32/64-bit struct offsets, Dolby-Vision side-data reader, the dev capture encoder and the
 //! `/tmp/plxnative-ffprobe` smoke test.
 //!
@@ -184,7 +184,7 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libavformat-plx.so.63",
         "libavformat-plx.63.dylib",
-        // Fork Rofocale11: this is the retained core's own ABI table, separate from media-codecs'.
+        // this is the retained core's own ABI table, separate from media-codecs'.
         // The Linux host sim needs the HOST=1 library names here too, or the ABI gate refuses
         // every stream while media-codecs reports FFmpeg as bound.
         "libavformat-plx-host.so.63",
@@ -245,7 +245,7 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libavcodec-plx.so.63",
         "libavcodec-plx.63.dylib",
-        // Fork Rofocale11: Linux host sim — see the libavformat candidates above.
+        // Linux host sim — see the libavformat candidates above.
         "libavcodec-plx-host.so.63",
     ] {
     fn avcodec_version() -> c_uint;
@@ -293,7 +293,7 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libavutil-plx.so.61",
         "libavutil-plx.61.dylib",
-        // Fork Rofocale11: Linux host sim — see the libavformat candidates above.
+        // Linux host sim — see the libavformat candidates above.
         "libavutil-plx-host.so.61",
     ] {
     fn avutil_version() -> c_uint;
@@ -316,7 +316,7 @@ plx_base::dynlib! {
         flags: c_int,
     ) -> *const AVDictionaryEntry;
 }}
-// Fork Rofocale11: FFmpeg 9's libavcodec NEEDs libswresample by SONAME once its native Opus
+// FFmpeg 9's libavcodec NEEDs libswresample by SONAME once its native Opus
 // decoder is enabled. Open it FIRST with RTLD_GLOBAL so that NEEDED resolves to our staged copy.
 plx_base::dynlib! {
     pub swresample: [
@@ -334,7 +334,7 @@ plx_base::dynlib! {
         // it could not open, and only one of these two can ever exist in an app directory.
         "libswscale-plx.so.10",
         "libswscale-plx.10.dylib",
-        // Fork Rofocale11: Linux host sim — see the libavformat candidates above.
+        // Linux host sim — see the libavformat candidates above.
         "libswscale-plx-host.so.10",
     ] {
     fn sws_getContext(
@@ -1016,7 +1016,7 @@ impl Drop for Venc {
                 avformat_free_context(self.oc); // does not free the caller-set pb
             }
             if !self.avio.is_null() {
-                // Fork Rofocale11: `free_avio` is plx_media_codecs' and this module now aliases that
+                // `free_avio` is plx_media_codecs' and this module now aliases that
                 // crate's AVIOContext instead of modelling a second opaque handle, so no cast.
                 free_avio(self.avio);
             }
@@ -1027,7 +1027,7 @@ impl Drop for Venc {
     }
 }
 
-// Fork Rofocale11: upstream's `ass_source` deliberately dropped the header/font count and byte
+// upstream's `ass_source` deliberately dropped the header/font count and byte
 // caps ("what can be shown is never cut by a count"), but the fork's retained demux-side
 // registration still needs the old bounds so an oversize/overlong attachment cannot be copied into
 // the render store. They live here, beside the ABI table that reads them, rather than reintroducing
@@ -1057,7 +1057,7 @@ pub fn ver(v: c_uint) -> String {
 /// all" versus "there is one and it is the wrong major".
 type FfmpegLoader = fn(Option<&std::path::Path>) -> plx_base::dynlib::Loaded;
 
-/// Fork Rofocale11: the four required bundled libraries in DT_NEEDED order — avutil <- swresample
+/// the four required bundled libraries in DT_NEEDED order — avutil <- swresample
 /// <- avcodec <- avformat. Kept in step with `plx_media_codecs::ffi`'s table: both boot the same
 /// files with RTLD_GLOBAL, and a wrong order fails only on the TV's first playback after boot.
 const FFMPEG_LOAD_ORDER: &[(&str, FfmpegLoader)] = &[
@@ -1080,7 +1080,7 @@ pub fn load_libraries() -> bool {
     // names it the loader finds the one we just opened rather than searching the system paths and
     // finding the TV's. Open libavformat first and that guarantee is gone.
     //
-    // Fork Rofocale11: avutil MUST come before swresample. The app directory is not on the loader's
+    // avutil MUST come before swresample. The app directory is not on the loader's
     // search path, so opening swresample first made dlopen fail on its NEEDED libavutil-plx.so.61;
     // avcodec then failed on swresample and avformat on avcodec. The demux gate stayed closed until
     // a later probe re-booted with avutil already global — the first hero-resume then just spun.

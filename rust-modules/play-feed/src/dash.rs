@@ -1,6 +1,6 @@
 //! DASH (trailer) demux: Rust engine over the shim's static SegmentBase MPD.
 //!
-//! # Fork Rofocale11: why this is a new file
+//! # why this is a new file
 //!
 //! Ported from the old fork's `media/src/ff.rs`. In this fork the physical FFmpeg demux lives in
 //! `plx_play_feed`, and the strict MPD parser in the fork-owned crate `plx_nuvio_dash`. This module

@@ -26,7 +26,7 @@ pub trait Backend: Send + Sync {
     /// `disabled` flags of every installed addon — catalog keys alone would miss a catalog-less
     /// addon (OpenSubtitles) and a transport swap that keeps the manifest id. Pseudo/test backends
     /// have no addon set, so their observable catalogs are the best available signal.
-    /// Fork Rofocale11: this keeps the boot-time warm start from being wiped by a no-op re-apply.
+    /// this keeps the boot-time warm start from being wiped by a no-op re-apply.
     fn addons_fingerprint(&self) -> Vec<(String, bool)> {
         let mut fp: Vec<(String, bool)> = self.all_catalogs().into_iter().map(|c| (c.key, false)).collect();
         for c in self.catalogs() {
@@ -119,7 +119,7 @@ fn info(set: &plx_stremio::addons::AddonSet, c: &plx_stremio::addons::CatalogRef
 }
 
 impl Backend for AddonBackend {
-    /// Fork Rofocale11: the exact set the account sink re-applies at boot and Settings replaces at
+    /// the exact set the account sink re-applies at boot and Settings replaces at
     /// run time. A disabled addon, a removed addon or a transport swap all change this fingerprint,
     /// so the shim clears its caches on a real change and keeps the warm start on a no-op re-apply.
     fn addons_fingerprint(&self) -> Vec<(String, bool)> {

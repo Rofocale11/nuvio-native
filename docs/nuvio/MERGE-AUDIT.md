@@ -35,6 +35,34 @@ comment are listed here instead: locale JSON (strict `value`/`description` objec
 shape), replay JSONL and manifests (hash-pinned recordings), `Cargo.lock`, and the
 Debian `control` file.
 
+## Fork-only locale keys live in `brand.json` (2026-11-25)
+
+The fork's 22 Nuvio-only keys were removed from all 12 upstream locale directories
+(`locales/{en,es,be,ca,fr,it,pt,de,hu,ru,pl,nl}/{browse,settings,library_header}.json`)
+and added to `nuvio-locales/brand.json`'s `add` map. Each language's existing wording was
+copied verbatim; the English `description` is preserved because the brand hook requires it.
+
+Keys moved: `browse.list.{add,remove,retry,saving,signin}`,
+`browse.streams.{empty,failed,loading,other}`, `library_header.catalogs`,
+`settings.addons.{detail,section,title}`, `settings.playback.p2p{,_enable,_enable.detail,_off,_on}`,
+`settings.ratings.{copy,imdb,title,tomatoes}`.
+
+Why: those 36 upstream locale files were the fork's largest recurring merge-conflict
+surface. The brand hook runs after `discover()` and before `compile()`, so upstream's
+key/placeholder checks still apply to the injected keys; a future upstream key collision
+now fails loudly ("already in locales/<tag>; delete the override") instead of silently
+freezing upstream's wording behind ours.
+
+**Merge policy:** do not re-add any of these keys to an upstream `locales/` file. If upstream
+introduces a key with the same name on a future merge, remove it from `brand.json:add` and
+take upstream's entry, or keep an override here with an explicit fork reason.
+
+Not moved: the 19 `browse.diagnostics.*` English-only keys (`translate:false`). A test reads
+`locales/en/browse.json` for them directly, so they stay in that upstream file.
+
+Verification: a fresh-target `cargo check -p plx_os` generated all 22 typed message functions
+with 13 language arms each; `cargo test -p plx_os --lib` passed 427/427.
+
 ## First-playback stall after boot: FFmpeg load order (2026-11-25)
 
 Owner-reported: resume from the big Home hero sometimes sat on "Buffering…" while the torrent
@@ -309,11 +337,6 @@ and `ci/check-deps.sh`'s `forks` ledger gap at `plex/servers.rs::register_with_c
 
 ## Agent instructions and non-commentable edits (single-store change)
 
-- `AGENTS.md` is upstream-owned. The only fork edit in it is the two-line pointer under
-  "Load the right context" that sends agents to `docs/nuvio/AGENTS.md`. It carries the literal
-  `Fork Rofocale11:` marker, but is recorded here too because a future upstream rewrite of that
-  section is the likeliest place for the pointer to be dropped. The fork rules themselves live in
-  fork-owned `docs/nuvio/AGENTS.md`, never in the upstream file.
 - `rust-modules/Cargo.lock` gained `redb 4.6.0` and `ring 0.17.14` edges for `plx_nuvio_store` and
   `plx_os`. Lockfiles cannot carry a comment; regenerate rather than hand-edit on merge.
 - `ci/test_storage_service_package.py` was rewritten (not merely patched) to grade the *absence*

@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the shim's subtitle CANDIDATE cache.
+//! the shim's subtitle CANDIDATE cache.
 //
 // The player asks for subtitles on every detail open and again from the Search page; the automatic
 // lane and the builtin OpenSubtitles provider both fan out over the network. Keeping the candidates

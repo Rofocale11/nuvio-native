@@ -285,14 +285,5 @@
   "browse.clock.key_changed": "La clau del teu servidor ha canviat. Connecta el televisor a Internet una vegada perquè l'aplicació la pugui verificar de nou.",
   "browse.detail.mark_episode_watched": "Marca l'episodi com a vist",
   "browse.detail.mark_episode_unwatched": "Marca l'episodi com a no vist",
-  "browse.detail.minutes_left": "Queden {minutes} min",
-  "browse.streams.loading": "Finding streams…",
-  "browse.streams.empty": "No playable streams found.",
-  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
-  "browse.streams.other": "Other sources",
-  "browse.list.add": "Add to My List",
-  "browse.list.remove": "Remove from My List",
-  "browse.list.saving": "Syncing My List…",
-  "browse.list.retry": "Retry My List",
-  "browse.list.signin": "Sign in for My List"
+  "browse.detail.minutes_left": "Queden {minutes} min"
 }

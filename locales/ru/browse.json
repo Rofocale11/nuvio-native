@@ -297,14 +297,5 @@
   "browse.clock.key_changed": "Ключ сервера изменился. Подключите телевизор к интернету, чтобы приложение могло проверить его заново.",
   "browse.detail.mark_episode_watched": "Отметить серию просмотренной",
   "browse.detail.mark_episode_unwatched": "Отметить серию непросмотренной",
-  "browse.detail.minutes_left": "Осталось {minutes} мин",
-  "browse.streams.loading": "Finding streams…",
-  "browse.streams.empty": "No playable streams found.",
-  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
-  "browse.streams.other": "Other sources",
-  "browse.list.add": "Add to My List",
-  "browse.list.remove": "Remove from My List",
-  "browse.list.saving": "Syncing My List…",
-  "browse.list.retry": "Retry My List",
-  "browse.list.signin": "Sign in for My List"
+  "browse.detail.minutes_left": "Осталось {minutes} мин"
 }

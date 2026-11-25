@@ -18,7 +18,7 @@ redb = "=4.6.0"
 plx_base = { path = "../base" }
 
 [dev-dependencies]
-# Fork Rofocale11: the cache fixture uses plx_base::testscratch so the atexit cleanup removes it.
+# the cache fixture uses plx_base::testscratch so the atexit cleanup removes it.
 plx_base = { path = "../base", features = ["test-support"] }
 
 [lints]

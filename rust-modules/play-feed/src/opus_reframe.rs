@@ -1,4 +1,4 @@
-//! # Fork Rofocale11: why this is a new file
+//! # why this is a new file
 //!
 //! Multichannel Opus reaches this television as app-decoded stereo PCM. The source packets in the
 //! addon files carry sparse timestamps: 20 ms of audio stamped 160 ms apart. Both `PcmConverter`'s

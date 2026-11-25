@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the TMDB attribution mark on the About page.
+//! the TMDB attribution mark on the About page.
 //!
 //! TMDB's attribution terms require its logo in the app's About/Credits area, below the app's own
 //! mark in prominence, together with the exact notice carried in `settings.about.body`. The SVG is
@@ -18,7 +18,7 @@ const TMDB_MARK: &str = include_str!("../../../../assets/nuvio/tmdb_logo.svg");
 /// The official TMDB wordmark's viewBox is 190.24 × 81.52; keep its aspect ratio in the slot.
 const ASPECT: f32 = 190.24 / 81.52;
 
-/// Fork Rofocale11: the mark, tinted with a theme token so it stays a role, never a raw colour.
+/// the mark, tinted with a theme token so it stays a role, never a raw colour.
 pub(crate) struct TmdbMark;
 
 pub(crate) const MARK: TmdbMark = TmdbMark;

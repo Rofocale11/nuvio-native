@@ -1,4 +1,4 @@
-//! Fork Rofocale11: durable catalog pages for the shim's Home/Library shelves.
+//! durable catalog pages for the shim's Home/Library shelves.
 //!
 //! The catalog rows used to live only in [`crate::shim_pms`]'s in-memory `catalogs` map, so every
 //! TV relaunch re-fetched the first page of every addon catalog (the ~15 s cold launch). This

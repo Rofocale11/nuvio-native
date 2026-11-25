@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Fork Rofocale11: the single store's soft budget (50 MiB). It is enforced by removing expired
+/// the single store's soft budget (50 MiB). It is enforced by removing expired
 /// and oldest TTL cache rows and by compacting at boot — NEVER by truncating a live redb file,
 /// which would destroy the durable records in it. If the non-cache rows alone exceed this, the
 /// store is logged and left intact; no account data is sacrificed to hit a round number.
@@ -37,19 +37,19 @@ pub const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
 pub const ACCOUNT_SESSION: TableDefinition<&str, &[u8]> = TableDefinition::new("account_session");
 pub const ACCOUNT_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("account_prefs");
 pub const INSTALL_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("install_prefs");
-// Fork Rofocale11: TMDB enrichment answers are durable app records, so they live in this one file
+// TMDB enrichment answers are durable app records, so they live in this one file
 // beside the key table and watch state — never in a second JSONL cache beside it.
 pub const META_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta_cache");
 pub const ENRICH_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrich_cache");
 pub const IMDB_IDS: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_ids");
-// Fork Rofocale11: the IMDb -> TMDB id mapping never goes stale, so it is kept as a plain 8-byte
+// the IMDb -> TMDB id mapping never goes stale, so it is kept as a plain 8-byte
 // big-endian u64 with NO TTL envelope (unlike `cache_put`). A `/find` answer is paid for once per
 // title, not once per 15-minute cache window.
 pub const IMDB_TMDB: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_tmdb");
-// Fork Rofocale11: subtitle CANDIDATE lists (not the files, and never a provider fault) are a
+// subtitle CANDIDATE lists (not the files, and never a provider fault) are a
 // bounded, expiring cache in the one store, so a reopen of a title does not re-ask every addon.
 pub const SUBTITLE_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("subtitle_cache");
-// Fork Rofocale11: catalog first pages are durable for one 15-minute window so a TV relaunch with
+// catalog first pages are durable for one 15-minute window so a TV relaunch with
 // an unchanged addon set does not re-fetch every Home shelf. Faults are never written here.
 pub const CATALOG_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("catalog_cache");
 
@@ -71,24 +71,24 @@ pub enum Table {
     MetaCache,
     EnrichCache,
     ImdbIds,
-    /// Fork Rofocale11: permanent IMDb -> TMDB id mapping (plain BE u64, no TTL envelope).
+    /// permanent IMDb -> TMDB id mapping (plain BE u64, no TTL envelope).
     ImdbTmdb,
-    /// Fork Rofocale11: TTL-enveloped subtitle candidates, shed like the other cache rows.
+    /// TTL-enveloped subtitle candidates, shed like the other cache rows.
     SubtitleCache,
-    /// Fork Rofocale11: TTL-enveloped catalog pages; cleared when the addon set changes.
+    /// TTL-enveloped catalog pages; cleared when the addon set changes.
     CatalogCache,
 }
 
-/// Fork Rofocale11: the TTL-aware metadata caches. `cache_get` returns `None` on a miss or an
+/// the TTL-aware metadata caches. `cache_get` returns `None` on a miss or an
 /// expired row, so callers never parse a stale envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NuvioCache {
     Meta,
     Enrich,
     Imdb,
-    /// Fork Rofocale11: subtitle candidates; an empty answer gets a much shorter TTL than rows.
+    /// subtitle candidates; an empty answer gets a much shorter TTL than rows.
     Subtitles,
-    /// Fork Rofocale11: catalog pages; one 15-minute window, never a provider fault.
+    /// catalog pages; one 15-minute window, never a provider fault.
     Catalogs,
 }
 
@@ -167,7 +167,7 @@ impl Store {
         }
     }
 
-    /// Fork Rofocale11: read a cached value that has not passed its TTL. The envelope is an
+    /// read a cached value that has not passed its TTL. The envelope is an
     /// 8-byte big-endian expiry (Unix millis) followed by the owner's opaque bytes.
     pub fn cache_get(&self, kind: NuvioCache, key: &str) -> Option<Vec<u8>> {
         let table = match kind {
@@ -350,7 +350,7 @@ fn maintain_with_budget(path: &Path, budget: u64) -> Result<Maintenance, String>
     Ok(Maintenance { before, after, expired, shed, compacted })
 }
 
-/// Fork Rofocale11: drop every row of a table. The addon-set change invalidates the meta and
+/// drop every row of a table. The addon-set change invalidates the meta and
 /// enrichment caches wholesale; this keeps that operation inside the one store.
 pub fn clear_table(table: Table) {
     let Some(store) = get() else { return };
@@ -404,7 +404,7 @@ mod tests {
     fn store() -> Arc<Store> {
         static STORE: OnceLock<Arc<Store>> = OnceLock::new();
         STORE.get_or_init(|| {
-            // Fork Rofocale11: the shared process_dir registers an atexit cleanup, so the cache
+            // the shared process_dir registers an atexit cleanup, so the cache
             // fixture no longer leaves a directory behind for cargo-test-parallel's TMPDIR check.
             let dir = plx_base::testscratch::process_dir("nuvio-cache-test");
             Store::open_at(&dir.join("cache.redb")).unwrap()

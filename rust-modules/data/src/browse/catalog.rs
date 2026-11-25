@@ -1,4 +1,4 @@
-//! The addon-catalog side of the Library's browse state. Fork Rofocale11: the shim exposes its
+//! The addon-catalog side of the Library's browse state. the shim exposes its
 //! addon catalogs as `Meta.Type` rows carrying `catalogKey`; the Movies/TV Shows header offers
 //! them as a Catalogs dropdown instead of upstream's hardcoded LibraryType menu. The state the
 //! store needs still lives in [`super::SecState`] (one table, one store), but the catalog's parse,

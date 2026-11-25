@@ -1,4 +1,4 @@
-//! Fork Rofocale11: perform a pick from the player's Streams (`…` → Streams → addon → stream).
+//! perform a pick from the player's Streams (`…` → Streams → addon → stream).
 //!
 //! This is the application half of the typed effect: the screen only reports an index, this module
 //! does the shim write on the caller's thread (the app is the runner, not a machine) and starts a

@@ -1,4 +1,4 @@
-//! Fork Rofocale11: a playable-reserve release for a progressive stall hold.
+//! a playable-reserve release for a progressive stall hold.
 //!
 //! The upstream hold releases only when a queue reaches its byte cap (or the demuxer ends). On a
 //! slow torrent that can mean twenty seconds of Buffering while the demuxer has already staged

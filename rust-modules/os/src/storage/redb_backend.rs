@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the canonical storage backend, run IN PROCESS against the single redb file.
+//! the canonical storage backend, run IN PROCESS against the single redb file.
 //!
 //! Upstream's `plxstorage` helper is a separate process that translates a closed wire protocol
 //! into DB8 and LG Keymanager3 calls. Nuvio Native has no DB8 record and no helper in its package,
@@ -53,7 +53,7 @@ fn backend() -> Result<&'static Mutex<Backend<RedbRpc>>, String> {
     BACKEND.get().ok_or_else(|| "backend not installed".into())
 }
 
-/// Fork Rofocale11: the entry point used by `storage::client::transact`. The socket path is gone on
+/// the entry point used by `storage::client::transact`. The socket path is gone on
 /// this build; a failure here is a local store failure, never a helper timeout.
 pub fn dispatch(request: Request) -> Result<Response, String> {
     let b = backend()?;
@@ -63,7 +63,7 @@ pub fn dispatch(request: Request) -> Result<Response, String> {
 
 struct RedbRpc {
     store: Arc<Store>,
-    /// Fork Rofocale11: the canonical record is flavour- and service-scoped. A store file copied
+    /// the canonical record is flavour- and service-scoped. A store file copied
     /// between installs (debug -> stable, or an older schema) can carry an object under our id
     /// that this app cannot read. Validate on read and quarantine just that object instead of
     /// rejecting every sign-in for the lifetime of the file.
@@ -188,7 +188,7 @@ impl Rpc for RedbRpc {
                 let mut results = Vec::new();
                 for id in ids.iter().filter_map(Value::as_str) {
                     if let Some(object) = self.object(id) {
-                        // Fork Rofocale11: self-heal one bad record instead of bricking sign-in.
+                        // self-heal one bad record instead of bricking sign-in.
                         if !self.usable(id, &object) {
                             self.quarantine(id, &object);
                             continue;

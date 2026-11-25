@@ -27,7 +27,7 @@ pub struct StreamList {
     pub complete: bool,
     #[serde(default)]
     pub streams: Vec<StreamChoice>,
-    // Fork Rofocale11: a stream-addon fault is not an empty answer. The picker shows a Retry row
+    // a stream-addon fault is not an empty answer. The picker shows a Retry row
     // instead of an empty menu when `failed`, and a partial hint when some addons answered.
     #[serde(default)]
     pub faulted: bool,
@@ -43,7 +43,7 @@ impl Client {
             || plx_base::local_server::get().is_some_and(|s| s.origin == self.origin().base())
     }
 
-    /// Fork Rofocale11: `retry` asks the shim to drop this item's stream slot and fan out again now,
+    /// `retry` asks the shim to drop this item's stream slot and fan out again now,
     /// bypassing the fault backoff. A normal poll leaves the slot alone.
     pub fn nuvio_streams(&self, rk: &str, retry: bool) -> Option<StreamList> {
         if !self.is_nuvio() { return None; }
@@ -53,7 +53,7 @@ impl Client {
         serde_json::from_slice(&self.get_bytes(&path)?).ok()
     }
 
-    /// Fork Rofocale11: the shim answers `/library/metadata/{rk}/allLeaves` with every episode of
+    /// the shim answers `/library/metadata/{rk}/allLeaves` with every episode of
     /// a show in one hop, built from the already-cached series meta (`shim_pms.rs`'s `leaves()`).
     /// The detail data layer reads it instead of the serial season → season → episode chain so a
     /// show open costs one round trip rather than three. A real PMS has no such route: return None
@@ -96,7 +96,7 @@ impl Client {
     }
 }
 
-// Fork Rofocale11: the old fork's addon-enable seam, ported verbatim. The screens layer may not
+// the old fork's addon-enable seam, ported verbatim. The screens layer may not
 // name `pmsshim` (it is a lower layer and cannot depend on the app), so Settings asks for the
 // installed addon list and flips one through this registered control instead. Registration stays
 // at boot in the application; no store record is introduced — the shim's own account prefs and
@@ -126,7 +126,7 @@ pub fn set_addon_enabled(key: String, enabled: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// Fork Rofocale11: before the app registers its boot control (the state of every unit-test
+    /// before the app registers its boot control (the state of every unit-test
     /// process) a screen must see an empty addon list and a refused flip, never a panic. The
     /// once-set seam is deliberately quiet rather than fabricating a backend.
     #[test]

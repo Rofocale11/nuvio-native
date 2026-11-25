@@ -1,4 +1,4 @@
-//! Fork Rofocale11: Settings > Addons — installed Nuvio addons and their per-addon enable switch.
+//! Settings > Addons — installed Nuvio addons and their per-addon enable switch.
 //!
 //! Ported from the authoritative fork's `screens/src/addons.rs` and adapted to this tree's
 //! Settings family: a route `FormTable` (`FormTable::page`) over the shared `family` plumbing,

@@ -1,5 +1,3 @@
-> **Read [`docs/nuvio/AGENTS.md`](docs/nuvio/AGENTS.md) first.** This checkout is the Nuvio Native fork, not a Plex client; that file overrides the upstream guidance below wherever the two disagree.
-
 # Project instructions
 
 ## Project
@@ -15,8 +13,6 @@ the macOS simulator are valuable, but they cannot prove every device behavior.
 
 ## Load the right context
 
-- Fork Rofocale11: this fork is not a Plex client. Read `docs/nuvio/AGENTS.md` first for its own
-  rules (marking upstream edits, the single redb store, Streams-only addon sources, TV safety).
 - `docs/agent-reference.md` is the detailed architecture, build, portability, and verification
   reference. Read the relevant section before changing a subsystem; do not load the whole file
   when a narrower section is enough.

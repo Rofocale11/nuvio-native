@@ -101,7 +101,7 @@ impl Drop for Claim<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Fork Rofocale11: this tree has no `plx_base::testrace`; a barrier is enough for the one
+    /// this tree has no `plx_base::testrace`; a barrier is enough for the one
     /// test that needs a simultaneous release.
     fn race<F: Fn(usize) + Send + Sync>(n: usize, body: F) {
         let barrier = std::sync::Barrier::new(n);

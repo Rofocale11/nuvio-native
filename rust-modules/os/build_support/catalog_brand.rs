@@ -1,4 +1,4 @@
-//! Fork Rofocale11: the Nuvio Native brand transform for the localization catalog.
+//! the Nuvio Native brand transform for the localization catalog.
 //!
 //! The upstream catalog compiler reads `locales/<tag>/*.json` verbatim. Editing those files would
 //! put ~120 brand strings in the merge conflict surface and would freeze upstream wording: a fix

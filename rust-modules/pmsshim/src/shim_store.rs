@@ -2,7 +2,7 @@
 //! last-opened page, the image cache's keys — means the same title after a restart) and the local
 //! watch state (PMS keeps watch state server-side; this server is the only one there is).
 
-// Fork Rofocale11: every durable record lives in the one redb file (`plx_nuvio_store`). The old
+// every durable record lives in the one redb file (`plx_nuvio_store`). The old
 // fork's keys.tsv / watch.json / meta-cache.jsonl / enrich-cache.jsonl are migrated once on first
 // open and never written again.
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ struct KeysInner {
 impl Keys {
     pub fn open(dir: Option<&Path>) -> Keys {
         let mut inner = KeysInner::default();
-        // Fork Rofocale11: one JSON row in the single redb file. The slot-for-slot placeholder
+        // one JSON row in the single redb file. The slot-for-slot placeholder
         // rule is unchanged, so a key the app already cached keeps its meaning after migration.
         let rows = plx_nuvio_store::get()
             .and_then(|s| s.get(plx_nuvio_store::Table::Keys, "ids"))
@@ -165,7 +165,7 @@ pub fn now_secs() -> i64 {
 
 impl WatchState {
     pub fn open(dir: Option<&Path>) -> WatchState {
-        // Fork Rofocale11: watch state moved from watch.json to the one redb file. The JSON
+        // watch state moved from watch.json to the one redb file. The JSON
         // document is unchanged; the old file is migrated once when redb has no record yet.
         let loaded = plx_nuvio_store::get()
             .and_then(|s| s.get(plx_nuvio_store::Table::Watch, "state"))
@@ -359,7 +359,7 @@ struct MetaRow {
 /// key wins at load — and the log is rewritten down to [`META_COMPACT`] when it grows past
 /// [`META_LOG_LIMIT`]. Appending one small line is what keeps this off the request path; the
 /// write itself runs on the shared persistence worker.
-/// Fork Rofocale11: one row per title in the one redb file. The old append-only JSONL log and its
+/// one row per title in the one redb file. The old append-only JSONL log and its
 /// compaction machinery are gone; `plx_nuvio_store::NuvioCache` supplies the TTL envelope.
 pub struct MetaCache {
     rows: Mutex<HashMap<(String, String), (i64, Arc<plx_stremio::model::Meta>)>>,
@@ -480,7 +480,7 @@ pub struct Enrichment {
     /// The raw TMDB `videos` answer. The trailer shelf and the play-time alternate picker both
     /// need it; without it each `/extras` request re-fetched `movie_details` just to rediscover
     /// the same ids, which is what made a warm detail open pay ~1.5 s in `related_ms`.
-    /// Fork Rofocale11: keep it in the one redb row with the rest of the enrichment.
+    /// keep it in the one redb row with the rest of the enrichment.
     pub videos: Option<plx_stremio::addons_tmdb::TmdbVideos>,
     /// The recommendation list (`None` on a row written before the shelf was kept).
     pub related: Option<RelatedSource>,
@@ -516,7 +516,7 @@ struct EnrichRow {
 /// It is the same append-only log as [`MetaCache`] and for the same reason: without it the first
 /// open after every restart pays for TMDB again (`tmdb_ms≈930` in the simulator). Rows are small
 /// (a `Role[]` of at most ten people), so the compaction budget is a quarter of the meta log's.
-/// Fork Rofocale11: one row per title in the one redb file. The old append-only JSONL log and its
+/// one row per title in the one redb file. The old append-only JSONL log and its
 /// compaction machinery are gone; `plx_nuvio_store::NuvioCache` supplies the TTL envelope.
 pub struct EnrichCache {
     rows: Mutex<HashMap<(String, String), (i64, Arc<Enrichment>)>>,
@@ -625,7 +625,7 @@ mod tests {
     }
     use std::path::PathBuf;
 
-    /// Fork Rofocale11: the old tests gave each case its own files. The one redb store is
+    /// the old tests gave each case its own files. The one redb store is
     /// process-wide, so take the shared serial lock and clear the table under test instead.
     fn install_test_store() {
         static STORE: std::sync::OnceLock<()> = std::sync::OnceLock::new();

@@ -1,6 +1,6 @@
 //! Strict parser for the static SegmentBase MPD the shim synthesises for trailer DASH.
 //!
-//! # Fork Rofocale11: why this is its own crate
+//! # why this is its own crate
 //!
 //! This used to be a module of `plx_media` in the old fork. It is pure Rust — no FFmpeg ABI
 //! table, no transport, no IO — so it lives in a fork-owned crate with no dependencies. An

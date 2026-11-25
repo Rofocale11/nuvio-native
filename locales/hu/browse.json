@@ -273,14 +273,5 @@
   "browse.clock.key_changed": "A szerver kulcsa megváltozott. Csatlakoztassa egyszer a TV-t az internethez, hogy az alkalmazás újra ellenőrizhesse.",
   "browse.detail.mark_episode_watched": "Epizód megjelölése megnézettként",
   "browse.detail.mark_episode_unwatched": "Epizód megjelölése nem megnézettként",
-  "browse.detail.minutes_left": "{minutes} perc van hátra",
-  "browse.streams.loading": "Finding streams…",
-  "browse.streams.empty": "No playable streams found.",
-  "browse.streams.failed": "Couldn’t load streams. Close and try again.",
-  "browse.streams.other": "Other sources",
-  "browse.list.add": "Add to My List",
-  "browse.list.remove": "Remove from My List",
-  "browse.list.saving": "Syncing My List…",
-  "browse.list.retry": "Retry My List",
-  "browse.list.signin": "Sign in for My List"
+  "browse.detail.minutes_left": "{minutes} perc van hátra"
 }

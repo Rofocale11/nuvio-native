@@ -13,7 +13,7 @@
 //! Cost: one HTTP open plus libavformat's probe window (`find_stream_info`, a few MB at most for
 //! Matroska; an MP4 with its index at the end costs one ranged seek). Bounded by `deadline`.
 //!
-//! # Fork Rofocale11: why this is its own crate
+//! # why this is its own crate
 //!
 //! This used to be `plx_media::ff::probe` (`media/src/ff_probe.rs`), reached through `super::*`.
 //! That made it borrow upstream's `ff.rs` names and carry a SECOND `dynlib!` table with its own
@@ -50,7 +50,7 @@ const AV_DISPOSITION_ATTACHED_PIC: c_int = 1 << 10;
 // AVSEEK_SIZE is FFmpeg's own. Kept local for the same reason as the two offsets above.
 const AVSEEK_SIZE: c_int = 0x10000;
 
-/// Fork Rofocale11: the media layer's `curlio::PlexAuthorization` bound to the shared byte-range
+/// the media layer's `curlio::PlexAuthorization` bound to the shared byte-range
 /// source. Duplicated here rather than imported from `plx_media` because that would make this
 /// low-level crate depend on the orchestration layer above it (and invert `ci/module-layers.ini`).
 /// The policy call is identical: a request that carries a credential reaches the wire only when

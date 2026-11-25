@@ -1,4 +1,4 @@
-// Fork Rofocale11: the client half of the Movies/TV Shows Catalogs dropdown — parsing the shim's
+// the client half of the Movies/TV Shows Catalogs dropdown — parsing the shim's
 // `Meta.Type` catalog rows, selection, and the wire filter a selection puts on every request.
 
 #[cfg(test)]
