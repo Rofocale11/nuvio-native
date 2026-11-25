@@ -1,13 +1,15 @@
-# Nuvio Native validation — 2026-10-10
+# Nuvio Native validation
 
-## Current status (HEAD `9e215acce`, 2026-11-25)
+## Current status (HEAD `1db875cc8`, 2026-11-25)
 
-The dated sections below are historical snapshots; this section describes the shipped tree.
-The branch is `nuvio-native`. The last recorded full `make check` was on `84a00aa68` and
-reported **146 steps — all ok** (app 1491 passed, `plx_screens` 2347, `plx_data` 1667,
-`plx_plex` 839, harness 2501 passed); the two commits after it, `e0b584c0c` (explicit addon
-failures and catalog/subtitle warm caches) and `9e215acce` (GC fixture flake fix), have no
-recorded full-gate run. The local stable IPK and the deployed set still predate both.
+The dated sections below are historical snapshots; this section describes the current tree.
+The branch is `nuvio-native` and nothing is pushed. The full `make check` gate passed on each of
+the trees behind `84a00aa68`, `e0b584c0c` and `9e215acce` — **146 steps — all ok**: app 1491,
+`plx_media` 2501, `plx_screens` 2347, `plx_data` 1667 and `plx_plex` 839 passed, with the Python
+harness at 753 tests (`OK (skipped=4)`). The first `e0b584c0c` attempt flaked
+`ci/test_disk_budget.py` on git auto-maintenance and was rerun clean; `9e215acce` removes that
+flake. `1db875cc8` is documentation only. The local stable IPK and the deployed set still predate
+`e0b584c0c`.
 
 Every durable record now lives in one `nuvio.redb` (no DB8 helper, no permission grant), with
 self-heal for unreadable canonical records and a 50 MiB cache-only soft budget. The 0.10.0
@@ -37,7 +39,7 @@ The owner confirmed on the LG `45UR7500PSC` (webOS 10.3.1, board `K8LPN_DVB`):
 
 **Still not verified:** `make check-replay` against rerecorded fixtures. The replay anchors
 need `tools/plxnative-rec rerecord` on a macOS simulator before that gate is trusted — the
-Linux host cannot do that step. No full gate run is recorded for `9e215acce` either.
+Linux host cannot do that step.
 
 ## Debug TV
 
@@ -69,8 +71,8 @@ cover image passthrough, actual HEVC/DV/track metadata and decision refusal.
 Fresh synthetic UI anchors pass Targets and Resolve (six replays, zero differences).
 The shipping Rust feature set passes `cargo +nightly check --lib --no-default-features`.
 The complete `make check` gate passed: all 79 auxiliary steps and the 443-test Python
-harness at this snapshot (today: 146 steps and a 753-test harness), plus the default and
-hostsim Rust suites and lint checks. Representative
+harness at this snapshot (in the current tree: 146 steps and a 753-test harness), plus the
+default and hostsim Rust suites and lint checks. Representative
 unit-test result lines (the gate retains every crate's result):
 
 ```
@@ -98,7 +100,7 @@ all three fresh synthetic fixtures passed both replay modes with zero difference
 
 ## Stable release
 
-Package: `pkg/com.nuvionative.app_0.8.0_arm.ipk`, built with
+Historical 0.8.0 package (the current package is 0.10.0) built with
 `source ~/.cargo/env; make FLAVOR=stable RELEASE=1 ipk`.
 
 Install `com.nuvionative.app` with `tools/nv-tv.py`, import the same addons into that
@@ -153,7 +155,8 @@ Three known limits, not claimed as verified:
   is `/tmp`.
 - `plx_plex` had three pre-existing `transcoder.rs` failures at that time (the fork had added
   `opus` to the codec list without updating those expectations). The later `make check` alignment
-  pass fixed the expectations; `plx_plex` is 826/0 at `eef501647`.
+  pass fixed the expectations; `plx_plex` was 826/0 at `eef501647` and is 839/0 in the current
+  tree.
 
 At that time the owner still needed to check relaunch persistence of a Settings pick, and that
 addons, My List and watch state load after the switch. Later (2026-11-25) the owner confirmed

@@ -1,11 +1,12 @@
-# NuvioNative architecture
+# Nuvio Native architecture
 
-NuvioNative is a fork of PlxNative (GPL-3.0-or-later, upstream GLinnik21/plx-native@4e454ea) that
+Nuvio Native is a fork of PlxNative (GPL-3.0-or-later, upstream GLinnik21/plx-native@4e454ea) that
 browses and plays content from Stremio addons — the same addons a user configured in Nuvio — with
 PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
-Current state: branch `nuvio-native` at `eef501647` (2026-11-24). Dated delivery history lives in
-`HANDOFF.md` and `VALIDATION.md`; the upstream conflict surface is in `MERGE-AUDIT.md`.
+Current state: branch `nuvio-native` at `1db875cc8` (2026-11-25); the deployed 0.10.0 stable
+build is from `84a00aa68`. Dated delivery history lives in `HANDOFF.md` and `VALIDATION.md`;
+the upstream conflict surface is in `MERGE-AUDIT.md`.
 
 ## Findings that drive the design
 

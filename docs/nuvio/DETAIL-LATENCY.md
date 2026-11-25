@@ -71,8 +71,9 @@ passed, `plx_pmsshim` 158 passed, `plx_data` 1662 passed, `plx_nuvio_store` 4 pa
 focused `plx_plex` re-run against the unmodified `nuvio.rs` reproduced those three failures,
 so they were not from `all_leaves`.
 
-**Current tree (`eef501647`):** `plx_net` 338/0 (1 ignored), `plx_pmsshim` 159/0 (2 ignored),
-`plx_data` 1663/0, `plx_nuvio_store` 6/0, `plx_plex` **826/0** — the three `opus` expectation
+**Tree at `eef501647` (no new detail-phase timings recorded since):** `plx_net` 338/0
+(1 ignored), `plx_pmsshim` 159/0 (2 ignored), `plx_data` 1663/0, `plx_nuvio_store` 6/0,
+`plx_plex` **826/0** — the three `opus` expectation
 failures were fixed by the `make check` alignment pass. On the committed tree `make check`
 reported **146 steps — all ok**; `make check-nodef`, the module-layer/deps gates and the ARM
 cross-build remain green.

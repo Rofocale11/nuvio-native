@@ -24,8 +24,7 @@ except the replay-fixtures item at the end of this section. Confirmed on device:
 **Not verified and not covered by this update:** replay fixtures (`AltSourcesScreen::SHAPE` and
 the other shape pins need `tools/plxnative-rec rerecord` on a macOS simulator before
 `make check-replay` is trusted — the Linux host cannot do that step); multi-hour stability; and a
-TV playback run explicitly attributed to the post-extraction probe. No full `make check` run is
-recorded for `9e215acce` either.
+TV playback run explicitly attributed to the post-extraction probe.
 
 **Resolution policy:** integrate both sides wherever they can coexist. The fork's
 version wins only where the two are semantically incompatible (app identity, the
@@ -98,7 +97,7 @@ each is a place to watch on the next upstream merge.
 
 - `rust-modules/screens/src/detail/hero_watchlist_tests.rs`,
   `rust-modules/screens/src/detail/no_driver_tests.rs` — added `list: false` / `list: 0.0`
-  because NuvioNative's `HeroSet`/`HeroWidths` carry an extra My List field.
+  because Nuvio Native's `HeroSet`/`HeroWidths` carry an extra My List field.
 - `rust-modules/screens/src/preferences_tests.rs` — added `PickerKind::RatingSource` to the
   expected Playback field list (the Nuvio IMDb/RT picker).
 - `ci/arm-cc.py` — drops rustc 1.100's `-fuse-ld=lld` for cargo-driven links; the
@@ -399,8 +398,9 @@ verified at this snapshot; the owner confirmed it on the 7500PSC on 2026-11-25 (
   delivery note are recorded here instead of inline markers.
 
 Verification: focused `plx_pmsshim` tests for the fingerprint's persistence, promotion and explicit
-pick precedence; `cargo check --workspace` green. No device verification of a resume choosing the
-same file after re-resolution.
+pick precedence; `cargo check --workspace` green. No device verification at this snapshot; the
+owner later confirmed a resume re-selects the last-played file on the 7500PSC on 2026-11-25 (see
+the device verification update at the top of this file).
 
 ## Version alignment after the upstream merge (2026-11-23)
 
@@ -1325,8 +1325,9 @@ Nuvio stream either.
 
 ## Docs audit (2026-11-25)
 
-Reconciled every file in `docs/nuvio/` against the working tree at HEAD `eef501647`. No Rust
-code, build input, upstream seam or gate changed; all edits are in Markdown. Only fork-owned files
+Reconciled every file in `docs/nuvio/` against the working tree at the then-current HEAD
+`eef501647`. No Rust code, build input, upstream seam or gate changed; all edits are in Markdown.
+Only fork-owned files
 were changed without a marker; the one upstream-owned file touched (`docs/player-submenus.md`)
 keeps its existing inline `Fork Rofocale11:` marker. Corrections made:
 

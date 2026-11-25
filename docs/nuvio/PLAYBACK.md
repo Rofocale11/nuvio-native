@@ -1,4 +1,4 @@
-# NuvioNative playback: third-party stream URLs through the PMS shim
+# Nuvio Native playback: third-party stream URLs through the PMS shim
 
 How a Stremio stream (debrid CDN link, AIOStreams proxy, Torrentio RD link, a LAN Stremio
 streaming server) reaches LG's decoder through PlxNative's unchanged direct-play path, and what
@@ -226,18 +226,18 @@ and visible English subtitles with the physical remote. P7 HDR10 fallback was st
 unverified at that snapshot. Fresh follow-up release QR approval reached the local server and
 loaded account addons. English audio default behavior was host-tested then; the owner confirmed
 both it and the P7 fallback on the 7500PSC on 2026-11-25 (see Current tree below).
-See `VALIDATION.md`
-for the stable install's final checks.
+See `VALIDATION.md` for the stable install's final checks.
 
-## Current tree (2026-11-25, HEAD `9e215acce`)
+## Current tree (2026-11-25, HEAD `1db875cc8`)
 
 The contracts above still describe the shipped path. The 0.10.0 stable build from `84a00aa68`
 (Addons page, P2P switch default ON, three hidden Playback rows) was deployed with
 `make FLAVOR=stable RELEASE=1 deploy` — `verify-deploy: 50 files match` — and the owner
-confirmed it works. On `84a00aa68` `make check` reported **146 steps — all ok**; `plx_plex`
-839/839, `plx_screens` 2347/2347 and the app crate 1491/1491. The three `transcoder.rs`
-lossy-gate failures mentioned in older validation notes were fixed by the `make check`
-alignment pass. No full gate run is recorded for `e0b584c0c` or `9e215acce`.
+confirmed it works. Full `make check` runs on this tree and the two after it reported
+**146 steps — all ok** (app 1491, `plx_media` 2501, `plx_screens` 2347, `plx_data` 1667,
+`plx_plex` 839; Python harness 753 tests). The three `transcoder.rs` lossy-gate failures
+mentioned in older validation notes were fixed by an earlier `make check` alignment pass.
+`1db875cc8` is documentation only.
 
 Owner device verification (2026-11-25, 7500PSC): the P7 HDR10 fallback, the dedicated
 `plx_nuvio_probe` sim-probe comparison, the English audio default on a newly started stream,

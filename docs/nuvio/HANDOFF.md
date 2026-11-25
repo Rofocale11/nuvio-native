@@ -1,9 +1,9 @@
-# Nuvio Native handoff (2026-10-10)
+# Nuvio Native handoff
 
-## Current status (HEAD `9e215acce`, 2026-11-25)
+## Current status (HEAD `1db875cc8`, 2026-11-25)
 
 Everything from "Build and TV" below is the original 2026-10-10 snapshot, kept as history. The
-shipped tree is `nuvio-native` at `9e215acce` in https://github.com/Rofocale11/nuvio-native; the
+current tree is `nuvio-native` at `1db875cc8` in https://github.com/Rofocale11/nuvio-native; the
 authoritative old fork is https://github.com/Rofocale11/nuvio-native-old (branch `nuvio-native`)
 at `83339172d`. This was not pushed, tagged, PR'd or released. Current facts that supersede the
 snapshot:
@@ -19,12 +19,12 @@ snapshot:
   and Settings > Addons lists/flips installed addons; Default quality, Direct Play and Playback
   engine rows are hidden, not deleted. A torrent/debrid diagnostics panel replaced the inert
   playback-controller placeholders.
-- Three commits after the last documented tree: `84a00aa68` (Catalogs selector in the
-  Movies/TV Shows header), `e0b584c0c` (explicit addon failures, catalog/subtitle warm caches)
-  and `9e215acce` (GC fixture flake fix). The last recorded full `make check` was on
-  `84a00aa68`: **146 steps — all ok** (app 1491, `plx_screens` 2347, `plx_data` 1667,
-  `plx_plex` 839, harness 2501). No full gate run is recorded for the two commits after it;
-  the local stable IPK and deployed set predate both.
+- Four commits after the last documented tree (`eef501647`): `84a00aa68` (Catalogs selector in
+  the Movies/TV Shows header), `e0b584c0c` (explicit addon failures, catalog/subtitle warm
+  caches), `9e215acce` (GC fixture flake fix) and `1db875cc8` (documentation only). The full
+  `make check` gate passed on each of the first three trees: **146 steps — all ok** (app 1491,
+  `plx_media` 2501, `plx_screens` 2347, `plx_data` 1667, `plx_plex` 839; Python harness 753
+  tests). The local stable IPK and deployed set predate `e0b584c0c`.
 - The stable 0.10.0 build from `84a00aa68` was deployed with `make FLAVOR=stable RELEASE=1 deploy`
   (`verify-deploy: 50 files match`) and the owner confirmed it works.
 - On 2026-11-25 the owner confirmed on the `45UR7500PSC` all previously open device items:
@@ -192,8 +192,9 @@ See `VALIDATION.md` for the checks and the intentionally stopped broad host run.
   no engine.
 - <!-- Fork Rofocale11: was "No DTS/TrueHD audio conversion. A compatible AAC/AC3/EAC3 track is required." -->
   In Auto the app now converts DTS, TrueHD and Opus to stereo 48 kHz PCM when the TV has no native path; a compatible AAC/AC3/EAC3 track is no longer required for those.
-- P7 enhancement-layer playback is unsupported; the HDR10 base-layer fallback has
-  not been tested on this CX. P8 Dolby Vision was tested.
+- P7 enhancement-layer playback is unsupported (dual-layer streams are refused). The HDR10
+  base-layer fallback was confirmed on the 7500PSC on 2026-11-25; it has not been tried on the
+  CX, where P8 Dolby Vision was tested.
 - Some upstream images/logos are absent; the proxy cannot manufacture missing images.
 
 The stable verification procedure is in `VALIDATION.md`; the final task report records

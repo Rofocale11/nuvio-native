@@ -1,4 +1,4 @@
-# NuvioNative ID management: numeric keys, the key table, synthetic keys
+# Nuvio Native ID management: numeric keys, the key table, synthetic keys
 
 The shim is the only place that knows both vocabularies — PlxNative's numeric `ratingKey` and the
 string ids Stremio addons and TMDB speak. Read with `ARCHITECTURE.md` and `TMDB.md`.
