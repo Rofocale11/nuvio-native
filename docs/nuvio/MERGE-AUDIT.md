@@ -1383,3 +1383,80 @@ rule. The shared capsule painter in `plx_ui` was not changed.
   from `e93158f16`.
 - `docs/nuvio/ARCHITECTURE.md` makes no claim this change contradicts (its "Catalogs → PMS library
   sections" line remains true); `docs/nuvio/AGENTS.md` needed no edit.
+
+## Fault-aware stream/subtitle caches and an explicit Retry (current status)
+
+The cache work had one production flaw: the shim's backend fetches returned a bare `Vec`, so a
+provider that timed out and a provider that honestly answered "nothing here" were the same empty
+list. A stream fan-out that failed was cached as an empty `StreamSlot` for its whole 30-minute TTL,
+the picker saw `complete: true` and stopped polling, and the viewer had an empty Streams menu with
+no way to ask again. Subtitles had no cache at all, so the natural next step — persisting the
+candidate list — would have made the same lossy signal permanent.
+
+The fix separates the three states and keeps the fault out of durable storage:
+
+- `plx_stremio` now has `Fetch<T>` (`rows`, `faulted`, `answered`, `asked`) and reported variants of
+  `streams`/`subtitles`. `fan_out_reported` tells a provider that never answered from one that
+  answered with no rows. `streams_from_addon` returns `Option<Vec<Stream>>` (`None` = transport
+  fault, `Some(empty)` = no streams). The old `Vec` methods are thin wrappers, so no caller changes.
+- `plx_pmsshim::shim_backend::Backend` gained `streams_fetch`/`subtitles_fetch` with default
+  implementations; only `AddonBackend` overrides them. Test fakes keep the old methods unchanged.
+- `shim_pms.rs` keeps `faulted`/`answered`/`asked`/`retry_at` on `SlotState`. A fault with no rows
+  is a short 30 s backoff, a real empty answer a 5 min TTL, real rows the existing 30 min TTL.
+  `Ranked` carries the fault outward; `/nuvio/streams` answers `faulted`, `failed`,
+  `retryAfterMs` and `subtitlesFaulted`. `retry=1` drops the slot and fans out again at once.
+- `shim_subtitle_cache.rs` (fork-owned) caches candidates for 6 h, a real empty answer for 10 min,
+  and a fault for nothing durable — only a 30 s in-memory backoff. It uses `Flight` single-flight,
+  and `addons_changed()` clears it along with the other addon-dependent caches. Unit tests use a
+  memory-only instance so one test's rows cannot answer another test's shim.
+- `plx_nuvio_store` gained one TTL-enveloped `SUBTITLE_CACHE` table; it joins `CACHE_TABLES`, so the
+  50 MiB budget sheds it and boot expiry applies. No new file, no DB8 kind.
+
+Upstream seams touched (each a small marked diff):
+
+- `plx_plex/nuvio.rs` — `StreamList` gained three serde-defaulted fault fields and `nuvio_streams`
+  a `retry` flag.
+- `screens/registry.rs` — `NuvioReq::Streams` gained `retry`; `screens/alt_sources.rs` sends
+  `false` (ordinary polls never bypass the backoff).
+- `screens/player/overlay.rs` — the picker's Retry arm re-arms an addressed request and keeps the
+  panel open; ordinary polling passes the menu's retry flag.
+- `appkit/more_menu.rs` — one `Action::NuvioRetryStreams` variant, its focus key, a11y name and
+  label (the existing `settings.audio.retry` string, so no locale file changed).
+- `appkit/more_menu/nuvio_streams.rs` (fork-owned child) — fault state, the Retry row and the
+  retry-aware poll. The root row stays reachable after a fault so the Retry row can be seen.
+- `src/app/bridge.rs` and `src/app/playback.rs` — a worker branch for the retry flag and a no-op
+  arm for the action the overlay already handled.
+
+No locale key was added, so `ci/check-localization.py` has no non-commentable edit to record.
+
+## Durable catalog pages and account addon-change detection (current status)
+
+A TV relaunch used to re-fetch the first page of every catalog (the ~15 s cold launch), because the
+catalog rows lived only in `Shim::catalogs`. They are now written to a `CATALOG_CACHE` table by
+`pmsshim/src/shim_catalog_cache.rs` with the in-memory cache's existing 15-minute TTL, and seeded
+back into the in-memory entry before any fill starts. A failed fill is never written, and a fill
+that outlived an addon change (`stale`) is not published.
+
+How a change is detected:
+
+- **Settings addon change / profile switch** — the existing `addons_changed()` fingerprint
+  (`transport_url`, `disabled`) clears the caches and recomputes `Shim::catalog_ns`.
+- **Manifest content change** (catalog added/renamed, genre options changed) — the namespace also
+  includes the installed manifests' catalog declarations, so old rows are missed without clearing
+  the meta/enrich caches. Recorded in `catalog_namespace()` in `shim_pms.rs`.
+- **Nuvio account addon add/remove** — at boot, `Account::account_addons_fingerprint()` makes ONE
+  REST read of the profile's addon rows (no manifest fetches) via the new
+  `nuvio::addons_fingerprint`. It is compared with the fingerprint written when the set was last
+  applied (`nuvio::addon_set_fingerprint`, stored under `InstallPrefs/account_addons_fp` before
+  local enable/disable overrides are applied, so a local toggle cannot force a re-fetch). Changed →
+  `Account::load_profile(None)` runs the existing sink path: manifests, cache clear, warm. A fault
+  returns `None` and keeps the persisted set.
+- **Catalog content change** — the Stremio protocol has no change signal; only the 15-minute TTL
+  bounds it. This is documented in `ARCHITECTURE.md` and is not claimed to be instant.
+
+New fork-owned file: `pmsshim/src/shim_catalog_cache.rs`. Upstream seams touched, all with
+`Fork Rofocale11:` markers: `nuvio-store/src/lib.rs` (table, cache enum, budget list, `def`/get/put
+arms), `stremio/src/nuvio.rs` (three fingerprint helpers), `pmsshim/src/{lib,shim_pms,shim_account}.rs`
+(module, field/init, seeding and write on fill, namespace recompute, account probe), and
+`src/app/nuvio.rs` (boot probe in the existing `nuvio-boot` task). `ci/module-layers.ini` registers
+the new shim module; no locale key changed.

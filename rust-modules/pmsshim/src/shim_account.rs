@@ -152,6 +152,16 @@ impl Account {
         self.session.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
+    /// Fork Rofocale11: compare the signed-in account's addon rows with the set we booted from.
+    /// One cheap REST read, NO manifest fetches; `None` when signed out or when the backend could
+    /// not be reached — a fault is not a change and must not clear a warm cache. The caller
+    /// compares this with the fingerprint written when the set was last applied.
+    pub fn account_addons_fingerprint(&self) -> Option<String> {
+        let session = self.fresh_session()?;
+        let pid = self.profile_id(&session).ok()?;
+        plx_stremio::nuvio::addons_fingerprint(&session, &pid).ok()
+    }
+
     /// The account's subtitle language (`defaultSubtitleLanguage`: the picker's 2-letter code, as
     /// the app writes it to `/api/v2/user/profile`), or `None` when the viewer never set one.
     /// It is what the subtitle tracks are ranked against when a part is built — see
@@ -469,7 +479,7 @@ impl Account {
 
     /// Fetch a profile's addons (the first profile when `None`) and hand them to the sink, off the
     /// request: manifests are fetched per addon.
-    fn load_profile(&self, profile: Option<&str>) {
+    pub fn load_profile(&self, profile: Option<&str>) {
         let Some(session) = self.fresh_session() else { return };
         let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
         let watch_sink = self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -537,7 +547,15 @@ fn activate_loaded_profile<F>(
     if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
         return;
     }
-    if let Ok(mut addons) = addons {
+    if let Ok(addons) = addons {
+        // Fork Rofocale11: remember the ACCOUNT's addon fingerprint BEFORE local enable/disable
+        // overrides are applied. The boot probe reads the account's rows and must compare like
+        // with like, or a viewer's local toggle would force a full account re-fetch every launch.
+        let account_fp = plx_stremio::nuvio::addon_set_fingerprint(&addons);
+        if let Some(store) = plx_nuvio_store::get() {
+            let _ = store.put(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp", account_fp.as_bytes());
+        }
+        let mut addons = addons;
         if !addons.is_empty() {
             // Apply session-scoped enable/disable overrides from nuvio-session.json.
             let overrides = prefs.lock().unwrap_or_else(|e| e.into_inner()).get("addonEnabled").and_then(Value::as_object).cloned().unwrap_or_default();

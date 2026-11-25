@@ -106,6 +106,9 @@ pub enum Action {
     /// Fork Rofocale11: pick the shim stream at this ranked index. The app performs the
     /// `/nuvio/select` write and re-resolves the playing item; this menu never does IO.
     NuvioStream(usize),
+    /// Fork Rofocale11: ask the shim to re-run the stream fan-out after a provider fault. The
+    /// overlay keeps the picker open and re-arms the request with `retry`; it is not a stream pick.
+    NuvioRetryStreams,
     /// select a rung of the playback-quality ladder ([`plx_media::route::set_quality`])
     SetQuality(plx_media::route::Quality),
     /// select a playback speed, in thousandths (one of [`plx_media::player::PLAY_RATES`];
@@ -332,6 +335,8 @@ impl FormId for Action {
             // Fork Rofocale11: 0x3000 up — clear of the upstream's speeds (20..=29), folded
             // commands (30..=43) and rungs (10..=16), and of the addon drill-ins (0x1000 + i).
             Action::NuvioStream(i) => 0x3000 + *i as u32,
+            // Fork Rofocale11: clear of every stream index; append-only so recorded keys stay.
+            Action::NuvioRetryStreams => 0x3800,
             // 30..=43: the folded commands, one key each (the four a package can never fold are listed so a
             // new command cannot compile without claiming one)
             Action::Hud(command) => match command {
@@ -398,6 +403,7 @@ impl MoreRow {
                 Action::ToggleStats => path.name("stats"),
                 Action::SendDiagnostics => path.name("diagnostics"),
                 Action::NuvioStream(i) => path.name("stream").index(*i),
+                Action::NuvioRetryStreams => path.name("retry_streams"),
                 Action::SetQuality(quality) => path.name("rung").name(match quality {
                     Quality::Auto => "auto",
                     Quality::Original => "original",
@@ -1110,6 +1116,8 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         // Fork Rofocale11: a stream row is built from the captured choice on its addon page; this
         // fallback only names an action whose choice is no longer in the list.
         Action::NuvioStream(i) => format!("Stream #{i}").into(),
+        // Fork Rofocale11: the same word the Settings retry rows use; no new locale key.
+        Action::NuvioRetryStreams => plx_os::i18n::msg::settings_audio_retry().into(),
         Action::SendDiagnostics => plx_os::i18n::msg::widgets_menu_diagnostics().into(),
         Action::None => "".into(),
         // a folded row is labelled by its `FoldedRow`, which knows the content
@@ -1146,7 +1154,7 @@ fn is_on(a: Action) -> bool {
         // a rung is not a switch — see `row_for`, which gives it the leading mark instead
         Action::SetQuality(_) | Action::SetSpeed(_) | Action::SendDiagnostics | Action::Hud(_) | Action::None
         // Fork Rofocale11: a stream is a choice, not a switch — no trailing On/Off.
-        | Action::NuvioStream(_) => false,
+        | Action::NuvioStream(_) | Action::NuvioRetryStreams => false,
     }
 }
 
@@ -1192,6 +1200,8 @@ fn row_for(ps: &plx_media::route::PlaybackSession, a: Action) -> Row {
         // Fork Rofocale11: the addon page builds its own rows from the captured choice, so this
         // arm is only a fallback for a choice that has since left the list.
         Action::NuvioStream(_) => Row::new(label(a)),
+        // Fork Rofocale11: Retry is an action, not a switch — no trailing On/Off.
+        Action::NuvioRetryStreams => Row::new(label(a)),
         _ => Row::new(label(a)).toggle(is_on(a)),
     }
 }

@@ -350,6 +350,29 @@ pub(crate) fn boot() {
                 shim.warm();
             }
         }
+        // Fork Rofocale11: an addon added or deleted in the Nuvio ACCOUNT is invisible to the
+        // locally persisted set until we ask. One cheap row read (no manifest fetches): unchanged
+        // keeps the warm set and the durable catalog cache; changed re-loads through the same sink
+        // path a sign-in or profile pick uses, which clears the caches and re-warms Home.
+        if shim.account.signed_in() {
+            if let Some(fp) = shim.account.account_addons_fingerprint() {
+                match plx_nuvio_store::get()
+                    .and_then(|s| s.get(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp"))
+                {
+                    None => {
+                        // First run of this feature: seed the baseline from the set we booted with.
+                        if let Some(store) = plx_nuvio_store::get() {
+                            let _ = store.put(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp", fp.as_bytes());
+                        }
+                    }
+                    Some(old) if old != fp.as_bytes() => {
+                        log("nuvio: account addons changed — reloading addon set");
+                        shim.account.load_profile(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
         if need_server {
             if let Some(s) = plx_stremio::torrent::probe_local_server() {
                 log("nuvio: streaming server found on this device; torrents enabled");

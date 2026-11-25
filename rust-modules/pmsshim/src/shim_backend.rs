@@ -6,6 +6,8 @@ use plx_stremio::model::{Meta, MetaPreview, Stream, Subtitle};
 use std::sync::RwLock;
 use std::time::Duration;
 
+pub use plx_stremio::model::Fetch;
+
 /// One catalog the shim shows as a Home shelf and/or a library listing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CatalogInfo {
@@ -54,6 +56,27 @@ pub trait Backend: Send + Sync {
     /// Streams for a movie (`id`) or an episode (the video id), progressively through `on_batch`.
     fn streams(&self, type_: &str, id: &str, deadline: Duration, on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream>;
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle>;
+
+    /// [`Self::streams`] with the provider-fault signal the cache needs. Backends with no network
+    /// (test fakes) keep the old answer: no fault, no partial state. Real addons override it.
+    fn streams_fetch(
+        &self,
+        type_: &str,
+        id: &str,
+        deadline: Duration,
+        on_batch: &mut dyn FnMut(&[Stream]),
+    ) -> Fetch<Stream> {
+        let rows = self.streams(type_, id, deadline, on_batch);
+        let answered = usize::from(!rows.is_empty());
+        Fetch::ok(rows, answered, answered)
+    }
+
+    /// [`Self::subtitles`] with the provider-fault signal the cache needs.
+    fn subtitles_fetch(&self, type_: &str, id: &str) -> Fetch<Subtitle> {
+        let rows = self.subtitles(type_, id);
+        let answered = usize::from(!rows.is_empty());
+        Fetch::ok(rows, answered, answered)
+    }
     /// The player's on-demand subtitle search (Subtitles → Search), all languages. `None` means
     /// the provider did not answer and is a fault; `Some(empty)` is its answer that it has none.
     /// Defaults to an empty answer so test/pseudo backends need no search provider.
@@ -142,6 +165,18 @@ impl Backend for AddonBackend {
     }
     fn subtitles(&self, type_: &str, id: &str) -> Vec<Subtitle> {
         self.snapshot().subtitles(type_, id)
+    }
+    fn streams_fetch(
+        &self,
+        type_: &str,
+        id: &str,
+        deadline: Duration,
+        on_batch: &mut dyn FnMut(&[Stream]),
+    ) -> Fetch<Stream> {
+        self.snapshot().streams_reported(type_, id, deadline, on_batch)
+    }
+    fn subtitles_fetch(&self, type_: &str, id: &str) -> Fetch<Subtitle> {
+        self.snapshot().subtitles_reported(type_, id)
     }
     /// The **builtin** OpenSubtitles v3 addon, independent of the user's installed set: the
     /// automatic lane above already reads that set, so searching there again would only repeat it.

@@ -1601,6 +1601,7 @@ fn the_more_menu_asks_for_streams_and_swaps_its_quality_row_when_they_land() {
                 ..Default::default()
             },
         ],
+        ..Default::default()
     };
     let _ = step(
         &mut page,

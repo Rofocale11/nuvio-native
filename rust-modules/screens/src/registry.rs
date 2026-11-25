@@ -106,7 +106,10 @@ pub struct NuvioReply {
 pub enum NuvioReq {
     /// `GET /nuvio/streams`: the (possibly paginated) ranked stream list for an item. `delay_ms`
     /// is the retry backoff the shim asks for; it is applied on the worker, never on a frame.
-    Streams { sid: plx_plex::plex::ServerId, rk: String, delay_ms: u32, reply: NuvioReply },
+    Streams { sid: plx_plex::plex::ServerId, rk: String, delay_ms: u32, reply: NuvioReply,
+        // Fork Rofocale11: an explicit Retry bypasses the shim's fault backoff; an ordinary poll
+        // carries false. The worker, never the screen, performs the HTTP read.
+        retry: bool },
     /// `GET /nuvio/select`: commit a ranked stream. This is the ONLY reply a screen turns into a
     /// navigation, and it keeps the same "not signed in / failed" refusal the old worker had.
     Select { sid: plx_plex::plex::ServerId, rk: String, index: usize, reply: NuvioReply },

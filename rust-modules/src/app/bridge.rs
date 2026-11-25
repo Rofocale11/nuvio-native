@@ -3642,9 +3642,11 @@ impl Bridge<'_> {
             plx_machine::present::wake_from_worker();
         };
         let spawned = match request {
-            NuvioReq::Streams { sid, rk, delay_ms, .. } => plx_base::task::spawn("nuvio-stream-list", move || {
+            // Fork Rofocale11: `retry` bypasses the shim's fault backoff for an explicit viewer
+            // Retry; an ordinary poll leaves the cached slot alone.
+            NuvioReq::Streams { sid, rk, delay_ms, retry, .. } => plx_base::task::spawn("nuvio-stream-list", move || {
                 if delay_ms > 0 { std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64)); }
-                let list = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_streams(&rk));
+                let list = plx_plex::plex::client_for(sid).and_then(|c| c.nuvio_streams(&rk, retry));
                 emit(NuvioResult::Streams(list));
             }),
             NuvioReq::Select { sid, rk, index, .. } => plx_base::task::spawn("nuvio-stream-select", move || {

@@ -23,7 +23,7 @@ pub const BUDGET_BYTES: u64 = 50 * 1024 * 1024;
 
 /// The TTL-enveloped tables. `ImdbTmdb` is deliberately absent: its rows never expire and are
 /// expensive to rebuild, so they are durable data, not cache.
-const CACHE_TABLES: [Table; 3] = [Table::MetaCache, Table::EnrichCache, Table::ImdbIds];
+const CACHE_TABLES: [Table; 5] = [Table::MetaCache, Table::EnrichCache, Table::ImdbIds, Table::SubtitleCache, Table::CatalogCache];
 
 /// The one file name. Kept here so boot, the shim and the in-process backend cannot disagree.
 pub const FILE_NAME: &str = "nuvio.redb";
@@ -46,6 +46,12 @@ pub const IMDB_IDS: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_id
 // big-endian u64 with NO TTL envelope (unlike `cache_put`). A `/find` answer is paid for once per
 // title, not once per 15-minute cache window.
 pub const IMDB_TMDB: TableDefinition<&str, &[u8]> = TableDefinition::new("imdb_tmdb");
+// Fork Rofocale11: subtitle CANDIDATE lists (not the files, and never a provider fault) are a
+// bounded, expiring cache in the one store, so a reopen of a title does not re-ask every addon.
+pub const SUBTITLE_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("subtitle_cache");
+// Fork Rofocale11: catalog first pages are durable for one 15-minute window so a TV relaunch with
+// an unchanged addon set does not re-fetch every Home shelf. Faults are never written here.
+pub const CATALOG_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("catalog_cache");
 
 /// The tables of the single file. A new feature that needs durable state adds one here rather
 /// than a second file or a new DB8 kind.
@@ -67,6 +73,10 @@ pub enum Table {
     ImdbIds,
     /// Fork Rofocale11: permanent IMDb -> TMDB id mapping (plain BE u64, no TTL envelope).
     ImdbTmdb,
+    /// Fork Rofocale11: TTL-enveloped subtitle candidates, shed like the other cache rows.
+    SubtitleCache,
+    /// Fork Rofocale11: TTL-enveloped catalog pages; cleared when the addon set changes.
+    CatalogCache,
 }
 
 /// Fork Rofocale11: the TTL-aware metadata caches. `cache_get` returns `None` on a miss or an
@@ -76,6 +86,10 @@ pub enum NuvioCache {
     Meta,
     Enrich,
     Imdb,
+    /// Fork Rofocale11: subtitle candidates; an empty answer gets a much shorter TTL than rows.
+    Subtitles,
+    /// Fork Rofocale11: catalog pages; one 15-minute window, never a provider fault.
+    Catalogs,
 }
 
 impl Table {
@@ -94,6 +108,8 @@ impl Table {
             Self::EnrichCache => ENRICH_CACHE,
             Self::ImdbIds => IMDB_IDS,
             Self::ImdbTmdb => IMDB_TMDB,
+            Self::SubtitleCache => SUBTITLE_CACHE,
+            Self::CatalogCache => CATALOG_CACHE,
         }
     }
 }
@@ -158,6 +174,8 @@ impl Store {
             NuvioCache::Meta => Table::MetaCache,
             NuvioCache::Enrich => Table::EnrichCache,
             NuvioCache::Imdb => Table::ImdbIds,
+            NuvioCache::Subtitles => Table::SubtitleCache,
+            NuvioCache::Catalogs => Table::CatalogCache,
         };
         let bytes = self.get(table, key)?;
         let (expiry, value) = bytes.split_at_checked(8)?;
@@ -172,6 +190,8 @@ impl Store {
             NuvioCache::Meta => Table::MetaCache,
             NuvioCache::Enrich => Table::EnrichCache,
             NuvioCache::Imdb => Table::ImdbIds,
+            NuvioCache::Subtitles => Table::SubtitleCache,
+            NuvioCache::Catalogs => Table::CatalogCache,
         };
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis() as u64;
         let expiry = now.saturating_add(ttl.as_millis() as u64).to_be_bytes();

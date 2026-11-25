@@ -40,6 +40,13 @@ const HUBS_BUDGET: Duration = Duration::from_secs(4);
 /// Catalog fetches in flight at once (the TV's network and CPU are shared with the UI).
 const CATALOG_PARALLEL: usize = 8;
 const STREAM_TTL: Duration = Duration::from_secs(30 * 60);
+/// A failed fan-out is NOT "this title has no streams". Keep the fault for this long, then let the
+/// next read try again — a dead addon host must not be asked on every poll, but it also must not
+/// leave the Streams menu empty and un-retryable for the whole stream TTL.
+const STREAM_RETRY: Duration = Duration::from_secs(30);
+/// A genuine empty answer is real information, but a newly installed addon can change it. Keep it
+/// briefly, then re-ask, unlike the long-lived rows that did contain playable streams.
+const STREAM_EMPTY_TTL: Duration = Duration::from_secs(5 * 60);
 /// Rows a catalog listing reports beyond what it has fetched while the catalog is not exhausted,
 /// so a grid keeps asking for the next page.
 const MORE_HINT: i64 = 50;
@@ -565,6 +572,31 @@ struct SlotState {
     /// Subtitle addons have reported (possibly empty). `ranked` may wait on this so a play does not
     /// start before the sidecars it must auto-enable have arrived.
     subs_done: bool,
+    /// A subtitle provider fault: the sidecars present may be partial, and the player should not
+    /// read "no subtitles" from it.
+    subs_faulted: bool,
+    /// At least one stream addon failed to answer. Rows that did arrive are still shown, but the
+    /// answer is partial, never presented as the final word on what is available.
+    faulted: bool,
+    answered: usize,
+    asked: usize,
+    /// When this slot may be re-asked. `Some` for a fault (short backoff) and for a genuine empty
+    /// answer (short TTL); `None` for rows that are kept for the full [`STREAM_TTL`].
+    retry_at: Option<Instant>,
+}
+
+/// What a ranked read tells the caller beyond the rows themselves. Faults are a first-class
+/// answer so the picker can offer an explicit retry instead of showing a blank menu.
+struct Ranked {
+    streams: Vec<(usize, Classified)>,
+    subs: Vec<SubRef>,
+    done: bool,
+    subs_done: bool,
+    subs_faulted: bool,
+    faulted: bool,
+    /// A fault with no rows at all: the provider failed, the title was not proven to have none.
+    failed: bool,
+    retry_after_ms: u32,
 }
 
 struct StreamSlot {
@@ -588,6 +620,9 @@ pub struct Shim {
     /// the `More Like This`/franchise data `related_hub` builds — persisted so a restart does not
     /// pay for it again.
     enrich: Arc<EnrichCache>,
+    /// Fork Rofocale11: subtitle candidates, cached in the one store. Faults stay in memory so a
+    /// provider outage is never persisted as "no subtitles for this title".
+    subtitle_cache: Arc<crate::shim_subtitle_cache::SubtitleCache>,
     /// Fork Rofocale11: the addon set the shim saw at construction. The boot path re-applies the
     /// same set and calls `addons_changed()` before the first read; clearing there threw away the
     /// meta rows the durable cache had just loaded. Only a real change may drop the caches.
@@ -596,6 +631,11 @@ pub struct Shim {
     /// it was warming would otherwise each ask the addon for the same title.
     meta_flight: crate::shim_flight::Flight,
     catalogs: Mutex<HashMap<(String, Option<String>), Arc<Mutex<CatalogCache>>>>,
+    /// Fork Rofocale11: durable catalog pages. Keyed by `catalog_ns`, which changes with the
+    /// addon set and the manifests' catalog declarations, so a configuration change can never
+    /// read a stale row; content staleness is bounded by the 15-minute TTL.
+    catalog_cache: crate::shim_catalog_cache::CatalogCache,
+    catalog_ns: std::sync::RwLock<String>,
     catalog_list: Mutex<Option<(Instant, Vec<CatalogInfo>)>>,
     /// The full browse list, same cache shape. **Every `/hubs/nuvio/{i}` index is an index into
     /// this list**, so Home and Recommended must both build their rows from it — a row's key has to
@@ -2447,6 +2487,116 @@ mod tmdb_metadata_tests {
         );
     }
 
+    /// A provider outage must look like an outage, not like a title with no streams. The old slot
+    /// cached the empty vector for 30 minutes and the picker stopped polling at `complete`, so a
+    /// transient failure left an empty, un-retryable Streams menu.
+    #[derive(Default)]
+    struct FaultStreamBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Backend for FaultStreamBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> { Vec::new() }
+        fn catalog_page(&self, _: &str, _: u32, _: Option<&str>) -> Result<Vec<MetaPreview>, ()> { Ok(Vec::new()) }
+        fn search(&self, _: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
+        fn meta(&self, _: &str, _: &str) -> Option<Meta> { None }
+        fn streams(&self, _: &str, _: &str, _: Duration, _: &mut dyn FnMut(&[Stream])) -> Vec<Stream> { Vec::new() }
+        fn subtitles(&self, _: &str, _: &str) -> Vec<plx_stremio::model::Subtitle> { Vec::new() }
+        fn streams_fetch(
+            &self,
+            _: &str,
+            _: &str,
+            _: Duration,
+            _: &mut dyn FnMut(&[Stream]),
+        ) -> crate::shim_backend::Fetch<Stream> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::shim_backend::Fetch::with_fault(Vec::new(), 0, 1)
+        }
+    }
+
+    #[test]
+    fn a_stream_fault_is_reported_and_an_explicit_retry_refetches() {
+        let backend = Arc::new(FaultStreamBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let rk = 1_000_000_603i64;
+        shim.warm_synthetic_streams(rk);
+        for _ in 0..200 {
+            let done = shim.streams.lock().unwrap().get(&rk)
+                .is_some_and(|s| s.state.lock().unwrap().done);
+            if done { break; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let request = |retry: bool| {
+            let mut query = HashMap::from([("ratingKey".into(), rk.to_string())]);
+            if retry { query.insert("retry".into(), "1".into()); }
+            Request { method: "GET".into(), path: "/nuvio/streams".into(), query,
+                headers: HashMap::new(), body: Vec::new() }
+        };
+        let response = shim.handle(&request(false));
+        let answer: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(answer["failed"], true, "a dead addon is not an empty library");
+        assert_eq!(answer["faulted"], true);
+        assert_eq!(answer["complete"], true, "the picker must stop polling a settled fault");
+        assert_eq!(answer["streams"].as_array().unwrap().len(), 0);
+        let calls = backend.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(calls, 1);
+        // Ordinary polls during the backoff must not hammer a dead host.
+        let _ = shim.handle(&request(false));
+        let _ = shim.handle(&request(false));
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), calls);
+        // The viewer's Retry bypasses the backoff and starts a fresh fan-out.
+        let _ = shim.handle(&request(true));
+        for _ in 0..200 {
+            let done = shim.streams.lock().unwrap().get(&rk)
+                .is_some_and(|s| s.state.lock().unwrap().done);
+            if done { break; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), calls + 1);
+    }
+
+    /// A relaunch starts with an empty in-memory catalog map. If the durable window holds the
+    /// rows, Home must be answered from redb without asking the addon at all.
+    #[derive(Default)]
+    struct CountingCatalogBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Backend for CountingCatalogBackend {
+        fn catalogs(&self) -> Vec<CatalogInfo> {
+            vec![CatalogInfo {
+                key: "a/movie/top".into(), title: "Top Movies".into(),
+                type_: "movie".into(), genres: vec![],
+            }]
+        }
+        fn catalog_page(&self, _: &str, _: u32, _: Option<&str>) -> Result<Vec<MetaPreview>, ()> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![MetaPreview { id: "tt-fresh".into(), type_: "movie".into(), name: "Fresh".into(), ..Default::default() }])
+        }
+        fn search(&self, _: &str) -> Vec<(CatalogInfo, Vec<MetaPreview>)> { Vec::new() }
+        fn meta(&self, _: &str, _: &str) -> Option<Meta> { None }
+        fn streams(&self, _: &str, _: &str, _: Duration, _: &mut dyn FnMut(&[Stream])) -> Vec<Stream> { Vec::new() }
+        fn subtitles(&self, _: &str, _: &str) -> Vec<plx_stremio::model::Subtitle> { Vec::new() }
+    }
+
+    #[test]
+    fn a_relaunch_reads_catalog_pages_from_the_durable_window() {
+        let backend = Arc::new(CountingCatalogBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let ns = shim.catalog_ns.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let key = crate::shim_catalog_cache::CatalogCache::key(&ns, "a/movie/top", None);
+        shim.catalog_cache.put(&key, vec![MetaPreview {
+            id: "tt-cached".into(), type_: "movie".into(), name: "Cached".into(), ..Default::default()
+        }], true);
+        // Simulate the process restart: the in-memory map is empty, the durable row is not.
+        shim.catalogs.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let (rows, _) = shim.catalog_range("a/movie/top", None, None, None, 0, 10, Duration::ZERO);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "tt-cached");
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "a fresh durable window must not touch the addon");
+    }
+
     #[test]
     fn synthetic_rating_keys_reach_addons_as_tmdb_ids() {
         let backend = Arc::new(RecordingBackend::default());
@@ -2668,6 +2818,20 @@ fn addons_fingerprint(backend: &dyn Backend) -> Vec<(String, bool)> {
     backend.addons_fingerprint()
 }
 
+/// Fork Rofocale11: the namespace for durable catalog pages. It changes when the addon set changes
+/// (Settings or account) OR when an installed manifest adds/renames a catalog or changes its genre
+/// options, so a stale row from a different configuration can never be read. A catalog's CONTENT
+/// changing is not observable without asking the addon; the 15-minute TTL bounds that instead.
+fn catalog_namespace(backend: &dyn Backend) -> String {
+    let mut decls: Vec<(String, String, String, Vec<String>)> = backend
+        .all_catalogs()
+        .into_iter()
+        .map(|c| (c.key, c.title, c.type_, c.genres))
+        .collect();
+    decls.sort();
+    format!("{:?}|{:?}", addons_fingerprint(backend), decls)
+}
+
 impl Shim {
     pub fn new(backend: Arc<dyn Backend>, cfg: Config) -> Shim {
         let dir = cfg.data_dir.clone();
@@ -2675,6 +2839,7 @@ impl Shim {
         let cfg_p2p = cfg.p2p_enabled;
         let cfg_token = cfg.token.clone();
         let initial_fp = addons_fingerprint(backend.as_ref());
+        let initial_ns = catalog_namespace(backend.as_ref());
         Shim {
             backend,
             keys: Keys::open(dir.as_deref()),
@@ -2683,9 +2848,12 @@ impl Shim {
             cfg,
             metas: MetaCache::open(dir.as_deref()),
             enrich: EnrichCache::open(dir.as_deref()),
+            subtitle_cache: crate::shim_subtitle_cache::SubtitleCache::open(),
             addons_fp: Mutex::new(Some(initial_fp)),
             meta_flight: crate::shim_flight::Flight::default(),
             catalogs: Mutex::new(HashMap::new()),
+            catalog_cache: crate::shim_catalog_cache::CatalogCache::open(),
+            catalog_ns: std::sync::RwLock::new(initial_ns),
             catalog_list: Mutex::new(None),
             browse_list: Mutex::new(None),
             cards: Mutex::new(HashMap::new()),
@@ -3042,6 +3210,9 @@ impl Shim {
         }
         self.metas.clear();
         self.enrich.clear();
+        // Fork Rofocale11: a different addon set may offer different subtitles — and a provider
+        // that was down under the old set must be asked at once under the new one.
+        self.subtitle_cache.clear();
         self.poster_fallbacks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3050,6 +3221,11 @@ impl Shim {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // Fork Rofocale11: a new addon set (Settings OR the Nuvio account) gets a new catalog
+        // namespace, so no durable row from the old set can be read. Dropping them also keeps the
+        // 50 MiB budget from being spent on rows that can never be hit.
+        *self.catalog_ns.write().unwrap_or_else(|e| e.into_inner()) = catalog_namespace(self.backend.as_ref());
+        self.catalog_cache.clear();
         *self.catalog_list.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.browse_list.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.streams
@@ -3144,22 +3320,37 @@ impl Shim {
         wait: Duration,
     ) -> (Vec<MetaPreview>, i64) {
         let k = (key.to_string(), match_genre.or(fetch_genre).map(genre_key));
+        let ns = self.catalog_ns.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let durable_key = crate::shim_catalog_cache::CatalogCache::key(&ns, &k.0, k.1.as_deref());
         let entry = {
             let mut g = self.catalogs.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = g.get(&k).is_some_and(|c| {
                 c.lock().unwrap_or_else(|e| e.into_inner()).at.elapsed() < CATALOG_TTL
             });
             if !fresh {
+                // Fork Rofocale11: seed from the one durable window before starting any fetch. A
+                // relaunch with unchanged addons then answers Home from redb, not from the addons.
+                let seeded = self.catalog_cache.get(&durable_key).map(|answer| {
+                    let age = Duration::from_secs(now_secs().saturating_sub(answer.at) as u64);
+                    CatalogCache {
+                        at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+                        rows: answer.rows,
+                        exhausted: answer.exhausted,
+                        filling: false,
+                        retry_at: None,
+                        cv: Arc::new(Condvar::new()),
+                    }
+                });
                 g.insert(
                     k.clone(),
-                    Arc::new(Mutex::new(CatalogCache {
+                    Arc::new(Mutex::new(seeded.unwrap_or_else(|| CatalogCache {
                         at: Instant::now(),
                         rows: Vec::new(),
                         exhausted: false,
                         filling: false,
                         retry_at: None,
                         cv: Arc::new(Condvar::new()),
-                    })),
+                    }))),
                 );
             }
             g[&k].clone()
@@ -3350,6 +3541,18 @@ impl Shim {
         }
         self.release();
         if !stale && (!failed || added) {
+            if !failed {
+                // Fork Rofocale11: a SUCCESSFUL fill is durable for one 15-minute window, so the
+                // next TV launch answers from redb. A failed fill is never written, and a fill
+                // that outlived an addon change (`stale`) must not publish old rows.
+                let (rows, exhausted) = {
+                    let c = entry.lock().unwrap_or_else(|e| e.into_inner());
+                    (c.rows.clone(), c.exhausted)
+                };
+                let ns = self.catalog_ns.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let durable_key = crate::shim_catalog_cache::CatalogCache::key(&ns, &k.0, k.1.as_deref());
+                self.catalog_cache.put(&durable_key, rows, exhausted);
+            }
             self.catalog_gen.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -3503,7 +3706,18 @@ impl Shim {
         let translated_id = self.addon_id_for(&type_, &addon_id);
         let mut g = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.get(&rk) {
-            if s.started.elapsed() < STREAM_TTL {
+            let st = s.state.lock().unwrap_or_else(|e| e.into_inner());
+            // A slot still filling is shared, never duplicated. A failed or genuinely empty slot
+            // is kept through its short backoff so the picker can see the fault and offer Retry;
+            // only after that, or after the full TTL for real rows, is a fresh fetch started.
+            if !st.done {
+                return Some(s.clone());
+            }
+            if st.retry_at.is_some_and(|at| Instant::now() < at) {
+                return Some(s.clone());
+            }
+            let ttl = if st.streams.is_empty() { STREAM_EMPTY_TTL } else { STREAM_TTL };
+            if s.started.elapsed() < ttl {
                 return Some(s.clone());
             }
         }
@@ -3520,6 +3734,7 @@ impl Shim {
         let (backend, s2, deadline) =
             (self.backend.clone(), slot.clone(), self.cfg.stream_deadline);
         let subs_backend = self.backend.clone();
+        let sub_cache = self.subtitle_cache.clone();
         let (st, sid) = (type_.clone(), translated_id.clone());
         // Subtitles ride beside the streams, never in front of them.
         let slot_subs = slot.clone();
@@ -3532,30 +3747,45 @@ impl Shim {
                     st.streams.extend(b.iter().take(room).cloned());
                     s2.cv.notify_all();
                 };
-                let all = backend.streams(&type_, &translated_id, deadline, &mut on_batch);
+                let fetched = backend.streams_fetch(&type_, &translated_id, deadline, &mut on_batch);
                 let mut st = s2.state.lock().unwrap_or_else(|e| e.into_inner());
                 // A backend that only returns at the end (no batches) still lands here.
-                if st.streams.is_empty() && !all.is_empty() {
-                    st.streams = all.into_iter().take(PART_STRIDE as usize - 1).collect();
+                if st.streams.is_empty() && !fetched.rows.is_empty() {
+                    st.streams = fetched.rows.into_iter().take(PART_STRIDE as usize - 1).collect();
                 }
+                st.faulted = fetched.faulted;
+                st.answered = fetched.answered;
+                st.asked = fetched.asked;
                 st.done = true;
+                if st.streams.is_empty() {
+                    // A fault is NOT an empty catalog: a short backoff and a retry affordance,
+                    // not half an hour of "nothing here".
+                    st.retry_at = Some(Instant::now() + if fetched.faulted { STREAM_RETRY } else { STREAM_EMPTY_TTL });
+                }
                 s2.cv.notify_all();
             })
             .is_ok();
-        // A slot whose thread never started must still report `done`, or the Source Picker polls
-        // to its retry limit and shows "loading" forever.
+        // A slot whose thread never started is a fault, not an empty answer: report `done` so the
+        // picker does not poll forever, but mark the fault so it can offer a retry.
         if !started {
             let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.faulted = true;
+            st.asked = 1;
             st.done = true;
+            st.retry_at = Some(Instant::now() + STREAM_RETRY);
             slot.cv.notify_all();
         }
         let subs_spawned = std::thread::Builder::new()
             .name("pmsshim-subs".into())
             .spawn(move || {
-                let subs = subs_backend.subtitles(&st, &sid);
+                let key = crate::shim_subtitle_cache::SubtitleCache::key(&st, &sid);
+                let subs = crate::shim_subtitle_cache::fetch_cached(
+                    &sub_cache, &key, || subs_backend.subtitles_fetch(&st, &sid),
+                );
+                let subs_faulted = subs.faulted;
                 let mut g = slot_subs.state.lock().unwrap_or_else(|e| e.into_inner());
                 // Ids are assigned by the shim on first read (see `ranked`), so only stash here.
-                g.subs = subs
+                g.subs = subs.rows
                     .into_iter()
                     .take(40)
                     .map(|s| {
@@ -3568,6 +3798,7 @@ impl Shim {
                         }
                     })
                     .collect();
+                g.subs_faulted = subs_faulted;
                 g.subs_done = true;
                 drop(g);
                 slot_subs.cv.notify_all();
@@ -3580,6 +3811,15 @@ impl Shim {
             slot.cv.notify_all();
         }
         Some(slot)
+    }
+
+    /// Drop the item's slot and start a fresh fan-out now, bypassing the fault backoff. An
+    /// explicit viewer Retry must not wait out a short cache window; the old slot's waiters are
+    /// woken by `ranked` on the next read, which sees the replacement slot.
+    pub fn retry_streams(&self, rk: i64) -> bool {
+        let Some(ident) = self.keys.ident(rk).or_else(|| synthetic_ident(rk)) else { return false };
+        self.streams.lock().unwrap_or_else(|e| e.into_inner()).remove(&rk);
+        self.slot(rk, &ident).is_some()
     }
 
     /// The ranked playable streams of an item (waiting per the deadline/grace rules) and the
@@ -3601,9 +3841,10 @@ impl Shim {
         runtime_secs: Option<u32>,
         max_wait: Duration,
         chosen: bool,
-    ) -> (Vec<(usize, Classified)>, Vec<SubRef>, bool, bool) {
+    ) -> Ranked {
         let Some(slot) = self.slot(rk, ident) else {
-            return (Vec::new(), Vec::new(), true, true);
+            return Ranked { streams: Vec::new(), subs: Vec::new(), done: true, subs_done: true,
+                subs_faulted: false, faulted: true, failed: true, retry_after_ms: 0 };
         };
         let deadline = self
             .cfg
@@ -3703,6 +3944,9 @@ impl Shim {
         let selected = st.selected;
         let done = st.done;
         let subs_done = st.subs_done;
+        let subs_faulted = st.subs_faulted;
+        let faulted = st.faulted;
+        let retry_at = st.retry_at;
         drop(st);
         let mut out: Vec<(usize, Classified)> = Vec::new();
         let audio = self
@@ -3751,7 +3995,11 @@ impl Shim {
                 s.selected = s.id == newest_id;
             }
         }
-        (out, subs, done, subs_done)
+        let failed = faulted && out.is_empty();
+        let retry_after_ms = retry_at
+            .map(|at| at.saturating_duration_since(Instant::now()).as_millis().min(u32::MAX as u128) as u32)
+            .unwrap_or(0);
+        Ranked { streams: out, subs, done, subs_done, subs_faulted, faulted, failed, retry_after_ms }
     }
 
     // ---- rows -------------------------------------------------------------------------------
@@ -5908,7 +6156,7 @@ impl Shim {
                 Duration::ZERO
             };
             let ranked_at = Instant::now();
-            let (ranked, subs, done, _subs_done) = self.ranked(
+            let Ranked { streams: ranked, subs, done, .. } = self.ranked(
                 rk,
                 &ident,
                 u32::try_from(dur / 1000).ok(),
@@ -6990,15 +7238,22 @@ impl Shim {
                 // slot map cannot answer that — an absent slot must NOT read as "still loading".
                 // The picker polls this route while addon workers report batches. Never wait here:
                 // return the streams cached so far and let the next poll observe later addons.
-                let (ranked, subs, done, subs_done) =
+                // An explicit Retry drops the slot and starts a fresh fan-out now, bypassing the
+                // fault backoff. It is a viewer action, never an automatic poll behaviour.
+                if req.q("retry").is_some_and(|v| v == "1") {
+                    self.retry_streams(rk);
+                }
+                let Ranked { streams: ranked, subs, done, subs_done, subs_faulted, faulted, failed, retry_after_ms } =
                     self.ranked(rk, &ident, None, Duration::ZERO, false);
                 // The sidecars ride the same answer: a play that starts before the subtitle addons
                 // finish (the deck's straight-to-player press) gets the late ones from the poll
                 // that reads this route instead of never seeing them. `complete` speaks only for
                 // the streams — the play-start poll stops on BOTH flags, because subtitle addons
-                // routinely answer seconds after the last stream.
+                // routinely answer seconds after the last stream. A fault is reported separately:
+                // an empty list from a dead addon is NOT the same as a title with no streams.
                 Response::json(&json!({"ratingKey": rk, "complete": done,
-                    "subtitlesComplete": subs_done,
+                    "subtitlesComplete": subs_done, "subtitlesFaulted": subs_faulted,
+                    "faulted": faulted, "failed": failed, "retryAfterMs": retry_after_ms,
                     "streams": ranked.iter().map(|(i, c)| shim_media::summary_json(*i, c)).collect::<Vec<_>>(),
                     "subtitles": subs.iter().map(|s| json!({
                         "id": s.id, "lang": s.lang, "title": s.title, "selected": s.selected
@@ -7483,7 +7738,7 @@ impl Shim {
         // Make sure the slot exists (a resume after a restart lands here first) and has waited.
         // A pick already made ends that wait: the player is opening THAT file, and no addon still
         // answering can change it.
-        let (ranked, _, _, _) = self.ranked(rk, &ident, None, self.cfg.stream_deadline, true);
+        let Ranked { streams: ranked, .. } = self.ranked(rk, &ident, None, self.cfg.stream_deadline, true);
         let stream = if idx == BEST_PART {
             ranked.first().map(|(_, c)| c.stream.clone())
         } else {
@@ -7537,11 +7792,18 @@ impl Shim {
         // item's "Other languages" rows — answer CONCURRENTLY: a language the page is asked for
         // may only be in one of the two, and neither read may push the other past the request's
         // budget.
+        let cache = self.subtitle_cache.clone();
+        let sub_key = crate::shim_subtitle_cache::SubtitleCache::key(&type_, &id);
         let (own, builtin) = std::thread::scope(|scope| {
-            let own = scope.spawn(|| self.backend.subtitles(&type_, &id));
-            (own.join().unwrap_or_default(), self.backend.search_subtitles(&type_, &id))
+            let own = scope.spawn(|| crate::shim_subtitle_cache::fetch_cached(
+                &cache, &sub_key, || self.backend.subtitles_fetch(&type_, &id),
+            ));
+            (own.join().unwrap_or_else(|_| plx_stremio::model::Fetch::with_fault(Vec::new(), 0, 1)),
+             self.backend.search_subtitles(&type_, &id))
         });
-        if builtin.is_none() && own.is_empty() {
+        // A provider fault is still a fault even when another provider answered a few rows. Only
+        // a genuinely empty answer from every provider means "no subtitles for this language".
+        if builtin.is_none() && (own.rows.is_empty() || own.faulted) {
             // A fault, not an empty answer: the page draws a retry for this one only.
             return Response::json_status(
                 502,
@@ -7551,7 +7813,7 @@ impl Shim {
         let want = req.q("language").unwrap_or("").trim().to_ascii_lowercase();
         let mut hits = builtin.unwrap_or_default();
         let mut seen: HashSet<String> = hits.iter().map(|s| s.url.clone()).collect();
-        for sub in own {
+        for sub in own.rows {
             if seen.insert(sub.url.clone()) {
                 hits.push(sub);
             }

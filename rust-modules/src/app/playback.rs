@@ -157,6 +157,9 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
         plx_appkit::more_menu::Action::SendDiagnostics => crate::lab::request_upload("menu", ps, pa),
         // A folded row is a HUD command, and the overlay asks for it as `PlayerReq::Command` (the one performer,
         // `perform_hud_command`), never as `PlayerReq::More`.
+        // Fork Rofocale11: Retry is handled by the overlay, which keeps the picker open and
+        // re-arms the shim request; by the time an Action reaches here there is nothing to do.
+        plx_appkit::more_menu::Action::NuvioRetryStreams => {}
         plx_appkit::more_menu::Action::Hud(_) | plx_appkit::more_menu::Action::None => {}
     }
 }

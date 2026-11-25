@@ -36,31 +36,49 @@ pub struct StreamMenu {
     pub(crate) complete: bool,
     /// Bumped whenever `choices` changes, so the upstream form notices a live re-rank.
     pub(crate) rev: u32,
+    /// A stream addon failed; rows that arrived are partial, never the final word.
+    pub(crate) faulted: bool,
+    /// A fault with no rows at all: the picker must offer Retry, not an empty menu.
+    pub(crate) failed: bool,
+    /// The next arm is the viewer's explicit Retry, which bypasses the shim's fault backoff.
+    pub(crate) retry_next: bool,
 }
 
 impl StreamMenu {
     /// Is there a picker to open? An empty list adds no row — a drill-in onto an empty page would
     /// read as a menu that failed to load.
     pub(crate) fn offered(&self) -> bool {
-        !self.choices.is_empty()
+        // A failed read still offers the drill-in: that is where the Retry row lives. Hiding the
+        // root row after a provider outage was what made the failure unrecoverable from the UI.
+        !self.choices.is_empty() || self.failed
     }
 
     /// The first fetch, and every poll after a partial answer, are emitted from the screen's
     /// `step` (a machine never starts work in a constructor). A refused fetch is answered with
     /// `None`, which ends the polling.
     pub(crate) fn should_request(&self) -> bool {
-        !self.pending && !self.complete
+        !self.pending && (!self.complete || self.retry_next)
     }
 
     /// Arm one fetch: return its correlation id and the delay the worker should apply. The first
     /// ask is immediate; later asks (polls after a partial answer) give the shim's addon fan-out
     /// time to answer. The worker, not the screen, sleeps.
-    pub(crate) fn arm(&mut self) -> (u32, u32) {
+    pub(crate) fn arm(&mut self) -> (u32, u32, bool) {
+        let retry = self.retry_next;
+        self.retry_next = false;
         self.attempts += 1;
         self.pending = true;
         self.req = self.req.wrapping_add(1).max(1);
         let delay = if self.attempts > 1 { 500 } else { 0 };
-        (self.req, delay)
+        (self.req, delay, retry)
+    }
+
+    /// Arm the viewer's explicit retry: the picker stays open and the request carries `retry`,
+    /// so the shim drops the faulted slot instead of making the viewer wait out its backoff.
+    pub(crate) fn arm_retry(&mut self) -> (u32, u32, bool) {
+        self.retry_next = true;
+        self.complete = false;
+        self.arm()
     }
 
     /// Land an addressed answer. Returns whether the visible list changed (and so the form must
@@ -69,10 +87,14 @@ impl StreamMenu {
     pub(crate) fn land(&mut self, list: Option<plx_plex::plex::nuvio::StreamList>) -> bool {
         self.pending = false;
         let Some(list) = list else {
+            self.faulted = true;
+            self.failed = true;
             self.complete = true;
             return false;
         };
         self.complete = list.complete;
+        self.faulted = list.faulted;
+        self.failed = list.failed;
         if self.choices == list.streams {
             return false;
         }
@@ -98,9 +120,15 @@ impl super::MoreMenuState {
     }
 
     /// Arm one fetch and return `(sid, rk, delay, request id)` for the screen to put on an effect.
-    pub fn nuvio_arm_request(&mut self, sid: plx_plex::plex::ServerId, rk: &str) -> (plx_plex::plex::ServerId, String, u32, u32) {
-        let (req, delay) = self.nuvio.arm();
-        (sid, rk.to_string(), delay, req)
+    pub fn nuvio_arm_request(&mut self, sid: plx_plex::plex::ServerId, rk: &str) -> (plx_plex::plex::ServerId, String, u32, u32, bool) {
+        let (req, delay, retry) = self.nuvio.arm();
+        (sid, rk.to_string(), delay, req, retry)
+    }
+
+    /// The explicit Retry arm: the picker stays open and the shim request carries `retry`.
+    pub fn nuvio_arm_retry_request(&mut self, sid: plx_plex::plex::ServerId, rk: &str) -> (plx_plex::plex::ServerId, String, u32, u32, bool) {
+        let (req, delay, retry) = self.nuvio.arm_retry();
+        (sid, rk.to_string(), delay, req, retry)
     }
 
     /// Land an addressed answer and rebuild the form if the list moved. The request id fence is
@@ -171,13 +199,27 @@ pub(crate) fn page_form(page: MorePage, menu: &StreamMenu) -> StreamForm {
                         row,
                     )
                 });
-            let mut form = Form::new().section(addons);
-            if menu.choices.is_empty() {
+            let mut form = Form::new();
+            if menu.failed {
+                // A provider fault, not "nothing to play": say so where the rows would have been.
+                form = form.section(FormSection::new("").note(plx_os::i18n::msg::browse_streams_failed()));
+            } else if menu.choices.is_empty() {
                 // placeholder-exempt: an inline busy NOTE on a picker page, not a content
                 // stand-in on a screen a storyboard reaches.
                 form = form.section(FormSection::new("").note(plx_os::i18n::msg::browse_streams_loading()));
             }
-            form
+            // Retry is offered on a partial answer too: rows that arrived are useful, but the
+            // viewer can ask the missing addons again without closing the picker or waiting out
+            // the shim's fault backoff.
+            if menu.faulted || menu.failed {
+                form = form.section(FormSection::new("").item(
+                    MoreRow::Act(Action::NuvioRetryStreams),
+                    RowKind::Choice,
+                    Action::NuvioRetryStreams,
+                    Row::new(plx_os::i18n::msg::settings_audio_retry()),
+                ));
+            }
+            form.section(addons)
         }
         MorePage::Addon(i) => {
             let groups = source_list::addon_pages(&menu.choices);
@@ -231,6 +273,7 @@ mod tests {
                 choice(5, "1080p", "Sootio", None),
                 choice(7, "720p", "Torrentio", None),
             ],
+            ..Default::default()
         })));
         menu
     }
@@ -287,27 +330,65 @@ mod tests {
     fn the_list_is_polled_until_the_shim_is_done() {
         let mut menu = StreamMenu::default();
         assert!(menu.should_request());
-        let (req, delay) = menu.arm();
+        let (req, delay, _) = menu.arm();
         assert_eq!(req, 1);
         assert_eq!(delay, 0, "the first ask is immediate");
         assert!(menu.land(Some(plx_plex::plex::nuvio::StreamList {
             complete: false,
             streams: vec![choice(1, "720p", "Torrentio", None)],
+            ..Default::default()
         })));
         assert!(menu.should_request(), "a partial answer is followed, not shown as final");
-        let (_, delay) = menu.arm();
+        let (_, delay, _) = menu.arm();
         assert_eq!(delay, 500, "later asks are delayed on the worker");
         assert!(!menu.land(Some(plx_plex::plex::nuvio::StreamList {
             complete: true,
             streams: vec![choice(1, "720p", "Torrentio", None)],
+            ..Default::default()
         })), "an unchanged list does not rebuild the form");
         assert!(!menu.should_request());
         // A re-rank while the page is open moves the revision even when the count is the same.
         assert!(menu.land(Some(plx_plex::plex::nuvio::StreamList {
             complete: true,
             streams: vec![choice(2, "1080p", "Torrentio", None)],
+            ..Default::default()
         })));
         assert_eq!(menu.rev, 2);
+    }
+
+    /// A provider fault is not "no streams". The picker stays reachable, shows Retry, and the
+    /// explicit retry carries the flag that makes the shim bypass its fault backoff.
+    #[test]
+    fn a_fault_offers_retry_and_keeps_the_picker_open() {
+        let mut menu = StreamMenu::default();
+        menu.land(Some(plx_plex::plex::nuvio::StreamList {
+            complete: true, faulted: true, failed: true, ..Default::default()
+        }));
+        assert!(menu.offered(), "a failed read still offers the drill-in");
+        let rows = ids(&page_form(MorePage::Streams, &menu));
+        assert!(rows.contains(&MoreRow::Act(Action::NuvioRetryStreams)), "{rows:?}");
+        assert!(!menu.should_request(), "a settled fault is not polled forever");
+        let (_, _, retry) = menu.arm_retry();
+        assert!(retry, "the explicit retry must reach the shim");
+        assert!(menu.land(Some(plx_plex::plex::nuvio::StreamList {
+            complete: true,
+            streams: vec![choice(1, "720p", "Torrentio", None)],
+            ..Default::default()
+        })));
+        assert!(!menu.failed && !menu.faulted);
+        let rows = ids(&page_form(MorePage::Streams, &menu));
+        assert!(!rows.contains(&MoreRow::Act(Action::NuvioRetryStreams)),
+            "a healthy answer retires the Retry row");
+    }
+
+    /// A refused shim answer is a fault too; the old code ended polling on an empty picker.
+    #[test]
+    fn a_refused_answer_keeps_a_retryable_picker() {
+        let mut menu = StreamMenu::default();
+        assert!(!menu.land(None));
+        assert!(menu.failed && menu.offered());
+        assert!(ids(&page_form(MorePage::Streams, &menu))
+            .contains(&MoreRow::Act(Action::NuvioRetryStreams)));
     }
 
     /// Focus keys are identities, not positions: a re-rank moves no focus key, and an addon drill-in

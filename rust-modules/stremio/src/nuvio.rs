@@ -437,6 +437,44 @@ pub fn addon_rows(rows: &Value) -> Vec<AddonRow> {
     out.into_iter().map(|(_, _, r)| r).filter(|r| seen.insert(addons::url_key(&r.url))).collect()
 }
 
+/// The same addon configuration in two shapes must produce the SAME fingerprint: the account's
+/// rows (cheap boot probe) and the installed `AddonSet` (written when the set is applied). A
+/// mismatch would either re-fetch on every boot or miss a real account change.
+fn fingerprint_parts(mut parts: Vec<(String, bool, String)>) -> String {
+    parts.sort();
+    format!("{parts:?}")
+}
+
+pub fn addon_rows_fingerprint(rows: &[AddonRow]) -> String {
+    fingerprint_parts(rows.iter().map(|r| {
+        (addons::canonicalize_url(&r.url), r.enabled, r.display_name.clone().unwrap_or_default())
+    }).collect())
+}
+
+pub fn addon_set_fingerprint(addons: &[crate::model::Addon]) -> String {
+    fingerprint_parts(addons.iter().map(|a| {
+        (a.transport_url.clone(), !a.disabled, a.display_name.clone().unwrap_or_default())
+    }).collect())
+}
+
+/// Fork Rofocale11: a cheap boot-time probe for account-side addon changes — ONE REST read of the
+/// profile's addon rows, no manifest fetches. A change is then handled by the existing
+/// [`addons`] path, which does fetch manifests. A fault is not a change: the caller must treat
+/// `Err` as "keep the persisted set", never as "the account is now empty".
+pub fn addons_fingerprint(session: &Session, profile_id: &str) -> Result<String> {
+    let c = require_config()?;
+    let s = fresh(session)?;
+    let mut index = profile_id.trim().parse::<u32>().ok().filter(|n| *n > 0).unwrap_or(1);
+    if index != 1 {
+        if let Ok(ps) = profiles(&s) {
+            if ps.iter().any(|p| p.id == index.to_string() && p.uses_primary_addons) {
+                index = 1;
+            }
+        }
+    }
+    Ok(addon_rows_fingerprint(&addon_rows(&fetch_rows(&c, &s, index)?)))
+}
+
 fn fetch_rows(c: &Config, s: &Session, profile_index: u32) -> Result<Value> {
     let owner = owner_id(c, s)?;
     let owner_q = http::encode_component(&owner);
@@ -511,6 +549,24 @@ pub fn addons(session: &Session, profile_id: &str) -> Result<Vec<Addon>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cheap boot probe reads account rows; the value written when a set is applied comes from
+    /// `Addon`s. They must agree byte for byte, or every launch would look like a change.
+    #[test]
+    fn account_rows_and_installed_addons_produce_the_same_fingerprint() {
+        let rows = vec![AddonRow {
+            url: "https://a.example/manifest.json".into(),
+            display_name: Some("A".into()), enabled: true, sort_order: 0,
+        }];
+        let addons = vec![crate::model::Addon {
+            transport_url: addons::canonicalize_url("https://a.example/manifest.json"),
+            manifest: Default::default(), disabled: false, display_name: Some("A".into()),
+        }];
+        assert_eq!(addon_rows_fingerprint(&rows), addon_set_fingerprint(&addons));
+        let removed = vec![];
+        assert_ne!(addon_rows_fingerprint(&rows), addon_set_fingerprint(&removed),
+            "an addon deleted in the account must change the fingerprint");
+    }
 
     #[test]
     fn rows_sort_dedupe_and_map() {

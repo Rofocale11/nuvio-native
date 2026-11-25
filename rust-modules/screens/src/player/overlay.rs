@@ -507,12 +507,13 @@ impl PlayerOverlayScreen {
         if !p.nuvio_should_request() { return; }
         let rk = plx_media::route::cur_rk(ps);
         if rk.is_empty() { return; }
-        let (sid, rk, delay_ms, req) = p.nuvio_arm_request(plx_media::route::cur_sid(ps), &rk);
+        let (sid, rk, delay_ms, req, retry) = p.nuvio_arm_request(plx_media::route::cur_sid(ps), &rk);
         fx.push(Fx::App(AppFx::Nuvio(NuvioReq::Streams {
             sid,
             rk,
             delay_ms,
             reply: NuvioReply { to: fx.from(), request: req },
+            retry,
         })));
     }
 
@@ -592,6 +593,20 @@ impl PlayerOverlayScreen {
                     self.dismiss(fx);
                     Self::ask(fx, PlayerReq::Command(command));
                     self.closing(fx);
+                }
+                // Fork Rofocale11: Retry stays in the picker. Re-arm the same addressed request
+                // with `retry`, so the shim drops the faulted slot and the answer repaints this
+                // open menu instead of closing it on the viewer.
+                MoreOk::Action(plx_appkit::more_menu::Action::NuvioRetryStreams) => {
+                    let rk = plx_media::route::cur_rk(ps);
+                    if !rk.is_empty() {
+                        let (sid, rk, delay_ms, req, retry) = p.nuvio_arm_retry_request(plx_media::route::cur_sid(ps), &rk);
+                        fx.push(Fx::App(AppFx::Nuvio(NuvioReq::Streams {
+                            sid, rk, delay_ms, retry,
+                            reply: NuvioReply { to: fx.from(), request: req },
+                        })));
+                    }
+                    self.moved(fx);
                 }
                 MoreOk::Action(action) => {
                     self.dismiss(fx);
@@ -1061,7 +1076,9 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Focusable<H
                     // a11y subject already names; no extra subject is needed on the row.
                     Some(Action::NuvioStream(_)) => None,
                     // exhaustive, so a new action cannot reach here without deciding whether it acts on a title
-                    Some(Action::None | Action::ToggleStats | Action::SetSpeed(_) | Action::SendDiagnostics) | None => None,
+                    // Fork Rofocale11: Retry names no title to play; it re-asks the addons.
+                    Some(Action::NuvioRetryStreams)
+                    | Some(Action::None | Action::ToggleStats | Action::SetSpeed(_) | Action::SendDiagnostics) | None => None,
                 };
                 Some(match subject {
                     Some(rk) => row.with_subject(rk),

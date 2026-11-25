@@ -27,6 +27,14 @@ pub struct StreamList {
     pub complete: bool,
     #[serde(default)]
     pub streams: Vec<StreamChoice>,
+    // Fork Rofocale11: a stream-addon fault is not an empty answer. The picker shows a Retry row
+    // instead of an empty menu when `failed`, and a partial hint when some addons answered.
+    #[serde(default)]
+    pub faulted: bool,
+    #[serde(default)]
+    pub failed: bool,
+    #[serde(default, rename = "retryAfterMs")]
+    pub retry_after_ms: u32,
 }
 
 impl Client {
@@ -35,9 +43,13 @@ impl Client {
             || plx_base::local_server::get().is_some_and(|s| s.origin == self.origin().base())
     }
 
-    pub fn nuvio_streams(&self, rk: &str) -> Option<StreamList> {
+    /// Fork Rofocale11: `retry` asks the shim to drop this item's stream slot and fan out again now,
+    /// bypassing the fault backoff. A normal poll leaves the slot alone.
+    pub fn nuvio_streams(&self, rk: &str, retry: bool) -> Option<StreamList> {
         if !self.is_nuvio() { return None; }
-        let path = QueryBuilder::new("/nuvio/streams").str("ratingKey", rk).build();
+        let mut q = QueryBuilder::new("/nuvio/streams").str("ratingKey", rk);
+        if retry { q = q.int("retry", 1); }
+        let path = q.build();
         serde_json::from_slice(&self.get_bytes(&path)?).ok()
     }
 

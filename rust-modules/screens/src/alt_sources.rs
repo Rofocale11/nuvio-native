@@ -439,6 +439,9 @@ impl AltSourcesScreen {
             rk: self.arg.rk.clone(),
             delay_ms,
             reply: crate::registry::NuvioReply { to: fx.from(), request: req },
+            // Fork Rofocale11: the Detail picker's ordinary polls never bypass the shim's
+            // fault backoff; only the player menu's explicit Retry sets this.
+            retry: false,
         })));
     }
 

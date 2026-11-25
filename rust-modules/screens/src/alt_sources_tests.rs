@@ -1138,7 +1138,7 @@ fn streams_menu_keeps_polling_while_addons_are_still_answering() {
     {
         let mut fx = plx_machine::machine::Effects::new(&mut answer_fx, plx_machine::machine::MachineId::Input, &mut present);
         let answer = NuvioResult::Streams(Some(plx_plex::plex::nuvio::StreamList {
-            complete: false, streams: Vec::new(),
+            complete: false, streams: Vec::new(), ..Default::default()
         }));
         let ev = ScreenEvent::Async(plx_machine::machine::RequestId(1), AppMsg::Nuvio(answer));
         assert_eq!(Machine::step(&mut p, &ev, &cx, &mut fx), Handled::Yes);
@@ -1190,6 +1190,7 @@ fn the_first_addon_landing_seats_focus_on_the_opening_row() {
         let answer = NuvioResult::Streams(Some(plx_plex::plex::nuvio::StreamList {
             complete: true,
             streams: vec![choice(3, "4k DV", "Torrentio"), choice(5, "1080p", "Sootio")],
+            ..Default::default()
         }));
         let ev = ScreenEvent::Async(plx_machine::machine::RequestId(1), AppMsg::Nuvio(answer));
         assert_eq!(Machine::step(&mut p, &ev, &cx, &mut fx), Handled::Yes);
@@ -1219,6 +1220,7 @@ fn the_first_addon_landing_seats_focus_on_the_opening_row() {
         let answer = NuvioResult::Streams(Some(plx_plex::plex::nuvio::StreamList {
             complete: true,
             streams: vec![choice(3, "4k DV", "Torrentio"), choice(5, "1080p", "Sootio")],
+            ..Default::default()
         }));
         let ev = ScreenEvent::Async(plx_machine::machine::RequestId(req2), AppMsg::Nuvio(answer));
         Machine::step(&mut p, &ev, &cx, &mut fx);

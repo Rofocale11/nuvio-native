@@ -486,6 +486,68 @@ fn fan_out<T: Send + 'static>(
     }
 }
 
+/// Like [`fan_out`], but each job reports whether it actually answered (`Some`) or failed,
+/// timed out, or could not be started (`None`). Needed by caches that must not persist a provider
+/// outage as an empty answer. Successful results are still delivered as they arrive; unfinished
+/// slots are reported as failures when the deadline is up.
+type ReportedJob<T> = (usize, Box<dyn FnOnce(Duration) -> Option<T> + Send>);
+type BoxedReportedJob<T> = Box<dyn FnOnce(Duration) -> Option<T> + Send>;
+
+fn fan_out_reported<T: Send + 'static>(
+    jobs: Vec<ReportedJob<T>>,
+    deadline: Duration,
+    on_result: &mut dyn FnMut(usize, Option<T>),
+) {
+    let start = Instant::now();
+    let total = jobs.len();
+    if total == 0 {
+        return;
+    }
+    let mut delivered = vec![false; total];
+    if !http::parallel_ok() {
+        for (i, job) in jobs {
+            let left = deadline.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            delivered[i] = true;
+            on_result(i, job(left));
+        }
+    } else {
+        let (tx, rx) = mpsc::channel::<(usize, Option<T>)>();
+        let mut pending = 0usize;
+        for (i, job) in jobs {
+            let tx = tx.clone();
+            let spawned = plx_base::task::spawn_small("stremio-addon", move || {
+                let _ = tx.send((i, job(deadline)));
+            });
+            if spawned {
+                pending += 1;
+            }
+        }
+        drop(tx);
+        while pending > 0 {
+            let left = deadline.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(left) {
+                Ok((i, r)) => {
+                    delivered[i] = true;
+                    on_result(i, r);
+                    pending -= 1;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    for (i, was_delivered) in delivered.into_iter().enumerate() {
+        if !was_delivered {
+            on_result(i, None);
+        }
+    }
+}
+
 type Job<T> = (usize, Box<dyn FnOnce(Duration) -> T + Send>);
 
 impl AddonSet {
@@ -780,24 +842,47 @@ impl AddonSet {
     /// Returns all streams, each tagged with `addon_name`/`addon_id`, grouped in ADDON order
     /// (the user's order) — `on_batch` sees them in completion order.
     pub fn streams(&self, type_: &str, id: &str, deadline: std::time::Duration, on_batch: &mut dyn FnMut(&[Stream])) -> Vec<Stream> {
+        self.streams_reported(type_, id, deadline, on_batch).rows
+    }
+
+    /// [`Self::streams`] with a fault signal: an addon that failed to answer is not the same as one
+    /// that answered with no streams. The shim uses this so a transient outage is never cached as
+    /// "no streams for this title".
+    pub fn streams_reported(
+        &self,
+        type_: &str,
+        id: &str,
+        deadline: std::time::Duration,
+        on_batch: &mut dyn FnMut(&[Stream]),
+    ) -> crate::model::Fetch<Stream> {
         let targets = self.stream_addons(type_, id);
-        let jobs: Vec<Job<Vec<Stream>>> = targets
+        let jobs: Vec<ReportedJob<Vec<Stream>>> = targets
             .iter()
             .enumerate()
             .map(|(slot, (i, t))| {
                 let addon = self.addons[*i].clone();
                 let (t, id) = (t.clone(), id.to_string());
-                (slot, Box::new(move |left: Duration| streams_from_addon(&addon, &t, &id, left)) as Box<dyn FnOnce(Duration) -> _ + Send>)
+                (slot, Box::new(move |left: Duration| streams_from_addon(&addon, &t, &id, left)) as BoxedReportedJob<Vec<Stream>>)
             })
             .collect();
         let mut got: Vec<Vec<Stream>> = vec![Vec::new(); targets.len()];
-        fan_out(jobs, deadline, &mut |slot, streams| {
-            if !streams.is_empty() {
-                on_batch(&streams);
+        let mut answered = 0usize;
+        fan_out_reported(jobs, deadline, &mut |slot, streams| {
+            if let Some(streams) = streams {
+                answered += 1;
+                if !streams.is_empty() {
+                    on_batch(&streams);
+                }
+                got[slot] = streams;
             }
-            got[slot] = streams;
         });
-        got.into_iter().flatten().collect()
+        let rows = got.into_iter().flatten().collect();
+        let asked = targets.len();
+        if answered == asked {
+            crate::model::Fetch::ok(rows, answered, asked)
+        } else {
+            crate::model::Fetch::with_fault(rows, answered, asked)
+        }
     }
 
     /// Subtitles from every subtitles-capable addon.
@@ -806,29 +891,49 @@ impl AddonSet {
     }
 
     pub fn subtitles_within(&self, type_: &str, id: &str, deadline: Duration) -> Vec<Subtitle> {
+        self.subtitles_reported_within(type_, id, deadline).rows
+    }
+
+    /// [`Self::subtitles`] with the provider-fault signal the shim's subtitle cache needs.
+    pub fn subtitles_reported(&self, type_: &str, id: &str) -> crate::model::Fetch<Subtitle> {
+        self.subtitles_reported_within(type_, id, Duration::from_secs(10))
+    }
+
+    pub fn subtitles_reported_within(&self, type_: &str, id: &str, deadline: Duration) -> crate::model::Fetch<Subtitle> {
         let targets: Vec<(usize, String)> = self
             .enabled()
             .filter_map(|(i, a)| resolve_request_type(a, "subtitles", type_, id, false, false).map(|t| (i, t)))
             .collect();
-        let jobs: Vec<Job<Vec<Subtitle>>> = targets
+        let jobs: Vec<ReportedJob<Vec<Subtitle>>> = targets
             .iter()
             .enumerate()
             .map(|(slot, (i, t))| {
                 let url = resource_url(&self.addons[*i].transport_url, "subtitles", t, id);
                 (slot, Box::new(move |left: Duration| {
                     match http::get_json(&url, http::within_ms(left.as_millis() as u64)) {
-                        Ok(Value::Object(mut o)) => lenient::decode_list::<Subtitle>(o.remove("subtitles")),
-                        _ => Vec::new(),
+                        Ok(Value::Object(mut o)) => Some(lenient::decode_list::<Subtitle>(o.remove("subtitles"))),
+                        _ => None,
                     }
-                }) as Box<dyn FnOnce(Duration) -> _ + Send>)
+                }) as BoxedReportedJob<Vec<Subtitle>>)
             })
             .collect();
         let mut got: Vec<Vec<Subtitle>> = vec![Vec::new(); targets.len()];
-        fan_out(jobs, deadline, &mut |slot, subs| got[slot] = subs);
-        let mut out: Vec<Subtitle> = got.into_iter().flatten().filter(|s| !s.url.is_empty()).collect();
+        let mut answered = 0usize;
+        fan_out_reported(jobs, deadline, &mut |slot, subs| {
+            if let Some(subs) = subs {
+                answered += 1;
+                got[slot] = subs;
+            }
+        });
+        let mut rows: Vec<Subtitle> = got.into_iter().flatten().filter(|s| !s.url.is_empty()).collect();
         let mut seen = std::collections::HashSet::new();
-        out.retain(|s| seen.insert(s.url.clone()));
-        out
+        rows.retain(|s| seen.insert(s.url.clone()));
+        let asked = targets.len();
+        if answered == asked {
+            crate::model::Fetch::ok(rows, answered, asked)
+        } else {
+            crate::model::Fetch::with_fault(rows, answered, asked)
+        }
     }
 }
 
@@ -852,16 +957,17 @@ fn catalog_from_url(url: &str, t: plx_net::net::Timeouts, type_: &str) -> Result
 }
 
 /// One addon's streams; Nuvio's inline-meta fallback when the stream endpoint answers empty.
-fn streams_from_addon(addon: &Addon, type_: &str, id: &str, left: Duration) -> Vec<Stream> {
+/// `None` is a provider fault, `Some(empty)` is an addon that honestly had nothing for this id.
+fn streams_from_addon(addon: &Addon, type_: &str, id: &str, left: Duration) -> Option<Vec<Stream>> {
     let start = Instant::now();
     let t = http::within_ms(left.as_millis() as u64);
     let body = match http::get_json(&resource_url(&addon.transport_url, "stream", type_, id), t) {
         Ok(b) => b,
-        Err(_) => return Vec::new(),
+        Err(_) => return None,
     };
     let streams = parse_streams(body, addon);
     if !streams.is_empty() {
-        return streams;
+        return Some(streams);
     }
     // Inline streams on the meta's matching video (debrid-cloud style addons).
     let content = content_level_id(id);
@@ -887,11 +993,11 @@ fn streams_from_addon(addon: &Addon, type_: &str, id: &str, left: Duration) -> V
         if let Some(ix) = matching {
             let found = tag(lenient::decode_list(videos[ix].get("streams").cloned()), addon);
             if !found.is_empty() {
-                return found;
+                return Some(found);
             }
         }
     }
-    Vec::new()
+    Some(Vec::new())
 }
 
 #[cfg(test)]
@@ -929,6 +1035,24 @@ mod tests {
             "https://torrentio.strem.fun/providers=yts/stream/series/tt0944947%3A1%3A2.json"
         );
         assert_eq!(resource_url("https://a.b/c?x=1", "meta", "movie", "tt1"), "https://a.b/c/meta/movie/tt1.json?x=1");
+    }
+
+    #[test]
+    fn fan_out_reported_distinguishes_a_fault_from_an_empty_answer() {
+        // The third provider failed to answer; the second honestly answered with no rows. The
+        // old fan_out delivered both as an empty Vec, which is why a dead addon could be cached as
+        // "this title has nothing".
+        let jobs: Vec<ReportedJob<Vec<u32>>> = vec![
+            (0, Box::new(|_| Some(vec![1]))),
+            (1, Box::new(|_| Some(Vec::new()))),
+            (2, Box::new(|_| None)),
+        ];
+        let mut seen = Vec::new();
+        fan_out_reported(jobs, Duration::from_secs(2), &mut |slot, answer| seen.push((slot, answer)));
+        seen.sort_by_key(|(slot, _)| *slot);
+        assert_eq!(seen.len(), 3, "every slot gets an answer, including the failed one: {seen:?}");
+        assert!(seen.iter().any(|(_, a)| a.as_deref() == Some(&[][..])), "an empty answer is Some(empty)");
+        assert!(seen.iter().any(|(_, a)| a.is_none()), "a failed provider is None");
     }
 
     #[test]

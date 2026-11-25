@@ -91,6 +91,12 @@ Current state: branch `nuvio-native` at `eef501647` (2026-11-24). Dated delivery
   resolves to: `/media/developer/<appid>.nuvio` when writable, else the persistent state root,
   else the Developer Mode runtime fallback (`/tmp`). Confirm the chosen directory on the set
   before claiming reboot durability.
+- Account addon changes: a relaunch makes **one cheap REST read** of the signed-in profile's addon
+  rows (`nuvio::addons_fingerprint`) and compares it with the fingerprint stored when the set was
+  last applied. Unchanged → keep the persisted set and the durable catalog cache (fast launch).
+  Changed → the existing profile-load path fetches manifests, replaces the set, clears the caches
+  and re-warms Home. A transport fault is not a change: the persisted set is kept. A Stremio addon
+  publishing new *items* still cannot be detected without asking it, so the catalog TTL bounds that.
 - Settings: Addons lists the installed addons and flips one through the boot-registered
   `nuvio::AddonControl` (the screens layer may not name `pmsshim`). Playback's P2P switch is
   persisted in the one redb `LocalSettings` value (absent key means ON) and applied live through
@@ -132,6 +138,20 @@ sidecar:
 - `IMDB_TMDB` — the durable IMDb→TMDB id map: a plain big-endian `u64` with **no** TTL, written by
   `shim_tmdb_ids::PersistentIdLookup` so a `/find` answer is paid for once per title. Negatives and
   non-IMDb ids are not stored.
+- `CATALOG_CACHE` — the first pages of Home/Library catalogs, written by
+  `pmsshim/src/shim_catalog_cache.rs` with the same 15-minute TTL the in-memory catalog rows had.
+  A relaunch with unchanged addons answers Home from redb instead of re-fetching every catalog.
+  The key is namespaced by the addon set **and** the installed manifests' catalog declarations, so
+  adding/removing an addon, switching profile, or a manifest that changes its catalogs misses the
+  old rows. Catalog *content* has no change signal in the Stremio protocol, so the 15-minute TTL
+  is the freshness bound; a failed fill is never cached.
+- `SUBTITLE_CACHE` — addon subtitle candidates, 6 h for a real answer and 10 min for a real empty
+  answer, written by `pmsshim/src/shim_subtitle_cache.rs`. A provider **fault is never persisted**:
+  it gets only a 30 s in-memory backoff, so a dead addon is neither hammered on every poll nor
+  remembered as "no subtitles" after it recovers. The same distinction applies to the in-memory
+  stream slots: an all-addon failure is `failed`/`faulted` with a 30 s retry window, not an empty
+  list for the slot's 30 min TTL. `/nuvio/streams?retry=1` clears the slot and fans out again; the
+  player's Streams picker offers that as a Retry row.
 
 The opposite direction (`tmdb:<n>` → `tt…`, used by `imdb_base()` for hub posters) is deliberately
 **not** a redb row in this tree: `Shim::imdb_ids` is a bounded in-memory map (512 entries, negative

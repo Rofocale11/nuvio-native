@@ -1,6 +1,30 @@
 //! Stremio addon protocol types (https://github.com/Stremio/stremio-addon-sdk/tree/master/docs/api).
 //! Field names follow the wire format; unknown fields are ignored.
 
+/// A provider answer that can tell "nobody had anything" from "a provider failed".
+///
+/// The old `Vec`-returning fetch methods could not: an addon that timed out and an addon that
+/// honestly answered `{"streams":[]}` both looked like an empty vector, so a transient outage
+/// could be cached as "this title has no streams". `faulted` means at least one provider did not
+/// answer; rows that did arrive are still useful, but they are partial, not final.
+#[derive(Clone, Debug, Default)]
+pub struct Fetch<T> {
+    pub rows: Vec<T>,
+    pub faulted: bool,
+    /// Providers that answered successfully, and providers that were asked.
+    pub answered: usize,
+    pub asked: usize,
+}
+
+impl<T> Fetch<T> {
+    pub fn ok(rows: Vec<T>, answered: usize, asked: usize) -> Self {
+        Fetch { rows, faulted: false, answered, asked }
+    }
+    pub fn with_fault(rows: Vec<T>, answered: usize, asked: usize) -> Self {
+        Fetch { rows, faulted: true, answered, asked }
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 /// `"movie"`, `"series"`, `"channel"`, `"tv"`, or anything an addon declares.
