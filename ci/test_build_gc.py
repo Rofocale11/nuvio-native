@@ -18,6 +18,25 @@ import check_steps
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def no_git_maintenance(env):
+    """Keep git's own housekeeping out of fixtures whose whole tree is snapshotted.
+
+    `gc --auto` / `git maintenance run --auto` fire at arbitrary command boundaries and write
+    `.git/objects/...` and a transient `.git/**/maintenance.lock`. Under a parallel `make check`
+    those writes land between a test's before/after snapshots and look like the tool under test
+    touched a path it refused. This disables both triggers for the fixture's git and for the
+    script subprocesses that inherit its env; it does not touch any assertion about the app.
+    """
+    env.update({
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "gc.auto",
+        "GIT_CONFIG_VALUE_0": "0",
+        "GIT_CONFIG_KEY_1": "maintenance.auto",
+        "GIT_CONFIG_VALUE_1": "false",
+    })
+    return env
+
+
 def git_has_merge_tree():
     """`git merge-tree --write-tree` (the squash check) arrived in git 2.38."""
     import re
@@ -113,6 +132,7 @@ class BuildGcTests(unittest.TestCase):
                    # The file named here does not exist until a test that wants a cold store writes it.
                    PLX_COLD_STORE_CONFIG=str(root / "cold-store.conf"),
                    PLX_TV_CONFIG_DIR=str(root / "no-tv-config"))
+        no_git_maintenance(env)
         for key in ("PLX_GC_TEST_NOW", "PLX_GC_TEST_FREE_KIB", "PLX_GC_IDLE_MIN", "PLX_GC_MIN_FREE_GIB"):
             env.pop(key, None)
         subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
@@ -1654,6 +1674,23 @@ def copy_tree(src, dst):
         return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None)
                 for p in Path(root).rglob("*")}
 
+    def test_fixture_git_cannot_auto_maintain_into_a_snapshot(self):
+        _, env, _, _ = self.fixture(0, 0)
+        self.assertEqual(env.get("GIT_CONFIG_KEY_0"), "gc.auto")
+        self.assertEqual(env.get("GIT_CONFIG_VALUE_0"), "0")
+        self.assertEqual(env.get("GIT_CONFIG_KEY_1"), "maintenance.auto")
+        self.assertEqual(env.get("GIT_CONFIG_VALUE_1"), "false")
+
+    def snapshot_without_git(self, root):
+        """For assertions about build paths only: git's own object store is not the tool's business.
+
+        `stable_snapshot` already filters `.git` for the read-only runs for this reason. A refused
+        evict path is the same case — git may refresh an index or leave a maintenance lock while the
+        tool is being checked, and none of that is a path the evict planner was asked about.
+        """
+        return {k: v for k, v in self.snapshot_tree(root).items()
+                if k != ".git" and not k.startswith(".git/")}
+
     def test_evict_deletes_exactly_what_the_plan_names_and_logs_who_gave_it_up(self):
         fixture, (lane0, lane1) = self.evict_fixture()
         repo, env, sentinels, _ = fixture
@@ -1825,7 +1862,7 @@ def copy_tree(src, dst):
             ("evict", 4, "tree", 1, "x", 0, "elsewhere", lane1 / "rust-modules/target"),
             ("delete", 4, "tree", 1, "x", 0, "normal", lane1 / "rust-modules/target"),
         ]
-        before = {p: self.snapshot_tree(p) for p in (repo, lane0, lane1, fleet, cache, tmproot, elsewhere)}
+        before = {p: self.snapshot_without_git(p) for p in (repo, lane0, lane1, fleet, cache, tmproot, elsewhere)}
         for entry in entries:
             with self.subTest(path=str(entry[-1])[-48:], rung=entry[1], scope=entry[2], mode=entry[6], kind=entry[0]):
                 plan = self.write_plan(fixture, [entry])
@@ -1833,7 +1870,7 @@ def copy_tree(src, dst):
                 out = result.stdout + result.stderr
                 self.assertEqual(result.returncode, 1, out)
                 self.assertIn("REFUSED", out)
-        after = {p: self.snapshot_tree(p) for p in before}
+        after = {p: self.snapshot_without_git(p) for p in before}
         self.assertEqual(before, after, "a refused path was touched")
         self.assertTrue(link.is_symlink())
 
@@ -2139,6 +2176,7 @@ class InstallDiskWatchTests(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = str(home)
         env["PATH"] = str(stub_bin) + os.pathsep + env.get("PATH", "")
+        no_git_maintenance(env)
         # The installer must see what THIS test declares, not what the developer's shell exported.
         env.pop("PLX_FLEET_DIR", None)
         env.update(extra_env or {})

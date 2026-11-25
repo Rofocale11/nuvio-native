@@ -536,6 +536,18 @@ def clean_env():
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    # Fixture repositories are snapshotted whole, including `.git/objects`. Git's `gc --auto` and
+    # `maintenance run --auto` fire at arbitrary command boundaries and drop a maintenance.lock or
+    # repack objects between a test's before/after reads; under a parallel `make check` that looked
+    # like the tool under test had touched a refused path. Disable both triggers here so every git
+    # call in the suite — the helpers and the script subprocesses that inherit this env — is quiet.
+    env.update({
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "gc.auto",
+        "GIT_CONFIG_VALUE_0": "0",
+        "GIT_CONFIG_KEY_1": "maintenance.auto",
+        "GIT_CONFIG_VALUE_1": "false",
+    })
     return env
 
 
@@ -592,6 +604,13 @@ class Repo(unittest.TestCase):
         for d in (self.fleet, self.cache, self.tmpr):
             os.makedirs(d)
         self.env = {"PLX_FLEET_DIR": self.fleet, "PLX_BUILD_CACHE": self.cache, "PLX_GC_TMP_ROOTS": self.tmpr}
+
+    def test_clean_env_disables_git_auto_maintenance(self):
+        env = clean_env()
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "gc.auto")
+        self.assertEqual(env["GIT_CONFIG_VALUE_0"], "0")
+        self.assertEqual(env["GIT_CONFIG_KEY_1"], "maintenance.auto")
+        self.assertEqual(env["GIT_CONFIG_VALUE_1"], "false")
 
     def lane(self, name, files=None):
         path = os.path.join(self.tmp, name)
