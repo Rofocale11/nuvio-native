@@ -68,6 +68,9 @@ pub enum SettingsPage {
     // Fork Rofocale11: Settings > Addons lists the installed Nuvio addons with per-addon switches.
     // It is pushed from a root row of its own, like Diagnostics, and shares its family plumbing.
     Addons,
+    // Fork Rofocale11: Settings > Profiles manages the Nuvio account's 1..=6 profile slots.
+    // A separate page (and ScreenId) keeps its stack entry distinct from Addons and the root.
+    NuvioProfiles,
     /// The Player HUD page: the installed packages, the drop folder and the chosen HUD (`hud_settings`).
     PlayerHud,
     HudGallery,
@@ -148,6 +151,7 @@ impl SettingsPage {
             | SettingsPage::Picker(_)
             | SettingsPage::Diagnostics
             | SettingsPage::Addons
+            | SettingsPage::NuvioProfiles
             | SettingsPage::PlayerHud
             | SettingsPage::HudGallery
             | SettingsPage::HudDetail(_)
@@ -217,6 +221,8 @@ impl ScreenArg for SettingsPage {
             SettingsPage::Diagnostics => 121,
             // Fork Rofocale11: a new forward id; reusing 113 would collide with Under posters here.
             SettingsPage::Addons => 122,
+            // Fork Rofocale11: forward id, never reuse an upstream page's number.
+            SettingsPage::NuvioProfiles => 123,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -263,6 +269,7 @@ impl LogicalState for SettingsPage {
             | SettingsPage::HudGallery
             | SettingsPage::Diagnostics
             | SettingsPage::Addons
+            | SettingsPage::NuvioProfiles
             | SettingsPage::About => 0,
             SettingsPage::Document(i) | SettingsPage::Preview(i) | SettingsPage::ConsentStage(i) => *i,
             SettingsPage::Picker(kind) => *kind as u8,
@@ -295,6 +302,7 @@ impl LogicalState for SettingsPage {
             SettingsPage::HudPreview(..) => "hud-preview",
             SettingsPage::Diagnostics => "diagnostics",
             SettingsPage::Addons => "addons",
+            SettingsPage::NuvioProfiles => "nuvio-profiles",
         });
         if let SettingsPage::Document(i) | SettingsPage::Preview(i) | SettingsPage::ConsentStage(i) = self {
             out.push_str(&format!("[{i}]"));
@@ -481,6 +489,7 @@ mod tests {
             SettingsPage::PlayerHud,
             SettingsPage::Diagnostics,
             SettingsPage::Addons,
+            SettingsPage::NuvioProfiles,
             SettingsPage::HudGallery,
             SettingsPage::HudDetail(plx_data::hudpacks::Sha::of(b"test")),
             SettingsPage::HudAbout(plx_data::hudpacks::Sha::of(b"test")),

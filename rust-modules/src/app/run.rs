@@ -2675,7 +2675,13 @@ pub(crate) unsafe fn land_results(app: &mut App, fr: &mut Frame) {
         // called from here and from the two tests that used to keep their own inline copy of this
         // exact `match` (see that function's doc for why sharing it, rather than restating it, is
         // what makes those tests prove anything).
-        if matches!(app.route(), AppArg::Login | AppArg::Profiles) {
+        // Fork Rofocale11: the Forgot-PIN QR reset raises StartLogin from Settings, not from the
+        // Login/Profiles routes the follower used to be gated on. Without this the phase changed
+        // but nothing rooted the QR screen, so the row looked dead. A Creating phase is followed
+        // from ANY route; other phases keep the original narrower guard.
+        let auth_creating = app.runtime.bridge(&mut app.bridge).auth_read().0.phase
+            == plx_session::auth::Phase::Creating;
+        if matches!(app.route(), AppArg::Login | AppArg::Profiles) || auth_creating {
             super::bridge::follow_auth_landing(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge));
         }
         // dev: an `acct` step on the LOAD DIAL asks for the REAL Account popover, so the

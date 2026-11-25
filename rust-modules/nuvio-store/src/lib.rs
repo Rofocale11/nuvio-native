@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// TV-side profile PIN verifiers. Nuvio's public API has no PIN verification call, so a profile
+/// is locked on this TV only when the viewer created a verifier here.
+pub mod pins;
+
 /// the single store's soft budget (50 MiB). It is enforced by removing expired
 /// and oldest TTL cache rows and by compacting at boot — NEVER by truncating a live redb file,
 /// which would destroy the durable records in it. If the non-cache rows alone exceed this, the
@@ -37,6 +41,8 @@ pub const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
 pub const ACCOUNT_SESSION: TableDefinition<&str, &[u8]> = TableDefinition::new("account_session");
 pub const ACCOUNT_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("account_prefs");
 pub const INSTALL_PREFS: TableDefinition<&str, &[u8]> = TableDefinition::new("install_prefs");
+/// PBKDF2 verifiers for TV-side profile locks, keyed by profile slot ("profile-N").
+pub const PROFILE_PINS: TableDefinition<&str, &[u8]> = TableDefinition::new("profile_pins");
 // TMDB enrichment answers are durable app records, so they live in this one file
 // beside the key table and watch state — never in a second JSONL cache beside it.
 pub const META_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta_cache");
@@ -68,6 +74,8 @@ pub enum Table {
     AccountSession,
     AccountPrefs,
     InstallPrefs,
+    /// TV-side PIN verifiers, one per profile slot.
+    ProfilePins,
     MetaCache,
     EnrichCache,
     ImdbIds,
@@ -104,6 +112,7 @@ impl Table {
             Self::AccountSession => ACCOUNT_SESSION,
             Self::AccountPrefs => ACCOUNT_PREFS,
             Self::InstallPrefs => INSTALL_PREFS,
+            Self::ProfilePins => PROFILE_PINS,
             Self::MetaCache => META_CACHE,
             Self::EnrichCache => ENRICH_CACHE,
             Self::ImdbIds => IMDB_IDS,

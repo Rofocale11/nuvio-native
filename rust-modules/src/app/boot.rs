@@ -673,6 +673,11 @@ pub(super) fn install_pms_owned(
     if let plx_session::auth::owner::ReadyInstall::PrimaryAndExtras(extras) = install {
         plx_session::auth::install_captured_registry(origin, address, token, tier, pin, extras, None);
     }
+    // Fork Rofocale11: `nuvio::boot()` schedules its profile refresh BEFORE this client exists, so
+    // that worker publishes an empty roster and Settings > Profiles shows no profile at all. Reload
+    // here, where `set_current` has made the client live; after this the page reads only the cache
+    // and a write refreshes it.
+    plx_plex::plex::nuvio_profiles::refresh();
     activate_server_owned(bridge)
 }
 /// Everything before the loop: SDL and the window, GL, text, the poster workers, the boot gate
@@ -1295,7 +1300,12 @@ pub(crate) unsafe fn construct(
             BootTo::Home
         } else { BootTo::Login }
     } else if session.can_go_local() {
-        if session.boot_shows_picker(automated_boot(), pick_user.is_some()) {
+        // Fork Rofocale11: a durable TV PIN verifier forces the who's-watching picker even when
+        // upstream's Auto Sign In says "go straight in" — the old `&& auto_login_allowed` gate
+        // only applied when upstream ALREADY wanted the picker, so a locked profile auto-signed in.
+        // The verifier is local and present at boot, unlike the HTTP roster snapshot.
+        let fork_must_pick = plx_plex::plex::nuvio_profiles::must_show_picker(&session.user.uuid);
+        if session.boot_shows_picker(automated_boot(), pick_user.is_some()) || fork_must_pick {
             // The Session owner installs the avatar read client and retained grants, publishes
             // the captured profile, then owns the picker/refresh flows. It does NOT issue the
             // Ready handoff before a viewer is selected. Boot BACK therefore retains its

@@ -56,12 +56,53 @@ pub struct Session {
     pub expires_at_unix: u64,
 }
 
-#[derive(Clone, Debug)]
+/// Public Nuvio clients manage profile slots 1..=6. A profile push fully replaces that range,
+/// so every management call sends the COMPLETE roster, never a partial one.
+pub const MAX_PROFILES: u32 = 6;
+
+/// The Nuvio web app owns the `tv` settings namespace. Native preferences live in their own
+/// namespace so this client's atomic blob upsert can never overwrite the web app's settings.
+pub const SETTINGS_PLATFORM: &str = "webos-native";
+
+#[derive(Clone, Debug, Default)]
 pub struct Profile {
+    /// The string form of `profile_index` — every Nuvio data RPC takes the integer index, and
+    /// the shim's Plex-dialect switch carries it as a uuid suffix.
     pub id: String,
     pub name: String,
     /// The profile shows the primary profile's addons (Nuvio's `uses_primary_addons`).
     pub uses_primary_addons: bool,
+    /// Slot 1..=6, parsed from `profile_index`.
+    pub index: u32,
+    pub avatar_id: Option<String>,
+    pub avatar_url: Option<String>,
+    pub avatar_color_hex: Option<String>,
+    /// Read-only account lock state. The public API has no PIN verification call, so this is
+    /// advisory on the TV: a tile is locked only by a TV-side verifier we can actually check.
+    pub pin_enabled: bool,
+    pub pin_locked_until: Option<String>,
+}
+
+/// One profile row in a full-roster push. PIN fields are deliberately absent: the API documents
+/// that `sync_push_profiles` never overwrites them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileEdit {
+    pub index: u32,
+    pub name: String,
+    pub uses_primary_addons: bool,
+    pub avatar_id: Option<String>,
+    pub avatar_url: Option<String>,
+    pub avatar_color_hex: Option<String>,
+}
+
+/// One row of the public avatar catalog (`get_avatar_catalog`, no authentication required).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Avatar {
+    pub id: String,
+    pub display_name: String,
+    pub storage_path: String,
+    pub bg_color: Option<String>,
+    pub is_active: bool,
 }
 
 /// Where the Nuvio account backend lives.
@@ -371,12 +412,21 @@ fn owner_id(c: &Config, s: &Session) -> Result<String> {
 
 fn map_profile(row: &Value) -> Profile {
     let idx = str_field(row, &["profile_index", "profileIndex", "id"]);
-    let idx = idx.parse::<u32>().ok().filter(|n| *n > 0).unwrap_or(1);
+    let idx = idx.parse::<u32>().ok().filter(|n| (1..=MAX_PROFILES).contains(n)).unwrap_or(1);
     let name = str_field(row, &["name"]);
+    let optional = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|k| row.get(*k).and_then(Value::as_str)).filter(|s| !s.is_empty()).map(str::to_string)
+    };
     Profile {
         id: idx.to_string(),
         name: if name.is_empty() { format!("Profile {idx}") } else { name },
         uses_primary_addons: bool_field(row, &["uses_primary_addons", "usesPrimaryAddons"], false),
+        index: idx,
+        avatar_id: optional(&["avatar_id", "avatarId"]),
+        avatar_url: optional(&["avatar_url", "avatarUrl"]),
+        avatar_color_hex: optional(&["avatar_color_hex", "avatarColorHex"]),
+        pin_enabled: bool_field(row, &["pin_enabled", "pinEnabled"], false),
+        pin_locked_until: optional(&["pin_locked_until", "pinLockedUntil"]),
     }
 }
 
@@ -395,9 +445,133 @@ pub fn profiles(session: &Session) -> Result<Vec<Profile>> {
     out.sort_by_key(|p| p.id.parse::<u32>().unwrap_or(u32::MAX));
     out.dedup_by(|a, b| a.id == b.id);
     if out.is_empty() {
-        out.push(Profile { id: "1".into(), name: "Profile 1".into(), uses_primary_addons: false });
+        out.push(Profile { id: "1".into(), name: "Profile 1".into(), uses_primary_addons: false, index: 1, ..Default::default() });
     }
     Ok(out)
+}
+
+/// Validate and encode a FULL profile roster for `sync_push_profiles`. The server deletes every
+/// slot in 1..=6 omitted from the payload, so callers must pass every profile they know about.
+/// PIN fields are never sent — the API keeps them unchanged.
+fn profiles_body(profiles: &[ProfileEdit]) -> Result<Value> {
+    if profiles.is_empty() || profiles.len() > MAX_PROFILES as usize {
+        return Err(Error::Parse("profile roster must have 1 to 6 entries".into()));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut rows = Vec::with_capacity(profiles.len());
+    for p in profiles {
+        if !(1..=MAX_PROFILES).contains(&p.index) || !seen.insert(p.index) {
+            return Err(Error::Parse("profile indices must be unique slots 1 to 6".into()));
+        }
+        if p.name.trim().is_empty() || p.name.chars().count() > 64 || p.name.chars().any(char::is_control) {
+            return Err(Error::Parse("invalid profile name".into()));
+        }
+        let mut row = json!({
+            "profile_index": p.index,
+            "name": p.name,
+            "uses_primary_addons": p.uses_primary_addons,
+        });
+        // `avatar_id` keeps an existing catalog picture when `avatar_url` is absent. Sending an
+        // explicit null for both would clear the avatar on rename, which is never what a rename
+        // means, so only include fields that were actually supplied.
+        if let Some(id) = &p.avatar_id { row["avatar_id"] = json!(id); }
+        if let Some(url) = &p.avatar_url { row["avatar_url"] = json!(url); }
+        if let Some(color) = &p.avatar_color_hex { row["avatar_color_hex"] = json!(color); }
+        rows.push(row);
+    }
+    Ok(json!({"p_client_max_profiles": MAX_PROFILES, "p_profiles": rows}))
+}
+
+/// Fully replace the account's profile roster. Callers MUST pass every profile they want to
+/// keep; omitted slots are deleted server-side. A successful call returns 204 No Content.
+pub fn push_profiles(session: &Session, profiles: &[ProfileEdit]) -> Result<()> {
+    let c = require_config()?;
+    let body = profiles_body(profiles)?;
+    ok(call(&c, "POST", "/rest/v1/rpc/sync_push_profiles", Some(&session.access_token), Some(&body))?)?;
+    Ok(())
+}
+
+/// Delete one profile and ALL of its account data (addons, library, progress, history). This is
+/// irreversible; callers confirm with the viewer first and never delete slot 1.
+pub fn delete_profile(session: &Session, index: u32) -> Result<()> {
+    if !(2..=MAX_PROFILES).contains(&index) {
+        return Err(Error::Parse("only profiles 2 to 6 may be deleted".into()));
+    }
+    let c = require_config()?;
+    ok(call(&c, "POST", "/rest/v1/rpc/sync_delete_profile_data", Some(&session.access_token),
+        Some(&json!({"p_profile_id": index})))?)?;
+    Ok(())
+}
+
+/// The public avatar catalog. No account token is needed — only the publishable key.
+pub fn avatar_catalog() -> Result<Vec<Avatar>> {
+    let c = require_config()?;
+    let v = ok(call(&c, "POST", "/rest/v1/rpc/get_avatar_catalog", None, Some(&json!({})))?)?;
+    let rows = v.as_array().ok_or_else(|| Error::Parse("invalid avatar catalog".into()))?;
+    Ok(rows.iter().filter_map(|r| {
+        let id = str_field(r, &["id"]);
+        let storage_path = str_field(r, &["storage_path", "storagePath"]);
+        if id.is_empty() || storage_path.is_empty() { return None; }
+        Some(Avatar {
+            id,
+            display_name: str_field(r, &["display_name", "displayName"]),
+            storage_path,
+            bg_color: r.get("bg_color").and_then(Value::as_str).map(str::to_string),
+            is_active: bool_field(r, &["is_active", "isActive"], true),
+        })
+    }).collect())
+}
+
+/// The public image URL for a catalog avatar. Verified against the live service: the storage
+/// bucket is `avatars` and `storage_path` entries carry subdirectories (e.g. `animals/bram-v1.png`).
+/// Each path segment is encoded separately so the separators survive.
+pub fn avatar_image_url(base: &str, storage_path: &str) -> String {
+    let path = storage_path.split('/').map(http::encode_component).collect::<Vec<_>>().join("/");
+    format!("{}/storage/v1/object/public/avatars/{path}", base.trim_end_matches('/'))
+}
+
+/// Best available image for a profile row: a custom URL wins, else the catalog entry's storage
+/// path. A bare `avatar_color_hex` is a tint, not a picture, so it is never returned as a URL.
+pub fn profile_avatar_url(profile: &Profile) -> Option<String> {
+    if let Some(url) = &profile.avatar_url {
+        if !url.is_empty() { return Some(url.clone()); }
+    }
+    let id = profile.avatar_id.as_deref()?;
+    let avatar = avatar_catalog().ok()?.into_iter().find(|a| a.id == id && a.is_active)?;
+    Some(avatar_image_url(&config().backend_url, &avatar.storage_path))
+}
+
+/// The native profile-settings blob, in this client's own platform namespace. A missing row is
+/// an empty object, not a failure: a fresh profile has no native settings yet.
+pub fn profile_settings(session: &Session, index: u32) -> Result<serde_json::Map<String, Value>> {
+    if !(1..=MAX_PROFILES).contains(&index) { return Err(Error::Parse("invalid profile index".into())); }
+    let c = require_config()?;
+    let v = ok(call(&c, "POST", "/rest/v1/rpc/sync_pull_profile_settings_blob", Some(&session.access_token),
+        Some(&json!({"p_profile_id": index, "p_platform": SETTINGS_PLATFORM})))?)?;
+    let row = first_row(v);
+    match row.get("settings_json") {
+        Some(Value::Object(m)) => Ok(m.clone()),
+        None | Some(Value::Null) => Ok(serde_json::Map::new()),
+        _ => Err(Error::Parse("invalid profile settings blob".into())),
+    }
+}
+
+/// Atomically replace the native profile-settings blob. The full blob is written, so callers
+/// must merge into the map they pulled rather than sending a single key.
+fn settings_body(index: u32, settings: &serde_json::Map<String, Value>) -> Result<Value> {
+    if !(1..=MAX_PROFILES).contains(&index) { return Err(Error::Parse("invalid profile index".into())); }
+    Ok(json!({
+        "p_profile_id": index,
+        "p_platform": SETTINGS_PLATFORM,
+        "p_settings_json": settings,
+    }))
+}
+
+pub fn put_profile_settings(session: &Session, index: u32, settings: &serde_json::Map<String, Value>) -> Result<()> {
+    let c = require_config()?;
+    let body = settings_body(index, settings)?;
+    ok(call(&c, "POST", "/rest/v1/rpc/sync_push_profile_settings_blob", Some(&session.access_token), Some(&body))?)?;
+    Ok(())
 }
 
 /// One addon row as Nuvio stores it.
@@ -603,6 +777,80 @@ mod tests {
         assert_eq!((p.id.as_str(), p.name.as_str(), p.uses_primary_addons), ("2", "Kids", true));
         let p = map_profile(&json!({}));
         assert_eq!((p.id.as_str(), p.name.as_str()), ("1", "Profile 1"));
+    }
+
+    #[test]
+    fn official_profile_rows_map_avatar_and_lock_fields() {
+        let p = map_profile(&json!({
+            "id": "2f0d-…", "user_id": "u", "profile_index": 2, "name": "Kids",
+            "uses_primary_addons": true, "avatar_id": "avatar_lalo",
+            "avatar_url": null, "avatar_color_hex": "#F45392",
+            "pin_enabled": true, "pin_locked_until": null
+        }));
+        assert_eq!((p.id.as_str(), p.index, p.name.as_str()), ("2", 2, "Kids"));
+        assert!(p.uses_primary_addons && p.pin_enabled);
+        assert_eq!(p.avatar_id.as_deref(), Some("avatar_lalo"));
+        assert_eq!(p.avatar_color_hex.as_deref(), Some("#F45392"));
+        assert!(p.avatar_url.is_none() && p.pin_locked_until.is_none());
+        // an out-of-range slot is never allowed to become a real account profile
+        assert_eq!(map_profile(&json!({"profile_index": 9})).index, 1);
+    }
+
+    fn edit(index: u32, name: &str) -> ProfileEdit {
+        ProfileEdit { index, name: name.into(), uses_primary_addons: false,
+            avatar_id: None, avatar_url: None, avatar_color_hex: None }
+    }
+
+    #[test]
+    fn profile_push_is_a_full_roster_with_six_slots_declared() {
+        let body = profiles_body(&[edit(1, "Main"), edit(2, "Kids")]).unwrap();
+        assert_eq!(body["p_client_max_profiles"], 6);
+        assert_eq!(body["p_profiles"][0]["profile_index"], 1);
+        assert_eq!(body["p_profiles"][1]["name"], "Kids");
+        // never send PIN fields: the server owns them
+        assert!(body["p_profiles"][1].get("pin_enabled").is_none());
+        // fields the caller did not supply stay absent so a rename keeps the old avatar
+        assert!(body["p_profiles"][1].get("avatar_id").is_none());
+        assert!(body["p_profiles"][1].get("avatar_url").is_none());
+    }
+
+    #[test]
+    fn a_partial_or_duplicate_roster_is_refused_before_any_request() {
+        assert!(profiles_body(&[]).is_err());
+        assert!(profiles_body(&[edit(1, "Main"), edit(1, "Again")]).is_err());
+        assert!(profiles_body(&[edit(0, "Zero")]).is_err());
+        assert!(profiles_body(&[edit(7, "Seven")]).is_err());
+        assert!(profiles_body(&[edit(1, "")]).is_err());
+        assert!(profiles_body(&[edit(1, &"x".repeat(65))]).is_err());
+        let mut named = edit(1, "Main");
+        named.avatar_id = Some("avatar_lalo".into());
+        named.avatar_url = Some("https://example.invalid/a.png".into());
+        assert_eq!(profiles_body(&[named]).unwrap()["p_profiles"][0]["avatar_id"], "avatar_lalo");
+    }
+
+    #[test]
+    fn the_primary_profile_cannot_be_deleted() {
+        assert!(delete_profile(&Session { access_token: String::new(), refresh_token: String::new(),
+            user_id: String::new(), expires_at_unix: 0 }, 1).is_err());
+    }
+
+    #[test]
+    fn avatar_urls_encode_each_storage_segment() {
+        assert_eq!(
+            avatar_image_url("https://api.nuvio.tv/", "animals/bram v1.png"),
+            "https://api.nuvio.tv/storage/v1/object/public/avatars/animals/bram%20v1.png"
+        );
+    }
+
+    #[test]
+    fn settings_pushes_are_scoped_to_the_native_platform() {
+        let mut map = serde_json::Map::new();
+        map.insert("defaultSubtitleLanguage".into(), json!("fr"));
+        let body = settings_body(3, &map).unwrap();
+        assert_eq!(body["p_profile_id"], 3);
+        assert_eq!(body["p_platform"], "webos-native");
+        assert_eq!(body["p_settings_json"]["defaultSubtitleLanguage"], "fr");
+        assert!(settings_body(0, &map).is_err());
     }
 
     #[test]

@@ -1765,3 +1765,107 @@ Gates on this tree: `plx_media` 2182 passed / 105 ignored; `plx_pmsshim` 167 pas
   vocabulary the shim intentionally preserves, not the destination a Nuvio build presents to the
   viewer. `tests/screenshots/scenes.json`'s note that the demo QR encodes `https://plex.tv/link`
   describes the **mock's** QR, not the shipping shim's.
+
+## Multi-profile on the public Nuvio API (2026-11-26)
+
+New fork-owned code: `stremio/src/nuvio.rs`'s profile-management/settings/avatar calls,
+`pmsshim/src/shim_profiles.rs`, `nuvio-store/src/pins.rs`, `plex/src/plex/nuvio_profiles.rs` and
+`screens/src/settings_nuvio_profiles.rs`. The upstream diff is only:
+
+- `plex/src/plex/mod.rs`, `screens/src/settings.rs`, `screens/src/family.rs`,
+  `screens/src/registry.rs`, `rust-modules/src/app/nuvio.rs` — one `mod`/variant/mount/arm each,
+  all marked `Fork Rofocale11:`. Settings gains one signed-in root row and one page (ScreenId 123,
+  route word `nuvio-profiles`); the app registers a `ProfileControl` beside `AddonControl`.
+- `screens/src/settings_v2_tests.rs` and `settings_draw_and_lifecycle_tests.rs` — the root row
+  census and the longest-root scroll pitch (370 → 430 px) for that one added row, marked.
+- `tests/fixtures/replay/ALPHABET.json` (no comment syntax) — the replay alphabet now accepts the
+  `nuvio-profiles` accessibility namespace, exactly as the registry census demands.
+- `nuvio-locales/brand.json` (fork-owned) — six new `add` keys for the management rows.
+
+The account's `pin_enabled`/`pin_locked_until` are read-only in the public API: there is no
+verify/set/unlock call. They are advisory only on the TV; a tile is locked by a PBKDF2 verifier
+in `nuvio.redb` that the shim holds and checks. The first PIN is set without a gate (physical
+access), changing or clearing an existing one requires the current PIN, and a forgotten one is
+recovered by signing out and scanning the existing QR sign-in as the same account.
+
+### Device fixes after the first multi-profile deploy (2026-11-26)
+
+- `pmsshim/src/shim_account.rs` (fork-owned) — `switch` now returns the account profile's `name`
+  as `title`. The upstream session stores that string as the seated profile's display name;
+  returning the product name made the top-left chip read "Nuvio" after every pick.
+- `plex/src/plex/nuvio_profiles.rs` (fork-owned) — the control now holds an in-process snapshot;
+  `profiles()`/`avatars()` are lock reads, and all HTTP runs on workers (`refresh`, `save`,
+  `delete`, `set_pin`). The first debug run crashed with `main-thread block: PMS HTTP at
+  plex/src/plex/nuvio_profiles.rs:51 (fatal; aborting)` because the Settings page called the
+  control on the frame thread. `plex/src/plex/nuvio_profiles.rs:51` was that call.
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — the page rebuilds when the snapshot
+  generation moves and never performs IO in `step`; PIN digits are no longer written into logical
+  state, and current-PIN verification is left to the shim's worker.
+- `rust-modules/src/app/boot.rs` (upstream, marked) — one condition: a known, unlocked previous
+  profile skips the who's-watching picker even with upstream Auto Sign In off. A TV-locked profile
+  still shows the picker, and an unloaded snapshot fails closed to it.
+- `docs/nuvio/ARCHITECTURE.md` — the same behaviour is recorded in the multi-profile section.
+
+### Forgotten TV PIN recovery (2026-11-26)
+
+- `pmsshim/src/shim_account.rs` (fork-owned) — `sign_out()` now removes all six TV PIN verifiers
+  from the one redb file and logs `nuvio: TV PINs cleared on sign-out`. The earlier prose claiming
+  that sign-out + QR re-sign-in recovered a forgotten PIN was wrong: the verifier table survived
+  sign-out, so the path did not exist. Recovery is now: Settings/account menu → Sign out, then QR
+  sign in with the phone as the same account. A remote-holder cannot use this to remove a lock
+  because re-sign-in needs the phone.
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — the PIN rows now show which PIN is being
+  asked for ("Enter current PIN" / "Enter new PIN again") instead of an empty value.
+- `nuvio-locales/brand.json` (fork-owned) — two new `add` keys for those prompts.
+- `nuvio-locales` fit test still drives the real form; no upstream locale catalog was edited.
+
+### Profile management page UX (2026-11-26)
+
+- `screens/src/settings.rs` (upstream, marked inline) — `sentence_for(RootId::NuvioProfiles)` now
+  uses the fork-owned `msg::nuvio_profiles_detail()` instead of upstream's `change_profile` string;
+  the old sentence did not say what the page offers. No upstream locale file was edited.
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — keyboard rows (Rename, Set/Clear TV PIN)
+  moved to the first section; the page reads the cached boot snapshot instead of refreshing on
+  every mount, and snapshot landings use `FormTable::refresh_with` so the row under the cursor keeps
+  focus; Add/Delete/Forgot PIN set a pending row drawn as an inline `Spinner` until the generation
+  moves. `Fork Rofocale11:` markers remain on the module doc.
+- `nuvio-locales/brand.json` (fork-owned, no comment syntax; recorded here) — added
+  `nuvio.profiles.detail` in all eleven shipped languages.
+
+### Profile snapshot refresh moved to client install (2026-11-26)
+
+- `src/app/boot.rs` (upstream, marked inline) — `install_pms_owned` now calls
+  `nuvio_profiles::refresh()` after `install_captured_registry` sets the current PMS client. The
+  existing refresh in `nuvio::boot()` runs before that client exists, so its worker published an
+  empty roster and Settings > Profiles listed no profiles. With the fetch at client install the
+  page can be a pure cache reader again.
+
+### Forgot-PIN QR navigation and locked-profile auto sign-in (2026-11-26)
+
+- `src/app/run.rs` (upstream, marked inline) — `follow_auth_landing` is now followed from any route
+  while the session phase is `Creating`. The Forgot-PIN row raises `StartLogin` from Settings, but
+  the follower used to run only on the Login/Profiles routes, so the phase changed and nothing
+  rooted the QR page — the row appeared dead.
+- `src/app/boot.rs` (upstream, marked inline) — the picker gate is now
+  `boot_shows_picker(...) || nuvio_profiles::must_show_picker(uuid)`. The old `&& auto_login_allowed`
+  only applied the TV-PIN lock when upstream had ALREADY chosen the picker, so Auto Sign In walked
+  straight into a locked profile.
+- `plex/src/plex/nuvio_profiles.rs` (fork-owned file) — `tv_pin_locked`/`must_show_picker` read the
+  durable `ProfilePins` table directly instead of the HTTP snapshot, which has not landed at boot.
+  An empty snapshot now means "not yet known", not "locked".
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — the inline spinner is measured in the
+  route's sectioned table frame, the same frame `TableScreen` paints into; measuring against
+  `Rect::FULL` drew it two rows above the pressed one.
+
+### Delete slot 1, avatar focus and account preference identity (2026-11-26)
+
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — `save` now keeps the row that triggered
+  the roster write (Avatar, Share main addons or Rename) instead of always landing on Rename, which
+  was the first row. Delete is disabled on slot 1 (the API refuses to delete it, so the armed row
+  could never complete) and the armed confirmation reads "Press again".
+- `nuvio-locales/brand.json` (fork-owned, no comment syntax; recorded here) — added
+  `nuvio.profiles.delete_again` in all eleven shipped languages.
+- `pmsshim/src/shim_account.rs` (fork-owned) — `/api/v2/user` and `/api/v2/user/profile` now answer
+  with the seated profile's `id`/`uuid` (`nuvio-profile-<slot>`) instead of a constant `nuvio`
+  identity. Upstream's preference client proves the token's owner by matching this DTO to the
+  seated `UserRef`; the constant failed that check and Settings > Audio & subtitles showed Retry.

@@ -9,6 +9,7 @@ use crate::shim_store::{
     now_secs, EnrichCache, Enrichment, Ident, Keys, LastStream, MetaCache, RelatedSource, Watch,
     WatchState,
 };
+use crate::shim_profiles;
 use plx_stremio::addons_tmdb::{
     TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
     TmdbPerson, TmdbShow, TmdbShowDetails,
@@ -609,7 +610,8 @@ pub struct Shim {
     backend: Arc<dyn Backend>,
     cfg: Config,
     keys: Keys,
-    watch: WatchState,
+    /// Fork-owned: the watch sink switches this before pulling a profile's account progress.
+    pub(crate) watch: WatchState,
     /// When each item's resume point was last mirrored to the Nuvio account, so a playing report
     /// (the app sends one every few seconds) does not become one API call every few seconds.
     watch_pushes: Mutex<HashMap<i64, Instant>>,
@@ -6809,6 +6811,123 @@ impl Shim {
         self.route(req)
     }
 
+    /// Fork-owned profile management. The Settings screen calls these over the same loopback
+    /// server; every account write is a full-roster or full-blob operation, so the pure helpers
+    /// validate the payload before any request leaves the box.
+    fn nuvio_profiles_route(&self, req: &Request, segs: &[&str]) -> Response {
+        match (req.method.as_str(), segs) {
+            ("GET", ["nuvio", "profiles"]) => {
+                let Some(session) = self.account.session() else {
+                    return Response::json_status(503, &json!({"error": "not signed in"}));
+                };
+                match plx_stremio::nuvio::profiles(&session) {
+                    Ok(profiles) => {
+                        let catalog = plx_stremio::nuvio::avatar_catalog().unwrap_or_default();
+                        let base = plx_stremio::nuvio::config().backend_url;
+                        let rows: Vec<Value> = profiles.iter().map(|p| json!({
+                            "profile_index": p.index,
+                            "name": p.name,
+                            "uses_primary_addons": p.uses_primary_addons,
+                            "avatar_id": p.avatar_id,
+                            "avatar_url": shim_profiles::avatar_url(&base, p, &catalog),
+                            "avatar_color_hex": p.avatar_color_hex,
+                            "pin_enabled": p.pin_enabled,
+                            "tv_locked": self.account.pin_locked(p.index),
+                        })).collect();
+                        Response::json(&json!({"profiles": rows}))
+                    },
+                    Err(e) => { crate::shim_account::log_failure("roster", &e);
+                        Response::json_status(503, &json!({"error": "Nuvio roster unavailable"})) },
+                }
+            },
+            ("POST", ["nuvio", "profiles"]) => {
+                let Some(session) = self.account.session() else {
+                    return Response::json_status(503, &json!({"error": "not signed in"}));
+                };
+                // The body is the documented form; the query form lets the narrow Plex client
+                // (whose request API has no body) reach the same validated route.
+                let payload: Value = req.q("roster").and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| serde_json::from_slice(&req.body).unwrap_or(Value::Null));
+                let Some(edits) = shim_profiles::profile_edits_from_json(&payload) else {
+                    return Response::json_status(400, &json!({"error": "invalid profile roster"}));
+                };
+                match plx_stremio::nuvio::push_profiles(&session, &edits) {
+                    Ok(()) => Response::json(&json!({"saved": edits.len()})),
+                    Err(e) => { crate::shim_account::log_failure("profile save", &e);
+                        Response::json_status(503, &json!({"error": "profiles not saved"})) },
+                }
+            },
+            ("POST", ["nuvio", "profiles", index, "delete"]) => {
+                let Some(session) = self.account.session() else {
+                    return Response::json_status(503, &json!({"error": "not signed in"}));
+                };
+                let Some(index) = index.parse::<u32>().ok() else {
+                    return Response::json_status(400, &json!({"error": "invalid profile index"}));
+                };
+                match plx_stremio::nuvio::delete_profile(&session, index) {
+                    Ok(()) => {
+                        let _ = self.account.set_pin(index, None);
+                        if self.account.active_index() == index {
+                            self.account.load_profile(Some("1"));
+                        }
+                        Response::json(&json!({"deleted": index}))
+                    },
+                    Err(e) => { crate::shim_account::log_failure("profile delete", &e);
+                        Response::json_status(400, &json!({"error": "profile not deleted"})) },
+                }
+            },
+            ("GET", ["nuvio", "avatars"]) => {
+                match plx_stremio::nuvio::avatar_catalog() {
+                    Ok(catalog) => Response::json(&json!({"avatars": catalog.iter().map(|a| json!({
+                        "id": a.id, "display_name": a.display_name,
+                        "url": plx_stremio::nuvio::avatar_image_url(&plx_stremio::nuvio::config().backend_url, &a.storage_path),
+                        "bg_color": a.bg_color, "is_active": a.is_active,
+                    })).collect::<Vec<_>>()})),
+                    Err(e) => { crate::shim_account::log_failure("avatars", &e);
+                        Response::json_status(503, &json!({"error": "avatar catalog unavailable"})) },
+                }
+            },
+            ("GET", ["nuvio", "profile-pin"]) => {
+                let index = req.q("index").and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| self.account.active_index());
+                Response::json(&json!({
+                    "index": index,
+                    "locked": self.account.pin_locked(index),
+                    // A supplied PIN is checked against the verifier we actually hold. The
+                    // account's read-only flag is never the authority here.
+                    "ok": req.q("pin").is_none_or(|pin| self.account.pin_allows(index, Some(pin))),
+                }))
+            },
+            ("POST", ["nuvio", "profile-pin", "forgot"]) => {
+                let index = req.q("index").and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| self.account.active_index());
+                match self.account.arm_pin_reset(index) {
+                    Ok(()) => Response::json(&json!({"armed": index})),
+                    Err(e) => Response::json_status(400, &json!({"error": e})),
+                }
+            },
+            ("POST", ["nuvio", "profile-pin"]) => {
+                let index = req.q("index").and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| self.account.active_index());
+                let clear = req.q("clear").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                // Changing or removing an existing lock requires the current PIN. Setting the
+                // FIRST one is unguarded by design: the parent does it before handing over the
+                // remote, and the public API has no PIN to check against.
+                if self.account.pin_locked(index) && !self.account.pin_allows(index, req.q("current")) {
+                    return Response::json_status(401, &json!({"error": "wrong PIN"}));
+                }
+                match self.account.set_pin(index, if clear { None } else { req.q("pin") }) {
+                    Ok(()) => {
+                        // Never log the digits: only which slot changed, so the device log can
+                        // prove the clear actually landed.
+                        plx_stremio::nuvio::log_account_event(&format!(
+                            "nuvio: TV PIN {} for profile {index}", if clear { "cleared" } else { "set" }));
+                        Response::json(&json!({"index": index, "locked": self.account.pin_locked(index)}))
+                    },
+                    Err(e) => Response::json_status(400, &json!({"error": e})),
+                }
+            },
+            _ => Response::json_status(404, &json!({"error": "not available"})),
+        }
+    }
+
     fn route(self: &Arc<Self>, req: &Request) -> Response {
         let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
         let p = req.path.as_str();
@@ -7177,6 +7296,14 @@ impl Shim {
                 }
             }
             ("GET" | "POST", ["nuvio", "library"]) => self.saved_item(req),
+            // Fork-owned profile management (Settings). Kept beside the other /nuvio routes.
+            (_, ["nuvio", "profiles"]) => self.nuvio_profiles_route(req, &["nuvio", "profiles"]),
+            (_, ["nuvio", "profiles", i, "delete"]) =>
+                self.nuvio_profiles_route(req, &["nuvio", "profiles", i, "delete"]),
+            (_, ["nuvio", "avatars"]) => self.nuvio_profiles_route(req, &["nuvio", "avatars"]),
+            (_, ["nuvio", "profile-pin", "forgot"]) =>
+                self.nuvio_profiles_route(req, &["nuvio", "profile-pin", "forgot"]),
+            (_, ["nuvio", "profile-pin"]) => self.nuvio_profiles_route(req, &["nuvio", "profile-pin"]),
             (_, ["hubs", "nuvio", i]) => {
                 let (start, size) = page_params(req);
                 let cat = i

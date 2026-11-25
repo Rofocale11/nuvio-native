@@ -35,6 +35,8 @@ fn the_root_is_four_groups_of_rows_without_sub_lines() {
         RootId::Playback, RootId::AudioSubtitles,
         // Fork Rofocale11: the Addons row sits between Playback and System.
         RootId::Addons,
+        // Fork Rofocale11: Nuvio profile management lives in the same signed-in group.
+        RootId::NuvioProfiles,
         RootId::Language, RootId::AutoSignIn, RootId::TrailerAutoplay,
         RootId::Privacy, RootId::Diagnostics, RootId::Legal, RootId::About,
     ]);
@@ -66,7 +68,8 @@ fn the_signed_out_root_drops_every_signed_in_row() {
 /// read off the board.
 // Fork Rofocale11: the Addons row adds one row to the longest root, moving the scroll-to-About pin
 // from 244 to 370 (measured with the real table builder).
-const ALL_ROWS_SCROLL: f32 = 370.0;
+// Fork Rofocale11: the Nuvio Profiles root row adds one 60px pitch to the longest root scroll.
+const ALL_ROWS_SCROLL: f32 = 430.0;
 const ALL_ROWS_SCROLL_TOLERANCE: f32 = 6.0;
 
 /// Sv2s-R2: every conditional row at once is the board's longest root, and it scrolls.

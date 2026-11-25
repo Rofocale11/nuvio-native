@@ -510,6 +510,8 @@ fn mount_page(
         SettingsPage::Diagnostics => Box::new(diagnostics::DiagnosticsPage::new(entry)),
         // Fork Rofocale11: the Addons page is mounted from its own root row, like Diagnostics.
         SettingsPage::Addons => Box::new(addons::AddonsPage::new(entry)),
+        // Fork Rofocale11: profile management, reached from its own Settings root row.
+        SettingsPage::NuvioProfiles => Box::new(nuvio_profiles::ProfilesPage::new(entry)),
         page @ (SettingsPage::HudGallery | SettingsPage::HudDetail(..) | SettingsPage::HudAbout(..) | SettingsPage::HudPreview(..)) =>
             Box::new(super::hud_settings::HudPage::at(entry, page)),
     }
@@ -1100,6 +1102,8 @@ enum RootId {
     Diagnostics,
     // Fork Rofocale11: the Addons root row opens the fork's addon enable/disable page.
     Addons,
+    // Fork Rofocale11: the Profiles root row opens the Nuvio profile manager.
+    NuvioProfiles,
     Legal,
     About,
 }
@@ -1124,6 +1128,8 @@ impl FormId for RootId {
             RootId::Diagnostics => 12,
             // Fork Rofocale11: 13 is past every upstream root key.
             RootId::Addons => 13,
+            // Fork Rofocale11: another forward key, past the Addons row.
+            RootId::NuvioProfiles => 14,
             // the base; `root_form` adds the position (`item_keyed`)
             RootId::Plaintext(_) => PLAINTEXT_KEY_BASE,
         })
@@ -1143,6 +1149,7 @@ impl FormId for RootId {
             RootId::Privacy => "privacy",
             RootId::Diagnostics => "diagnostics",
             RootId::Addons => "addons",
+            RootId::NuvioProfiles => "nuvio_profiles",
             RootId::Legal => "legal",
             RootId::About => "about",
         })
@@ -1315,6 +1322,9 @@ fn sentence_for(id: Option<&RootId>) -> Cow<'static, str> {
         Some(RootId::Diagnostics) => Cow::Borrowed(msg::settings_diagnostics_detail()),
         // Fork Rofocale11: the Addons row states what the page it opens is for.
         Some(RootId::Addons) => Cow::Borrowed(msg::settings_addons_detail()),
+        // Fork Rofocale11: "Change profile" alone did not say what the page offers. The fork-owned
+        // sentence names add, rename, lock and switch without naming a Plex account.
+        Some(RootId::NuvioProfiles) => Cow::Borrowed(msg::nuvio_profiles_detail()),
         Some(RootId::Legal) => Cow::Borrowed(msg::settings_legal_detail()),
         Some(RootId::About) => Cow::Borrowed(msg::settings_about_detail()),
         Some(RootId::Plaintext(_)) | None => Cow::Borrowed(msg::settings_root_copy()),
@@ -1372,6 +1382,14 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
             RowKind::Nav(SettingsPage::Addons),
             Action::Door,
             Row::new(plx_os::i18n::msg::settings_addons_title()).chevron(true),
+        )
+        // Fork Rofocale11: manage the account's 1..=6 Nuvio profiles from the same signed-in
+        // section. The picker's own "Who's watching?" label is already shipped in every language.
+        .item(
+            RootId::NuvioProfiles,
+            RowKind::Nav(SettingsPage::NuvioProfiles),
+            Action::Door,
+            Row::new(plx_os::i18n::msg::settings_profiles_title()).chevron(true),
         );
     let system = FormSection::new(plx_os::i18n::msg::settings_system_section())
         .item(
@@ -1932,6 +1950,10 @@ mod diagnostics;
 // the diff to this upstream file is just this declaration, the mount arm and the root row.
 #[path = "settings_addons.rs"]
 mod addons;
+// Fork Rofocale11: Settings > Profiles manages the Nuvio account's 1..=6 profile slots. The
+// fork-owned page keeps every account call behind the registered control, like Addons does.
+#[path = "settings_nuvio_profiles.rs"]
+mod nuvio_profiles;
 #[cfg(test)]
 #[path = "settings_v2_tests.rs"]
 mod v2_tests;

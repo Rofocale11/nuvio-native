@@ -18,6 +18,9 @@
 //! the classified streams, `/nuvio/select?ratingKey=&index=` moves one to `Media[0]`.
 
 pub mod shim_account;
+/// Pure profile-roster, avatar and settings rules behind both the Plex dialect and the Nuvio
+/// management routes.
+pub mod shim_profiles;
 pub mod shim_backend;
 pub mod shim_fake;
 pub mod shim_flight;

@@ -16,6 +16,7 @@
 //! of this: it boots straight into the shim with the local addon set.
 
 use crate::shim_http::{Request, Response};
+use crate::shim_profiles;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,9 +29,7 @@ pub type AddonSink = Arc<dyn Fn(plx_stremio::addons::AddonSet) + Send + Sync>;
 
 /// Receives a nudge when a profile has been selected (the shim then merges the account's resume
 /// points into its local watch state).
-pub type WatchSink = Arc<dyn Fn() + Send + Sync>;
-
-const PROFILE_UUID_PREFIX: &str = "nuvio-profile-";
+pub type WatchSink = Arc<dyn Fn(u32) + Send + Sync>;
 
 pub struct Account {
     file: Option<PathBuf>,
@@ -44,6 +43,9 @@ pub struct Account {
     next_pin: AtomicI64,
     sink: Mutex<Option<AddonSink>>,
     watch_sink: Mutex<Option<WatchSink>>,
+    /// A forgotten TV PIN: the slot whose verifier is cleared once the QR sign-in that follows is
+    /// approved. The QR is the account owner's phone, not a code typed on the remote.
+    pin_reset: Mutex<Option<u32>>,
     /// The token handed to the app in place of a plex.tv account token.
     token: String,
     origin: Mutex<String>,
@@ -111,6 +113,7 @@ impl Account {
             next_pin: AtomicI64::new(1_000_001),
             sink: Mutex::new(None),
             watch_sink: Mutex::new(None),
+            pin_reset: Mutex::new(None),
             token: token.to_string(),
             origin: Mutex::new(String::new()),
         }
@@ -135,6 +138,13 @@ impl Account {
         save_session_file(session.as_ref(), profile.as_deref(), &prefs)
     }
 
+    /// Publish the active profile's prefs as its native settings blob.
+    fn sync_settings_out(&self, index: u32) {
+        if let Some(session) = self.fresh_session() {
+            sync_settings_out(&session, index, &self.prefs);
+        }
+    }
+
     pub fn set_sink(&self, sink: AddonSink) {
         *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
@@ -150,6 +160,12 @@ impl Account {
 
     pub fn signed_in(&self) -> bool {
         self.session.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// A fresh account session for the fork-owned management routes. They run on shim workers,
+    /// never in a screen's `step`.
+    pub fn session(&self) -> Option<plx_stremio::nuvio::Session> {
+        self.fresh_session()
     }
 
     /// compare the signed-in account's addon rows with the set we booted from.
@@ -238,6 +254,16 @@ impl Account {
             context.generation = context.generation.wrapping_add(1);
             context.profile = None;
             context.cached = None;
+            *self.pin_reset.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        // Recovery for a forgotten TV PIN: signing out clears every local verifier. Re-signing
+        // in still needs the account's QR approval on a phone, so a person holding only the TV
+        // remote cannot remove a lock this way; the account owner can always get back in.
+        if let Some(store) = plx_nuvio_store::get() {
+            for index in 1..=plx_stremio::nuvio::MAX_PROFILES {
+                let _ = plx_nuvio_store::pins::remove(store, index);
+            }
+            plx_stremio::nuvio::log_account_event("nuvio: TV PINs cleared on sign-out");
         }
         // Signing out WIPES the install's preferences with the session: the next sign-in pulls the
         // account's own settings, and local leftovers would only disagree with them. With no
@@ -335,7 +361,8 @@ impl Account {
             (_, ["user", "profile"]) => self.user_profile(req),
             (_, ["resources"]) => self.resources(),
             (_, ["home", "users"]) => self.home_users(),
-            ("POST", ["home", "users", uuid, "switch"]) => self.switch(uuid),
+            ("POST", ["home", "users", uuid, "switch"]) =>
+                self.switch(uuid, req.query.get("pin").map(String::as_str)),
             (_, ["ping"]) => Response::json(&json!({})),
             _ => Response::json_status(404, &json!({"error": "not available"})),
         }
@@ -370,6 +397,9 @@ impl Account {
     }
 
     fn poll_pin(&self, id: i64) -> Response {
+        // Captured before the approval overwrites it: a QR for a different Nuvio account must
+        // never clear this install's TV PIN, even when a reset is pending.
+        let seated_user = self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|s| s.user_id.clone());
         let login = {
             let pins = self.pins.lock().unwrap_or_else(|e| e.into_inner());
             match pins.get(&id) {
@@ -380,8 +410,23 @@ impl Account {
         };
         match plx_stremio::nuvio::poll_login(&login) {
             Ok(Some(session)) => {
+                // A QR approval proves the account owner is present. Only then does a pending
+                // forgot-PIN reset clear the verifier — scanning an unrelated QR cannot do it.
+                let approved_same_account = seated_user.as_deref().is_none_or(|old| old == session.user_id);
                 self.save(Some(&session));
                 *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
+                if let Some(index) = self.pin_reset.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    if approved_same_account {
+                        if let Some(store) = plx_nuvio_store::get() {
+                            let _ = plx_nuvio_store::pins::remove(store, index);
+                        }
+                        plx_stremio::nuvio::log_account_event(&format!(
+                            "nuvio: TV PIN reset by account QR for profile {index}"));
+                    } else {
+                        plx_stremio::nuvio::log_account_event(
+                            "nuvio: TV PIN reset refused — QR approved a different account");
+                    }
+                }
                 if let Some(p) = self.pins.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
                     p.authorized = true;
                 }
@@ -399,8 +444,12 @@ impl Account {
     }
 
     fn user(&self) -> Response {
+        // Upstream's preference client proves the token's owner by matching this identity against
+        // the seated profile. A constant "nuvio" stopped matching once profiles got real uuids,
+        // so Settings > Audio & subtitles answered "not authorized". Answer the CURRENT slot.
+        let index = self.active_index();
         Response::json(&json!({
-            "id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "email": "",
+            "id": index, "uuid": shim_profiles::uuid(index), "title": "Nuvio Native", "name": "Nuvio Native", "email": "",
             "thumb": "", "authToken": self.token, "plex_tv_token": self.token,
             "subscription": {"active": true, "features": []}
         }))
@@ -410,8 +459,9 @@ impl Account {
         match req.method.as_str() {
             "GET" => {
                 let prefs = self.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                let index = self.active_index();
                 Response::json(&json!({
-                    "id": 1, "uuid": "nuvio", "title": "Nuvio Native", "email": "",
+                    "id": index, "uuid": shim_profiles::uuid(index), "title": "Nuvio Native", "email": "",
                     "thumb": "", "authToken": self.token,
                     "autoSelectAudio":         prefs.get("autoSelectAudio").and_then(|v| v.as_bool()).unwrap_or(false),
                     "defaultAudioLanguage":    prefs.get("defaultAudioLanguage").and_then(|v| v.as_str()).unwrap_or(""),
@@ -437,7 +487,12 @@ impl Account {
                     }
                 }
                 match self.write_prefs() {
-                    Ok(()) => Response::json(&json!({})),
+                    Ok(()) => {
+                        // The account blob is a mirror, never the only copy: a fault here leaves
+                        // the local preference in force and the next switch retries.
+                        self.sync_settings_out(self.active_index());
+                        Response::json(&json!({}))
+                    },
                     Err(e) => {
                         log_prefs_error(&e);
                         Response::json_status(500, &json!({"error": "preferences not saved"}))
@@ -465,16 +520,110 @@ impl Account {
     /// the body did not parse" (simulator, 2026-11-01), the roster came back empty, and the app
     /// silently signed in as the single default profile instead of offering the who's-watching
     /// screen.
-    fn home_users(&self) -> Response {
+    fn local_home_users(&self) -> Response {
         Response::json(&json!({"users": [
             {"id": 1, "uuid": "nuvio", "title": "Nuvio Native", "name": "Nuvio Native", "thumb": "", "admin": true, "guest": false, "restricted": false, "authToken": self.token, "plex_tv_token": self.token}
         ]}))
     }
 
-    fn switch(&self, uuid: &str) -> Response {
-        let profile = uuid.strip_prefix(PROFILE_UUID_PREFIX).map(str::to_string);
-        self.load_profile(profile.as_deref());
-        Response::json(&json!({"id": 1, "uuid": uuid, "title": "Nuvio", "authToken": self.token}))
+    /// The real account roster. A transport fault returns 503 so `auth::grade_roster` treats it as
+    /// "no verdict" and keeps the cached roster; an empty array would be read as the account
+    /// having no profiles at all.
+    fn home_users(&self) -> Response {
+        let Some(session) = self.fresh_session() else { return self.local_home_users() };
+        let profiles = match plx_stremio::nuvio::profiles(&session) {
+            Ok(p) => p,
+            Err(e) => {
+                log_failure("roster", &e);
+                return Response::json_status(503, &json!({"error": "Nuvio roster unavailable"}));
+            },
+        };
+        let catalog = plx_stremio::nuvio::avatar_catalog().unwrap_or_default();
+        let base = plx_stremio::nuvio::config().backend_url;
+        let store = plx_nuvio_store::get();
+        let body = shim_profiles::home_users(&profiles, &catalog, &base, &self.token, &|index| {
+            store.and_then(|s| plx_nuvio_store::pins::get(s, index)).is_some()
+        });
+        Response::json(&body)
+    }
+
+    /// The active profile slot, used by the fork-owned management routes and settings sync.
+    pub fn active_index(&self) -> u32 {
+        self.library.lock().unwrap_or_else(|e| e.into_inner())
+            .profile.as_deref()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|n| (1..=plx_stremio::nuvio::MAX_PROFILES).contains(n))
+            .unwrap_or(1)
+    }
+
+    /// PIN management for the fork-owned Settings screen. Setting or clearing a PIN is a local
+    /// act: the public API never sees it and cannot verify it.
+    pub fn set_pin(&self, index: u32, pin: Option<&str>) -> Result<(), String> {
+        if !(1..=plx_stremio::nuvio::MAX_PROFILES).contains(&index) {
+            return Err("invalid profile index".into());
+        }
+        let Some(store) = plx_nuvio_store::get() else { return Err("the single store is not open".into()) };
+        match pin {
+            Some(p) => {
+                let verifier = plx_nuvio_store::pins::PinVerifier::new(p)
+                    .ok_or_else(|| "PIN must be four digits".to_string())?;
+                plx_nuvio_store::pins::put(store, index, &verifier)
+            },
+            None => plx_nuvio_store::pins::remove(store, index),
+        }
+    }
+
+    /// Arm a forgotten-PIN reset for one slot. The verifier is removed only when the QR sign-in
+    /// that follows is approved by the account — never on this call alone.
+    pub fn arm_pin_reset(&self, index: u32) -> Result<(), String> {
+        if !(1..=plx_stremio::nuvio::MAX_PROFILES).contains(&index) {
+            return Err("invalid profile index".into());
+        }
+        *self.pin_reset.lock().unwrap_or_else(|e| e.into_inner()) = Some(index);
+        Ok(())
+    }
+
+    pub fn pin_locked(&self, index: u32) -> bool {
+        plx_nuvio_store::get().and_then(|s| plx_nuvio_store::pins::get(s, index)).is_some()
+    }
+
+    /// Does this PIN open the slot? A slot with no verifier accepts any digits — there is nothing
+    /// to check, and the account's advisory flag must never lock the only profile out.
+    pub fn pin_allows(&self, index: u32, pin: Option<&str>) -> bool {
+        match plx_nuvio_store::get().and_then(|s| plx_nuvio_store::pins::get(s, index)) {
+            None => true,
+            Some(verifier) => pin.is_some_and(|p| verifier.verify(p)),
+        }
+    }
+
+    fn switch(&self, uuid: &str, pin: Option<&str>) -> Response {
+        let index = match shim_profiles::index_of(uuid) {
+            Some(n) => n,
+            // The signed-out/local tile keeps its old uuid and simply reloads the local set.
+            None if uuid == "nuvio" => {
+                self.load_profile(None);
+                return Response::json(&json!({"id": 1, "uuid": uuid, "title": "Nuvio", "authToken": self.token}));
+            },
+            None => return Response::json_status(404, &json!({"error": "unknown profile"})),
+        };
+        // The switch answer's `title` is what the app writes as the seated profile's display
+        // name — the chip reads it back. Return the account's actual profile name, not the
+        // product name, or every pick labels itself "Nuvio".
+        let mut title = "Nuvio".to_string();
+        if let Some(session) = self.fresh_session() {
+            match plx_stremio::nuvio::profiles(&session) {
+                Ok(rows) => match shim_profiles::profile_title(&rows, index) {
+                    Some(name) => title = name,
+                    None => return Response::json_status(404, &json!({"error": "unknown profile"})),
+                },
+                Err(e) => { log_failure("roster", &e); return Response::json_status(503, &json!({"error": "Nuvio roster unavailable"})); },
+            }
+        }
+        if !self.pin_allows(index, pin) {
+            return Response::json_status(401, &json!({"error": "wrong PIN"}));
+        }
+        self.load_profile(Some(index.to_string().as_str()));
+        Response::json(&json!({"id": index, "uuid": uuid, "title": title, "authToken": self.token}))
     }
 
     /// Fetch a profile's addons (the first profile when `None`) and hand them to the sink, off the
@@ -484,6 +633,7 @@ impl Account {
         let Some(sink) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
         let watch_sink = self.watch_sink.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let profile = profile.map(str::to_string);
+        let previous = self.active_index();
         let library = self.library.clone();
         let prefs = self.prefs.clone();
         let write_lock = Arc::clone(&self.write_lock);
@@ -495,15 +645,24 @@ impl Account {
             context.cached = None;
             context.generation
         };
+        let explicit = profile.is_some();
         let _ = std::thread::Builder::new().name("pmsshim-profile".into()).spawn(move || {
+            if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation { return; }
             let pid = profile.clone().or_else(|| plx_stremio::nuvio::profiles(&session).ok().and_then(|p| p.first().map(|p| p.id.clone()))).unwrap_or_else(|| "1".into());
+            let index = pid.parse::<u32>().unwrap_or(1);
+            let switching = explicit && previous != index;
+            // Publish the OLD profile's prefs before replacing them, then pull the new profile's
+            // blob. Both calls are network-bound and run before any store lock is taken.
+            if switching { sync_settings_out(&session, previous, &prefs); }
+            let incoming = sync_settings_in(&session, index, switching, &prefs);
             let mut context = library.lock().unwrap_or_else(|e| e.into_inner());
             if context.generation != generation { return; }
             context.profile = Some(pid.clone());
             // Same write lock as `write_prefs`: a preference saved while the profile resolves
             // must not be overwritten by a snapshot taken before it.
             let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let p = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let p = incoming.unwrap_or_else(|| prefs.lock().unwrap_or_else(|e| e.into_inner()).clone());
+            *prefs.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
             if let Err(e) = save_session_file(Some(&session), Some(&pid), &p) {
                 log_prefs_error(&e);
             }
@@ -511,10 +670,34 @@ impl Account {
             // drop the guard first or the two deadlock.
             drop(context);
             activate_loaded_profile(
-                &library, generation, &prefs, &sink, watch_sink,
+                &library, generation, index, &prefs, &sink, watch_sink,
                 || plx_stremio::nuvio::addons(&session, &pid),
             );
         });
+    }
+}
+
+/// Publish one profile's prefs as its native settings blob. Best effort: a transport fault leaves
+/// the local copy authoritative for this run, and the next switch or preference edit retries.
+fn sync_settings_out(session: &plx_stremio::nuvio::Session, index: u32,
+    prefs: &Arc<Mutex<serde_json::Map<String, Value>>>) {
+    let snapshot = prefs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Err(e) = plx_stremio::nuvio::put_profile_settings(session, index, &snapshot) {
+        log_failure("settings push", &e);
+    }
+}
+
+/// Pull one profile's native settings blob. `fresh` starts from an empty map for a real switch so
+/// one profile's prefs never leak into another; a boot/sign-in keeps local-only keys.
+fn sync_settings_in(session: &plx_stremio::nuvio::Session, index: u32, fresh: bool,
+    prefs: &Arc<Mutex<serde_json::Map<String, Value>>>) -> Option<serde_json::Map<String, Value>> {
+    match plx_stremio::nuvio::profile_settings(session, index) {
+        Ok(remote) => {
+            let base = if fresh { serde_json::Map::new() }
+                else { prefs.lock().unwrap_or_else(|e| e.into_inner()).clone() };
+            Some(shim_profiles::merge_settings(&remote, &base))
+        },
+        Err(e) => { log_failure("settings pull", &e); None },
     }
 }
 
@@ -530,6 +713,7 @@ impl Account {
 fn activate_loaded_profile<F>(
     library: &Mutex<LibraryContext>,
     generation: u64,
+    index: u32,
     prefs: &Mutex<serde_json::Map<String, Value>>,
     sink: &AddonSink,
     watch_sink: Option<WatchSink>,
@@ -571,7 +755,7 @@ fn activate_loaded_profile<F>(
         return;
     }
     if let Some(watch) = watch_sink {
-        watch();
+        watch(index);
     }
 }
 
@@ -662,6 +846,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The account's `pin_enabled` is advisory; only a verifier WE hold locks a slot. A slot with
+    /// no verifier takes any digits, so a locked single-profile account can still open its one
+    /// profile.
+    #[test]
+    fn only_a_tv_verifier_locks_a_profile() {
+        let _serial = serial();
+        install_test_store();
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        assert!(account.pin_allows(1, None));
+        assert!(account.pin_allows(1, Some("whatever")));
+        assert!(!account.pin_locked(1));
+        account.set_pin(2, Some("4821")).unwrap();
+        assert!(account.pin_locked(2));
+        assert!(!account.pin_allows(2, None));
+        assert!(!account.pin_allows(2, Some("4822")));
+        assert!(account.pin_allows(2, Some("4821")));
+        account.set_pin(2, None).unwrap();
+        assert!(account.pin_allows(2, Some("anything")));
+        assert!(account.set_pin(7, Some("1234")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Arming recovery must not itself unlock anything; only the QR approval does.
+    #[test]
+    fn arming_a_pin_reset_keeps_the_lock_until_qr_approval() {
+        let _serial = serial();
+        install_test_store();
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        account.set_pin(2, Some("4821")).unwrap();
+        assert!(account.arm_pin_reset(2).is_ok());
+        assert!(account.pin_locked(2), "a link to a QR is not proof of account ownership");
+        assert!(account.arm_pin_reset(7).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_switch_uuid_outside_slots_one_to_six_is_refused() {
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        let req = crate::shim_http::Request {
+            method: "POST".into(),
+            path: "/api/v2/home/users/nuvio-profile-7/switch".into(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        let response = account.handle(&req, &["home", "users", "nuvio-profile-7", "switch"]);
+        assert_eq!(response.status, 404);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn qr_is_a_png() {
         assert!(super::qr_png("https://example.invalid/tv?code=ABCD").unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
@@ -689,6 +926,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Upstream's preference client proves the token's owner by matching `/api/v2/user` against
+    /// the seated profile. A constant "nuvio" refused every profile after uuids became real.
+    #[test]
+    fn the_account_user_answers_the_seated_profiles_identity() {
+        let _serial = serial();
+        install_test_store();
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        account.library.lock().unwrap_or_else(|e| e.into_inner()).profile = Some("3".into());
+        let req = Request {
+            method: "GET".into(), path: "/api/v2/user".into(),
+            query: std::collections::HashMap::new(), headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        };
+        let response = account.handle(&req, &["user"]);
+        let dto: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(dto["id"], 3);
+        assert_eq!(dto["uuid"], "nuvio-profile-3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Signing out WIPES the install's preferences with the session: the next sign-in pulls the
     /// account's settings, and a leftover local language would only disagree with them.
     #[test]
@@ -699,12 +957,15 @@ mod tests {
         let dir = temp_dir();
         let account = super::Account::new(Some(&dir), "tok");
         account.set_addon_enabled("https://addon.example/manifest.json", false);
+        account.set_pin(2, Some("4821")).unwrap();
+        assert!(account.pin_locked(2), "the lock must exist before sign-out");
         assert!(plx_nuvio_store::get().unwrap().get(plx_nuvio_store::Table::AccountSession, "session").is_some(), "the write must land first");
         account.sign_out();
         assert!(
             plx_nuvio_store::get().unwrap().get(plx_nuvio_store::Table::AccountSession, "session").is_none(),
             "a signed-out install keeps no preferences"
         );
+        assert!(!account.pin_locked(2), "sign-out is the forgotten-PIN recovery path");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -728,9 +989,9 @@ mod tests {
         let sink_order = Arc::clone(&order);
         let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
         let watch_order = Arc::clone(&order);
-        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+        let watch: WatchSink = Arc::new(move |_| watch_order.lock().unwrap().push("watch"));
 
-        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), || Ok(vec![test_addon()]));
+        activate_loaded_profile(&library, 7, 1, &prefs, &sink, Some(watch), || Ok(vec![test_addon()]));
 
         assert_eq!(*order.lock().unwrap(), ["addons", "watch"]);
     }
@@ -745,9 +1006,9 @@ mod tests {
         let sink_order = Arc::clone(&order);
         let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
         let watch_order = Arc::clone(&order);
-        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+        let watch: WatchSink = Arc::new(move |_| watch_order.lock().unwrap().push("watch"));
 
-        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), || Ok(Vec::new()));
+        activate_loaded_profile(&library, 7, 1, &prefs, &sink, Some(watch), || Ok(Vec::new()));
 
         assert_eq!(*order.lock().unwrap(), ["watch"]);
     }
@@ -761,9 +1022,9 @@ mod tests {
         let sink_order = Arc::clone(&order);
         let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
         let watch_order = Arc::clone(&order);
-        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+        let watch: WatchSink = Arc::new(move |_| watch_order.lock().unwrap().push("watch"));
 
-        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch),
+        activate_loaded_profile(&library, 7, 1, &prefs, &sink, Some(watch),
             || -> plx_stremio::model::Result<Vec<plx_stremio::model::Addon>> {
                 panic!("a superseded load must not fetch")
             });
@@ -781,10 +1042,10 @@ mod tests {
         let sink_order = Arc::clone(&order);
         let sink: AddonSink = Arc::new(move |_set| sink_order.lock().unwrap().push("addons"));
         let watch_order = Arc::clone(&order);
-        let watch: WatchSink = Arc::new(move || watch_order.lock().unwrap().push("watch"));
+        let watch: WatchSink = Arc::new(move |_| watch_order.lock().unwrap().push("watch"));
         let newer = Arc::clone(&library);
 
-        activate_loaded_profile(&library, 7, &prefs, &sink, Some(watch), move || {
+        activate_loaded_profile(&library, 7, 1, &prefs, &sink, Some(watch), move || {
             newer.lock().unwrap().generation = 8;
             Ok(vec![test_addon()])
         });
@@ -793,7 +1054,7 @@ mod tests {
     }
 }
 
-fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
+pub(crate) fn log_failure(stage: &str, error: &plx_stremio::model::Error) {
     let category = match error { plx_stremio::model::Error::Network => "network", plx_stremio::model::Error::Status(_) => "http", plx_stremio::model::Error::Parse(_) => "response", plx_stremio::model::Error::NoAddon => "addon" };
     let status = match error { plx_stremio::model::Error::Status(s) => *s, _ => 0 };
     plx_stremio::nuvio::log_account_event(&format!("nuvio account: {stage} failed category={category} status={status}"));

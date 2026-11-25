@@ -78,7 +78,12 @@ pub fn start_on(backend: Arc<dyn Backend>, cfg: Config, host: &str, port: u16) -
     // Continue Watching is account-backed: merge the account's resume points at boot, and again
     // whenever the profile changes (a profile's history is its own).
     let s3 = shim.clone();
-    shim.account.set_watch_sink(Arc::new(move || s3.pull_account_watch()));
+    shim.account.set_watch_sink(Arc::new(move |index| {
+        // Switch the LOCAL row before pulling the account's resume points: the two belong to
+        // the same profile, or a pick merges one viewer's progress into another's state.
+        s3.watch.set_profile(index);
+        s3.pull_account_watch();
+    }));
     shim.pull_account_watch();
     let s2 = shim.clone();
     let handler: Arc<crate::shim_http::Handler> = Arc::new(move |req: &crate::shim_http::Request| s2.handle(req));

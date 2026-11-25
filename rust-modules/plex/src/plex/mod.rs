@@ -33,6 +33,9 @@ mod servers;
 mod hubs;
 mod library;
 pub mod nuvio;
+/// Fork Rofocale11: Nuvio profile management over the in-process shim, reached from Settings.
+/// A new file keeps upstream `nuvio.rs` free of conflict apart from this declaration.
+pub mod nuvio_profiles;
 pub mod collections;
 /// Agent-backed subtitle search & download. `docs/pms-api.md` §8 is the verified contract; the
 /// bundled OpenAPI spec is wrong about this endpoint and must not be read as authority for it.

@@ -335,6 +335,34 @@ pub(crate) fn boot() {
             shim: handle.shim.clone(),
         }));
     }
+    // Fork Rofocale11: Settings > Profiles reaches the shim through this seam, the same way
+    // Settings > Addons reaches it. No screen may name `pmsshim` itself.
+    {
+        struct Ctl;
+        impl plx_plex::plex::nuvio_profiles::ProfileControl for Ctl {
+            fn profiles(&self) -> Vec<plx_plex::plex::nuvio_profiles::ProfileView> {
+                plx_plex::plex::client_opt().and_then(|c| c.nuvio_profiles()).unwrap_or_default()
+            }
+            fn avatars(&self) -> Vec<plx_plex::plex::nuvio_profiles::AvatarView> {
+                plx_plex::plex::client_opt().and_then(|c| c.nuvio_avatars()).unwrap_or_default()
+            }
+            fn save(&self, profiles: &[plx_plex::plex::nuvio_profiles::ProfileEditView]) -> bool {
+                plx_plex::plex::client_opt().is_some_and(|c| c.nuvio_save_profiles(profiles))
+            }
+            fn delete(&self, index: u32) -> bool {
+                plx_plex::plex::client_opt().is_some_and(|c| c.nuvio_delete_profile(index))
+            }
+            fn set_pin(&self, index: u32, pin: Option<&str>, current: Option<&str>) -> bool {
+                plx_plex::plex::client_opt().is_some_and(|c| c.nuvio_set_pin(index, pin, current))
+            }
+            fn forgot_pin(&self, index: u32) -> bool {
+                plx_plex::plex::client_opt().is_some_and(|c| c.nuvio_forgot_pin(index))
+            }
+        }
+        plx_plex::plex::nuvio_profiles::register_control(std::sync::Arc::new(Ctl));
+        // Fill the settings snapshot on a worker; a screen must never do this HTTP itself.
+        plx_plex::plex::nuvio_profiles::refresh();
+    }
     let _ = BACKEND.set(backend.clone());
     let _ = HANDLE.set(handle);
     shim.warm();

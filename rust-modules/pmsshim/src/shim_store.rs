@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -155,8 +156,24 @@ struct WatchFile {
     account_keys: HashMap<String, i64>,
 }
 
+/// Watch state is a person's viewing record, so each Nuvio profile slot gets its own row in the
+/// one redb file. The legacy single `state` row is migrated as profile 1; content caches stay
+/// shared because they hold no viewer identity.
 pub struct WatchState {
     inner: Mutex<WatchFile>,
+    profile: AtomicU32,
+}
+
+fn watch_key(index: u32) -> String {
+    format!("state:{index}")
+}
+
+fn stored_profile() -> u32 {
+    plx_nuvio_store::get()
+        .and_then(|s| s.get(plx_nuvio_store::Table::AccountSession, "session"))
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["profile_id"].as_str().and_then(|s| s.parse::<u32>().ok()).filter(|n| (1..=6).contains(n)))
+        .unwrap_or(1)
 }
 
 pub fn now_secs() -> i64 {
@@ -165,26 +182,53 @@ pub fn now_secs() -> i64 {
 
 impl WatchState {
     pub fn open(dir: Option<&Path>) -> WatchState {
-        // watch state moved from watch.json to the one redb file. The JSON
-        // document is unchanged; the old file is migrated once when redb has no record yet.
+        // watch state moved from watch.json to the one redb file. The JSON document is unchanged;
+        // the old single row is profile 1's state, and the old file is a one-time migration source.
+        let index = stored_profile();
         let loaded = plx_nuvio_store::get()
-            .and_then(|s| s.get(plx_nuvio_store::Table::Watch, "state"))
+            .and_then(|s| s.get(plx_nuvio_store::Table::Watch, &watch_key(index))
+                .or_else(|| (index == 1).then(|| s.get(plx_nuvio_store::Table::Watch, "state")).flatten()))
             .and_then(|b| serde_json::from_slice::<WatchFile>(&b).ok())
             .or_else(|| {
                 let bytes = std::fs::read(dir?.join("watch.json")).ok()?;
                 let parsed = serde_json::from_slice::<WatchFile>(&bytes).ok()?;
                 if let Ok(encoded) = serde_json::to_vec(&parsed) {
-                    let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Watch, "state", &encoded);
+                    let _ = plx_nuvio_store::get()?.put(plx_nuvio_store::Table::Watch, &watch_key(1), &encoded);
                 }
                 Some(parsed)
             });
-        WatchState { inner: Mutex::new(loaded.unwrap_or_default()) }
+        WatchState {
+            inner: Mutex::new(loaded.unwrap_or_default()),
+            profile: AtomicU32::new(index),
+        }
+    }
+
+    /// Swap the active profile's local watch state. Called on the profile worker BEFORE the
+    /// account's resume points are pulled, so a switch never merges one person's progress into
+    /// another's. The outgoing state is persisted under its own slot first.
+    pub fn set_profile(&self, index: u32) {
+        let old = self.profile.swap(index, Ordering::SeqCst);
+        if old == index {
+            return;
+        }
+        if let (Some(store), Ok(bytes)) = (plx_nuvio_store::get(),
+            serde_json::to_vec(&*self.inner.lock().unwrap_or_else(|e| e.into_inner()))) {
+            let _ = store.put(plx_nuvio_store::Table::Watch, &watch_key(old), &bytes);
+        }
+        // A fresh slot, or a legacy single row on profile 1, is the only starting state. The
+        // watch.json migration is deliberately NOT repeated here — it belongs to first boot.
+        let loaded = plx_nuvio_store::get()
+            .and_then(|s| s.get(plx_nuvio_store::Table::Watch, &watch_key(index))
+                .or_else(|| (index == 1).then(|| s.get(plx_nuvio_store::Table::Watch, "state")).flatten()))
+            .and_then(|b| serde_json::from_slice::<WatchFile>(&b).ok())
+            .unwrap_or_default();
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
     }
 
     fn save(&self, g: &WatchFile) {
         let Some(store) = plx_nuvio_store::get() else { return };
         if let Ok(bytes) = serde_json::to_vec(g) {
-            let _ = store.put(plx_nuvio_store::Table::Watch, "state", &bytes);
+            let _ = store.put(plx_nuvio_store::Table::Watch, &watch_key(self.profile.load(Ordering::SeqCst)), &bytes);
         }
     }
 
@@ -829,6 +873,21 @@ mod tests {
         reopened.progress(5, 9500, 10_000, None);
         assert_eq!(reopened.last_stream(5), None, "watched clears the source pick");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_profile_switch_does_not_share_one_persons_resume_with_another() {
+        let _serial = serial();
+        install_test_store();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::Watch);
+        let w = WatchState::open(None);
+        w.progress(5, 1000, 10_000, None);
+        w.set_profile(2);
+        assert_eq!(w.get(5).offset_ms, 0, "profile 2 must not inherit profile 1's position");
+        w.progress(6, 2000, 10_000, None);
+        w.set_profile(1);
+        assert_eq!(w.get(5).offset_ms, 1000, "profile 1's row comes back unchanged");
+        assert_eq!(w.get(6).offset_ms, 0);
     }
 
     #[test]

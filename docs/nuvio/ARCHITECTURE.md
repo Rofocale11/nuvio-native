@@ -98,6 +98,43 @@ the upstream conflict surface is in `MERGE-AUDIT.md`.
   Changed → the existing profile-load path fetches manifests, replaces the set, clears the caches
   and re-warms Home. A transport fault is not a change: the persisted set is kept. A Stremio addon
   publishing new *items* still cannot be detected without asking it, so the catalog TTL bounds that.
+- **Multi-profile (1–6, the public API's range).** One account holds up to six profile slots;
+  everything account-backed is keyed by `profile_id`/`p_profile_id`. `nuvio::profiles()` reads
+  `sync_pull_profiles`; `home_users()` projects those rows into Plex-dialect tiles whose uuid is
+  `nuvio-profile-<index>`, and `switch` validates the index against a fresh roster before
+  `load_profile`. `uses_primary_addons` still resolves a child profile to profile 1's addons.
+  Settings > Profiles (a fork-owned page behind the boot-registered `ProfileControl`) creates,
+  renames and deletes slots through `sync_push_profiles`/`sync_delete_profile_data` — both
+  destructive full-state calls, so every push carries the COMPLETE roster and `p_client_max_profiles:
+  6`, and slot 1 is never deletable. Avatars resolve `avatar_url` or `avatar_id` →
+  `get_avatar_catalog` → `https://api.nuvio.tv/storage/v1/object/public/avatars/<storage_path>`;
+  `avatar_color_hex` is a tint, never an image. Settings preferences sync through
+  `sync_pull/push_profile_settings_blob` under the fork-owned `p_platform = "webos-native"`, so
+  a full blob upsert cannot overwrite the Nuvio web app's `tv` namespace. Content caches and the
+  ratingKey table stay shared; local watch state and prefs are keyed by profile slot in the same
+  redb, with the old flat rows migrated as profile 1.
+  The public API exposes `pin_enabled` and `pin_locked_until` as READ-ONLY state and has no PIN
+  verification call. The account flag is therefore advisory: a tile is locked on this TV only
+  when a local PBKDF2 verifier exists. Setting the first TV PIN is unguarded (physical access);
+  changing or clearing one requires the current PIN. A forgotten PIN is recovered from the
+  management page's **Forgot PIN? Scan QR** row: it arms a one-shot reset on the shim and opens the
+  existing QR sign-in; only when that QR is approved as the SAME account does the shim remove the
+  verifier, logging `nuvio: TV PIN reset by account QR for profile N`. Arming alone never unlocks.
+  The QR sign-in is followed from any route while the session is `Creating`, so raising it from
+  Settings actually shows the QR page. Signing out also clears every verifier as a fallback, but
+  still needs the phone to sign back in. Auto Sign In never skips a locked profile: the boot gate
+  reads the durable verifier directly, before any HTTP snapshot has landed.
+  The management page is a pure cache reader: the application refreshes the snapshot once at
+  launch from `install_pms_owned`, where the PMS client is current (the earlier `nuvio::boot()`
+  refresh ran before any client existed and published an empty roster), and again after each write.
+  A landing refresh keeps the row under the cursor instead of re-seating focus on profile 1. The
+  rows that raise the TV keyboard (Rename, Set/Clear TV PIN) are the FIRST section so the keyboard
+  cannot cover the field; Add and Delete show a small inline spinner on the affected row until the
+  worker's refreshed snapshot lands. A roster write keeps the row that triggered it (Avatar, Share
+  main addons, Rename), and confirming a delete seats the neighbouring profile rather than slot 1;
+  slot 1 is never deletable and its Delete row is inert. The shim's `/api/v2/user` answers the
+  seated profile's `id`/`uuid`, so upstream's account-preference identity check resolves and
+  Settings > Audio & subtitles reads the profile's own values.
 - Settings: Addons lists the installed addons and flips one through the boot-registered
   `nuvio::AddonControl` (the screens layer may not name `pmsshim`). Playback's P2P switch is
   persisted in the one redb `LocalSettings` value (absent key means ON) and applied live through

@@ -1817,6 +1817,8 @@ pub mod word {
     pub const DIAGNOSTICS: &str = "diagnostics";
     // Fork Rofocale11: the Settings > Addons page's route/heartbeat word (`SettingsPage::Addons`).
     pub const ADDONS: &str = "addons";
+    // Fork Rofocale11: Settings > Profiles' route/heartbeat word.
+    pub const NUVIO_PROFILES: &str = "nuvio-profiles";
     pub const UNDER_POSTERS: &str = "under-posters";
     pub const UNDER_POSTERS_MOVIE: &str = "under-posters-movie";
     pub const UNDER_POSTERS_SHOW: &str = "under-posters-show";
@@ -3475,6 +3477,7 @@ mod a11y_coverage_tests {
                 SettingsPage::Diagnostics => Covered("Settings::Diagnostics", || surface(SettingsPage::Diagnostics)),
                 // Fork Rofocale11: the Addons page is mounted like any other Settings page.
                 SettingsPage::Addons => Covered("Settings::Addons", || surface(SettingsPage::Addons)),
+                SettingsPage::NuvioProfiles => Covered("Settings::NuvioProfiles", || surface(SettingsPage::NuvioProfiles)),
                 SettingsPage::PlayerHud => Covered("Settings::PlayerHud", || surface(SettingsPage::PlayerHud)),
                 SettingsPage::HudGallery => Covered("Settings::HudGallery", || surface(SettingsPage::HudGallery)),
                 SettingsPage::HudDetail(_) => Covered("Settings::HudDetail", crate::hud_settings::tests::hud_detail_conforms),
@@ -3488,8 +3491,8 @@ mod a11y_coverage_tests {
     /// How many leaf arms the table has: 21 flat `AppArg` arms, 5 `ContentArg`, 23 `SettingsPage` (Fork Rofocale11: + Addons) and
     /// `FirstRunConsent`. A new arm fails [`coverage`] to compile, and then this to pass until the census
     /// below holds it too.
-    // Fork Rofocale11: +1 for Settings::Addons.
-    const ARMS: usize = 50;
+    // Fork Rofocale11: +1 for Settings::Addons, +1 for Settings::NuvioProfiles.
+    const ARMS: usize = 51;
 
     /// **A value of every leaf arm** the table names: the registry's own page and surface censuses, plus
     /// the arms those leave out (Filmography and every Settings page).
@@ -3521,6 +3524,7 @@ mod a11y_coverage_tests {
                 SettingsPage::Picker(PickerKind::Quality),
                 SettingsPage::Diagnostics,
                 SettingsPage::Addons,
+                SettingsPage::NuvioProfiles,
                 SettingsPage::PlayerHud,
                 SettingsPage::HudGallery,
                 SettingsPage::HudDetail(sha),
