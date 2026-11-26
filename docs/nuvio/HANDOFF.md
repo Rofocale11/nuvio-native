@@ -42,7 +42,8 @@ Repo / current fork: https://github.com/Rofocale11/nuvio-native. Commit as
 attribution lines. Never modify the installed `space.nuvio.webos` app. Never print
 or commit addon URLs or `rust-modules/stremio/nuvio.local.env`.
 
-Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
+Read `ARCHITECTURE.md` and `PLAYBACK.md` for the system and decoder contracts, and `PMSSHIM.md`
+for the end-to-end shim walkthrough and the current artwork behavior.
 
 ---
 
@@ -92,18 +93,15 @@ Read `ARCHITECTURE.md` and `PLAYBACK.md` for the shim and decoder contracts.
 - Settings → Playback → Rating source offers IMDb or Rotten Tomatoes. The preference
   uses the canonical session record in the single redb file and updates cached detail presentation. Rotten
   Tomatoes detail scores must be supplied by a metadata addon; absent scores remain absent.
-- BetterPosters (`btttr.cc`) supplies posters wherever the shim resolves an IMDb id — not
-  only for a literal `tt…` item id, but also for `tmdb:` catalog items and synthetic TMDB
-  rows, whose IMDb id comes from the addon meta or one cached TMDB `external_ids` lookup.
-  Posters request Rotten Tomatoes scores (`rs=RT`); titles with no IMDb mapping retain
-  their addon artwork, and the image proxy falls back to the original image on a 404.
-  TMDB-only related cards keep their TMDB poster: a recommendation result carries no IMDb
-  id, and resolving one per card would add ten HTTP round trips to the detail page.
-- TMDB is the primary source for landscape backdrops and clear logos, including on detail,
-  Continue Watching, related and franchise rows. Cinemeta's `images.metahub.space` art is
-  **strictly a fallback** when TMDB has no answer or the key is not configured; it is never
-  chosen as a Continue Watching backdrop over a poster crop. A missing TMDB logo omits
-  `clearLogo` entirely rather than substituting the poster.
+- **Superseded (2026-11-26; see `PMSSHIM.md` §7–8):** this snapshot said BetterPosters supplied
+  posters for resolved IMDb ids, `tmdb:` catalog items and synthetic rows. The shipped code passes
+  the item's **own** id to `Backend::poster`, so only a literal `tt…` id of ≥7 digits becomes a
+  BetterPosters URL (`?rs=RT`); `tmdb:` rows keep their addon poster. The proxy falls back to the
+  original on **any** non-ok/empty response, not just 404.
+- **Superseded (2026-11-26; see `PMSSHIM.md` §7–8):** this snapshot said TMDB was the primary source
+  of landscape art and clear logos everywhere. Real rows publish the addon's `background`/`logo`
+  as `art`/`clearLogo` — including Continue Watching and enrichment — and TMDB backdrops/logos are
+  written only on synthetic TMDB detail rows. A missing TMDB logo omits `clearLogo` on those rows.
 - Movie/show details have Add to My List / Remove from My List. The active Nuvio
   account profile owns the list; individual item RPCs preserve other devices' titles.
   A fresh pull confirms each mutation before the button updates. Home has a paged

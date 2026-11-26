@@ -5562,6 +5562,13 @@ pub fn clear_for_erase(all_local: bool, retry: Option<Retained>) -> Erasure {
         // A failed helper clear can still leave only an explicitly supported file fallback.
         preference_failures.push("fallback install preferences could not be retained".into());
     }
+    // Fork Rofocale11: the documented forgotten-PIN recovery is "Sign out, then sign back in
+    // with the phone". Upstream's sweep cannot see Nuvio's redb verifier table, so clear it here.
+    // Only on a confirmed durable clear: a sign-out that failed to revoke credentials must not
+    // hand a remote-holder the power to drop a profile lock.
+    if matches!(outcome, ClearOutcome::Durable { .. }) {
+        nuvio_signout::clear_profile_pins();
+    }
     Erasure { outcome, retained, preference_failures }
 }
 
@@ -5984,6 +5991,9 @@ mod prefs_characterisation_tests;
 #[allow(dead_code)] // Stage B connects typed owner admission/completions.
 pub mod async_persistence;
 mod install_preferences;
+// Fork Rofocale11: Nuvio's TV PIN verifiers live in the one redb store, not in the credential
+// files upstream sweeps; the sign-out hook is a child module so this file keeps one routed call.
+mod nuvio_signout;
 mod memory_only;
 #[cfg(test)]
 mod memory_only_tests;

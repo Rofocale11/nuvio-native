@@ -42,8 +42,9 @@ the upstream conflict surface is in `MERGE-AUDIT.md`.
 - Catalogs → PMS library sections and Home hubs. Metas → movie/show/season/episode items.
   Search → `/hubs/search`. Streams → the item's `Media[]` list (one Media per stream, with
   resolution/codec/HDR/size/bitrate from `plx_stremio::classify`), so PlxNative's existing
-  version/source picker is the stream picker. Part URLs redirect (or proxy, when headers are
-  needed) to the stream's real URL. The decision endpoint waits for discovery/probing
+  version/source picker is the stream picker. Part URLs answer **302** to the stream's real URL;
+  the shim has no byte proxy, even for addons that declare `behaviorHints.proxyHeaders`
+  (`PMSSHIM.md` §9). The decision endpoint waits for discovery/probing
   and refuses media that cannot direct play; the native route uses its probed fields.
   The Streams overlay uses `/nuvio/streams` and `/nuvio/select`, retaining the shim's
   ranked index instead of confusing it with the selected-first Media list.
@@ -74,7 +75,9 @@ the upstream conflict surface is in `MERGE-AUDIT.md`.
 - Release discovery permits plaintext credentials for the registered in-process shim
   only when its origin, token and machine identity match the boot registration and
   its address is literal loopback. Identity probing and authenticated library admission
-  still run. Remote HTTP resources do not gain this exception.
+  still run. Remote HTTP resources do not gain this exception. This is enforced by the
+  Plex client's discovery code (`plex/src/plex/probe.rs:430-458`), **not** by the shim: the
+  shim carries the token but validates nothing (`shim_core.rs:26-27`; `PMSSHIM.md` §2–3).
 - Rating-source preference lives in the native canonical session record; the shim
   retains supplied IMDb and Rotten Tomatoes scores so cached details can switch
   providers. It does not replace a missing RT detail score with IMDb. BetterPosters
@@ -165,14 +168,18 @@ marked seams into `plx_nuvio_store`; `plx_stremio`, `plx_pmsshim`, `plx_nuvio_pr
 All of these are tables in the SAME `nuvio.redb`; there is no second cache file and no new JSONL
 sidecar:
 
-- `META_CACHE` and `ENRICH_CACHE` — one JSON row per `(type, id)` written by the shim's
-  `MetaCache` / `EnrichCache` (`pmsshim/src/shim_store.rs`), each carrying its own `at` unix-seconds
-  stamp and an in-memory warm copy. Expired rows are dropped on open. The old `meta-cache.jsonl` /
-  `enrich-cache.jsonl` files are read **once** as migration sources only when the redb table is
-  empty; nothing writes them any more.
+- `META_CACHE` and `ENRICH_CACHE` — one TTL-enveloped JSON row per `(type, id)` written by the
+  shim's `MetaCache` / `EnrichCache` (`pmsshim/src/shim_store.rs`), each carrying its own `at`
+  unix-seconds stamp and an in-memory warm copy. On open the shim reads both the enveloped rows and
+  the pre-envelope raw JSON of earlier builds (`decode_cached`, `:415-423`), deletes the expired
+  ones from redb and rewrites the live ones under an envelope (`:447-476`, `:616-645`). The row's own
+  `at` stays authoritative for in-memory freshness (`:483-485`, `:640-642`). The old
+  `meta-cache.jsonl` / `enrich-cache.jsonl` files are read **once** as migration sources only when
+  the redb table is empty; nothing writes them any more.
 - `IMDB_IDS` — the old generic TTL table, retained in `nuvio-store` and still used by its own
-  tests. The shim no longer calls through `NuvioCache::{Meta,Enrich,Imdb}` / `Store::cache_get` /
-  `cache_put`: after the wholesale old-fork shim port its caches write redb tables directly.
+  tests. Meta/enrich rows are written directly to their redb tables, but the shim **does** use
+  `NuvioCache::{Catalogs,Subtitles}` / `Store::cache_get` / `cache_put` for the catalog and subtitle
+  caches (`shim_catalog_cache.rs:71-83`, `shim_subtitle_cache.rs:86-98`).
 - `IMDB_TMDB` — the durable IMDb→TMDB id map: a plain big-endian `u64` with **no** TTL, written by
   `shim_tmdb_ids::PersistentIdLookup` so a `/find` answer is paid for once per title. Negatives and
   non-IMDb ids are not stored.
@@ -182,19 +189,28 @@ sidecar:
   The key is namespaced by the addon set **and** the installed manifests' catalog declarations, so
   adding/removing an addon, switching profile, or a manifest that changes its catalogs misses the
   old rows. Catalog *content* has no change signal in the Stremio protocol, so the 15-minute TTL
-  is the freshness bound; a failed fill is never cached.
+  is the freshness bound; a failed fill is never cached. Its durable helpers no-op by default under
+  `#[cfg(test)]`, but a thread-local test store lets one test close and reopen the real redb
+  (`shim_catalog_cache.rs:178-214`); the older shim test named "relaunch" still covers in-memory
+  only. Device relaunch warmth is the owner's separate evidence.
 - `SUBTITLE_CACHE` — addon subtitle candidates, 6 h for a real answer and 10 min for a real empty
   answer, written by `pmsshim/src/shim_subtitle_cache.rs`. A provider **fault is never persisted**:
   it gets only a 30 s in-memory backoff, so a dead addon is neither hammered on every poll nor
   remembered as "no subtitles" after it recovers. The same distinction applies to the in-memory
   stream slots: an all-addon failure is `failed`/`faulted` with a 30 s retry window, not an empty
   list for the slot's 30 min TTL. `/nuvio/streams?retry=1` clears the slot and fans out again; the
-  player's Streams picker offers that as a Retry row.
+  player's Streams picker offers that as a Retry row. Its durable helpers are also no-ops under
+  `#[cfg(test)]` (`shim_subtitle_cache.rs:75-101`).
 
-The opposite direction (`tmdb:<n>` → `tt…`, used by `imdb_base()` for hub posters) is deliberately
-**not** a redb row in this tree: `Shim::imdb_ids` is a bounded in-memory map (512 entries, negative
-answers cached too). See `ID-MANAGEMENT.md` and `TMDB.md`. The 50 MiB soft budget sheds expired and
-oldest cache rows only; `IMDB_TMDB` and the durable tables are never discarded to meet it.
+The opposite direction (`tmdb:<n>` → `tt…`, used by `imdb_base()` for account identity/watch mirroring
+and addon id translation, **not** for hub posters) is deliberately **not** a redb row in this tree:
+`Shim::imdb_ids` is a bounded in-memory map (512 entries, negative answers cached too). A hub row's
+poster is `poster_url(id, original)` with the item's own id; only a literal `tt…` id is rewritten to
+BetterPosters (`shim_backend.rs:158-162`, `shim_pms.rs:6386-6399`; `PMSSHIM.md` §7). See
+`ID-MANAGEMENT.md` and `TMDB.md`. The 50 MiB soft budget sheds expired and oldest cache rows only;
+`IMDB_TMDB` and the durable tables are never discarded to meet it. Meta/enrich rows carry the same
+TTL envelope as catalog/subtitle rows, so all four cache tables participate correctly in the
+boot-time purge and shed (2026-11-26; `PMSSHIM.md` §11).
 
 ### Focus-warm (sans-IO)
 

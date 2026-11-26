@@ -7152,7 +7152,7 @@ impl Shim {
             ("GET", ["library", "metadata", rk, "subtitles"]) => self.subtitle_search(rk, req),
             ("PUT", ["library", "metadata", rk, "subtitles"]) => self.subtitle_install(rk, req),
             (_, ["library", "metadata", _, ..]) => ok_empty(),
-            ("PUT", ["library", "parts", ..]) => ok_empty(),
+            ("PUT", ["library", "parts", pid, ..]) => self.select_part(pid.parse().unwrap_or(-1)),
             (_, ["library", "parts", pid, ..]) => self.part(pid.parse().unwrap_or(-1)),
             (_, ["library", "streams", sid]) => {
                 self.subtitle(sid.split('.').next().unwrap_or("").parse().unwrap_or(-1))
@@ -7870,6 +7870,30 @@ impl Shim {
             json!({"Metadata": rows, "playQueueID": 1, "playQueueSelectedItemID": 1,
             "playQueueSelectedItemOffset": 0, "playQueueTotalCount": total, "playQueueVersion": 1}),
         ))
+    }
+
+    /// The player's server-side track write-back. A Part id is `ratingKey * PART_STRIDE + arrival
+    /// index`, so the path already names the file the viewer chose: commit the same slot selection
+    /// `/nuvio/select` records instead of answering 200 and forgetting it. Without this the next
+    /// episode's fresh ranking reverted a pick that had been made through the standard PMS route.
+    // Fork Rofocale11: Nuvio's shim keeps the selection in a stream slot; upstream's no-op 200
+    // could not express it, and the fork-owned /nuvio/select was the only route that did.
+    fn select_part(&self, pid: i64) -> Response {
+        // Trailer Parts are separate CDN targets, not entries in a stream slot; keep their
+        // previously harmless 200 while leaving the pick alone.
+        if pid < 0 || trailer_part_at(pid).is_some() {
+            return ok_empty();
+        }
+        let (rk, idx) = (pid / PART_STRIDE, (pid % PART_STRIDE) as usize);
+        let Some(slot) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&rk).cloned() else {
+            return Response::json_status(404, &json!({"ok": false}));
+        };
+        let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+        if idx >= state.streams.len() {
+            return Response::json_status(404, &json!({"ok": false}));
+        }
+        state.selected = Some(idx);
+        ok_empty()
     }
 
     fn part(&self, pid: i64) -> Response {
@@ -8701,6 +8725,61 @@ mod playback_regressions {
         let body: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(body["MediaContainer"]["generalDecisionCode"], 2000);
     }
+
+    // Fork Rofocale11: the standard PMS track write-back must land in the same slot the
+    // fork-owned picker uses, or a pick made through the player silently reverts.
+    #[test]
+    fn a_put_to_a_part_commits_the_same_pick_as_nuvio_select() {
+        let shim = Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ));
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt1254207".into(),
+        });
+        shim.streams.lock().unwrap().insert(
+            rk,
+            Arc::new(StreamSlot {
+                started: Instant::now(),
+                state: Mutex::new(SlotState {
+                    streams: vec![
+                        Stream { url: Some("https://example.invalid/a.mkv".into()), ..Default::default() },
+                        Stream { url: Some("https://example.invalid/b.mkv".into()), ..Default::default() },
+                    ],
+                    done: true,
+                    ..Default::default()
+                }),
+                cv: Condvar::new(),
+            }),
+        );
+        let chosen = rk * PART_STRIDE + 1;
+        let put = Request {
+            method: "PUT".into(),
+            path: format!("/library/parts/{chosen}/0/file.mkv"),
+            query: HashMap::from([("allParts".into(), "1".into())]),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(shim.handle(&put).status, 200);
+        let slot = shim.streams.lock().unwrap().get(&rk).unwrap().clone();
+        assert_eq!(slot.state.lock().unwrap().selected, Some(1), "the PUT must commit the pick");
+
+        // The fork-owned route addresses the same slot by ratingKey and arrival index.
+        let select = Request {
+            method: "POST".into(),
+            path: "/nuvio/select".into(),
+            query: HashMap::from([
+                ("ratingKey".into(), rk.to_string()),
+                ("index".into(), "0".into()),
+            ]),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(shim.handle(&select).status, 200);
+        assert_eq!(slot.state.lock().unwrap().selected, Some(0), "both routes share one pick");
+    }
+
     #[test]
     fn decision_carries_probed_hevc_dovi_tracks_and_refuses_missing_selection() {
         let shim = Arc::new(Shim::new(

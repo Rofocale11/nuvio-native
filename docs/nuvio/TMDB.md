@@ -85,20 +85,21 @@ and keep it only when it starts with `tt`.
 TMDB is **only** for the detail page and its children: cast, title logo (`clearLogo`), landscape
 `art`, trailers, More Like This, and franchise collections. It is never used while building a hub.
 
-A hub row's poster is **BetterPosters** by IMDb id, with the addon's own (Cinemeta) poster as the
-**strict fallback**. No TMDB image is ever used for a hub.
+No TMDB image is ever used for a hub row. The poster is chosen by the item's **own** id, not by a
+resolved IMDb id: `poster_url(id, original)` calls `Backend::poster(id, original)`, and
+`AddonBackend::poster` rewrites only a literal `tt…` id of at least seven digits to the
+BetterPosters `?rs=RT` URL; every other id — including Recommended's `tmdb:<n>` catalogs — keeps the
+addon's original (`shim_pms.rs:6386-6399`, `shim_backend.rs:158-162`). `imdb_base` is **not** called
+on the poster path; it serves account identity/watch mirroring and `addon_id_for` translation
+(`shim_pms.rs:2929-2948`, `:3692-3734`). The in-memory `Shim::imdb_ids` map (512 entries, negatives
+cached) and the durable `IMDB_TMDB` table are those two directions, not a poster lookup.
 
-Home's Cinemeta catalogs carry `tt…` ids and need no resolution. The extra catalogs in Recommended
-("Streaming Catalogs" — Apple TV+, Netflix, HBO Max…) carry `tmdb:<n>` ids. Per the owner's decision,
-`poster_url` resolves those to IMDb **once** with `imdb_base`: the shim's in-memory `Shim::imdb_ids`
-map is checked first (512 entries, positive **and negative** answers cached), and only a cold miss
-calls TMDB `/external_ids`. `TmdbClient`'s 15-minute `(api_key, path)` cache and keyed single-flight
-make concurrent cold hub fills share the one request. Later fills in the same process read the map;
-a restart pays one cold lookup again. The durable `IMDB_TMDB` redb table is the opposite direction
-(IMDb→TMDB), not this one. An id that resolves to no IMDb id keeps the addon poster.
-
-The addon's `logo` is published as the row's `clearLogo`, and `UltraBlurColors` is derived from the
-poster actually chosen.
+`art` and `clearLogo` on real rows are the addon's `background` and `logo` verbatim
+(`shim_pms.rs:4077`, `:4082-4085`). TMDB backdrops and logos are published only on synthetic TMDB
+detail rows (`shim_pms.rs:5580-5585`, `:5639-5644` via `tmdb_image`/`tmdb_logo` at `:947-967`);
+enrichment never overwrites a real row's artwork (`:4174-4268`). `UltraBlurColors` is derived from
+the poster actually chosen. The complete shipped behavior, including `/photo` fallbacks and logo
+ink cropping, is in `PMSSHIM.md` §7–8.
 
 ## Filmography
 

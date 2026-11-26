@@ -413,6 +413,15 @@ fn cache_key(type_: &str, id: &str) -> String {
     format!("{type_}\t{id}")
 }
 
+/// Decode a row written by this cache. Rows written before the store's TTL envelope was adopted
+/// are plain JSON; new rows are `[8-byte big-endian expiry][JSON]` (`cache_put`). Both must reload,
+/// or the first boot after the switch would lose the warm start.
+// Fork Rofocale11: the fork owns both caches and the store; this reads the fork's own two on-disk
+// formats so the TTL envelope switch needs no data migration and cannot drop a still-live title.
+fn decode_cached<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    serde_json::from_slice(bytes).ok().or_else(|| serde_json::from_slice(bytes.get(8..)?).ok())
+}
+
 impl MetaCache {
     pub fn open(dir: Option<&Path>) -> Arc<MetaCache> {
         let now = now_secs();
@@ -436,11 +445,17 @@ impl MetaCache {
         }
         let parsed = stored
             .iter()
-            .filter_map(|(_, bytes)| serde_json::from_slice::<MetaRow>(bytes).ok())
-            .chain(legacy.into_iter().map(Some).filter_map(|x| x))
+            .filter_map(|(key, bytes)| decode_cached::<MetaRow>(bytes).map(|row| (key.clone(), row)))
+            .chain(legacy.into_iter().map(|row| (cache_key(&row.type_, &row.id), row)))
             .collect::<Vec<_>>();
-        for row in parsed {
+        for (key, row) in parsed {
             if now.saturating_sub(row.at) >= meta_ttl(&row.type_) {
+                // Fork Rofocale11: expired rows used to be skipped in memory but left in the store,
+                // so a title never reopened kept its (large) JSON row forever and the 50 MiB
+                // cleanup mistook it for a far-future row. Delete it here instead.
+                if let Some(store) = plx_nuvio_store::get() {
+                    let _ = store.remove(plx_nuvio_store::Table::MetaCache, &key);
+                }
                 continue;
             }
             rows.insert((row.type_, row.id), (row.at, Arc::new(row.meta)));
@@ -449,7 +464,14 @@ impl MetaCache {
             for ((type_, id), (at, meta)) in &rows {
                 let row = MetaRow { type_: type_.clone(), id: id.clone(), at: *at, meta: (**meta).clone() };
                 if let Ok(bytes) = serde_json::to_vec(&row) {
-                    let _ = store.put(plx_nuvio_store::Table::MetaCache, &cache_key(type_, id), &bytes);
+                    // Fork Rofocale11: use the store's TTL envelope so purge/shed can see these
+                    // heavy rows; the row's own `at` stays authoritative for in-memory freshness.
+                    let _ = store.cache_put(
+                        plx_nuvio_store::NuvioCache::Meta,
+                        &cache_key(type_, id),
+                        Duration::from_secs(meta_ttl(type_) as u64),
+                        &bytes,
+                    );
                 }
             }
         }
@@ -477,7 +499,12 @@ impl MetaCache {
         }
         let row = MetaRow { type_: type_.to_string(), id: id.to_string(), at, meta: (*meta).clone() };
         if let (Some(store), Ok(bytes)) = (plx_nuvio_store::get(), serde_json::to_vec(&row)) {
-            let _ = store.put(plx_nuvio_store::Table::MetaCache, &cache_key(type_, id), &bytes);
+            let _ = store.cache_put(
+                plx_nuvio_store::NuvioCache::Meta,
+                &cache_key(type_, id),
+                Duration::from_secs(meta_ttl(type_) as u64),
+                &bytes,
+            );
         }
     }
 
@@ -587,11 +614,16 @@ impl EnrichCache {
         }
         let parsed = stored
             .iter()
-            .filter_map(|(_, bytes)| serde_json::from_slice::<EnrichRow>(bytes).ok())
-            .chain(legacy.into_iter().map(Some).filter_map(|x| x))
+            .filter_map(|(key, bytes)| decode_cached::<EnrichRow>(bytes).map(|row| (key.clone(), row)))
+            .chain(legacy.into_iter().map(|row| (cache_key(&row.type_, &row.id), row)))
             .collect::<Vec<_>>();
-        for row in parsed {
+        for (key, row) in parsed {
             if now.saturating_sub(row.at) >= ENRICH_TTL.as_secs() as i64 {
+                // Fork Rofocale11: same cleanup as the meta cache — an enrichment row that is
+                // never reopened must not occupy the 50 MiB budget forever.
+                if let Some(store) = plx_nuvio_store::get() {
+                    let _ = store.remove(plx_nuvio_store::Table::EnrichCache, &key);
+                }
                 continue;
             }
             rows.insert((row.type_, row.id), (row.at, Arc::new(row.enrich)));
@@ -600,7 +632,13 @@ impl EnrichCache {
             for ((type_, id), (at, enrich)) in &rows {
                 let row = EnrichRow { type_: type_.clone(), id: id.clone(), at: *at, enrich: (**enrich).clone() };
                 if let Ok(bytes) = serde_json::to_vec(&row) {
-                    let _ = store.put(plx_nuvio_store::Table::EnrichCache, &cache_key(type_, id), &bytes);
+                    // Fork Rofocale11: the store's TTL envelope lets purge/shed see this row.
+                    let _ = store.cache_put(
+                        plx_nuvio_store::NuvioCache::Enrich,
+                        &cache_key(type_, id),
+                        ENRICH_TTL,
+                        &bytes,
+                    );
                 }
             }
         }
@@ -627,7 +665,12 @@ impl EnrichCache {
         }
         let row = EnrichRow { type_: type_.to_string(), id: id.to_string(), at, enrich: enrich.clone() };
         if let (Some(store), Ok(bytes)) = (plx_nuvio_store::get(), serde_json::to_vec(&row)) {
-            let _ = store.put(plx_nuvio_store::Table::EnrichCache, &cache_key(type_, id), &bytes);
+            let _ = store.cache_put(
+                plx_nuvio_store::NuvioCache::Enrich,
+                &cache_key(type_, id),
+                ENRICH_TTL,
+                &bytes,
+            );
         }
     }
 
@@ -705,6 +748,47 @@ mod tests {
         let reopened = MetaCache::open(Some(&dir));
         let got = reopened.get("movie", "tt1").expect("the row survived the restart");
         assert_eq!(got.name, "Kept");
+    }
+
+    #[test]
+    fn meta_rows_get_a_ttl_envelope_and_expired_ones_leave_the_store() {
+        let _serial = serial();
+        install_test_store();
+        let store = plx_nuvio_store::get().unwrap();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::MetaCache);
+        let expired = MetaRow {
+            type_: "movie".into(),
+            id: "tt-expired".into(),
+            at: now_secs() - META_TTL_MOVIE.as_secs() as i64 - 3600,
+            meta: meta("tt-expired", "Expired"),
+        };
+        let live = MetaRow {
+            type_: "movie".into(),
+            id: "tt-live".into(),
+            at: now_secs(),
+            meta: meta("tt-live", "Live"),
+        };
+        // Seed the pre-envelope format: raw JSON, as every warm row was written before this fix.
+        for row in [&expired, &live] {
+            store.put(
+                plx_nuvio_store::Table::MetaCache,
+                &cache_key(&row.type_, &row.id),
+                &serde_json::to_vec(row).unwrap(),
+            ).unwrap();
+        }
+        let cache = MetaCache::open(None);
+        assert!(cache.get("movie", "tt-expired").is_none());
+        assert!(store.get(plx_nuvio_store::Table::MetaCache, &cache_key("movie", "tt-expired")).is_none(),
+            "an expired row must be deleted, not merely ignored");
+        assert_eq!(cache.get("movie", "tt-live").unwrap().name, "Live");
+        let wrapped = store.get(plx_nuvio_store::Table::MetaCache, &cache_key("movie", "tt-live")).unwrap();
+        let expiry = u64::from_be_bytes(wrapped[..8].try_into().unwrap());
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(now_ms < expiry && expiry <= now_ms + META_TTL_MOVIE.as_millis() as u64 + 60_000,
+            "the live row must carry a real TTL envelope");
+        drop(cache);
+        let reopened = MetaCache::open(None);
+        assert_eq!(reopened.get("movie", "tt-live").unwrap().name, "Live", "the enveloped row reloads");
     }
 
     #[test]
@@ -805,6 +889,40 @@ mod tests {
         let cache = EnrichCache::open(Some(&dir));
         assert!(cache.get("movie", "tt1").is_none(), "past the month");
         assert!(cache.get("movie", "tt2").is_some(), "within it");
+    }
+
+    #[test]
+    fn enrich_rows_get_a_ttl_envelope_and_expired_ones_leave_the_store() {
+        let _serial = serial();
+        install_test_store();
+        let store = plx_nuvio_store::get().unwrap();
+        plx_nuvio_store::clear_table(plx_nuvio_store::Table::EnrichCache);
+        let expired = EnrichRow {
+            type_: "movie".into(), id: "tt-expired".into(),
+            at: now_secs() - ENRICH_TTL.as_secs() as i64 - 3600,
+            enrich: enrich("Expired"),
+        };
+        let live = EnrichRow {
+            type_: "movie".into(), id: "tt-live".into(),
+            at: now_secs(), enrich: enrich("Live"),
+        };
+        for row in [&expired, &live] {
+            store.put(
+                plx_nuvio_store::Table::EnrichCache,
+                &cache_key(&row.type_, &row.id),
+                &serde_json::to_vec(row).unwrap(),
+            ).unwrap();
+        }
+        let cache = EnrichCache::open(None);
+        assert!(cache.get("movie", "tt-expired").is_none());
+        assert!(store.get(plx_nuvio_store::Table::EnrichCache, &cache_key("movie", "tt-expired")).is_none(),
+            "an expired enrichment must be deleted, not merely ignored");
+        assert!(cache.get("movie", "tt-live").is_some());
+        let wrapped = store.get(plx_nuvio_store::Table::EnrichCache, &cache_key("movie", "tt-live")).unwrap();
+        let expiry = u64::from_be_bytes(wrapped[..8].try_into().unwrap());
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(now_ms < expiry && expiry <= now_ms + ENRICH_TTL.as_millis() as u64 + 60_000,
+            "the live enrichment must carry a real TTL envelope");
     }
 
     #[test]

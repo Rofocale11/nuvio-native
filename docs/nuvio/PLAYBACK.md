@@ -49,7 +49,10 @@ duration, size, the video track (codec, WxH, fps, bit depth, profile, `color_trc
 (codec, profile, channels, language, title, default, forced). Callable from any thread after
 `plx_media_codecs::ffi::boot()` — it is the same single ABI table the demuxer uses, not a second
 one. The shim runs it when the player asks `/video/:/transcode/universal/decision`
-for an item (or when a stream is picked), caches it per stream URL, and emits the PMS fields from it:
+for an item (a detail read also pre-probes the leading stream in the background), and emits the PMS
+fields from it. `ProbeCache` keys by scheme+host+path with the query stripped — torrents by content
+and file index — for 30 min, so a re-signed CDN URL for the same file reuses the verdict; content
+verdicts survive a relaunch and failures are never cached (`shim_probe.rs:92-191`, `:193-351`):
 
 | PMS field | from |
 |---|---|
@@ -182,10 +185,13 @@ All on the shim origin with the token; JSON shapes per `tests/mock_pms.py`.
    `generalDecisionCode: 2000` with `transcodeDecisionText: "<why>"` — `route::plan::refusal`
    stops the playback before a byte moves and shows that sentence. Never answer `transcode`: the
    app would then request `start.mkv` from a server that has no transcoder.
-3. `GET <Part.key>` (with `X-Plex-Session-Identifier`/`session` query) — **302** to the stream URL
-   (or a byte proxy, only for streams with `behaviorHints.proxyHeaders`: curlio cannot add
-   per-URL request headers).
-4. `PUT /library/parts/<id>?allParts=1&subtitleStreamID=&audioStreamID=` — 200, remember the pick.
+3. `GET <Part.key>` (with `X-Plex-Session-Identifier`/`session` query) — **302** to the stream URL,
+   or 502 if it cannot be resolved (`shim_pms.rs:7918-7969`). There is **no byte proxy**: the shim
+   never inspects `behaviorHints.proxyHeaders` here (`PMSSHIM.md` §9).
+4. `PUT /library/parts/<id>?allParts=1&subtitleStreamID=&audioStreamID=` — 200 `ok_empty()` **and a
+   committed pick** (`shim_pms.rs:7155`, `:7881-7897`): the Part id is `ratingKey*1000 + arrival
+   index`, so the route sets that slot's selected stream, exactly as `/nuvio/select` does
+   (`:7447-7469`). A successful decision probe can also remember a source (`:6262-6264`).
 5. `GET /:/timeline?ratingKey=&key=&state=playing|paused|stopped&time=&duration=&…` (~10 s) — 200,
    store resume offset / watched (≥90%).
 6. `GET /:/scrobble?key=<rk>&identifier=com.plexapp.plugins.library`, `/:/unscrobble` — 200.
@@ -196,7 +202,9 @@ All on the shim origin with the token; JSON shapes per `tests/mock_pms.py`.
    candidates; may return empty.
 10. `GET /identity` — `{MediaContainer:{machineIdentifier}}`.
 Never reached for direct play: `/video/:/transcode/universal/start.mkv`, `/transcode/sessions/*`,
-`/video/:/transcode/universal/stop` (answer 200 if called).
+`/video/:/transcode/universal/stop`. `start.*` specifically answers **404**
+`"no transcoder: streams play direct"` (`shim_pms.rs:7403-7408`); the generic `/video/*` arm answers
+200 (`:7409`).
 
 ## Verified on the host (2026-10-10, `cargo test -p plx_media --lib live_probe`, host FFmpeg 9.0)
 

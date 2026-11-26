@@ -18,6 +18,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use plx_stremio::model::MetaPreview;
 
+/// A test-owned store: the ordinary tests must not touch the install's real redb, but a restart
+/// test has to exercise the real durable path. A thread-local keeps that one case isolated.
+#[cfg(test)]
+mod test_store {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    thread_local! {
+        pub static STORE: RefCell<Option<Arc<plx_nuvio_store::Store>>> = const { RefCell::new(None) };
+    }
+}
+
 /// The same freshness bound the in-memory catalog cache already used.
 pub const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -63,8 +74,11 @@ impl CatalogCache {
     fn durable_get(&self, key: &str) -> Option<Vec<u8>> {
         #[cfg(test)]
         {
-            let _ = key;
-            None
+            return test_store::STORE.with(|s| {
+                s.borrow().as_ref().and_then(|store| {
+                    store.cache_get(plx_nuvio_store::NuvioCache::Catalogs, key)
+                })
+            });
         }
         #[cfg(not(test))]
         {
@@ -75,7 +89,14 @@ impl CatalogCache {
     fn durable_put(&self, key: &str, bytes: &[u8]) {
         #[cfg(test)]
         {
-            let _ = (key, bytes);
+            test_store::STORE.with(|s| {
+                if let Some(store) = s.borrow().as_ref() {
+                    let _ = store.cache_put(
+                        plx_nuvio_store::NuvioCache::Catalogs, key, CATALOG_TTL, bytes,
+                    );
+                }
+            });
+            return;
         }
         #[cfg(not(test))]
         {
@@ -151,5 +172,44 @@ mod tests {
         let c = CatalogCache::key("ns-1", "cat", Some("horror"));
         assert_ne!(a, b, "an addon-set change must miss the old rows");
         assert_ne!(a, c, "a genre-filtered fill is a different answer");
+    }
+
+    /// The shim test at `shim_pms.rs`'s `a_relaunch_reads_catalog_pages_from_the_durable_window`
+    /// only clears the old in-memory map; the new cache still answers from its own memory. This
+    /// one closes and reopens the actual redb so a warm shelf after a real TV relaunch is covered.
+    #[test]
+    fn a_relaunch_reopens_the_store_and_reads_the_catalog_page() {
+        let dir = std::env::temp_dir().join(format!("nuvio-catalog-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("t.redb");
+        let key = CatalogCache::key("restart-ns", "addon/movie/top", None);
+
+        let store = plx_nuvio_store::Store::open_at(&path).unwrap();
+        test_store::STORE.with(|s| *s.borrow_mut() = Some(store.clone()));
+        let before = CatalogCache::open();
+        before.put(&key, vec![preview("tt-persisted")], true);
+        drop(before);
+        drop(store);
+        test_store::STORE.with(|s| *s.borrow_mut() = None);
+
+        let reopened_store = plx_nuvio_store::Store::open_at(&path).unwrap();
+        test_store::STORE.with(|s| *s.borrow_mut() = Some(reopened_store.clone()));
+        let after = CatalogCache::open();
+        let got = after.get(&key).expect("the shelf survived a full store reopen");
+        assert_eq!(got.rows[0].id, "tt-persisted");
+        assert!(got.exhausted);
+
+        // The store's envelope still governs: an expired row is missed, not served warm.
+        let expired_key = CatalogCache::key("restart-ns", "addon/movie/old", None);
+        reopened_store.cache_put(
+            plx_nuvio_store::NuvioCache::Catalogs,
+            &expired_key,
+            Duration::ZERO,
+            serde_json::to_vec(&CachedCatalog { rows: vec![preview("tt-old")], exhausted: true, at: now_secs() }).unwrap().as_slice(),
+        ).unwrap();
+        assert!(after.get(&expired_key).is_none(), "an expired durable row must not be served");
+
+        test_store::STORE.with(|s| *s.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

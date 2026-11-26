@@ -67,7 +67,10 @@ persisted state as a table in `plx_nuvio_store`, not a new file or a new DB8 kin
 50 MiB soft budget: expired and oldest TTL cache rows are shed and the file is compacted at boot,
 never truncated; durable records are kept even if the budget is exceeded. An unreadable canonical
 record is quarantined as `<id>.rejected-<millis>` and read as missing so sign-in recovers without
-SSH. See `ARCHITECTURE.md` for the in-process backend and the migration limits.
+SSH. This is the normal-boot rule: a synthetic boot installs a private ephemeral redb and host tests
+use temp stores; the shim's `data_dir` field is only a legacy-migration directory, not a store
+location (`PMSSHIM.md` §11). See `ARCHITECTURE.md` for the in-process backend and the migration
+limits.
 
 ## The old fork's shim behavior is authoritative
 
@@ -84,9 +87,9 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
   `make check-nodef`; an ARM cross-build is required before claiming the target still builds.
 - The owner tests the TV. Acquire the TV lock for any device command; release it immediately after.
   Never boot with a real account for screenshots. Upstream's `--guest`/mock cannot do this on this
-  fork: the in-process shim short-circuits its identity and Home needs a stored Nuvio sign-in. Use
-  the `plxnative-nuviofake` synthetic mode below and read the identity line (see
-  `SYNTHETIC-DEBUG.md`).
+  fork: the in-process shim short-circuits its identity and an **ordinary** boot needs a stored Nuvio
+  sign-in to reach Home (`PMSSHIM.md` §4). A synthetic boot is the deliberate exception: use the
+  `plxnative-nuviofake` trigger and read the identity line.
 - No commit, push, merge, PR or deploy without the owner's explicit instruction in that session.
 
 ## Documents of record
@@ -94,9 +97,12 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 - `docs/nuvio/ARCHITECTURE.md` — current components, storage, identity.
 - `docs/nuvio/ID-MANAGEMENT.md` — numeric `ratingKey`s, the key table and the five synthetic key
   ranges; read with `TMDB.md`.
-- `docs/nuvio/TMDB.md` — the TMDB client contract and the artwork order: TMDB backdrop/logo
-  first, BetterPosters posters by resolved IMDb id, metahub art fallback-only.
+- `docs/nuvio/TMDB.md` — the TMDB client contract and where TMDB is allowed (detail page and its
+  children only; no TMDB image is used for a hub row). Artwork behavior as actually shipped is in
+  `PMSSHIM.md` §7–8.
 - `docs/nuvio/PLAYBACK.md` — probe, route and shim playback contract.
+- `docs/nuvio/PMSSHIM.md` — end-to-end shim walkthrough: boot, HTTP, identity, catalog, artwork,
+  playback, trailers, store, synthetic mode, tests and open code decisions.
 - `docs/nuvio/TRAILERS.md` — trailer ids, Node decipher, MPD/Feed demux, autoplay and full-trailer
   modes, and the held-play supersede rule.
 - `docs/nuvio/TORRENT-ENGINE.md` — the `libsbengine.so` / Nuvio Engine layers, budgets, stream
@@ -109,10 +115,3 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 - `docs/nuvio/HANDOFF.md` — delivery history and known limitations. It opens with the current
   status; everything below the first section is the 2026-10-10 snapshot.
 - `docs/nuvio/MERGE-AUDIT.md` — upstream conflicts and non-commentable fork edits.
-- `docs/nuvio/SYNTHETIC-DEBUG.md` — the shared `plxnative-nuviofake` mode for deterministic debug
-  boots in the simulator and on the TV: how to arm and drive it (including fake ratingKeys and the
-  Streams picker paths), what stays inert, and the identity to grade.
-- `docs/nuvio/SCENARIOS.md` — fork-specific scenarios an agent can reproduce, classed as synthetic
-  boot, host/fixture, or real-account/TV, with the commands and the still-unverified surface.
-- `docs/nuvio/MERGE-REGRESSION.md` — the ordered post-upstream-merge gate: marker check, host gates,
-  ARM build, synthetic TV boot and Streams-picker acceptance, plus where to record the evidence.

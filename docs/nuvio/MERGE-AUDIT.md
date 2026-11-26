@@ -36,18 +36,92 @@ comment are listed here instead: locale JSON (strict `value`/`description` objec
 shape), replay JSONL and manifests (hash-pinned recordings), `Cargo.lock`, and the
 Debian `control` file.
 
-**After every future upstream merge, run `MERGE-REGRESSION.md`** — static marker check, host gates,
-ARM build, then the synthetic TV boot and Streams-picker acceptance. Record the commands and their
-output here with the merged hash; a compile alone is not a passed merge.
+**After every future upstream merge**, run the static marker check, host gates, ARM build, then the
+synthetic TV boot and Streams-picker acceptance. Record the commands and their output here with the
+merged hash; a compile alone is not a passed merge.
+
+## Documentation corrections (2026-11-26, HEAD `872617531`)
+
+A source audit against the shipped tree found that some prose in the dated documents of record no
+longer matches the code. The correction of record is `docs/nuvio/PMSSHIM.md`, which cites the
+current source lines; the older passages are kept as history but are marked superseded where they
+would otherwise read as current fact.
+
+- **Artwork:** no linear "TMDB backdrop/logo → BetterPosters → metahub" selector exists. A row's
+  `thumb` is `poster_url(id, original)` with the item's own id; only literal `tt…` ids of ≥7 digits
+  are rewritten to BetterPosters, and `tmdb:<n>` rows keep their addon poster. Real rows publish
+  the addon's `background`/`logo` as `art`/`clearLogo`; TMDB backdrop/logo are only on synthetic
+  detail rows. `/photo` falls back to the original on any non-ok/empty response. Corrected in
+  `AGENTS.md`, `ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md`, `HANDOFF.md`, and the tenth pass
+  above; current contract in `PMSSHIM.md` §7–8.
+- **Trailer keys:** the stride is `10_000_000_000` with `MAX_TRAILERS = 12`, not `+ index` and not a
+  `TRAILER_KEY_END` constant. Corrected in `ID-MANAGEMENT.md`; `PMSSHIM.md` §6, §10.
+- **Cache wrappers:** meta/enrich rows were raw JSON written directly at the time of that audit,
+  but catalog/subtitle caches did use `NuvioCache`/`cache_get`/`cache_put`; their durable helpers are
+  no-ops under `cfg(test)`. Meta/enrich were switched to `cache_put` on 2026-11-26 (section below).
+  Corrected in `ARCHITECTURE.md`, `ID-MANAGEMENT.md`; `PMSSHIM.md` §11.
+- **Playback endpoints:** `part()` has no byte proxy; `PUT /library/parts` was a no-op 200 at the
+  time of that audit (wired to the slot pick later the same day, section below); `start.*` is 404.
+  Corrected in `PLAYBACK.md`, `ARCHITECTURE.md`; `PMSSHIM.md` §9.
+- **Identity/auth/data_dir:** plaintext credential admission is client-side discovery policy, the
+  shim validates no token, and `Config::data_dir` is only a legacy-migration directory. Corrected
+  in `AGENTS.md`, `ARCHITECTURE.md`; `PMSSHIM.md` §2–3, §11.
+- **Historical names:** test and symbol names quoted in the numbered pass narratives above are the
+  names at that pass, not necessarily names in this tree. Where behavior matters, use the test
+  names cited in `PMSSHIM.md` §13. Code questions found by this audit but deliberately NOT changed
+  are listed in `PMSSHIM.md` §15.
+
+An independent source audit of `PMSSHIM.md` then corrected two false statements and six bad
+citations in the new document before it was reported: the `OnceLock` was credited with redirecting
+PMS discovery (it redirects the plex.tv account and Discover bases; PMS credential admission is
+`probe.rs:430-458`); `small/medium/large` was attributed to TMDB as well as MetaHub (TMDB uses a
+`w…/original` ladder); the probe cache's 30 min TTL was applied to content keys too (only URL keys
+expire); `clear()` was said to be `cfg(test)`-no-op'd along with the durable get/put helpers; and
+the libcurl, paging-header, `serve.rs` and packaging citations pointed at the wrong lines. The
+shipped behavior was unchanged; only the prose and its source references were fixed.
+
+## Meta/enrichment cache rows gain a TTL envelope (2026-11-26)
+
+- `pmsshim/src/shim_store.rs` (fork-owned) — `MetaCache` and `EnrichCache` now write through
+  `plx_nuvio_store::cache_put`, so their heavy JSON rows carry the 8-byte BE-millis TTL envelope the
+  store's `purge_expired` and `shed_oldest` understand. Before this, the rows began with `{"type":"`
+  and decoded as a far-future expiry, so expired rows were never reclaimed and a file over the 50 MiB
+  budget shed fresh catalog/subtitle rows first. Both `open()` methods accept the old raw-JSON rows,
+  delete ones past the shim's own TTL, and rewrite live ones under an envelope — no stored-data
+  migration. Two regression tests pin the delete-and-rewrite behavior. Host gates: 181 pmsshim lib
+  tests pass and `make check-nodef` passes; an ARM build has not been run.
+- `docs/nuvio/PMSSHIM.md` — §11 and §15 item 1 updated to the new behavior.
+
+## Sign-out, track write-back and a real restart test (2026-11-26)
+
+Owner-accepted fixes; no commit or deploy was made.
+
+- `plex/src/plex/session.rs` (upstream, **marked**) — two edits: a `mod nuvio_signout;` declaration
+  and one call from `clear_for_erase` after the canonical credential clear is confirmed durable.
+  Guarding on durability matters: a sign-out that failed to revoke credentials must not let a
+  remote-holder drop a profile lock.
+- `plex/src/plex/session/nuvio_signout.rs` (new fork-owned file) — clears every `ProfilePins` row in
+  the one redb store by walking the table, with a test-only call witness. This is what makes the
+  documented forgotten-PIN recovery (Sign out, then QR sign in with the phone as the same account)
+  actually work; the shim's own `Account::sign_out()` remains unrouted and is now dead code.
+- `pmsshim/src/shim_pms.rs` (fork-owned) — `PUT /library/parts/{pid}` now decodes the Part id as
+  `ratingKey*1000 + arrival index` and commits the same slot pick as `/nuvio/select`; trailer Parts
+  keep their harmless 200. Two routes, one piece of state.
+- `pmsshim/src/shim_catalog_cache.rs` (fork-owned) — a thread-local store seam lets a test close and
+  reopen the real redb, so a warm Home shelf after a TV relaunch is now covered by a unit test
+  rather than only by the owner's device observation. Production behavior is unchanged.
+- Tests: 844 `plx_plex` lib tests, 183 `plx_pmsshim` lib tests and `make check-nodef` pass. The
+  Sign-out fix still needs the owner's device check (owner tests the TV). No ARM build yet.
+- `docs/nuvio/PMSSHIM.md`, `PLAYBACK.md`, `ARCHITECTURE.md` — updated to the new behavior.
 
 ## Synthetic debug mode: one devtrig for sim and TV (2026-11-26)
 
 A network-free `FakeBackend` already existed in fork-owned `plx_pmsshim` but was reachable only
 from unit tests and `pmsshim-serve --fake`. It is now a boot-time choice for both the simulator
-and a debug TV, behind `plxnative-nuviofake`. Full contract: `docs/nuvio/SYNTHETIC-DEBUG.md`.
+and a debug TV, behind `plxnative-nuviofake`.
 
-New fork-owned files: `rust-modules/src/app/nuvio/nuvio_debug.rs` (child of the fork-owned `nuvio.rs`),
-`docs/nuvio/SYNTHETIC-DEBUG.md`. Fork-owned files changed: `nuvio.rs`, `nuvio-store/src/lib.rs`,
+New fork-owned files: `rust-modules/src/app/nuvio/nuvio_debug.rs` (child of the fork-owned `nuvio.rs`).
+Fork-owned files changed: `nuvio.rs`, `nuvio-store/src/lib.rs`,
 `pmsshim/src/shim_core.rs`, `shim_pms.rs`, `shim_account.rs`, `bin/serve.rs` (unchanged) —
 `Config::synthetic`, `Account::new_synthetic` and the store's `EPHEMERAL` override make the account
 isolation explicit. `data_dir: None` alone was NOT enough: `WatchState`/`Keys`/caches read the
@@ -609,6 +683,13 @@ one redb store is read first, a cold miss makes ONE cached TMDB `/external_ids` 
 negative answers cached under `IMDB_TTL`, `TmdbClient` keyed single-flight shares concurrent
 misses), and all later reads are redb-only. No TMDB image is ever used for a hub. `TMDB.md` and
 `ID-MANAGEMENT.md` record the rule; `plx_pmsshim` 53/53.
+
+**Superseded (2026-11-26):** the shipped code does **not** call `imdb_base` from `poster_url`. The
+thirteenth pass below restored the old fork's rule — the item's own id is passed to
+`Backend::poster`, so only a literal `tt…` id becomes BetterPosters and a `tmdb:<n>` row keeps its
+addon poster (`shim_pms.rs:6386-6399`, `shim_backend.rs:158-162`). The current versions of `TMDB.md`
+and `ID-MANAGEMENT.md`, and `PMSSHIM.md` §7–8, record the shipped behavior; this paragraph is kept
+only as the history of that pass.
 
 An eleventh pass traced the remaining spinner/mixed-art symptom past the shim entirely: every hub
 thumb is BetterPoster and the `/photo` bytes are correct, but `plx_ui::tex` reported
@@ -1272,7 +1353,12 @@ Verified on the working tree: `make check` **146 steps — all ok**, `make check
   enforces the same budget during a run by purging/shedding cache rows; no file is ever
   truncated. Durable tables (`ImdbTmdb`, `Watch`, `Keys`, `AccountSession`, `Addons`,
   `InstallPrefs`) are never discarded to meet the budget — an over-budget store made only of
-  durable data is logged and left intact.
+  durable data is logged and left intact. Qualification (2026-11-26): this holds for tables that
+  use the store's 8-byte BE-millis TTL envelope. At the time of that audit the shim's
+  `MetaCache`/`EnrichCache` values were raw JSON with their own `at` stamp, so `purge_expired` could
+  not recognise them as expired and `shed_oldest` sorted them last. That gap was closed later the
+  same day by writing those rows through `cache_put` and deleting expired ones in `open()` (section
+  "Meta/enrichment cache rows gain a TTL envelope"); see `PMSSHIM.md` §11 and §15.
 - Tests: `plx_os` redb backend 6/6 (foreign kind, wrong flavour, valid record preserved),
   `plx_nuvio_store` 6/6 (expired purge, over-budget shed/compact, durable rows survive).
 
