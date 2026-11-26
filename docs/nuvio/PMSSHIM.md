@@ -355,6 +355,16 @@ owns the encoding, keys and TTL policy (`nuvio-store/src/lib.rs:1-9`, `:213-247`
 | `CatalogCache` | `shim_catalog_cache.rs` | TTL envelope + `CachedCatalog`, 15 min, namespaced by addon set and manifests (`:21-31`, `:57-117`) |
 | `SubtitleCache` | `shim_subtitle_cache.rs` | TTL envelope + candidates, 6 h / real empty 10 min, never a fault (`:61-186`) |
 
+**Privacy erase.** Settings ▸ Privacy & data ▸ *Delete all local data* revokes the account first
+(`session.rs::clear_for_erase`), then `plx_nuvio_store::erase::erase()` clears every table in the
+file and unlinks this install's data paths (`nuvio-store/src/erase.rs`, enumerated in
+`base/src/paths/nuvio_erase.rs`): the data root (`<data>/shim/` with `nuvio.redb`, `addons.json`,
+`settings.json`), the poster cache, torrent swarm state and probe verdict, installed HUD packages
+and the dev-shell import handoff. Every path is keyed by `app_id()`, so one flavour's erase cannot
+reach another's data. Clearing the tables before unlinking is deliberate: a jail that mounts a
+data rung read-only cannot be unlinked, but an empty table set leaves no record for the next boot.
+A synthetic boot only clears its private store; it never unlinks a real install's file.
+
 `Store::open` runs maintenance when the file exists: purge expired TTL-envelope rows, shed oldest
 live cache rows, then compact, under a 50 MiB soft budget; durable rows are never shed and an
 over-budget durable-only file is logged and left intact (`nuvio-store/src/lib.rs:22-30`, `:147-164`,

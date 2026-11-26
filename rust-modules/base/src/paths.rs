@@ -27,6 +27,10 @@ use crate::choice::Choice;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+// Fork Rofocale11: the privacy sweep's Nuvio-side paths live in a child module so this upstream
+// file changes by one declaration, not by a second copy of the app-id-keyed path rules.
+pub mod nuvio_erase;
+
 /// May the ENVIRONMENT relocate this app's paths?
 ///
 /// Only in a build that is being steered from outside — the desktop simulator. A television

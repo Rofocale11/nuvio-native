@@ -1783,6 +1783,10 @@ pub(crate) fn delete_all_local_data(meta: &mut plx_data::stores::metadata::Metad
         plx_base::paths::runtime_dir(),
     ));
     meta.run(plx_data::stores::metadata::MetadataCmd::Clear);
+    // Fork Rofocale11: upstream's candidate sets cannot see Nuvio's one redb file or the other
+    // app-id-keyed data directories. The caller has already revoked the account; this clears
+    // every remaining Nuvio record and unlinks this install's data paths.
+    failures.extend(plx_nuvio_store::erase::erase());
     // No explicit `ClearRecents` here (phase 7 Search cutover retired the legacy screen's own
     // thin `recents::clear()` wrapper this used to call): recent Search terms
     // live INSIDE the session file (`plx_data::search::recents`), and the adapter already deleted that

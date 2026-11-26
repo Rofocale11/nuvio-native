@@ -19,6 +19,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// is locked on this TV only when the viewer created a verifier here.
 pub mod pins;
 
+/// Fork Rofocale11: the Nuvio half of Settings ▸ Privacy & data's "Delete all local data".
+/// Upstream's sweep cannot see this file, so without this module an erase signed out but left
+/// the watch state, addon config, key table and caches on the television.
+pub mod erase;
+
 /// the single store's soft budget (50 MiB). It is enforced by removing expired
 /// and oldest TTL cache rows and by compacting at boot — NEVER by truncating a live redb file,
 /// which would destroy the durable records in it. If the non-cache rows alone exceed this, the
@@ -359,23 +364,31 @@ fn maintain_with_budget(path: &Path, budget: u64) -> Result<Maintenance, String>
     Ok(Maintenance { before, after, expired, shed, compacted })
 }
 
+/// Fork Rofocale11: the privacy sweep clears every table before unlinking the file, so a
+/// read-only rung that cannot be removed still holds no record. Factored out of `clear_table`
+/// so both callers answer the same question about a row and a failed clear is reportable.
+pub fn clear_table_in(store: &Store, table: Table) -> Result<(), String> {
+    let write = store.db.begin_write().map_err(|e| e.to_string())?;
+    {
+        let mut t = write.open_table(table.def()).map_err(|e| e.to_string())?;
+        let keys: Vec<String> = t.iter()
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|(k, _)| k.value().to_string())
+            .collect();
+        for k in keys {
+            t.remove(k.as_str()).map_err(|e| e.to_string())?;
+        }
+    }
+    write.commit().map_err(|e| e.to_string())
+}
+
 /// drop every row of a table. The addon-set change invalidates the meta and
 /// enrichment caches wholesale; this keeps that operation inside the one store.
 pub fn clear_table(table: Table) {
-    let Some(store) = get() else { return };
-    let Ok(write) = store.db.begin_write() else { return };
-    {
-        if let Ok(mut t) = write.open_table(table.def()) {
-            let keys: Vec<String> = match t.iter() {
-                Ok(iter) => iter.flatten().map(|(k, _)| k.value().to_string()).collect(),
-                Err(_) => Vec::new(),
-            };
-            for k in keys {
-                let _ = t.remove(k.as_str());
-            }
-        }
+    if let Some(store) = get() {
+        let _ = clear_table_in(&store, table);
     }
-    let _ = write.commit();
 }
 
 /// The process-wide handle, installed once before any persistence call. Host tests that do not
