@@ -8,7 +8,7 @@ currently in progress.
 **Audit range:** `0a1edc61f` (previous upstream merge point, 2026-11-21) →
 `efc05f025` (upstream head, 2026-11-26): 39 upstream commits, 455 files changed,
 24 conflicting files. Merge into `nuvio-native` on `merge/upstream-2026-11-26`.
-Product-branch landing commit: not yet committed — fill it in here when it lands.
+Product-branch landing commit: `e618494cc72818e0de23f7700e2ce4d712646a6c`.
 
 When rotating this audit into history, keep the heading
 `## 0a1edc61f..efc05f025 — 2026-11-21..2026-11-26` and add the landing commit.
