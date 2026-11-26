@@ -35,14 +35,15 @@ static BACKEND: OnceLock<Arc<dyn plx_pmsshim::Backend>> = OnceLock::new();
 /// Latched by `boot()` so the boot gate can ask ONCE without a second trigger read.
 static SYNTHETIC: AtomicBool = AtomicBool::new(false);
 
-/// Fork Rofocale11: a synthetic boot takes the dev-PMS identity path instead of the Nuvio
-/// account sign-in, so an agent reaches a deterministic Home with no account in the way.
+/// Fork Rofocale11: a sealed boot (`nuviofake` OR `nuviolive`) takes the dev-PMS identity path
+/// instead of the Nuvio account sign-in, so an agent reaches Home with no account in the way.
 pub(crate) fn synthetic_boot() -> bool { SYNTHETIC.load(Ordering::Relaxed) }
 
 /// Fork Rofocale11: called in `app::boot` BEFORE `session::load`, so even the canonical session
 /// reads the private empty store instead of the household's. `nuvio::boot()` then reuses it.
+/// Both debug modes are sealed; the live one serves real addons/TMDB into that private store.
 pub(crate) fn prepare_store() {
-    let synthetic = nuvio_debug::enabled();
+    let synthetic = nuvio_debug::mode().sealed();
     SYNTHETIC.store(synthetic, Ordering::Relaxed);
     if synthetic {
         match plx_nuvio_store::install_ephemeral() {
@@ -207,7 +208,10 @@ fn load_addons(path: &Path) -> Option<plx_stremio::AddonSet> {
 pub(crate) fn boot() {
     // Fork Rofocale11: `prepare_store` latched this before the session was read. The second read
     // keeps direct callers (host rigs) correct without touching the trigger a second time on TV.
-    let synthetic = synthetic_boot() || nuvio_debug::enabled();
+    // Fork Rofocale11: one mode decision drives identity, addons and shim config. `Live` is sealed
+    // like `Fake` but uses the real addon backend; `Normal` keeps the stored Nuvio sign-in.
+    let mode = nuvio_debug::mode();
+    let synthetic = mode.sealed();
     SYNTHETIC.store(synthetic, Ordering::Relaxed);
     let data = data_dir();
     let _ = std::fs::create_dir_all(&data);
@@ -221,9 +225,10 @@ pub(crate) fn boot() {
     };
     let mut fresh_import = false;
     let mut imported = None;
-    // Fork Rofocale11: a synthetic boot does not read the household's imported addon set either;
-    // the FakeBackend ignores it, and the log must not name the viewer's addons.
-    if !synthetic && import_path.is_file() {
+    // Fork Rofocale11: neither debug boot reads the household's imported addon set. Fake ignores
+    // it entirely; Live installs its own PUBLIC addon list below. The log must never name the
+    // viewer's addons on either path.
+    if mode == nuvio_debug::Mode::Normal && import_path.is_file() {
         if let Some(set) = import(&import_path) {
             log(&format!("nuvio: imported {} addon(s) from Nuvio: {}", set.addons.len(), describe(&set)));
             if !save_addons(&set, &addons_path) {
@@ -238,12 +243,14 @@ pub(crate) fn boot() {
             imported = Some(set);
         }
     }
-    let set = if synthetic {
-        plx_stremio::AddonSet::default()
-    } else {
-        imported.or_else(|| load_addons(&addons_path)).unwrap_or_else(plx_stremio::AddonSet::defaults)
+    let set = match mode {
+        nuvio_debug::Mode::Fake => plx_stremio::AddonSet::default(),
+        nuvio_debug::Mode::Live => nuvio_debug::public_addons(),
+        nuvio_debug::Mode::Normal => imported
+            .or_else(|| load_addons(&addons_path))
+            .unwrap_or_else(plx_stremio::AddonSet::defaults),
     };
-    if !synthetic {
+    if mode != nuvio_debug::Mode::Fake {
         log(&format!("nuvio: {} addon(s): {}", set.addons.len(), describe(&set)));
     }
     // one store for the whole app. Published before the shim starts so the
@@ -284,12 +291,12 @@ pub(crate) fn boot() {
         p2p_enabled: settings.p2p_enabled && plx_stremio::sbengine::available(),
         ..Default::default()
     };
-    // Fork Rofocale11: one devtrig chooses the fixed FakeBackend instead of the account's addon
-    // set, with a private empty store. The flag was latched before the session was read.
-    let cfg = nuvio_debug::config(cfg, synthetic);
+    // Fork Rofocale11: the devtrig choice was latched before the session was read. Fake gets a
+    // private empty store; Live keeps the shim's real cache path inside that private store.
+    let cfg = nuvio_debug::config(cfg, mode);
     // the same decision is the frame-thread fallback until the shim is published.
     P2P_FALLBACK.store(cfg.p2p_enabled, Ordering::Relaxed);
-    let selection = nuvio_debug::select(set, synthetic);
+    let selection = nuvio_debug::select(set, mode);
     let backend = selection.backend.clone();
     let addons = selection.addons.clone();
     let started = plx_pmsshim::start(backend.clone(), cfg.clone(), PORT).or_else(|_| plx_pmsshim::start(backend.clone(), cfg, 0));

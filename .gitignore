@@ -68,6 +68,8 @@ rust-modules/target-sim-lab/
 # `make screenshots-sim` — the documentation-screenshot simulator (`sim` + devtriggers).
 rust-modules/target-sim-shots/
 rust-modules/target-sim-video/
+# Fork Rofocale11: `make sim-nuvio` / `make sim-nuvio-linux` — the agent-facing `nuviolive` host loop.
+rust-modules/target-sim-nuvio/
 # `simulators.yml` builds into `target-sim-ci` (`make sim-macos SIM_TDIR=...`) and `target-sim-ci-macapp`
 # (the macapp feature set's link), in the checkout; a lane reproducing that job gets the same trees.
 rust-modules/target-sim-ci*/

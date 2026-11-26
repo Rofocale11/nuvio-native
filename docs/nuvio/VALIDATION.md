@@ -11,6 +11,27 @@ harness at 753 tests (`OK (skipped=4)`). The first `e0b584c0c` attempt flaked
 flake. `1db875cc8` is documentation only. The local stable IPK and the deployed set still predate
 `e0b584c0c`.
 
+### Agent host loop (2026-11-26, uncommitted)
+
+`plxnative-nuviolive` was exercised on the Linux host with `sim-nuvio-linux`: three public addon
+manifests installed (Cinemeta, Torrentio, OpenSubtitles), the dedicated local TMDB key configured,
+the boot log proving the sealed private store, five navigation keys driven
+through the remote FIFO, and a 1920x1080 PNG written and opened. The Home shot showed real catalog
+posters and TMDB hero copy; a cast-card press reached a person page with a real Matt Damon biography
+and 227 TMDB filmography credits, proving the shim's person routes need no Discover stand-in. After
+`HOST=1 ./ci/build-ffmpeg.sh` and staging the five `pkg/lib*-plx-host.so.*` files (the fork's
+libswresample addition was missing from the older local host build), the boot log bound all five
+host libraries. A local H.264/AAC file served through `tests/serve_fixtures.py` then played through
+`tools/nuvio-sim.py --media`: Range 200/206 requests, `ff: v=#0 codec=h264 2048x872`, AU framing,
+and HUD position advancing 1 s → 17 s under `clocksink`, with the player HUD captured. No TV,
+Nuvio sign-in, Plex account or household redb was touched. Torrentio's own stream endpoint was read
+directly: the bare endpoint returned 433 streams for `tt33764258`, the tracked configured
+`qualityfilter=…|limit=2` endpoint 9; with `--host-engine` staging the host `libsbengine.so`,
+the live Streams pill showed **Torrentio · 8** for a 2026 movie, and an episode still opened the
+same picker carrying that episode's ratingKey (the plain host build correctly drops every torrent
+source when p2p is off). The recipe is
+`docs/nuvio/SIM-LOOP.md`. This is host evidence only — no decoder, no video plane, no device claim.
+
 Every durable record now lives in one `nuvio.redb` (no DB8 helper, no permission grant), with
 self-heal for unreadable canonical records and a 50 MiB cache-only soft budget. The 0.10.0
 stable package built from `84a00aa68` was deployed with `make FLAVOR=stable RELEASE=1 deploy`

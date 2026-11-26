@@ -85,11 +85,18 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 
 - Prefer focused host gates over repeated full `make check` loops. After Rust edits also run
   `make check-nodef`; an ARM cross-build is required before claiming the target still builds.
-- The owner tests the TV. Acquire the TV lock for any device command; release it immediately after.
-  Never boot with a real account for screenshots. Upstream's `--guest`/mock cannot do this on this
-  fork: the in-process shim short-circuits its identity and an **ordinary** boot needs a stored Nuvio
-  sign-in to reach Home (`PMSSHIM.md` §4). A synthetic boot is the deliberate exception: use the
-  `plxnative-nuviofake` trigger and read the identity line.
+- **The default agent host loop is `nuviolive`, not upstream's mock and not the TV.** Load the
+  `nuvio-sim-loop` skill (or read `SIM-LOOP.md`) first: `make sim-nuvio` (or `make sim-nuvio-linux`) once, then
+  `python3 tools/nuvio-sim.py --shot home`. It boots the real app with real public addons and the
+  dedicated TMDB key from the gitignored `nuvio.local.env`, with a sealed identity and private
+  store; no sign-in and no owner involvement. Use `plxnative-nuviofake` only for fixed-content
+  deterministic tests.
+- The owner tests the TV, and only with explicit permission in the session. Acquire the TV lock for
+  any device command; release it immediately after. Never boot with a real account for screenshots.
+  Upstream's `--guest`/mock cannot do this on this fork: the in-process shim short-circuits its
+  identity and an **ordinary** boot needs a stored Nuvio sign-in to reach Home (`PMSSHIM.md` §4).
+  A synthetic boot is the deliberate exception. Playback is the only remaining device need and is
+  already verified; a simulator result is never a device claim.
 - No commit, push, merge, PR or deploy without the owner's explicit instruction in that session.
 
 ## Documents of record

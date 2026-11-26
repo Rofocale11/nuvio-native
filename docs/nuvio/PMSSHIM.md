@@ -394,7 +394,7 @@ Two precise caveats the older prose glosses over:
 
 `FakeBackend` is a fixed, network-free library of four Blender films and one two-season series,
 each with a direct MP4 and a fake torrent infohash (`shim_fake.rs:1-8`, `:20-33`, `:96-168`). There
-are two distinct ways to use it:
+are two ways to use it, plus the live agent profile beside it:
 
 - `pmsshim-serve --fake` (`bin/serve.rs:1-34`) is a host-only dev binary. It swaps the backend but
   leaves `Config::synthetic = false` and installs **no** redb store (`serve.rs:15-27` builds the
@@ -405,8 +405,14 @@ are two distinct ways to use it:
 - `plxnative-nuviofake` is a full synthetic boot (compiled out of release): a private empty
   `nuvio-synthetic.redb` installed before `session::load`, `Config{synthetic:true, data_dir:None,
   torrent_server:None, p2p_enabled:false}`, `FakeBackend`, no account reads/writes and a dev-PMS
-  identity path to Home (`nuvio-debug.rs:16-39`, `:41-70`; `app/nuvio.rs:42-53`; `shim_core.rs:80-98`).
+  identity path to Home (`nuvio-debug.rs`; `app/nuvio.rs`; `shim_core.rs:80-98`).
   Arm `plxnative-nuviofake` in the instance root to drive it.
+- `plxnative-nuviolive` is the agent host loop, also compiled out of release (`nuvio_debug.rs`'s
+  `Mode::Live`). It keeps the sealed identity, private redb and dev-PMS path, but installs the REAL
+  `AddonBackend` from a tracked, account-free public addon list and leaves `Config::synthetic=true`
+  while keeping the shim's real cache directory. TMDB enrichment runs through the dedicated key in
+  the gitignored `nuvio.local.env`. It is the only host mode in which fetch, cache, enrichment and
+  UI can be tested as the shipped app behaves without a TV or a Nuvio sign-in; see `SIM-LOOP.md`.
 
 `shim_flight` is unrelated to either mode: it is a generic keyed single-flight registry used for
 meta, trailer and subtitle fetches (`shim_flight.rs:1-25`, `:30-99`). Probes have their own

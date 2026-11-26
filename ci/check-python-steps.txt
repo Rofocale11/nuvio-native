@@ -463,3 +463,7 @@ python3 ci/test_tizen_so_check.py
 python3 ci/test_tizen_package.py
 
 python3 ci/test_tizen_log_stamp.py
+
+# Fork Rofocale11: the agent host loop's offline wiring check — public addon list, dev-trigger
+# names and token grammar. No network, no simulator build, no key value read.
+python3 tools/nuvio-sim.py selftest

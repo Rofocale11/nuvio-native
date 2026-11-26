@@ -1,0 +1,8 @@
+{
+  "_comment": "Public, account-free Stremio addon manifest URLs for the nuviolive simulator profile. No debrid token, no Nuvio account config and no household install data belongs here; a local override can be named by plxnative-nuvioaddons.",
+  "addons": [
+    "https://v3-cinemeta.strem.io",
+    "https://torrentio.strem.fun/qualityfilter=unknown,cam,other,scr,threed,480p,720p|limit=2/manifest.json",
+    "https://opensubtitles-v3.strem.io"
+  ]
+}

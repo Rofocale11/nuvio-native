@@ -110,6 +110,25 @@ fork-owned copies, with no conflict to resolve.
   routes to the fork-owned pins with a marked edit, so upstream's proof files stay
   byte-identical and every consumer proves the fork tree.
 
+## Agent host loop (`nuviolive`) — fork surface after the merge
+
+The live simulator profile is a later fork feature on the merged tree. Its exact upstream surface:
+
+- `rust-modules/src/app/nuvio/nuvio_debug.rs` — fork-owned child module rewritten for
+  `Mode::{Normal,Fake,Live}`, the two dev trigger reads and a public-addon installer. No upstream
+  file changed for the mode itself.
+- `rust-modules/src/app/nuvio.rs` — TWO marked `Fork Rofocale11:` edits: the sealed-boot latch now
+  covers both debug modes, and the addon-set match adds the `Live` branch. Everything else in that
+  file is pre-existing fork work.
+- `Makefile` — one marked `Fork Rofocale11:` block adding `sim-nuvio` / `sim-nuvio-linux` and one
+  `.PHONY` line. Plain `sim-macos` is untouched and still has no `devtriggers`.
+- `.gitignore` and `ci/check-python-steps.txt` — one marked line each: the new target dir and the
+  driver's offline selftest step. Both are upstream files with only that fork addition.
+- New fork-owned files with no upstream counterpart: `tools/nuvio-sim.py`,
+  `tests/nuvio-public-addons.json`, `docs/nuvio/SIM-LOOP.md`. The JSON has no comment syntax and is
+  recorded here instead: it holds https manifest URLs only, never a debrid token, an account key or
+  the production TMDB key.
+
 ## Gate results on merged tree (uncommitted)
 
 - `make check`: **151 steps — all ok** (`753` harness tests not shown in this line;

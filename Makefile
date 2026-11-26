@@ -2675,6 +2675,24 @@ sim-macos: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED) pkg/.ffabi-host-ok
 	$(TELEMETRY_ENV) \
 	  cargo +$(RUST_TOOLCHAIN) build --manifest-path rust-modules/Cargo.toml --target-dir $(SIM_TDIR)$(if $(LAB),-lab,) --features sim$(if $(LAB), --features lab-diagnostics,) -p plx_platform_desktop --bin plxnative-sim
 
+# Fork Rofocale11: the agent-facing LIVE simulator profile. `sim-macos` carries the shipping
+# feature set (no devtriggers), so the `plxnative-nuviolive` boot cannot be armed there. This build
+# brings devtriggers back with BOTH shipping playback backends: real Stremio addons and TMDB
+# through the unchanged shim/data layer, but a sealed identity and a private redb. Its own
+# target dir and CARGO_INCREMENTAL=0 mark it as a one-shot dev tool, never a shipping profile.
+SIM_NUVIO_TDIR ?= $(SIM_TDIR)-nuvio
+SIM_NUVIO_BIN  = $(SIM_NUVIO_TDIR)/debug/plxnative-sim
+sim-nuvio: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED) pkg/.ffabi-host-ok
+	CARGO_INCREMENTAL=0 cargo +$(RUST_TOOLCHAIN) build --manifest-path rust-modules/Cargo.toml \
+	  --target-dir $(SIM_NUVIO_TDIR) --no-default-features \
+	  --features sim,play-uri,play-feed,devtriggers -p plx_platform_desktop --bin plxnative-sim
+
+# Fork Rofocale11: Linux/WSLg counterpart of `sim-nuvio`; the macOS-only host FFmpeg is not staged.
+sim-nuvio-linux: $(LIBASS_HOST_STAGED)
+	CARGO_INCREMENTAL=0 cargo +$(RUST_TOOLCHAIN) build --manifest-path rust-modules/Cargo.toml \
+	  --target-dir $(SIM_NUVIO_TDIR) --no-default-features \
+	  --features sim,play-uri,play-feed,devtriggers -p plx_platform_desktop --bin plxnative-sim
+
 # Full product replay is a renderer-backed host gate. Keep the fast unit suite usable without
 # a window system; Simulator CI runs this same driver against the simulator it just built.
 .PHONY: check-replay
@@ -2884,7 +2902,7 @@ fetch-profile:
 	-$(SCP) tv:$(RUNDIR)/plxnative-hwcnt.jsonl pkg/plxnative-hwcnt.jsonl
 	@ls -l pkg/plxnative-*.jsonl 2>/dev/null || echo "no profiler output in $(RUNDIR) on the TV ($(APPID))"
 
-.PHONY: setup-rust libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \
+.PHONY: setup-rust libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux sim-nuvio sim-nuvio-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \
         release-guard lab-guard install uninstall $(QUERY_GOALS)
 
 # --- the Tizen platform (W9, docs/tizen.md) ------------------------------------------------------------
