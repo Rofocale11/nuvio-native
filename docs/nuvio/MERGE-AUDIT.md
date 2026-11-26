@@ -129,6 +129,18 @@ The live simulator profile is a later fork feature on the merged tree. Its exact
   recorded here instead: it holds https manifest URLs only, never a debrid token, an account key or
   the production TMDB key.
 
+## Post-merge TV loop — fork surface
+
+The device twin of the host loop is a later fork feature, not part of the merge above.
+
+- `tools/tv-session.sh` — upstream file, TWO marked `Fork Rofocale11:` edits: `fifo_send` now reads
+  the jailed FIFO's uid/gid and writes the token with `setpriv`, because this firmware refuses a
+  root write and the old error was swallowed; the offline FIFO selftest stubs `tvq` so it never
+  opens an ssh session to the television. No other upstream behaviour changed.
+- New fork-owned files with no upstream counterpart: `tools/nuvio-tv.py` and
+  `docs/nuvio/TV-LOOP.md`. `SIM-LOOP.md` stays host-only; the pointer in
+  `.agents/skills/nuvio-sim-loop/SKILL.md` is fork-owned.
+
 ## Gate results on merged tree (uncommitted)
 
 - `make check`: **151 steps — all ok** (`753` harness tests not shown in this line;

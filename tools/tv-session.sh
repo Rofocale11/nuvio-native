@@ -1064,13 +1064,18 @@ selftest_fifo() {
   done
   # fifo_send: a refusal sends nothing, a word is sent as one ssh command carrying the escaped quote.
   _real_tv=$(declare -f tv)
+  # Fork Rofocale11: the FIFO-uid probe below calls tvq, so the offline selftest needs a stub —
+  # otherwise `tv-session.sh selftest` would open an ssh connection to the television.
+  _real_tvq=$(declare -f tvq)
   tv() { sent_to_tv=1; sent_arg=$1; }
+  tvq() { :; }   # no television in the selftest: no uid probe, so the root-write branch is used
   for word in "${refused[@]}"; do
     fifo_send "$word" >/dev/null 2>&1; got=$?
     [ "$got" = 2 ] && [ "$sent_to_tv" = 0 ] || { eval "$_real_tv"; bad "a token with whitespace was sent (status $got)"; return 1; }
   done
   fifo_send "txt:it's" >/dev/null 2>&1; got=$?
   eval "$_real_tv"
+  eval "$_real_tvq"
   [ "$got" = 0 ] && [ "$sent_to_tv" = 1 ] || { bad "an ordinary word was not sent (status $got)"; return 1; }
   case "$sent_arg" in
     *"'txt:it'\\''s'"*) ;;
@@ -1428,9 +1433,27 @@ fifo_write() {  # $1 = one token; prints the one remote statement that writes it
 # Returns 2 (and sends nothing) for a word `fifo_write` refuses, else 0: the remote `kill` that ends the
 # time box exits non-zero whenever the write finished, so its status says nothing about the send.
 fifo_send() {  # $1 = one token
-  local stmt
+  # Fork Rofocale11: the Nuvio debug app's remote FIFO is created by its jailed uid (mode 0660),
+  # and this firmware refuses a root write while the old code swallowed that error — so keep token
+  # injection working by writing as the FIFO's owner. The rest of this comment explains the shape.
+  # The FIFO is created by the jailed app (mode 0660, owner = its uid) and on this firmware root
+  # CANNOT write it — ssh reports "Permission denied", which used to be swallowed so `key` printed
+  # "sent" while nothing arrived. Inject as the FIFO's own uid via setpriv, which is what makes
+  # `key`, `focus`, `press` and `state` work at all on a flavoured install. Keep fifo_write's own
+  # escaping: the wrapped statement is the same one remote word, with shell metacharacters escaped
+  # again for the extra `sh -c` layer.
+  local stmt owner uid gid wrapped
   stmt=$(fifo_write "$1") || return 2
-  tv "($stmt) & P=\$!; sleep 2; kill \$P 2>/dev/null" 2>/dev/null
+  owner=$(tvq "command -v setpriv >/dev/null 2>&1 && stat -c '%u:%g' $REMOTE_FIFO 2>/dev/null")
+  if [ -n "$owner" ] && [ "${owner#*:}" != "$owner" ]; then
+    uid=${owner%%:*}; gid=${owner##*:}
+    wrapped=${stmt//\\/\\\\}; wrapped=${wrapped//\"/\\\"}
+    wrapped=${wrapped//\$/\\\$}; wrapped=${wrapped//\`/\\\`}
+    tv "setpriv --reuid=$uid --regid=$gid --clear-groups sh -c \"$wrapped\" & P=\$!; sleep 2; kill \$P 2>/dev/null"
+  else
+    # No FIFO yet (or no setpriv): keep the old root write, e.g. during an offline selftest.
+    tv "($stmt) & P=\$!; sleep 2; kill \$P 2>/dev/null" 2>/dev/null
+  fi
   return 0
 }
 

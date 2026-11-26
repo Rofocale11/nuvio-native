@@ -12,7 +12,9 @@ description: >
 
 The fork's `plx_pmsshim` already serves the PMS REST surface in-process, so there is no upstream
 `mock_pms.py` to imitate. The missing piece was an account-free boot that still uses the REAL addon
-backend: `plxnative-nuviolive`. Full details: `docs/nuvio/SIM-LOOP.md`. To confirm or reproduce a regression
+backend: `plxnative-nuviolive`. Full details: `docs/nuvio/SIM-LOOP.md`. For the same profile on the television
+read `docs/nuvio/TV-LOOP.md` and use `tools/nuvio-tv.py` — it is a separate runbook and a separate lock-taking command.
+To confirm or reproduce a regression
 in a fork-specific behavior, use the scenarios in `docs/nuvio/SCENARIO.md` (exact command, pass
 evidence and failure signature for each).
 
