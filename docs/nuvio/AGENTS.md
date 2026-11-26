@@ -119,6 +119,8 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
 - `docs/nuvio/WATCH-PROGRESS.md` — account mirror: IMDb identity, push/pull RPCs and Home refresh.
 - `docs/nuvio/VALIDATION.md` — what has and has not been verified. Its early sections are dated
   snapshots; the current status is at the top.
+- `docs/nuvio/SCENARIO.md` — reproducible host-loop scenarios for fork-specific behaviors, with the
+  pass evidence and regression signature of each. An agent confirming a regression starts here.
 - `docs/nuvio/HANDOFF.md` — delivery history and known limitations. It opens with the current
   status; everything below the first section is the 2026-10-10 snapshot.
 - `docs/nuvio/MERGE-AUDIT.md` — the CURRENT merge only: its conflicts, regressions and non-commentable fork edits. A fresh file is written at the start of every upstream merge, after rotating the previous one into history.

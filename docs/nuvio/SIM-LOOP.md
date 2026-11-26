@@ -11,6 +11,10 @@ already serves the PMS REST surface in-process. What was missing was a boot mode
 real backend with an account-free identity — `plxnative-nuviolive` is that mode. The old
 `plxnative-nuviofake` still exists for deterministic fixed-content tests; it is not the default.
 
+To confirm a regression in a fork-specific behavior (sealed boot, person enrichment, the Streams
+picker, privacy erase, playback), use the ready-made scenarios in `SCENARIO.md`: each names the
+command, the pass evidence and the failure signature. This document stays the "how to drive" guide.
+
 ## One-time setup
 
 ```sh
@@ -221,5 +225,7 @@ plane or device frame rate.
 - `rust-modules/pmsshim/src/shim_fake.rs` — unchanged fixed fake backend, now only for `nuviofake`.
 - `tests/nuvio-public-addons.json` — tracked public addon URLs.
 - `tools/nuvio-sim.py` — the one-command agent driver.
+- `tools/nuvio-fixture-addon.py` — loopback Stremio addon for checks that need a real ratingKey
+  (subtitles drill-down, clear logo, resume, trailers); see `SCENARIO.md`.
 - `Makefile` — `sim-nuvio` / `sim-nuvio-linux` targets (fork-marked).
 - `docs/nuvio/MERGE-AUDIT.md` — exact upstream surface for this feature.
