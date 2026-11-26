@@ -47,7 +47,7 @@ ordered, de-duplicated list of `(youtube_id, title)`:
    same title's IMDb-keyed meta is tried.
 
 `playable_candidates` filters out ids in the resolver's blocked map and takes at most
-**`MAX_TRAILERS = 12`**. `push_candidate` dedupes by id. `docs/nuvio/MERGE-AUDIT.md` records why
+**`MAX_TRAILERS = 12`**. `push_candidate` dedupes by id. `docs/nuvio/MERGE-AUDIT-HISTORY.md` records why
 the enrichment-cache read is a fork edit.
 
 ## 2. Keys and Part ids

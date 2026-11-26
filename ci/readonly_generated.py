@@ -12,13 +12,8 @@ import json
 import re
 from readonly_dependencies import _local_sha, _sha, _json, _manifest_paths, _configs, _workspace_hashes, WORKSPACE_HASHING
 
-# Fork Rofocale11: re-derived for the fork workspace after adding the Nuvio crates; the
-# production sources and enum grammar are unchanged, only the pinned manifests/lock hashes moved.
 CERTIFICATE_PATH = Path(__file__).with_name('proofs') / 'platform-generated-enums.json'
-# Fork Rofocale11: re-pinned for the build-script brand hook, the plx_nuvio_ffmpeg member, and again
-# when the fork marker tokens were removed from the four fork-owned manifests (comment text only —
-# no crate, dependency, producer or grammar change).
-CERTIFICATE_SHA256 = '3009f53e3b6d78491c078f3cffe0d178a9f9c8dc590fc5ca54d238bcf47f0609'
+CERTIFICATE_SHA256 = 'e932c0cb80198ab3463c7cbe39188d21c6181f705c5492e1ca11d224cffacea3'
 SOURCES = ['os/Cargo.toml', 'os/src/lib.rs', 'os/src/i18n/mod.rs',
            'os/build.rs', 'os/build_support/catalog.rs', 'build_support/install_identities.rs',
            'machine/src/lib.rs', 'machine/src/machine.rs']
@@ -39,7 +34,10 @@ MACHINE_LIB_SOURCES = ['105afdbb05fb762e6752cef260b6d928b1d828993350aaa71651f96c
 
 
 I18N_SOURCES = ['40a13d07a43c772b10587e510a69502684abfa1f582ce355b22fd935a8c46f45',
-                '867bb41013e0016d186e699698c762685325aa02f01ebe92d39797c0a41a37e1']
+                '867bb41013e0016d186e699698c762685325aa02f01ebe92d39797c0a41a37e1',
+                '82ee1803e4a6339772a175da2f256a7d6a313619e242f76f47c345cdd8199e92',
+                '17a2cff5ffb5bf95a46a2a0c12b13c0b7a02c1f7554656fa0f59557b7afca2ec',
+                '3a51ceeb41a6027d177b205a5c66ac7c4b039291cc216a6ebb4a171afff25b83']
 
 def source_hashes(root):
     sources = {p: _local_sha((root / p).read_bytes()) for p in SOURCES}
@@ -53,7 +51,7 @@ def source_hashes(root):
     # Owned-present migration changes sibling/test modules, never the canonical machine child.
     if sources['machine/src/lib.rs'] not in MACHINE_LIB_SOURCES: raise ValueError('unreviewed machine namespace')
     sources['machine/src/lib.rs'] = MACHINE_LIB_SOURCES
-    # Existing consumer variants differ in clock formatting, not include/enum identity.
+    # Existing consumer variants differ in clock formatting, sim cfg or month-name tables, not include/enum identity.
     if sources['os/src/i18n/mod.rs'] not in I18N_SOURCES: raise ValueError('unreviewed include namespace')
     sources['os/src/i18n/mod.rs'] = I18N_SOURCES
     return sources
@@ -78,9 +76,7 @@ def produce_certificate(root):
                        'PR1366: PressRead identity/live/active and owned-present sibling/test modules; canonical machine child and doc-only u32 newtype producer unchanged',
                        'PR1385: Canon byte-feed loops inlined (impl Canon and canon_tests only, FNV-1a byte stream unchanged); newtype macro and its ten u32 invocations unchanged',
                        'UI FIFO on PR1385: AppCommandId(u64), AppCommandOutcome and generic AppCommand<F,R> appended after unchanged doc-only newtype producer and its ten u32 invocations; none certified as generated declarations',
-                       'Owned runtime: HoldHintRead/Event, ModalRead, PageImageRead, Cx/Fx projections, AppEffect partition and PresentationAuthority/Receipt added outside the unchanged doc-only newtype macro and ten u32 invocations; Arc-bearing receipts and effect contracts are not certified; canonical include namespace unchanged',
-                       'Fork Rofocale11: the build script passes a fork-owned brand transform into catalog::build_with before compile(); the enum producer, include namespace and catalogue grammar are unchanged',
-                       'Fork Rofocale11: marker tokens removed from fork-owned workspace manifests; comment text only, no crate, dependency, producer or grammar change'],
+                       'Owned runtime: HoldHintRead/Event, ModalRead, PageImageRead, Cx/Fx projections, AppEffect partition and PresentationAuthority/Receipt added outside the unchanged doc-only newtype macro and ten u32 invocations; Arc-bearing receipts and effect contracts are not certified; canonical include namespace unchanged'],
             'assumptions': __doc__.splitlines()}
 
 

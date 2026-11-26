@@ -204,7 +204,7 @@ and seeks by time via `av_seek_frame` (libavformat's own Cues index).
 (Starfish-shaped: one method per verb, reached through `PlayerAdapter::display_sink`). `platform-webos/src/webos/video_sink.rs`'s `extern "C"`
 declarations are private to that module and only `StarfishSink` there implements the trait on the
 television; `HostSink` (`play-feed/src/ffi_host.rs`, `plx_play_feed::ffi_host`) is the simulator's. Every verb but `load` and `unload`
-takes a `task::MainThread` (the constant queries `feed_abi_is_cow`, `window_mode` and `window_id`
+takes a `task::MainThread` (the constant queries `feed_abi_is_cow`, `lacks_video_path`, `window_mode` and `window_id`
 take nothing); `unload` takes an `UnloadTicket`, which only a `&MainThread` can issue and which is
 `Send`, so the main thread decides when an Unload happens and a worker may carry it out.
 `MainThread` is a `!Send` ZST the application mints once. Since phase 9 it mints exactly one
@@ -237,12 +237,19 @@ something.
   probe's own capability (for read-outs) + that gated presentation decision, and every
   Load/reload/recovery consumes the
   stored presentation rather than re-reading the later cache; `dvnonode` is the logged diagnostic
-  exception, and the Feed's `dv_start` guard (`play-feed/src/dv_start.rs`, reached only through `FeedLoad::dv_landing_due`) is the one mid-play change (#1166): at a landing the firmware's
+  exception, and the Feed's `dv_start` guard (`play-feed/src/dv_start.rs`, reached only through `FeedLoad::dv_landing_due`) is one of the two mid-play changes (#1166): at a landing the firmware's
   Dolby Vision splitter would skip, or after 4 s with no position update, it takes the declaration
   out of the route for the rest of that play request (`route::withdraw_dv_presentation`: what DV Off
   would have planned, the probed capability kept, on the installed route, the file's own declaration
   and the stored Auto Original candidate, so a trip to HLS and back to Original stays base-layer)
-  and reloads once. Atmos routing and ACB forwarding are independent and unchanged. The payload evidence,
+  and reloads once. The other goes the opposite way: a stream whose container has no Dolby Vision
+  configuration record but whose RPUs say Profile 5 or Profile 8 over PQ/HLG (a remux that dropped
+  the record; the server then reports no Dolby Vision) is reported by the demuxer
+  (`ff::RpuOnlyScan`, `FeedRaw::rpu_dovi`), and once the Load has returned the pump has the route
+  declare it (`route::declare_rpu_dovi`: direct play only, outside an unconfirmed Original trial,
+  with the Dolby Vision setting frozen at the resolve, so DV Off and a set without confirmed support
+  change nothing) and reloads once with the node.
+  Atmos routing and ACB forwarding are independent and unchanged. The payload evidence,
   Profile 5 one-tick fix and instrument traps live in that document.
 - **The Load's `adaptiveStreaming` ceiling is derived per session (`plx_play_feed::sink_envelope`), and
   it was a 4K60 constant for EVERY codec until 2026-09-03 — which on webOS 10 refused every H.264

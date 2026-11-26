@@ -4,16 +4,17 @@
 //! The application's modules are private (`mod app;`), so a crate that is a sibling of this one cannot
 //! name `app::Platform` or implement a crate-private `Shell`. This is the one narrow public face: re-exports
 //! of the types a platform builds or implements, an [`EventSink`] through which it reports input, the two SDL
-//! helpers an SDL platform's `Shell` is built from ([`sdl_init`], [`sdl_open`], with [`InitHooks`]), [`run`], the
-//! one function defined in here (it hands the platform to the application's entry), and the ready media values
+//! helpers an SDL platform's `Shell` is built from ([`sdl_init`], [`sdl_open`], with [`InitHooks`]), the hosted contract's exit types, [`run`], the
+//! entry for a host with a fixed server, [`run_signed_out`] for a host without one, and the ready media values
 //! described below. No other module of the
-//! application is public to a television build. A `hostsim` build also keeps the simulator binary's own doors,
-//! each behind `feature = "hostsim"` in `lib.rs` (`grep -n 'feature = "hostsim"' rust-modules/src/lib.rs`):
+//! application is public to a television build. A `sim` build also keeps the simulator binary's own doors,
+//! each behind `feature = "sim"` in `lib.rs` (`grep -n 'feature = "sim"' rust-modules/src/lib.rs`):
 //! `hud_cli`, `sim_runtime_dir`, `sim_events_log`, `publish_sim_webos_major` and
 //! `synthetic_home_initial`, the one `app` item re-exported at the crate root. `HostEvent`, the loop's own event type, stays
 //! private: a platform reports input through [`EventSink`] and the application converts it. The owner's ruling (2026-11-21, Decision 3
 //! amended): the eight application-crate items `Platform`, `Shell`, `Surface`, `FrameProbe`, `MediaBoot`,
-//! `Composition`, `Exit` and `Release` are reachable only through this module. `Services` is not one of the eight:
+//! `Composition`, `Exit` and `Release`, and the four of the hosted contract's exit half (below), are reachable only
+//! through this module. `Services` is not one of the eight:
 //! it is `plx_os::tv::Services`, already a `pub` type of a lower crate, which this module re-exports beside them.
 //! A platform crate names the application crate's types through `host` alone; the hook tables a `Services` is
 //! built from (`plx_os::tv`) come from their own crate, which it depends on directly.
@@ -22,11 +23,25 @@
 //! moves it into the webOS platform, so `host` hands a platform READY [`MediaBoot`] values, and a platform crate names
 //! no `PlayerAdapter` (the type `MediaBoot::compose` takes): [`WEBOS_MEDIA`] is the television's (the plane owner's
 //! boot, then the Feed and the product URI driver), compiled in every build of the application because it carries no `cfg` (the application cannot know which platform names it), and, under
-//! `hostsim`, `FEED_MEDIA` is the desktop's (the Feed over the simulator's sink, no URI driver) and `HOST_SINK`
+//! `sim`, `FEED_MEDIA` is the desktop's (the Feed over the simulator's sink, no URI driver) and `HOST_SINK`
 //! is that sink itself (also `play-feed`, the module it lives in). A television build never has the desktop pair.
+//! `SIM_PRESENT` is the one other `sim` value: the simulator's [`Present`] hooks, which draw and so stay in the
+//! application, for the desktop's [`FrameSeam`] to state beside the pacer it owns (a television states `FrameSeam::NONE`).
+//! [`NO_MEDIA`] is the one for a platform with no playback (a Tizen build without its `uri` feature, which composes its own driver): no early init, no driver and no resolver,
+//! so the boot publishes `BackendSet::NONE` and logs `compose: backends=none resolver=no`; it carries no `cfg` either.
 //! Each retires at W11a, when the composition moves into the platform that owns it
 //! (`docs/platform-ports.md`, Target shape 8 and W7). The names this module publishes are a known list that a
 //! pin in this file's tests holds: growing it fails until the addition and its retirement point are recorded there.
+//!
+//! **The hosted contract's exit half.** A platform whose process belongs to a host (Target shape 7) starts its own loop
+//! thread, calls [`run`] on it, and must answer the host's `on_stopped(code, clean)` exactly once, whichever of two
+//! threads gets there first. [`HostGate`] is what every host-bound callback enters through ([`HostGate::enter`] returns an
+//! [`InFlight`] until the stop was requested, then refuses), what `plx_host_stop` closes ([`HostGate::stop`]) and what the
+//! loop thread reports through once [`run`] returned its [`Exit`] ([`HostGate::report`]: `clean` only when the release was
+//! `Complete` and nothing is in flight); [`HostGate::expire`] is the deadline thread's never-clean report. [`Completion`]
+//! delivers the one [`Stopped`] to `on_stopped` and suppresses the loser's. They are plain values the platform keeps in
+//! its own `static`, and they stay in the application beside [`Exit`] and [`Release`], whose meaning they read; a platform
+//! that does not host the application (the television, the desktop) never names them. They do not retire at W11a.
 //!
 //! The split is by thread. A [`Platform`] is registration data in a `static`: function pointers and
 //! `&'static dyn` of `Sync` types, [`Shell`] included as a factory. The thread-affine state (the window,
@@ -35,25 +50,34 @@
 //!
 //! Beside the platform's own types, the vocabulary their signatures name is re-exported from the lower
 //! layers it lives in ([`MainThread`], [`Action`], [`Edge`], [`RawKey`], [`Lifecycle`], [`PointerEdge`],
-//! [`OpenAsk`], [`Placement`], [`InitHooks`]), so a platform crate names the application crate's types, and the vocabulary they use, through `host` alone.
+//! [`OpenAsk`], [`Placement`], [`InitHooks`], [`InitSteps`], [`SdlFlavor`], [`GlProfile`], [`WindowPlan`]), so a platform crate names the application crate's types, and the vocabulary they use, through `host` alone.
 //! [`sdl_open`] stays in the application, not in a platform crate: the `Surface` it returns is implemented for
 //! `plx_shell_sdl::Window` there, which the orphan rule allows nowhere else.
 use std::ffi::CStr;
 use std::os::raw::c_int;
 
-pub use crate::app::platform::{sdl_init, sdl_open, Composition, EventSink, FrameProbe, MediaBoot, Platform, Shell, Surface};
-pub use crate::app::{Exit, Release};
+pub use crate::app::platform::{
+    sdl_init, sdl_open, Composition, EventSink, FrameProbe, FrameSeam, MediaBoot, Pacer, Platform, Present, Shell, Surface,
+    WindowPlan,
+};
+pub use crate::app::{Completion, Exit, HostGate, InFlight, Release, Stopped};
 pub use plx_base::task::MainThread;
 pub use plx_machine::machine::Edge;
 pub use plx_os::tv::Services;
 pub use plx_shell_sdl::event::{Lifecycle, PointerEdge};
-pub use plx_shell_sdl::{InitHooks, OpenAsk, Placement};
+pub use plx_shell_sdl::{GlProfile, InitHooks, InitSteps, OpenAsk, Placement, SdlFlavor};
 pub use plx_ui::consts::{Action, RawKey};
 /// The simulator's video sink, the Feed backend's host sink built with the simulator's decoded picture: what the desktop
 /// platform's `Services` hold as their video sink and display binding. Under the cfg of the module it lives in, so a
 /// television build never has it. Retires at W11a with `FEED_MEDIA`.
-#[cfg(all(feature = "hostsim", feature = "play-feed"))]
+#[cfg(all(feature = "sim", feature = "play-feed"))]
 pub use crate::app::adapters::hostsim::HOST_SINK;
+
+/// The simulator's [`Present`] hooks, the application's own because they draw (`plx_gfx`, the decoded picture): the
+/// compositor stand-in under a bound frame and the supersampled copy to the window. The desktop platform states it as
+/// its `FrameSeam`'s `present`; a television states `Present::NONE`. `sim` builds only.
+#[cfg(feature = "sim")]
+pub const SIM_PRESENT: Present = crate::app::adapters::sim_present::PRESENT;
 
 /// The television's [`MediaBoot`]: the plane owner's boot (`backends::acb_init`, once per process, on a boot that touches
 /// the television) and the composition of the Feed plus the product URI driver (`backends::compose_native`). Compiled in every
@@ -64,11 +88,21 @@ pub const WEBOS_MEDIA: MediaBoot = MediaBoot {
 };
 
 /// The desktop's [`MediaBoot`]: nothing to boot, and the Feed over the simulator's sink as the only driver, with no URI
-/// driver and so no resolver. `hostsim` builds only. Retires at W11a with [`WEBOS_MEDIA`].
-#[cfg(feature = "hostsim")]
+/// driver and so no resolver. `sim` builds only. Retires at W11a with [`WEBOS_MEDIA`].
+#[cfg(feature = "sim")]
 pub const FEED_MEDIA: MediaBoot = MediaBoot {
     early_init: crate::app::adapters::backends::feed_early_init,
     compose: crate::app::adapters::backends::compose_feed_alone,
+};
+
+/// The [`MediaBoot`] of a platform with no playback: no early init, a composition that installs no driver
+/// (`BackendSet::NONE`, no resolver). Compiled in every build, like [`WEBOS_MEDIA`], because it carries no `cfg`:
+/// a hosted platform that is neither the television nor the simulator (the Tizen build without its `uri` feature) states it. The boot
+/// still publishes the composition through the one path, so the log reads `compose: backends=none resolver=no`.
+/// Retires at W11a with [`WEBOS_MEDIA`], when each platform composes its own drivers.
+pub const NO_MEDIA: MediaBoot = MediaBoot {
+    early_init: crate::app::adapters::backends::no_early_init,
+    compose: crate::app::adapters::backends::compose_none,
 };
 
 /// Boot the application on `platform` and return the status it ended with: the application's entry
@@ -81,6 +115,12 @@ pub fn run(platform: &'static Platform, pms_host: &CStr, pms_port: u16) -> Exit 
     crate::app::run_application(platform, pms_host.as_ptr(), c_int::from(pms_port))
 }
 
+/// Boot a host with no fixed server. The pair is read only when an injected dev token selects a
+/// fixed server. Without an injected token or a saved session, boot opens ordinary Plex sign-in.
+pub fn run_signed_out(platform: &'static Platform) -> Exit {
+    run(platform, c"", 0)
+}
+
 /// **The owner's ruling, held in the source.** `tests/host_interface.rs` is a separate crate and reads only its own
 /// spelling, so nothing there stops `lib.rs` from growing `pub mod app;` or `pub use app::platform::Shell;`: every
 /// test would still pass. These pins read the crate's own source, in the style of the `include_str!` pins of
@@ -91,7 +131,7 @@ mod surface_pin_tests {
     use std::path::Path;
 
     /// What the crate root may make `pub`, by the head of the item: `host`, and the simulator binary's own doors
-    /// (a separate crate, so they must be `pub`), each existing only under `feature = "hostsim"`. `host` alone is
+    /// (a separate crate, so they must be `pub`), each existing only under `feature = "sim"`. `host` alone is
     /// open to a television build.
     const ROOT_ITEMS: [(&str, bool); 6] = [
         ("pub mod host", false),
@@ -105,7 +145,7 @@ mod surface_pin_tests {
     const HOW_TO_PROCEED: &str = "The application is reachable only through `host`, because the owner's 2026-11-21 amendment to \
          Decision 3 (docs/platform-ports.md) makes `host` the only way a platform crate reaches it. To publish an \
          application item, re-export it from host.rs, which the second pin allows and the third pin (HOST_ITEMS) \
-         lists. Only a new simulator door that is NOT an application item, existing only under `feature = \"hostsim\"`, \
+         lists. Only a new simulator door that is NOT an application item, existing only under `feature = \"sim\"`, \
          extends ROOT_ITEMS in this test, and the reason is recorded in that amendment.";
 
     /// The text of an item's head: up to its first `;`, `{`, `(` or `<`.
@@ -115,7 +155,7 @@ mod surface_pin_tests {
     }
 
     /// `(can be true, can be false)` for the cfg predicate at the start of `s` (whitespace removed), in a build with
-    /// neither `hostsim` nor `test` and whatever else set; also returns the rest of `s`. Any other predicate may be
+    /// neither `sim` nor `test` and whatever else set; also returns the rest of `s`. Any other predicate may be
     /// either, so an `any(...)` naming another feature (`devtriggers` is on by default) can be true.
     fn can_be(s: &str) -> ((bool, bool), &str) {
         let end = s.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(s.len());
@@ -138,15 +178,15 @@ mod surface_pin_tests {
         }
         if let Some(value) = rest.strip_prefix("=\"") {
             let (value, after) = value.split_once('"').expect("a closed string");
-            let never = name == "feature" && value == "hostsim";
+            let never = name == "feature" && value == "sim";
             return ((!never, true), after);
         }
         (((name != "test"), true), rest)
     }
 
     /// Whether the attribute `attr` (whitespace removed) is a `cfg` under which the item cannot exist without
-    /// `hostsim` or `test`: `feature = "hostsim"`, an `any` of those two, or an `all` with `hostsim` among its members.
-    fn confines_to_hostsim(attr: &str) -> bool {
+    /// `sim` or `test`: `feature = "sim"`, an `any` of those two, or an `all` with `sim` among its members.
+    fn confines_to_sim(attr: &str) -> bool {
         let predicate = attr.strip_prefix("#[cfg(").and_then(|a| a.strip_suffix(")]"));
         predicate.is_some_and(|p| !can_be(p).0 .0)
     }
@@ -251,7 +291,7 @@ mod surface_pin_tests {
     fn public_items(source: &str) -> Vec<(usize, String, bool)> {
         public_statements(source)
             .into_iter()
-            .map(|p| (p.at, head(&p.text).to_string(), p.attrs.iter().any(|a| confines_to_hostsim(a))))
+            .map(|p| (p.at, head(&p.text).to_string(), p.attrs.iter().any(|a| confines_to_sim(a))))
             .collect()
     }
 
@@ -260,12 +300,12 @@ mod surface_pin_tests {
         let source = include_str!("lib.rs");
         let items = public_items(source);
         for (at, item, confined) in &items {
-            let Some(&(_, hostsim_only)) = ROOT_ITEMS.iter().find(|&&(known, _)| known == item.as_str()) else {
+            let Some(&(_, sim_only)) = ROOT_ITEMS.iter().find(|&&(known, _)| known == item.as_str()) else {
                 panic!("lib.rs line {at} makes `{item}` public. {HOW_TO_PROCEED}");
             };
             assert!(
-                !hostsim_only || *confined,
-                "lib.rs line {at}: `{item}` is a simulator door and must exist only under `feature = \"hostsim\"` (with \
+                !sim_only || *confined,
+                "lib.rs line {at}: `{item}` is a simulator door and must exist only under `feature = \"sim\"` (with \
                  `test` or `all(..)` at most): an `any(..)` naming another feature, `devtriggers` being on by default, \
                  ships it in a television build. {HOW_TO_PROCEED}"
             );
@@ -327,7 +367,7 @@ mod surface_pin_tests {
                 if name == "host.rs" {
                     in_host += 1;
                 } else {
-                    // The one other: the root's `hostsim`-only `synthetic_home_initial`, which the simulator binary calls.
+                    // The one other: the root's `sim`-only `synthetic_home_initial`, which the simulator binary calls.
                     assert!(
                         name == "lib.rs" && statement == "app::synthetic_home_initial;",
                         "{name} line {at} re-exports from the application (`pub use {statement}`). {HOW_TO_PROCEED}"
@@ -346,12 +386,16 @@ mod surface_pin_tests {
     /// removed; empty for none). The first groups are the interface of a platform's own types and entry; the media values
     /// and the simulator's sink are there because the application keeps the playback composition until W11a, which retires
     /// each of them (`docs/platform-ports.md`, Target shape 8 and W7).
-    const HOST_ITEMS: [(&str, &str); 25] = [
+    const HOST_ITEMS: [(&str, &str); 39] = [
         // What a platform builds, implements and reports input through, and the entry that boots it.
         ("Platform", ""),
         ("Shell", ""),
+        ("WindowPlan", ""),
         ("Surface", ""),
         ("FrameProbe", ""),
+        ("FrameSeam", ""),
+        ("Pacer", ""),
+        ("Present", ""),
         ("EventSink", ""),
         ("MediaBoot", ""),
         ("Composition", ""),
@@ -359,6 +403,13 @@ mod surface_pin_tests {
         ("Release", ""),
         ("Services", ""),
         ("run", ""),
+        ("run_signed_out", ""),
+        // The hosted contract's exit half: a hosted platform's callbacks, its stop and its watchdog go through these. They
+        // are the application's own types and stay (they do not retire); the C ABI that drives them is the platform's.
+        ("HostGate", ""),
+        ("InFlight", ""),
+        ("Completion", ""),
+        ("Stopped", ""),
         // The vocabulary their signatures name.
         ("MainThread", ""),
         ("Edge", ""),
@@ -372,10 +423,15 @@ mod surface_pin_tests {
         ("sdl_init", ""),
         ("sdl_open", ""),
         ("InitHooks", ""),
+        ("InitSteps", ""),
+        ("SdlFlavor", ""),
+        ("GlProfile", ""),
         // The media values: each retires at W11a.
         ("WEBOS_MEDIA", ""),
-        ("FEED_MEDIA", r#"feature="hostsim""#),
-        ("HOST_SINK", r#"all(feature="hostsim",feature="play-feed")"#),
+        ("NO_MEDIA", ""),
+        ("FEED_MEDIA", r#"feature="sim""#),
+        ("HOST_SINK", r#"all(feature="sim",feature="play-feed")"#),
+        ("SIM_PRESENT", r#"feature="sim""#),
     ];
 
     /// The names a `pub use` tree brings in: a group is expanded, `a as b` is `b`, and a glob is `*` (never on the list).
@@ -460,13 +516,13 @@ mod surface_pin_tests {
         let source = [
             "#[doc(hidden)] pub mod app;",
             "#[allow(unused_imports)] pub use app::platform::Shell;",
-            "#[cfg(feature = \"hostsim\")] pub fn sim_runtime_dir() {}",
+            "#[cfg(feature = \"sim\")] pub fn sim_runtime_dir() {}",
             "#[cfg(any(",
             "    test,",
-            "    feature = \"hostsim\"",
+            "    feature = \"sim\"",
             "))] pub mod hud_cli;",
-            "#[cfg(feature = \"hostsim\")] #[doc(hidden)] pub fn two_on_a_line() {}",
-            "#[cfg(feature = \"hostsim\")]",
+            "#[cfg(feature = \"sim\")] #[doc(hidden)] pub fn two_on_a_line() {}",
+            "#[cfg(feature = \"sim\")]",
             "#[allow(dead_code)] pub fn two_groups() {}",
             "#[doc = \"a ] in a string\"] pub fn bracket_in_a_string() {}",
             "#[allow(unused)] fn private() {}",
@@ -491,13 +547,41 @@ mod surface_pin_tests {
         assert_eq!(items[1].0, 2, "the line is the one the attribute starts on");
         assert_eq!(pub_uses(&source), [(2, "app::platform::Shell;".to_string())]);
         // The attribute above a multi-line `pub use` list still reaches the statement, and the attribute is not the item.
-        let list = ["#[cfg(feature = \"hostsim\")]", "pub use a::{", "    B,", "    C,", "};"].join("\n");
+        let list = ["#[cfg(feature = \"sim\")]", "pub use a::{", "    B,", "    C,", "};"].join("\n");
         assert_eq!(pub_uses(&list), [(2, "a::{B,C,};".to_string())]);
-        assert!(public_statements(&list)[0].attrs.iter().any(|a| confines_to_hostsim(a)));
+        assert!(public_statements(&list)[0].attrs.iter().any(|a| confines_to_sim(a)));
     }
 }
 
-#[cfg(all(test, feature = "hostsim"))]
+/// `NO_MEDIA` is a media boot in EVERY build (no `sim`, no webOS), so its test is too.
+#[cfg(test)]
+mod no_media_tests {
+    use super::*;
+
+    /// A platform with no playback composes no driver and no resolver, and the boot's one publisher logs exactly that:
+    /// there is no second logging path for "nothing composed".
+    #[test]
+    fn the_no_playback_boot_composes_nothing_and_the_boot_logs_it() {
+        let mt = unsafe { MainThread::assume() };
+        (NO_MEDIA.early_init)(&mt);
+        let mut adapter = plx_media::player::adapter::PlayerAdapter::new(mt);
+        let composed = (NO_MEDIA.compose)(&mut adapter, false);
+        assert!(composed.resolver.is_none(), "no URI driver, so no resolver");
+        assert_eq!(adapter.composed_backends(), plx_playback_contract::BackendSet::NONE, "and no driver of any kind");
+        let controlled = (NO_MEDIA.compose)(&mut adapter, true);
+        assert!(controlled.resolver.is_none(), "a controlled boot composes nothing either");
+
+        let mut session = plx_media::route::PlaybackSession::IDLE;
+        let log = plx_base::eventlog::with_private_log(|| {
+            crate::app::platform::publish_composition(&mut session, &adapter, composed);
+            std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default()
+        });
+        assert!(log.contains("compose: backends=none resolver=no"), "{log:?}");
+        assert_eq!(session.backends(), plx_playback_contract::BackendSet::NONE);
+    }
+}
+
+#[cfg(all(test, feature = "sim"))]
 mod media_boot_tests {
     use super::*;
 

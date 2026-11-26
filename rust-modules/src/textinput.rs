@@ -2,7 +2,17 @@
 //!
 //! Four calls wide: [`available`] asks whether this set has a panel, [`start`]/[`stop`] raise and
 //! dismiss it, and [`drain`] takes what has been typed. The app draws no keyboard of its own — the
-//! television draws it, over our surface, and hands the text back as ordinary SDL events.
+//! television draws it, over our surface, and hands the text back (as ordinary SDL events on webOS).
+//!
+//! ## The platform raises the panel, and on Tizen it is not SDL's
+//!
+//! [`available`], [`start`] and [`stop`] reach the panel through the platform's `Shell`
+//! (`keyboard_available`, `show_keyboard`, `hide_keyboard`). An SDL shell takes the trait's defaults,
+//! which are the SDL calls this note describes, so the television and a desktop are unchanged. Tizen
+//! states its own: Ecore IMF on the host's main thread (`plx_platform_tizen`'s `ime`), whose commits
+//! arrive through `EventSink::text` like an SDL `SDL_TEXTINPUT`, and whose panel says when the viewer
+//! closed it (`EventSink::keyboard_dismissed`, the keyboard drop a background edge also asks for).
+//! The SDL traps below are SDL's; there the focus read logs `focus=?` (no SDL window).
 //!
 //! ## Why this is plain SDL and not a webOS call
 //!
@@ -25,11 +35,12 @@
 //! 1. **The event is shifted.** webOS inserts a `Uint32 inputSource` at `+12`, so the UTF-8 text
 //!    starts at **+16**, not the `+12` that stock SDL 2.0.4's `SDL_events.h` declares. That
 //!    header lies about this build; the NDK sysroot's fork copy is the proof.
-//!    Under `hostsim` the offset really is `+12` — desktop SDL2 is stock — so this is a `cfg`, and
-//!    a single hard-coded number ships garbage on one of the two platforms. `plx_shell_sdl::text::TEXT_OFF`
-//!    is that `cfg`, and the decoder next to it takes the offset as an argument so `make check` grades
-//!    both: the byte layout is the shell crate's, and [`decode`] and [`encode_event`] are re-exported
-//!    from it.
+//!    A stock desktop SDL2 really puts it at `+12`, so the offset is a property of the platform's
+//!    SDL, and a single hard-coded number ships garbage on one of the two. The platform states it:
+//!    `Shell::sdl()` carries a `plx_shell_sdl::SdlFlavor` (`Lg` or `Stock`) and
+//!    `plx_shell_sdl::text::text_off` maps it to the offset. The decoder next to it takes the
+//!    offset as an argument so `make check` grades both: the byte layout is the shell crate's, and
+//!    [`decode`] and [`encode_event`] are re-exported from it.
 //! 2. **`SDL_WINDOW_INPUT_FOCUS` is a precondition.** `SDL_StartTextInput` shows the panel only
 //!    `if (SDL_GetKeyboardFocus())` — the window carrying `0x200` — and our window is created
 //!    `OPENGL | FULLSCREEN` with neither `SHOWN` nor a focus flag. If it is clear, SDL still
@@ -85,6 +96,7 @@
 //! text-input one, and it is not in this module's gift.
 #![allow(dead_code)]
 
+use crate::app::platform::Shell;
 use crate::app::SDL_WINDOW_INPUT_FOCUS;
 use plx_base::eventlog::log;
 use std::os::raw::c_void;
@@ -158,8 +170,10 @@ fn has_focus() -> Option<bool> {
 
 /// Does this build/firmware claim a system keyboard? Probed, never assumed — see the module doc.
 /// A `false` here means the field can still be typed into by other means but no panel will rise.
-pub(crate) fn available() -> bool {
-    plx_shell_sdl::text::has_screen_keyboard()
+/// The platform's answer (`Shell::keyboard_available`): SDL's on the television and a desktop, Ecore
+/// IMF's on Tizen.
+pub(crate) fn available(shell: &dyn Shell) -> bool {
+    shell.keyboard_available()
 }
 
 /// Raise the keyboard. Idempotent: calling it while the panel is already up is not an error, and
@@ -169,7 +183,7 @@ pub(crate) fn available() -> bool {
 /// free on this platform: it re-issues `WebOSShowScreenKeyboard` — a real `text_model` IME
 /// activation over wayland — each time. [`STARTED`] is what makes the contract true rather than
 /// merely harmless.
-pub(crate) fn start() {
+pub(crate) fn start(shell: &dyn Shell) {
     unsafe {
         if *addr_of!(STARTED) {
             return;
@@ -187,18 +201,18 @@ pub(crate) fn start() {
         // `focus=0` means SDL will enable text events and then silently skip the panel.
         log(&format!(
             "keyboard: start support={} focus={}",
-            i32::from(available()),
+            i32::from(available(shell)),
             match has_focus() {
                 Some(f) => i32::from(f).to_string(),
                 None => "?".into(), // bind() was never called — a boot-order bug, not a TV fact
             }
         ));
-        plx_shell_sdl::text::start_input();
+        shell.show_keyboard();
     }
 }
 
 /// Dismiss it. Also idempotent.
-pub(crate) fn stop() {
+pub(crate) fn stop(shell: &dyn Shell) {
     unsafe {
         // Guarded, and not only for symmetry: `screens::search::SearchScreen` requests this on
         // every BACK and every leave, including ones where the field was never edited. Unguarded, that would call
@@ -214,7 +228,7 @@ pub(crate) fn stop() {
         // panel simply never returns — which looks exactly like the driver's own reopen wedge and
         // is not it. With both transitions logged, one log answers which of the two you have.
         log("keyboard: stop");
-        plx_shell_sdl::text::stop_input();
+        shell.hide_keyboard();
     }
 }
 
@@ -286,8 +300,8 @@ pub(crate) fn pending() -> usize {
 /// One `SDL_TEXTINPUT` event, straight off the wire: [`decode`], then [`queue`]. Called by the
 /// `txt:` remote token (`app/events.rs`), which has the bytes [`encode_event`] built. The event
 /// loop gets its text already decoded (`HostEvent::Text`) and calls [`queue`] itself.
-pub(crate) fn on_event(ev: &[u8]) {
-    queue(decode(ev));
+pub(crate) fn on_event(flavor: plx_shell_sdl::SdlFlavor, ev: &[u8]) {
+    queue(decode(flavor, ev));
 }
 
 /// One committed string, queued for [`drain`] and bounded by [`MAX_PENDING`]. The loop's route for a
@@ -312,8 +326,12 @@ pub(crate) fn queue(s: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plx_shell_sdl::text::TEXT_OFF;
+    use plx_shell_sdl::text::text_off;
+    use plx_shell_sdl::SdlFlavor;
     use std::sync::Mutex;
+
+    /// Both layouts: a commit decodes and queues the same in either.
+    const FLAVORS: [SdlFlavor; 2] = [SdlFlavor::Lg, SdlFlavor::Stock];
 
     /// `STARTED` is a module singleton (and `PENDING` is per thread, but these tests drive both
     /// together), so the tests that drive them must not overlap.
@@ -335,14 +353,16 @@ mod tests {
     #[test]
     fn commits_queue_in_order_and_drain_takes_them_once() {
         let _g = BUF.lock().unwrap_or_else(|e| e.into_inner());
-        PENDING.with(|pending| pending.borrow_mut().clear());
-        on_event(&ev_with(TEXT_OFF, b"wal"));
-        on_event(&ev_with(TEXT_OFF, b"l"));
-        assert_eq!(drain(), ["wal", "l"]);
-        assert!(
-            drain().is_empty(),
-            "a second drain must not re-deliver what the first took"
-        );
+        for flavor in FLAVORS {
+            PENDING.with(|pending| pending.borrow_mut().clear());
+            on_event(flavor, &ev_with(text_off(flavor), b"wal"));
+            on_event(flavor, &ev_with(text_off(flavor), b"l"));
+            assert_eq!(drain(), ["wal", "l"], "{flavor:?}");
+            assert!(
+                drain().is_empty(),
+                "a second drain must not re-deliver what the first took ({flavor:?})"
+            );
+        }
     }
 
     /// An empty commit is dropped rather than queued: see `on_event`.
@@ -350,8 +370,10 @@ mod tests {
     fn an_empty_commit_is_not_queued() {
         let _g = BUF.lock().unwrap_or_else(|e| e.into_inner());
         PENDING.with(|pending| pending.borrow_mut().clear());
-        on_event(&ev_with(TEXT_OFF, b"\0"));
-        on_event(&[0u8; 128]);
+        for flavor in FLAVORS {
+            on_event(flavor, &ev_with(text_off(flavor), b"\0"));
+            on_event(flavor, &[0u8; 128]);
+        }
         assert!(drain().is_empty());
     }
 
@@ -364,9 +386,11 @@ mod tests {
     #[test]
     fn every_thread_drains_only_the_commits_it_queued() {
         plx_base::testrace::race(4, |t| {
+            // Half the threads commit in each layout: the queue is the same either way.
+            let flavor = FLAVORS[t % 2];
             for round in 0..40 {
                 for i in 0..MAX_PENDING + 20 {
-                    on_event(&ev_with(TEXT_OFF, format!("t{t}r{round}i{i}").as_bytes()));
+                    on_event(flavor, &ev_with(text_off(flavor), format!("t{t}r{round}i{i}").as_bytes()));
                 }
                 let got = drain();
                 assert_eq!(got.len(), MAX_PENDING, "round {round}");
@@ -385,12 +409,54 @@ mod tests {
     #[test]
     fn the_pending_buffer_is_bounded() {
         let _g = BUF.lock().unwrap_or_else(|e| e.into_inner());
-        PENDING.with(|pending| pending.borrow_mut().clear());
-        for i in 0..MAX_PENDING + 10 {
-            on_event(&ev_with(TEXT_OFF, format!("{i}").as_bytes()));
+        for flavor in FLAVORS {
+            PENDING.with(|pending| pending.borrow_mut().clear());
+            for i in 0..MAX_PENDING + 10 {
+                on_event(flavor, &ev_with(text_off(flavor), format!("{i}").as_bytes()));
+            }
+            let got = drain();
+            assert_eq!(got.len(), MAX_PENDING, "{flavor:?}");
+            assert_eq!(got.last().unwrap(), &format!("{}", MAX_PENDING + 9), "{flavor:?}");
         }
-        let got = drain();
-        assert_eq!(got.len(), MAX_PENDING);
-        assert_eq!(got.last().unwrap(), &format!("{}", MAX_PENDING + 9));
+    }
+
+    /// **A platform whose surface has no SDL window binds NULL and never reads SDL's focus flag.** The
+    /// Tizen `Surface::window()` is null (W9, D1): `has_focus` answers `None` before it asks SDL
+    /// anything, and `start` logs `focus=?` rather than calling `SDL_GetWindowFlags(NULL)`. (That SDL
+    /// itself takes a NULL window and an uninitialised video is the shell crate's own test,
+    /// `the_real_sdl_answers_a_null_window_with_video_uninitialised`: this module's calls are stubbed under
+    /// test, so only the shell crate can reach the real ones.)
+    /// **The panel is the platform's, not SDL's** (the Tizen report: a field that raised nothing because
+    /// `start` called SDL, which Tizen does not run). A shell that states its own keyboard answers
+    /// `available`, and `start`/`stop` raise and dismiss through it exactly once per edge, however often the
+    /// field asks.
+    #[test]
+    fn the_keyboard_is_raised_and_dismissed_through_the_platforms_shell_once_per_edge() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _g = BUF.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = crate::app::platform::KeyboardShell::default();
+        assert!(available(&shell), "the platform's answer, not SDL's (none on a host)");
+        // SAFETY: the module's own singleton, under its test lock.
+        unsafe { *addr_of_mut!(STARTED) = false };
+        start(&shell);
+        start(&shell);
+        assert_eq!(shell.shows.load(Relaxed), 1, "a raise per edge, not per call");
+        stop(&shell);
+        stop(&shell);
+        assert_eq!(shell.hides.load(Relaxed), 1, "a dismissal per edge");
+        start(&shell);
+        assert_eq!(shell.shows.load(Relaxed), 2, "and it rises again after a dismissal");
+        stop(&shell);
+    }
+
+    #[test]
+    fn a_null_window_has_no_focus_reading_and_asks_sdl_nothing() {
+        let _g = BUF.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the module's own singleton, under its test lock; restored below.
+        let before = unsafe { *addr_of!(WIN) };
+        bind(std::ptr::null_mut());
+        assert_eq!(has_focus(), None);
+        // SAFETY: as above.
+        unsafe { *addr_of_mut!(WIN) = before };
     }
 }

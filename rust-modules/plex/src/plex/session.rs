@@ -637,7 +637,7 @@ pub struct Session {
     /// and display settings, and those settings' frozen top-level keys every profile
     /// falls back to (`trailer_autoplay` among them), `auto_sign_in`,
     /// `last_hero_blur`, `plaintext_consent`, `server_key_pins`, `last_library`,
-    /// `library_sorts`, `track_memory`, `subtitle_offsets`), flattened so the keys sit at the top level of the file under
+    /// `library_sorts`, `track_memory`, `subtitle_offsets`, `recent_channels`), flattened so the keys sit at the top level of the file under
     /// the same keys they always had. Declared before [`Session::extensions`]:
     /// a flattened struct takes its keys first, so the unknown-key map sees only keys nobody models.
     #[serde(flatten)]
@@ -673,8 +673,8 @@ struct CanonicalSessionPreferences {
     // source), so keep this fork-only top-level key here; otherwise a pick would be lost on reload.
     #[serde(default, deserialize_with = "de_soft_rating_source", skip_serializing_if = "is_default_rating_source")]
     rating_source: RatingSource,
-    /// Every flattened preference key (playback and display settings, the A5 rows and the two memory-door
-    /// lists), flattened ahead of `extensions` so a flattened struct takes its keys first and
+    /// Every flattened preference key (playback and display settings, the A5 rows and every memory-door list:
+    /// `track_memory`, `subtitle_offsets`, `recent_channels`), flattened ahead of `extensions` so a flattened struct takes its keys first and
     /// `extensions` still sees only unknown ones.
     #[serde(flatten)]
     prefs: Preferences,
@@ -6400,7 +6400,10 @@ mod audio_enhancements_tests {
                 .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
             let manifest: serde_json::Value = serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
-            let Some(committed) = manifest.pointer("/init/data/session/committed_credentials")
+            // A V6 recording nests the boot session under `session.boot` (`Initial::to_v6_value`).
+            let Some(committed) = manifest
+                .pointer("/init/data/session/committed_credentials")
+                .or_else(|| manifest.pointer("/init/data/session/boot/committed_credentials"))
             else {
                 continue;
             };

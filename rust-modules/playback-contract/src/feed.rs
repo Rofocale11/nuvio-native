@@ -24,6 +24,7 @@
 //! | `load_failed`, `load_timed_out`, `demux_failed`, `demux_io_failed` (10) | one collapsed `runtime_failure` (`play-feed/src/readout.rs`) | **raw**: [`FailureFlags`]; readers test single flags and `live_runtime_failure` re-derives the collapse in media. The player's own notes of one are [`FeedCommand::NoteFailure`]: the flag is written inside the feed and returns through the next sample |
 //! | `duration_ns` (5) | `(d > 0).then_some(d)` | **mapped**, `unwrap_or(0)`: every reader tests `> 0` (`timeline.rs` `from_content_ns`, `pump.rs` `stream_ended` and the `> 0` seek gate, `route_start.rs` `final_report`) or passes it to `report::ended`; the store is 0 or positive (`reset` stores 0), so `<= 0` never carries a meaning `None` loses |
 //! | `dg_http_status` (3), `dg_cb_err_num` (1) | `> 0` and `!= 0` gates | **mapped** in `AttemptFacts`, and **raw** beside the flags ([`FeedRaw::http_status`], [`FeedRaw::cb_err_num`], 0 = none): the failure drains read a flag and its code from ONE sample, and a reload's session reset clears the raw one with the mirror it mirrors |
+//! | `hls_live_stalled` (1) | none | **raw** beside the flags ([`FeedRaw::live_stalled`]): the failure drains read which kind of source failure a flag is from the flag's own sample, and `AttemptFacts` has no member for it |
 //! | `hls_rebuffering` (1), `seen_frame` (1) | plain bool | **mapped** |
 //! | `native_audio_refused`, `decoder_revoked` | one-shot takes | **raw counters** ([`FeedRaw::native_audio_refusals`], [`FeedRaw::decoder_revocations`]): the feed counts each edge, the player's readout holds how many it has taken |
 //! | `file_size`, `applied_rate_permille`, `speed_audio_verdict`, `dg_vpres_ct`, `dg_vpres_gap_sum`, `dg_vpres_gap_ct`, `pts_shift` | no `AttemptFacts` field | **raw**, in [`FeedRaw`]; the three presentation counters are diagnostics only (the heartbeat's liveness line differences two samples: the tick count, and the mean gap as sum over gap count) |
@@ -145,6 +146,18 @@ pub struct DvWithdrawal {
     pub armed_target: Option<i64>,
     /// The landing was an in-place seek of a live Engine.
     pub in_place: bool,
+}
+
+/// The Dolby Vision a video stream carries in its own bitstream when its container has no
+/// configuration record (a remux that dropped it): the profile the stream's RPUs describe and the
+/// base layer's compatibility id, inferred from the stream's transfer. The demuxer reports it once
+/// per open ([`FeedRaw::rpu_dovi`]); the player decides whether to declare it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpuDovi {
+    /// 5 or 8.
+    pub profile: u8,
+    /// 0 for Profile 5, 1 for a PQ (HDR10) base layer, 4 for an HLG one.
+    pub bl_compat: u8,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -527,6 +540,11 @@ pub struct FeedRaw {
     /// The HTTP status of the last failed transport request, 0 = none; loaded like
     /// [`Self::cb_err_num`].
     pub http_status: i32,
+    /// The failure flag beside it is a live playlist that stopped advancing, not a stream that
+    /// could not be read: the demuxer gave up after its no-progress allowance with the playlist
+    /// unchanged. Loaded like [`Self::cb_err_num`] (published before the flag it explains) and
+    /// cleared by the session reset; the open recovery's only use of it is NOT to convert.
+    pub live_stalled: bool,
     /// The codec the file ACTUALLY carries, in the Load-declaration code space, recorded by the
     /// demuxer when it refuses a Load whose bytes disagree with its declared codec (a stale PMS
     /// track list, or a transcode the route described from the source's record); `0` = no
@@ -534,6 +552,9 @@ pub struct FeedRaw {
     /// player's one-shot probe retry is its only consumer, and the session reset clears it.
     pub probe_actual_video: u8,
     pub probe_actual_audio: u8,
+    /// Dolby Vision the demuxer found in the video's RPUs although the container declares none;
+    /// `None` until then, and for every stream with a configuration record.
+    pub rpu_dovi: Option<RpuDovi>,
     /// What the Stats-for-nerds read-out shows of the feed's own mailboxes, from the same sample.
     pub diag: FeedDiag,
     /// The summed length (ms, wrapping) of the gaps between consecutive native presentation
@@ -723,8 +744,8 @@ impl FeedRaw {
         decoder_revocations: 0, native_audio_refusals: 0, file_size: 0,
         applied_rate_permille: crate::RATE_NORMAL, speed_audio_ok: None, vpres_count: 0,
         pts_shift: 0, pipeline_eos: false, seek_landed_epoch: 0, seek_target_ns: None,
-        seek_requeue: SeekRequeue::NONE, cb_err_num: 0, http_status: 0,
-        probe_actual_video: 0, probe_actual_audio: 0,
+        seek_requeue: SeekRequeue::NONE, cb_err_num: 0, http_status: 0, live_stalled: false,
+        probe_actual_video: 0, probe_actual_audio: 0, rpu_dovi: None,
         diag: FeedDiag::IDLE,
         vpres_gap_sum_ms: 0, vpres_gap_count: 0, disp_base: 0, load: LoadRaw::IDLE,
         abr: DemuxAbr::IDLE,

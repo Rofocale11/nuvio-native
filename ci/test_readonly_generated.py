@@ -8,6 +8,11 @@ import unittest
 import readonly_generated as generated
 import readonly_dependencies as dependency
 from machine_readonly import Proof, imports
+# Fork Rofocale11: upstream's certificate enumerates upstream's workspace; this fork's
+# reviewed certificate lives in ci/fork_proofs so upstream's proof files stay byte-identical
+# and stop conflicting on every merge. Route both modules to it before any test runs.
+from fork_proofs import pins as _fork_pins
+_fork_pins.apply(dependency, generated)
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('generated_gate', ROOT / 'ci/check-machine-shape.py')

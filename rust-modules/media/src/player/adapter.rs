@@ -457,6 +457,20 @@ pub struct StartHooks {
 fn inert_sink() -> &'static dyn VideoSink { &NoSink }
 
 /// Common coordinator and main-thread proof, as one owned value (`App.adapters.player`).
+/// **A foreground restore of a URI original** (`player::begin_resume`'s URI branch). A URI original plan installs no
+/// stream URL, so the parked session cannot be reopened from a route: it is re-resolved at the saved position through
+/// `route::restore_uri_original`, which goes through the common request door (`request_play_with_queue`, origin `Resume`; not
+/// `route::retry_current_play`, which is the Retry press's own entry), and the offer that lands opens the driver again.
+/// The machine below holds the request and the answer between the foreground lifecycle (which has no metadata store)
+/// and the frame (which has): `Owed` until the frame takes it, `Flying` while the resolve runs, `Landed` until
+/// `land_resume` hands the lifecycle its answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UriRestore {
+    Owed { resume_ns: i64 },
+    Flying,
+    Landed(crate::player::ResumeOutcome),
+}
+
 pub struct PlayerAdapter {
     /// Proof, held rather than passed: see the module doc. It is a ZST, so this costs nothing and
     /// is what makes `&mut PlayerAdapter` mean "the main thread, exclusively".
@@ -489,6 +503,8 @@ pub struct PlayerAdapter {
     uri_route_attempt: Option<crate::route::RouteStartAttempt>,
     uri_offer_id: Option<crate::route::backend_policy::OfferId>,
     uri_recovery: Option<PendingUriRecovery>,
+    /// A foreground restore's re-resolve of a URI original (see [`UriRestore`]).
+    uri_restore: Option<UriRestore>,
     uri_route_settled: bool,
     uri_stop_requested: bool,
     uri_finalized: bool,
@@ -575,6 +591,7 @@ impl PlayerAdapter {
             uri_route_attempt: None,
             uri_offer_id: None,
             uri_recovery: None,
+            uri_restore: None,
             uri_route_settled: false,
             uri_stop_requested: false,
             uri_finalized: false,
@@ -749,6 +766,19 @@ impl PlayerAdapter {
             return true;
         }
         false
+    }
+
+    /// **A parked URI attempt whose stop was never reported.** A Suspend (the host's terminate arrives as one too) closes the
+    /// native session and leaves the attempt for the foreground restore to re-open, so nothing is live and no route attempt is
+    /// bound, and [`Self::playback_needs_teardown`] reads false; yet the server was told the title was playing and nothing has told
+    /// it otherwise. The attempt is unfinalized, owes its restore, and that restore has not begun (once it has, the retire reports it
+    /// at [`crate::route::restore_uri_original`]). A process exit stops it here, at its own position, through the one stop path.
+    pub fn parked_uri_owes_stop(&self, ps: &crate::route::PlaybackSession) -> bool {
+        !self.uri_finalized
+            && self.uri_route_attempt.is_none()
+            && !self.uri_restore_outstanding()
+            && ps.attempt_view().backend() == Some(super::attempt_view::Backend::Uri)
+            && crate::route::uri_restore_owed(ps)
     }
 
     /// A pending first Play keeps the native pause hold until its exact startup command is
@@ -1139,6 +1169,10 @@ impl PlayerAdapter {
     /// inside (PLX-NATIVE-1Q). Every media-side verb that is not a hook goes through here.
     pub fn display_sink(&self) -> &'static dyn VideoSink { (self.sink)() }
 
+    /// Whether a Load on the composed sink has no video path behind it (the simulator with its clock sink
+    /// off): the application's preview admission asks it without naming the sink.
+    pub fn lacks_video_path(&self) -> bool { self.display_sink().lacks_video_path() }
+
     /// Escrow an exact resolved URL and its source-specific native track map. The route owner
     /// still has to supply a qualified offer and send an addressed Start through the runner.
     pub fn stage_uri_source(&mut self, attempt: AttemptId, source: UriSource)
@@ -1255,6 +1289,54 @@ impl PlayerAdapter {
         self.refused_uri_subtitle = None;
     }
 
+    /// A foreground restore owes a re-resolve of the parked URI original at `resume_ns` (the Sans-IO request: the app's
+    /// frame, which holds the metadata store, performs it with [`Self::take_uri_restore_request`]).
+    pub(super) fn owe_uri_restore(&mut self, resume_ns: i64) {
+        self.uri_restore = Some(UriRestore::Owed { resume_ns });
+    }
+
+    /// The restore's re-resolve request, once: the state moves to `Flying` as it is handed out.
+    pub fn take_uri_restore_request(&mut self) -> Option<i64> {
+        match self.uri_restore {
+            Some(UriRestore::Owed { resume_ns }) => {
+                self.uri_restore = Some(UriRestore::Flying);
+                Some(resume_ns)
+            }
+            _ => None,
+        }
+    }
+
+    /// The re-resolve is in flight: its landing is owed to [`crate::player::pump_uri_restore`].
+    pub fn uri_restore_flying(&self) -> bool {
+        self.uri_restore == Some(UriRestore::Flying)
+    }
+
+    /// A restore is owed or in flight: the foreground machine keeps waiting on it, and the play it started is not a
+    /// successor that retires the machine.
+    pub fn uri_restore_outstanding(&self) -> bool {
+        matches!(self.uri_restore, Some(UriRestore::Owed { .. } | UriRestore::Flying))
+    }
+
+    pub(super) fn settle_uri_restore(&mut self, outcome: crate::player::ResumeOutcome) {
+        self.uri_restore = Some(UriRestore::Landed(outcome));
+    }
+
+    /// The restore's answer, once, when it has landed.
+    pub(super) fn take_uri_restore_landing(&mut self) -> Option<crate::player::ResumeOutcome> {
+        match self.uri_restore {
+            Some(UriRestore::Landed(outcome)) => {
+                self.uri_restore = None;
+                Some(outcome)
+            }
+            _ => None,
+        }
+    }
+
+    /// Nothing is owed any more (a flight of the ordinary kind took over, or the restore was withdrawn).
+    pub(super) fn clear_uri_restore(&mut self) {
+        self.uri_restore = None;
+    }
+
     pub fn take_released_uri_recovery(&mut self) -> Option<UriRecoveryNotice> {
         if self.uri_recovery.is_some_and(|pending| pending.released) {
             self.uri_recovery.take().map(|pending| pending.notice)
@@ -1299,6 +1381,9 @@ impl PlayerAdapter {
             attempt: route_attempt, offer_id, phase, known_position_ns, viewer_paused,
         }, released: false });
     }
+
+    /// The attempt's final `stopped` has not been handed over yet ([`Self::finalize_uri_once`] has not run).
+    pub(super) fn uri_final_report_owed(&self) -> bool { !self.uri_finalized }
 
     pub(super) fn finalize_uri_once(&mut self) -> bool {
         if self.uri_finalized { false } else {
@@ -1579,6 +1664,9 @@ impl PlayerAdapter {
             plx_playback_contract::Observation::Failed(failure) => {
                 facts.status = Some(plx_playback_contract::readout::PlaybackState::Error);
                 facts.runtime_failure = Some(match failure {
+                    // A timeout of a title that was playing is a stall (a frozen picture), not a load that never answered.
+                    Failure::TimedOut if facts.playing_observed == Some(true) =>
+                        plx_playback_contract::readout::RuntimeFailure::PlaybackInterrupted,
                     Failure::TimedOut => plx_playback_contract::readout::RuntimeFailure::LoadTimeout,
                     Failure::ReleaseUncertain => plx_playback_contract::readout::RuntimeFailure::ReleaseTimeout,
                     Failure::Refused | Failure::Unsupported | Failure::Backend =>
@@ -1780,7 +1868,7 @@ impl PlayerAdapter {
         changed
     }
 
-    /// Test-only access to the physical session for the existing hostsim rigs.
+    /// Test-only access to the physical session for the existing host-sink rigs.
     #[cfg(test)]
     #[inline]
     pub fn engine(&mut self) -> Option<std::cell::RefMut<'_, Engine>> {
@@ -2049,7 +2137,7 @@ impl PlayerAdapter {
     }
 
     /// Address one Load verdict without handing route state to the native worker.
-    #[cfg(all(test, feature = "hostsim"))]
+    #[cfg(test)]
     pub(super) fn load_receipt(&mut self, attempt: crate::route::RouteStartAttempt, native_epoch: u32,
         _trace_generation: u32) -> plx_play_feed::feed_resources::LoadReceipt {
         self.probe().resources(|resources|
@@ -2057,7 +2145,7 @@ impl PlayerAdapter {
     }
 
     /// A refused thread spawn cannot return a receipt; retire its mapping immediately.
-    #[cfg(all(test, feature = "hostsim"))]
+    #[cfg(test)]
     pub(super) fn cancel_load_receipt(&mut self, token: u64) {
         self.probe().resources(|resources| resources.cancel_load_receipt(token));
     }
@@ -2356,6 +2444,31 @@ mod uri_stop_refusal_tests {
             "a Playing report after a lost bufferingEnd ends the rebuffer");
     }
 
+    /// **A stall of a URI title that was playing reads as "stopped", not as a load that never answered.** The driver reports a
+    /// stalled picture as `Failed(TimedOut)` (the same observation as a start that never completed), and the read-out used to map it
+    /// to `LoadTimeout` whichever phase it came in: "the television did not answer in time" about a title the viewer had been watching.
+    /// After `Playing` was observed it is `PlaybackInterrupted`; before it, a start that never completed, it stays `LoadTimeout`.
+    #[test]
+    fn a_uri_stall_after_playing_reads_as_stopped_and_a_start_that_never_completed_as_a_timeout() {
+        use plx_playback_contract::readout::RuntimeFailure as R;
+        let _serial = plx_base::testlock::serial();
+        let mut adapter = PlayerAdapter::new_fed(unsafe { MainThread::assume() });
+        let route = crate::route::RouteStartAttempt::fixture();
+        adapter.uri_route_attempt = Some(route);
+        let attempt = route.contract_id();
+        let failed = Observation::Failed(Failure::TimedOut);
+        let mut ps = crate::route::PlaybackSession::default();
+        ps.begin_attempt_view(route, super::super::attempt_view::Backend::Uri);
+        adapter.publish_uri_observation(&mut ps, attempt, failed);
+        assert_eq!(ps.attempt_view().facts().runtime_failure, Some(R::LoadTimeout), "a start that never completed");
+        let mut ps = crate::route::PlaybackSession::default();
+        ps.begin_attempt_view(route, super::super::attempt_view::Backend::Uri);
+        adapter.publish_uri_observation(&mut ps, attempt, Observation::Playback(Observed {
+            value: Playback::Playing, from: EvidenceSource::BackendReport }));
+        adapter.publish_uri_observation(&mut ps, attempt, failed);
+        assert_eq!(ps.attempt_view().facts().runtime_failure, Some(R::PlaybackInterrupted), "a stall of a playing title");
+    }
+
     #[test]
     fn unavailable_uri_driver_cannot_begin_release_or_queue_a_successor() {
         let _serial = plx_base::testlock::serial();
@@ -2399,7 +2512,7 @@ mod uri_stop_refusal_tests {
     }
 }
 
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 mod load_outcome_tests {
     use plx_play_feed::shared::FEED_TX;
     use super::*;

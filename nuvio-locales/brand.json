@@ -202,7 +202,8 @@
       "hu": "A videó lejátszásához átkódolás kell.",
       "ru": "Нужно преобразование видео.",
       "pl": "Ten film wymaga konwersji.",
-      "nl": "Deze video moet worden omgezet."
+      "nl": "Deze video moet worden omgezet.",
+      "hr": "Video zahtijeva konverziju."
     },
     "widgets.tracks.enh_note_burn": "Subtitles stay on. The picture may look a little softer.",
     "widgets.tracks.enh_reason_not_analyzed": "Not ready for this video yet.",
@@ -220,7 +221,8 @@
       "it": "Tieni {key} per chiudere e riaprire l’app.",
       "ru": "Удерживайте {key} для выхода и повторного входа.",
       "pl": "Przytrzymaj {key}, aby zamknąć i otworzyć program.",
-      "nl": "Houd {key} ingedrukt om de app te herstarten."
+      "nl": "Houd {key} ingedrukt om de app te herstarten.",
+      "hr": "Držite {key} za ponovno pokretanje."
     },
     "browse.auth.plaintext_remote": {
       "fr": "Nuvio n’a répondu que sans chiffrement, depuis un autre réseau. Vérifiez l’accès à distance."
@@ -234,67 +236,67 @@
       "description": "The armed Delete row asks for a second press before removing a Nuvio profile.",
       "en": "Press again", "es": "Pulsa de nuevo", "be": "Націсніце яшчэ раз",
       "ca": "Press again", "fr": "Press again", "it": "Press again", "pt": "Press again",
-      "de": "Press again", "hu": "Press again", "ru": "Press again", "pl": "Press again", "nl": "Press again"
+      "de": "Press again", "hu": "Press again", "ru": "Press again", "pl": "Press again", "nl": "Press again", "hr": "Press again"
     },
     "nuvio.profiles.detail": {
       "description": "Settings row sentence and page subtitle for Nuvio Native profile management: what the page is for.",
       "en": "Add, rename, lock and switch profiles", "es": "Añade, renombra, bloquea y cambia de perfil", "be": "Дадайце, перайначуйце, заблакуйце і змяніце профілі",
       "ca": "Add, rename, lock and switch profiles", "fr": "Add, rename, lock and switch profiles", "it": "Add, rename, lock and switch profiles", "pt": "Add, rename, lock and switch profiles",
-      "de": "Add, rename, lock and switch profiles", "hu": "Add, rename, lock and switch profiles", "ru": "Add, rename, lock and switch profiles", "pl": "Add, rename, lock and switch profiles", "nl": "Add, rename, lock and switch profiles"
+      "de": "Add, rename, lock and switch profiles", "hu": "Add, rename, lock and switch profiles", "ru": "Add, rename, lock and switch profiles", "pl": "Add, rename, lock and switch profiles", "nl": "Add, rename, lock and switch profiles", "hr": "Add, rename, lock and switch profiles"
     },
     "nuvio.profiles.add": {
       "description": "Nuvio profile management row.",
       "en": "Add profile", "es": "Añadir perfil", "be": "Дадаць профіль",
       "ca": "Add profile", "fr": "Add profile", "it": "Add profile", "pt": "Add profile",
-      "de": "Add profile", "hu": "Add profile", "ru": "Add profile", "pl": "Add profile", "nl": "Add profile"
+      "de": "Add profile", "hu": "Add profile", "ru": "Add profile", "pl": "Add profile", "nl": "Add profile", "hr": "Add profile"
     },
     "nuvio.profiles.rename": {
       "description": "Nuvio profile management row: edit the selected profile's name.",
       "en": "Rename", "es": "Renombrar", "be": "Перайменаваць",
       "ca": "Rename", "fr": "Rename", "it": "Rename", "pt": "Rename",
-      "de": "Rename", "hu": "Rename", "ru": "Rename", "pl": "Rename", "nl": "Rename"
+      "de": "Rename", "hu": "Rename", "ru": "Rename", "pl": "Rename", "nl": "Rename", "hr": "Rename"
     },
     "nuvio.profiles.avatar": {
       "description": "Nuvio profile management row: cycle the selected profile's avatar.",
       "en": "Avatar", "es": "Avatar", "be": "Аватар",
       "ca": "Avatar", "fr": "Avatar", "it": "Avatar", "pt": "Avatar",
-      "de": "Avatar", "hu": "Avatar", "ru": "Avatar", "pl": "Avatar", "nl": "Avatar"
+      "de": "Avatar", "hu": "Avatar", "ru": "Avatar", "pl": "Avatar", "nl": "Avatar", "hr": "Avatar"
     },
     "nuvio.profiles.primary": {
       "description": "Nuvio profile management toggle: this profile shares the main profile's addons.",
       "en": "Share main addons", "es": "Compartir addons principales", "be": "Выкарыстоўваць асноўныя дадаткі",
       "ca": "Share main addons", "fr": "Share main addons", "it": "Share main addons", "pt": "Share main addons",
-      "de": "Share main addons", "hu": "Share main addons", "ru": "Share main addons", "pl": "Share main addons", "nl": "Share main addons"
+      "de": "Share main addons", "hu": "Share main addons", "ru": "Share main addons", "pl": "Share main addons", "nl": "Share main addons", "hr": "Share main addons"
     },
     "nuvio.profiles.pin_set": {
       "description": "Nuvio profile management row: create or change this TV's PIN for the selected profile.",
       "en": "Set TV PIN", "es": "Establecer PIN de TV", "be": "Устанавіць PIN ТБ",
       "ca": "Set TV PIN", "fr": "Set TV PIN", "it": "Set TV PIN", "pt": "Set TV PIN",
-      "de": "Set TV PIN", "hu": "Set TV PIN", "ru": "Set TV PIN", "pl": "Set TV PIN", "nl": "Set TV PIN"
+      "de": "Set TV PIN", "hu": "Set TV PIN", "ru": "Set TV PIN", "pl": "Set TV PIN", "nl": "Set TV PIN", "hr": "Set TV PIN"
     },
     "nuvio.profiles.pin_clear": {
       "description": "Nuvio profile management row: remove this TV's PIN for the selected profile.",
       "en": "Clear TV PIN", "es": "Quitar PIN de TV", "be": "Выдаліць PIN ТБ",
       "ca": "Clear TV PIN", "fr": "Clear TV PIN", "it": "Clear TV PIN", "pt": "Clear TV PIN",
-      "de": "Clear TV PIN", "hu": "Clear TV PIN", "ru": "Clear TV PIN", "pl": "Clear TV PIN", "nl": "Clear TV PIN"
+      "de": "Clear TV PIN", "hu": "Clear TV PIN", "ru": "Clear TV PIN", "pl": "Clear TV PIN", "nl": "Clear TV PIN", "hr": "Clear TV PIN"
     },
     "nuvio.profiles.pin_current": {
       "description": "Prompt while a locked TV profile asks for its current PIN before a change.",
       "en": "Enter current PIN", "es": "Introduce el PIN actual", "be": "Увядзіце цяперашні PIN",
       "ca": "Enter current PIN", "fr": "Enter current PIN", "it": "Enter current PIN", "pt": "Enter current PIN",
-      "de": "Enter current PIN", "hu": "Enter current PIN", "ru": "Enter current PIN", "pl": "Enter current PIN", "nl": "Enter current PIN"
+      "de": "Enter current PIN", "hu": "Enter current PIN", "ru": "Enter current PIN", "pl": "Enter current PIN", "nl": "Enter current PIN", "hr": "Enter current PIN"
     },
     "nuvio.profiles.forgot_pin": {
       "description": "Nuvio profile management row: recover a forgotten TV PIN by approving the QR sign-in on the owner's phone.",
       "en": "Forgot PIN? Scan QR", "es": "¿Olvidó el PIN? Escanee QR", "be": "Забылі PIN? Сканіруйце QR",
       "ca": "Forgot PIN? Scan QR", "fr": "Forgot PIN? Scan QR", "it": "Forgot PIN? Scan QR", "pt": "Forgot PIN? Scan QR",
-      "de": "Forgot PIN? Scan QR", "hu": "Forgot PIN? Scan QR", "ru": "Forgot PIN? Scan QR", "pl": "Forgot PIN? Scan QR", "nl": "Forgot PIN? Scan QR"
+      "de": "Forgot PIN? Scan QR", "hu": "Forgot PIN? Scan QR", "ru": "Forgot PIN? Scan QR", "pl": "Forgot PIN? Scan QR", "nl": "Forgot PIN? Scan QR", "hr": "Forgot PIN? Scan QR"
     },
     "nuvio.profiles.pin_confirm": {
       "description": "Prompt for the second entry of a new TV PIN.",
       "en": "Enter new PIN again", "es": "Introduce el PIN nuevo otra vez", "be": "Увядзіце новы PIN яшчэ раз",
       "ca": "Enter new PIN again", "fr": "Enter new PIN again", "it": "Enter new PIN again", "pt": "Enter new PIN again",
-      "de": "Enter new PIN again", "hu": "Enter new PIN again", "ru": "Enter new PIN again", "pl": "Enter new PIN again", "nl": "Enter new PIN again"
+      "de": "Enter new PIN again", "hu": "Enter new PIN again", "ru": "Enter new PIN again", "pl": "Enter new PIN again", "nl": "Enter new PIN again", "hr": "Enter new PIN again"
     },
     "browse.list.add": {
       "description": "Nuvio account My List action/status.",
@@ -309,7 +311,7 @@
       "hu": "Add to My List",
       "ru": "Add to My List",
       "pl": "Add to My List",
-      "nl": "Add to My List"
+      "nl": "Add to My List", "hr": "Add to My List"
     },
     "browse.list.remove": {
       "description": "Nuvio account My List action/status.",
@@ -324,7 +326,7 @@
       "hu": "Remove from My List",
       "ru": "Remove from My List",
       "pl": "Remove from My List",
-      "nl": "Remove from My List"
+      "nl": "Remove from My List", "hr": "Remove from My List"
     },
     "browse.list.retry": {
       "description": "Nuvio account My List action/status.",
@@ -339,7 +341,7 @@
       "hu": "Retry My List",
       "ru": "Retry My List",
       "pl": "Retry My List",
-      "nl": "Retry My List"
+      "nl": "Retry My List", "hr": "Retry My List"
     },
     "browse.list.saving": {
       "description": "Nuvio account My List action/status.",
@@ -354,7 +356,7 @@
       "hu": "Syncing My List…",
       "ru": "Syncing My List…",
       "pl": "Syncing My List…",
-      "nl": "Syncing My List…"
+      "nl": "Syncing My List…", "hr": "Syncing My List…"
     },
     "browse.list.signin": {
       "description": "Nuvio account My List action/status.",
@@ -369,7 +371,7 @@
       "hu": "Sign in for My List",
       "ru": "Sign in for My List",
       "pl": "Sign in for My List",
-      "nl": "Sign in for My List"
+      "nl": "Sign in for My List", "hr": "Sign in for My List"
     },
     "browse.streams.empty": {
       "description": "Addon stream picker status",
@@ -384,7 +386,7 @@
       "hu": "No playable streams found.",
       "ru": "No playable streams found.",
       "pl": "No playable streams found.",
-      "nl": "No playable streams found."
+      "nl": "No playable streams found.", "hr": "No playable streams found."
     },
     "browse.streams.failed": {
       "description": "Addon stream picker status",
@@ -399,7 +401,7 @@
       "hu": "Couldn’t load streams. Close and try again.",
       "ru": "Couldn’t load streams. Close and try again.",
       "pl": "Couldn’t load streams. Close and try again.",
-      "nl": "Couldn’t load streams. Close and try again."
+      "nl": "Couldn’t load streams. Close and try again.", "hr": "Couldn’t load streams. Close and try again."
     },
     "browse.streams.loading": {
       "description": "Addon stream picker status",
@@ -414,7 +416,7 @@
       "hu": "Finding streams…",
       "ru": "Finding streams…",
       "pl": "Finding streams…",
-      "nl": "Finding streams…"
+      "nl": "Finding streams…", "hr": "Finding streams…"
     },
     "browse.streams.other": {
       "description": "Fallback group name for streams whose addon returned no name",
@@ -429,7 +431,7 @@
       "hu": "Other sources",
       "ru": "Other sources",
       "pl": "Other sources",
-      "nl": "Other sources"
+      "nl": "Other sources", "hr": "Other sources"
     },
     "library_header.catalogs": {
       "description": "Library header control: opens the menu of addon catalogs this library can list (Netflix Movies, Top Rated, ...). It is the label alone — the menu’s check marks the catalog in force — so keep it to one short word.",
@@ -444,7 +446,7 @@
       "hu": "Katalógusok",
       "ru": "Catalogs",
       "pl": "Catalogs",
-      "nl": "Catalogs"
+      "nl": "Catalogs", "hr": "Catalogs"
     },
     "settings.addons.detail": {
       "description": "Settings, account, onboarding or privacy UI: settings.addons.detail",
@@ -459,7 +461,7 @@
       "hu": "Enable or disable installed addons for this session",
       "ru": "Enable or disable installed addons for this session",
       "pl": "Enable or disable installed addons for this session",
-      "nl": "Enable or disable installed addons for this session"
+      "nl": "Enable or disable installed addons for this session", "hr": "Enable or disable installed addons for this session"
     },
     "settings.addons.section": {
       "description": "Settings, account, onboarding or privacy UI: settings.addons.section",
@@ -474,7 +476,7 @@
       "hu": "Addons",
       "ru": "Addons",
       "pl": "Addons",
-      "nl": "Addons"
+      "nl": "Addons", "hr": "Addons"
     },
     "settings.addons.title": {
       "description": "Settings, account, onboarding or privacy UI: settings.addons.title",
@@ -489,7 +491,7 @@
       "hu": "Addons",
       "ru": "Addons",
       "pl": "Addons",
-      "nl": "Addons"
+      "nl": "Addons", "hr": "Addons"
     },
     "settings.playback.p2p": {
       "description": "Settings > Playback section heading: the peer-to-peer (torrent) streaming settings.",
@@ -504,7 +506,7 @@
       "hu": "P2P Streaming",
       "ru": "P2P Streaming",
       "pl": "P2P Streaming",
-      "nl": "P2P Streaming"
+      "nl": "P2P Streaming", "hr": "P2P Streaming"
     },
     "settings.playback.p2p_enable": {
       "description": "Settings > Playback toggle: whether torrent streams may be offered in the Source Picker.",
@@ -519,7 +521,7 @@
       "hu": "Enable P2P",
       "ru": "Enable P2P",
       "pl": "Enable P2P",
-      "nl": "Enable P2P"
+      "nl": "Enable P2P", "hr": "Enable P2P"
     },
     "settings.playback.p2p_enable.detail": {
       "description": "Settings > Playback: what the Enable P2P toggle does.",
@@ -534,7 +536,7 @@
       "hu": "Offer torrents in the Source Picker.",
       "ru": "Offer torrents in the Source Picker.",
       "pl": "Offer torrents in the Source Picker.",
-      "nl": "Offer torrents in the Source Picker."
+      "nl": "Offer torrents in the Source Picker.", "hr": "Offer torrents in the Source Picker."
     },
     "settings.playback.p2p_off": {
       "description": "Settings > Playback read-out for the P2P switch when it is off.",
@@ -549,7 +551,7 @@
       "hu": "Off",
       "ru": "Off",
       "pl": "Off",
-      "nl": "Off"
+      "nl": "Off", "hr": "Off"
     },
     "settings.playback.p2p_on": {
       "description": "Settings > Playback read-out for the P2P switch when it is on.",
@@ -564,7 +566,7 @@
       "hu": "On",
       "ru": "On",
       "pl": "On",
-      "nl": "On"
+      "nl": "On", "hr": "On"
     },
     "settings.ratings.copy": {
       "description": "Nuvio rating provider preference.",
@@ -579,7 +581,7 @@
       "hu": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
       "ru": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
       "pl": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.",
-      "nl": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon."
+      "nl": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon.", "hr": "Posters use BetterPosters with Rotten Tomatoes scores. This setting changes detail scores when supplied by your metadata addon."
     },
     "settings.ratings.imdb": {
       "description": "Rating provider brand.",
@@ -594,7 +596,7 @@
       "hu": "IMDb",
       "ru": "IMDb",
       "pl": "IMDb",
-      "nl": "IMDb"
+      "nl": "IMDb", "hr": "IMDb"
     },
     "settings.ratings.title": {
       "description": "Nuvio rating provider preference.",
@@ -609,7 +611,7 @@
       "hu": "Rating source",
       "ru": "Rating source",
       "pl": "Rating source",
-      "nl": "Rating source"
+      "nl": "Rating source", "hr": "Rating source"
     },
     "settings.ratings.tomatoes": {
       "description": "Rating provider brand.",
@@ -624,7 +626,7 @@
       "hu": "Rotten Tomatoes",
       "ru": "Rotten Tomatoes",
       "pl": "Rotten Tomatoes",
-      "nl": "Rotten Tomatoes"
+      "nl": "Rotten Tomatoes", "hr": "Rotten Tomatoes"
     }
   }
 }

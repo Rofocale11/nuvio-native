@@ -129,7 +129,7 @@ board `K8LPN_DVB`) and confirmed playback of a probed addon stream. The event lo
 shows the probe (then `ff::probe`, now `plx_nuvio_probe`) reporting `hevc 3840x2160`,
 a DIRECT PLAY decision, `SMP Load ok=1`, the exported window bound to the video plane,
 `feed: presented`, `timeline playing` advancing for ~135 s, and a clean stop with the
-callback gate reporting `dropped=0`. See `docs/nuvio/MERGE-AUDIT.md` for the exact
+callback gate reporting `dropped=0`. See `docs/nuvio/MERGE-AUDIT-HISTORY.md` for the exact
 evidence and its scope (HDR10, not DV P8; no seek/resume cases in this run). At that
 point the extraction itself still needed a sim probe and one TV playback run; later
 debug and stable installs shipped it and the owner confirmed the current stable build

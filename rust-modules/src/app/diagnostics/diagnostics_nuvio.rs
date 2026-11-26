@@ -8,7 +8,7 @@
 //! for a link — instead of inert placeholders. `abr_rows` and the controller's own rows stay in the
 //! parent and are called from here, so an upstream merge of that code does not conflict.
 //!
-//! Recorded in `docs/nuvio/MERGE-AUDIT.md`.
+//! Recorded in `docs/nuvio/MERGE-AUDIT-HISTORY.md`.
 
 use plx_media::player::Diag;
 use plx_media::route::PlaybackSession;

@@ -461,7 +461,7 @@ unsafe fn copy_target(vw: c_int, vh: c_int) -> c_uint {
 /// One GL blend factor the simulator's compositor model uses: the data the GL call
 /// ([`UnderBlend::gl`]) and the host test's model ([`UnderBlend::apply`]) both read, so the test
 /// checks the factors the simulator actually sets.
-#[cfg(any(test, feature = "hostsim"))]
+#[cfg(any(test, feature = "sim"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendFactor {
     One,
@@ -469,7 +469,7 @@ pub enum BlendFactor {
     OneMinusDstAlpha,
 }
 
-#[cfg(any(test, feature = "hostsim"))]
+#[cfg(any(test, feature = "sim"))]
 impl BlendFactor {
     /// The `GLenum`.
     pub const fn gl(self) -> c_uint {
@@ -491,14 +491,14 @@ impl BlendFactor {
 }
 
 /// A `glBlendFuncSeparate` as `(source, destination)` factors for colour and for alpha.
-#[cfg(any(test, feature = "hostsim"))]
+#[cfg(any(test, feature = "sim"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnderBlend {
     pub rgb: (BlendFactor, BlendFactor),
     pub alpha: (BlendFactor, BlendFactor),
 }
 
-#[cfg(any(test, feature = "hostsim"))]
+#[cfg(any(test, feature = "sim"))]
 impl UnderBlend {
     /// The four `glBlendFuncSeparate` arguments.
     pub const fn gl(self) -> [c_uint; 4] {
@@ -525,7 +525,7 @@ impl UnderBlend {
 /// not what the frame was meant to show: a premultiplied pixel it is given comes out multiplied by its
 /// own alpha, which is exactly the fault the pass exists to remove, so the simulator shows the bug
 /// without the pass and the fix with it.
-#[cfg(any(test, feature = "hostsim"))]
+#[cfg(any(test, feature = "sim"))]
 pub const UNDER: UnderBlend = UnderBlend {
     rgb: (BlendFactor::OneMinusDstAlpha, BlendFactor::DstAlpha),
     alpha: (BlendFactor::OneMinusDstAlpha, BlendFactor::One),
@@ -1061,7 +1061,31 @@ mod tests {
         assert!(fs.contains("#define PLX_BEHIND gl_LastFragData[0]"));
         assert!(fs.contains("#extension GL_ARM_shader_framebuffer_fetch : require"));
         assert!(fs.contains("#extension GL_EXT_shader_framebuffer_fetch : require"));
-        assert!(fs.contains("texture2D(u_tex, v_uv)"), "the copy variant samples its copy");
+        assert!(!fs.contains("texture2D"), "the fetch file has no copy branch; that program is its own file");
+        let copy = include_str!("../shaders/fs_straighten_copy.frag");
+        assert!(copy.contains("texture2D(u_tex, v_uv)"), "the copy variant samples its copy");
+    }
+
+    /// **The copy program has no preprocessor directive, and its arithmetic is the fetch file's.**
+    /// YaGL (the Tizen emulator's GLES2) rejected the one shared source's copy variant at its `precision`
+    /// statement ("0:37(1) syntax error, unexpected NEW_IDENTIFIER"), the suspect being the `#extension`
+    /// lines of the branches that variant does not take, so the copy variant is a file with none. The
+    /// two files must not drift: the lines from `void main` on are equal but for the one line that
+    /// reads the pixel.
+    #[test]
+    fn the_copy_program_has_no_directive_and_the_fetch_files_arithmetic() {
+        let fetch = include_str!("../shaders/fs_straighten.frag");
+        let copy = include_str!("../shaders/fs_straighten_copy.frag");
+        for (n, line) in copy.lines().enumerate() {
+            assert!(!line.trim_start().starts_with('#'), "fs_straighten_copy.frag:{}: a directive: {line}", n + 1);
+        }
+        let arithmetic = |src: &str| -> Vec<String> {
+            let body = &src[src.find("void main(){").expect("main")..];
+            body.lines().filter(|l| !l.contains("highp vec4 c =")).map(str::to_string).collect()
+        };
+        assert_eq!(arithmetic(fetch), arithmetic(copy), "the two sources compute the same thing");
+        let code = copy.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains("precision mediump float;\nvarying highp vec2 v_uv;\nuniform sampler2D u_tex;\n"));
     }
 
     // ---- the extent ledger ---------------------------------------------------------------------------

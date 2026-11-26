@@ -241,12 +241,13 @@ const FS_TEX_RC: &CStr = glsl_rclip!("shaders/fs_tex.frag");
 const VS_ART_SCRIM: &CStr = glsl!("shaders/vs_art_scrim.vert");
 const FS_ART_SCRIM: &CStr = glsl!("shaders/fs_art_scrim.frag");
 /// The straighten pass (`gfx/straighten.rs`): one vertex shader that stretches the unit quad over a box
-/// of the viewport and one fragment source in three variants, picked by a `#define` prefix. The fetch variants read the frame in place; the
-/// copy variant samples a copy of it.
+/// of the viewport and two fragment sources in three programs. The fetch programs are one source picked by a
+/// `#define` prefix and read the frame in place; the copy program is a source of its own with no directive
+/// (`fs_straighten_copy.frag` says why) and samples a copy of the frame.
 const VS_STRAIGHTEN: &CStr = glsl!("shaders/vs_straighten.vert");
 const FS_STRAIGHTEN_ARM: &CStr = glsl!("shaders/fs_straighten.frag", "#define PLX_STRAIGHTEN_ARM\n");
 const FS_STRAIGHTEN_EXT: &CStr = glsl!("shaders/fs_straighten.frag", "#define PLX_STRAIGHTEN_EXT\n");
-const FS_STRAIGHTEN_COPY: &CStr = glsl!("shaders/fs_straighten.frag");
+const FS_STRAIGHTEN_COPY: &CStr = glsl!("shaders/fs_straighten_copy.frag");
 const GL_VERTEX_SHADER: c_uint = 0x8B31;
 const GL_FRAGMENT_SHADER: c_uint = 0x8B30;
 const GL_COMPILE_STATUS: c_uint = 0x8B81;
@@ -1180,10 +1181,11 @@ impl ScrimLoc {
 /// desktop-GL webOS, a Mesa GLES2 box, or anything else — there is one arm, so nothing can rot.
 /// Is this context an OpenGL **ES** driver, asked of the driver once?
 ///
-/// Hoisted out of `glsl_preamble` so the two GL-flavour adaptations cannot disagree. They very
-/// nearly did: the preamble probes, while `bind_core_profile_vao` trusted `cfg!(hostsim)` — so a
+/// Hoisted out of `glsl_preamble` so the GL-flavour adaptations cannot disagree. They very
+/// nearly did: the preamble probes, while the desktop's vertex-array bind trusted a build flag — so a
 /// host build against a Mesa GLES2 driver (a Pi, a Linux VM) would have bound a VAO into a context
-/// that has none *while* compiling ES shaders. A nonsense state that compiles clean.
+/// that has none *while* compiling ES shaders. A nonsense state that compiles clean. (The desktop
+/// platform's bind now asks the driver the same question itself.)
 fn gl_is_es() -> bool {
     use std::sync::OnceLock;
     static ES: OnceLock<bool> = OnceLock::new();
@@ -1215,7 +1217,7 @@ fn glsl_preamble(ty: c_uint) -> &'static CStr {
 /// (`surface::render_scale`, simulator only), so every rounded corner would come out `n` times
 /// softer than the render it sits in. Narrow exactly that ramp to one physical pixel. `None` —
 /// the source untouched — at scale 1, so the default simulator compiles what the television does.
-#[cfg(feature = "hostsim")]
+#[cfg(feature = "sim")]
 unsafe fn supersample_aa(src: *const c_char) -> Option<std::ffi::CString> {
     let n = plx_base::surface::render_scale();
     if n <= 1 {
@@ -1282,9 +1284,9 @@ fn try_compile(ty: c_uint, src: *const c_char) -> Option<c_uint> {
         let s = glCreateShader(ty);
         // Two source strings rather than a concatenation: GL joins them itself, so the preamble
         // needs no allocation and the original `&CStr` sources stay untouched.
-        #[cfg(feature = "hostsim")]
+        #[cfg(feature = "sim")]
         let supersampled = supersample_aa(src);
-        #[cfg(feature = "hostsim")]
+        #[cfg(feature = "sim")]
         let src = supersampled.as_ref().map_or(src, |c| c.as_ptr());
         let srcs: [*const c_char; 2] = [glsl_preamble(ty).as_ptr(), src];
         glShaderSource(s, 2, srcs.as_ptr(), std::ptr::null());
@@ -1466,47 +1468,14 @@ fn field_mesh() -> Vec<f32> {
     v
 }
 
-/// Bind the one vertex array object a desktop core profile requires.
-///
-/// **GLES2 has no VAOs and a core profile has no DEFAULT one**, and the difference is silent: with
-/// VAO 0 bound, `glVertexAttribPointer` and `glDrawArrays` raise `GL_INVALID_OPERATION` and draw
-/// nothing at all. `glClear` is unaffected, so the symptom is a window painted the clear colour and
-/// a completely empty interface — which is exactly what the first simulator screenshots were, at
-/// every frame sampled.
-///
-/// One VAO for the process is enough and is not a simplification: this renderer has a single
-/// attribute layout — attribute 0, the shared unit quad in one static VBO, set up immediately
-/// below and never rebound. There is nothing for a second VAO to describe.
-///
-/// `#[cfg]` rather than a runtime check because these two entry points do not EXIST in GLES2; the
-/// television's libGLESv2 exports neither, so merely naming them in the shared `extern` block
-/// would be a link-time undefined symbol on the device.
-#[cfg(feature = "hostsim")]
-fn bind_core_profile_vao() {
-    extern "C" {
-        fn glGenVertexArrays(n: c_int, arrays: *mut c_uint);
-        fn glBindVertexArray(array: c_uint);
-    }
-    // A hostsim build is not necessarily a core profile — Mesa GLES2 exists on desktops too, and
-    // there VAO 0 is legal and these entry points are absent. Ask the driver, like the preamble.
-    if gl_is_es() {
-        return;
-    }
-    unsafe {
-        let mut vao: c_uint = 0;
-        glGenVertexArrays(1, &mut vao);
-        glBindVertexArray(vao);
-    }
-}
-
 pub fn init_gl() -> Result<(), GfxFault> {
     unsafe {
         WARM_TARGET = None;
-        // Before any buffer or attribute state is touched — in a core profile the calls below are
-        // errors without it.
-        #[cfg(feature = "hostsim")]
-        bind_core_profile_vao();
-
+        // A desktop core profile needs a vertex array object bound before any buffer or attribute state
+        // is touched, and the platform that links desktop GL binds it: the shell crate ran the platform's
+        // `after_context` step right behind the context's creation, which is before this call. The two entry
+        // points it needs do not exist in GLES2, so they are not named here (the television's libGLESv2
+        // exports neither).
         PROG = link_program(VS_SRC.as_ptr(), FS_SRC.as_ptr()).map_err(|fault| {
             // A compile rejection logged itself in `try_compile`. A link failure is logged here,
             // for the same reason: stderr is not the event log and a clean exit is not a crash, so
@@ -1544,7 +1513,7 @@ pub fn init_gl() -> Result<(), GfxFault> {
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         // ONE buffer, one attribute layout: the unit quad at vertex 0 and the field mesh right
         // after it at vertex 4, so a field draw is `glDrawArrays(GL_TRIANGLES, 4, ..)` against the
-        // same pointer and nothing is ever rebound (see `bind_core_profile_vao`).
+        // same pointer and nothing is ever rebound (the desktop's one vertex array is the platform's, `after_context`).
         let mut verts: Vec<f32> = QUAD.to_vec();
         verts.extend(field_mesh());
         glBufferData(
@@ -2990,7 +2959,7 @@ pub fn draw_art_wash(
 /// of a logical one, and the textures are rasterised at `n`x to match, so that is what it snaps to.
 #[inline]
 pub fn snap(v: f32) -> f32 {
-    #[cfg(feature = "hostsim")]
+    #[cfg(feature = "sim")]
     {
         let n = plx_base::surface::render_scale();
         if n > 1 {
@@ -3921,7 +3890,7 @@ pub fn draw_tex_carded_blend(tex: c_uint, next: c_uint, mix: f32, crop: [f32; 4]
 
 /// Run `draw` with the simulator's compositor blend ([`straighten::UNDER`]) set and the app's own put
 /// back after.
-#[cfg(feature = "hostsim")]
+#[cfg(feature = "sim")]
 fn under_blend(draw: impl FnOnce()) {
     let [src_rgb, dst_rgb, src_a, dst_a] = straighten::UNDER.gl();
     unsafe {
@@ -3940,7 +3909,7 @@ fn under_blend(draw: impl FnOnce()) {
 /// ([`straighten::straighten_surface`], run first) removes, so the simulator shows both. Used by
 /// `app::adapters::hostsim::sim_video` for the screenshot pipeline's player figure and, with no
 /// picture, by [`draw_under_black`]; restores the app's blend.
-#[cfg(feature = "hostsim")]
+#[cfg(feature = "sim")]
 pub fn draw_under(tex: c_uint, x: f32, y: f32, w: f32, h: f32) {
     under_blend(|| draw_tex(tex, x, y, w, h, 0.0, [1.0f32; 4].as_ptr()));
 }
@@ -3949,7 +3918,7 @@ pub fn draw_under(tex: c_uint, x: f32, y: f32, w: f32, h: f32) {
 /// straightened (the pass has no simulator switch), so it has to go through the compositor model
 /// whether or not the simulator holds a decoded picture, or a screenshot would read the straight
 /// buffer itself.
-#[cfg(feature = "hostsim")]
+#[cfg(feature = "sim")]
 pub fn draw_under_black() {
     let black = [0.0f32, 0.0, 0.0, 1.0];
     under_blend(|| draw_rect(0.0, 0.0, SCR_W, SCR_H, 0.0, 0.0, black.as_ptr(), black.as_ptr(), 0.0, 1.0));
@@ -9821,7 +9790,9 @@ mod tests {
     /// compiled and linked and `plx_gfx` drew. Why YaGL rejects the statement is not established (the
     /// message is the one Mesa gives for raw desktop GLSL 1.10, where `highp` is an ordinary
     /// identifier), and an optional program, the straighten copy variant, still fails there with the
-    /// same kind of error and no multi-declarator, its cause also not established. Every other source
+    /// same kind of error and no multi-declarator, its cause not established; its suspect was the `#extension`
+    /// lines in the shared source's inactive branches, so the copy program is a source of its own
+    /// (`fs_straighten_copy.frag`) with no directive in it. Every other source
     /// already spelled one name per statement, and a driver that reads either spelling sees the same
     /// program, so the sources keep to the spelling the other drivers have read. It lists the
     /// directory, so a new shader is covered by being added.

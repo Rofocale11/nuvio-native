@@ -1,4 +1,4 @@
-<!-- Fork Rofocale11: upstream's chronological re-record changelog is kept verbatim below, and the fork's Nuvio stream-picker paragraph is kept alongside it. Both accounts are true of their respective branches. The recordings and manifests cannot carry comments (hash-pinned JSON/JSONL), so their per-file merge decisions are recorded in docs/nuvio/MERGE-AUDIT.md. -->
+<!-- Fork Rofocale11: upstream's chronological re-record changelog is kept verbatim below, and the fork's Nuvio stream-picker paragraph is kept alongside it. Both accounts are true of their respective branches. The recordings and manifests cannot carry comments (hash-pinned JSON/JSONL), so their per-file merge decisions are recorded in docs/nuvio/MERGE-AUDIT-HISTORY.md. -->
 
 # Replay fixtures
 

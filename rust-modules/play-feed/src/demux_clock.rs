@@ -400,6 +400,7 @@ impl DemuxMedia for FeedDemuxMedia {
             DemuxEffect::FailFault(fault) => FEED_SHARED.fail_demux_latch((self.hooks.exit_latch)(fault)),
             DemuxEffect::IoFailed => FEED_SHARED.demux_io_failed.store(true, Ordering::Release),
             DemuxEffect::Failed => FEED_SHARED.demux_failed.store(true, Ordering::Release),
+            DemuxEffect::LiveStalled => FEED_SHARED.hls_live_stalled.store(true, Ordering::Release),
             DemuxEffect::NoVideo => FEED_SHARED.demux_no_video.store(true, Ordering::Release),
             DemuxEffect::ProbeActual { video, audio } => {
                 if let Some(v) = video {
@@ -409,6 +410,7 @@ impl DemuxMedia for FeedDemuxMedia {
                     if a != 0 { FEED_SHARED.probe_actual_a.store(a, Ordering::Release); }
                 }
             }
+            DemuxEffect::RpuDovi(dovi) => FEED_SHARED.note_rpu_dovi(dovi),
             DemuxEffect::HttpStatus(status) => FEED_SHARED.dg_http_status.store(status, Ordering::Relaxed),
             DemuxEffect::TrackNames { audio, subs } => {
                 previous_names = Some((self.hooks.replace_track_names)(TrackNames { audio, subs }));

@@ -498,6 +498,25 @@ pub enum PmsDecline {
     UnexecutableSelection,
 }
 
+impl PmsDecline {
+    /// The reason as a short phrase for the refused-play log line. No parentheses: the line wraps it in one.
+    pub fn log_name(self) -> &'static str {
+        match self {
+            Self::UnsupportedIntent => "the requested output is not one a URI player carries",
+            Self::MissingSourceFacts => "the source's facts are missing",
+            Self::UnavailableCapability => "no composed backend can play a server-converted output",
+            Self::MissingOutputEvidence => "no certificate for a server-converted output",
+            Self::UnknownCertificate => "the converted output's certificate is unknown",
+            Self::ProviderRefused => "the URI provider refused the converted output",
+            Self::AppFixedControllerUnavailable => "the app-fixed controller is unavailable",
+            Self::UnmappedClock => "the converted output's clock is not mapped to the source",
+            Self::NoReleaseProof => "no proof the converted output can be released",
+            Self::StaleOrMismatched => "the prepared offer went stale or no longer matched",
+            Self::UnexecutableSelection => "the track selection cannot be executed on the converted output",
+        }
+    }
+}
+
 /// The caller supplies the actual Part URL and selected source tracks. An implementation may
 /// perform bounded IO only with the worker's OffFrame proof; it must not infer a URI certificate
 /// from Feed's codec table, MDE answer or native ACK. [`OriginalRequest::standard`] is no certificate
@@ -509,6 +528,20 @@ pub trait OriginalQualifier: Send + Sync + std::panic::RefUnwindSafe {
     /// until firmware, source time mapping, controls and release have all been established.
     fn qualify_pms(&self, _off: &OffFrame, _request: PmsRequest) -> PmsVerdict {
         PmsVerdict::Unknown
+    }
+
+    /// Whether this provider can ever certify a URI output that plays a source track the viewer picks while a
+    /// title is playing and the native driver cannot switch to (`UriDriver::maps_track` is false): the
+    /// re-resolve a pick like that asks for ends in a replacement play, which retires the playing title first.
+    /// A provider that certifies only the source's default stream and no converted output says `false`, so the
+    /// session refuses the pick instead of replacing the playing title with a failure
+    /// ([`PlaybackSession::source_track_change_carriable`](super::PlaybackSession::source_track_change_carriable)).
+    /// A Quality rung picked while a title plays is the same kind of request (a converted output only a converting backend can
+    /// carry), so the same answer withholds the ladder and refuses the pick
+    /// ([`PlaybackSession::quality_pick_carriable`](super::PlaybackSession::quality_pick_carriable)).
+    /// The default is the behaviour before the question existed: carriable.
+    fn carries_source_track_change(&self) -> bool {
+        true
     }
 }
 
@@ -524,6 +557,9 @@ impl ResolvePort {
     }
 
     pub fn evidence(&self) -> ProductEvidence { self.evidence }
+
+    /// See [`OriginalQualifier::carries_source_track_change`].
+    pub fn carries_source_track_change(&self) -> bool { self.qualifier.carries_source_track_change() }
 
     /// Whether even attempting a PMS candidate could produce a URI offer. This is only a
     /// preflight cost gate; it never qualifies a source or promises release.
@@ -692,7 +728,12 @@ impl ResolvePort {
         else if request.selection.audio_contract.any() { Some(UriDecline::AudioEnhancement) }
         else if request.requires_subtitle_burn { Some(UriDecline::SubtitleBurn) }
         else if request.requires_client_subtitle { Some(UriDecline::ClientSubtitle) }
-        else if request.subtitle_choice == TrackChoice::Off { Some(UriDecline::SubtitleOff) }
+        // Off is refused only where the driver cannot carry it: a pipeline that shows a default
+        // subtitle by itself (the webOS one) states `subtitle_off: false`.
+        else if request.subtitle_choice == TrackChoice::Off
+            && !(evidence.callable.subtitle_off && evidence.certified.subtitle_off) {
+            Some(UriDecline::SubtitleOff)
+        }
         else if request.dolby_vision.present
             && request.dolby_vision_mode == plx_plex::plex::session::DolbyVisionMode::Off {
             Some(UriDecline::DolbyVisionOff)
@@ -1134,7 +1175,7 @@ mod tests {
                     audio_track: TrackChoice::Selected(42),
                     subtitle_track: if request.selection.subtitle_sid > 0 {
                         TrackChoice::Selected(request.selection.subtitle_sid as u64)
-                    } else { TrackChoice::Unspecified } },
+                    } else { request.subtitle_choice } },
                 certified_dolby_vision: self.dovi,
                 certified_subtitle_source: self.subtitle.clone(),
                 expires_at: if self.expired { Instant::now() - std::time::Duration::from_secs(1) }
@@ -1376,11 +1417,22 @@ mod tests {
         let render_proof = ResolvePort::new(evidence, Arc::new(Certified { dovi: None,
             subtitle: Some(source_subtitle.clone()), expired: false, mapped: true }));
         assert!(matches!(render_proof.qualify(&off, subtitle_request()), Verdict::Known(_)));
-        let mut off_request = request();
-        off_request.dolby_vision = plx_data::metadata::Dovi::NONE;
-        off_request.subtitle_choice = TrackChoice::Off;
-        assert!(matches!(render_proof.qualify(&off, off_request), Verdict::Refused(UriDecline::SubtitleOff)),
+        let off_request = || { let mut input = request(); input.dolby_vision = plx_data::metadata::Dovi::NONE;
+            input.subtitle_choice = TrackChoice::Off; input };
+        assert!(matches!(render_proof.qualify(&off, off_request()), Verdict::Refused(UriDecline::SubtitleOff)),
             "the native driver cannot disable an otherwise selectable subtitle");
+        // A driver that carries Off (its pipeline is given no subtitle, the Tizen host's) is asked, and certifies it.
+        let carries_off = Capabilities { subtitle_off: true, ..evidence.callable };
+        let off_evidence = ProductEvidence { callable: carries_off,
+            certified: Capabilities { subtitle_off: true, ..evidence.certified }, ..evidence };
+        let off_driver = ResolvePort::new(off_evidence, Arc::new(Certified { dovi: None,
+            subtitle: None, expired: false, mapped: true }));
+        assert!(matches!(off_driver.qualify(&off, off_request()), Verdict::Known(_)),
+            "Off is refused only where the driver cannot carry it");
+        // Callable is not enough: Off must also be certified.
+        let uncertified = ResolvePort::new(ProductEvidence { callable: carries_off, ..evidence },
+            Arc::new(Certified { dovi: None, subtitle: None, expired: false, mapped: true }));
+        assert!(matches!(uncertified.qualify(&off, off_request()), Verdict::Refused(UriDecline::SubtitleOff)));
     }
 
     // ---- why the Experimental engine did not take a play (`UriDecline`) ----

@@ -10,8 +10,14 @@ pub mod feed_driver;
 pub mod feed_resources;
 pub mod feed_pump;
 pub mod feed_state;
-/// The simulator's stand-in for the Starfish/ACB seam (`hostsim` builds only; see its module doc).
-#[cfg(feature = "hostsim")]
+/// The host's stand-in for the Starfish/ACB seam (see its module doc): the simulator's `sim` build, and
+/// the tests, this crate's own and the ones that enable `test-support`. Two declarations of one file, never
+/// both active, so that no single `cfg` mixes the simulator with `test` (that would be a production-visible
+/// test/production fork in `ci/allow/forks/`).
+#[cfg(feature = "sim")]
+pub mod ffi_host;
+#[cfg(all(any(test, feature = "test-support"), not(feature = "sim")))]
+#[path = "ffi_host.rs"]
 pub mod ffi_host;
 pub mod ff_pcm;
 // Fork Rofocale11: the four-profile startup prime and its rate sampler. Pure logic in a fork-owned

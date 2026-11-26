@@ -37,6 +37,8 @@ pub mod nuvio;
 /// A new file keeps upstream `nuvio.rs` free of conflict apart from this declaration.
 pub mod nuvio_profiles;
 pub mod collections;
+/// Live TV reads: DVRs, their guide lineups and what is airing now. `docs/pms-api.md` §10.
+pub mod livetv;
 /// Agent-backed subtitle search & download. `docs/pms-api.md` §8 is the verified contract; the
 /// bundled OpenAPI spec is wrong about this endpoint and must not be read as authority for it.
 pub mod subtitles;

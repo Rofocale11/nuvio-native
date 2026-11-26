@@ -8,6 +8,14 @@ from functools import lru_cache
 from pathlib import Path
 import re
 
+# Fork Rofocale11: the upstream proof certificates enumerate upstream's workspace and cannot
+# certify this fork's extra crates. Route the upstream proof modules to the fork-owned pins so
+# the machine-shape gate proves the tree it is actually checking; upstream's files stay pristine.
+from fork_proofs import pins as _fork_pins
+import readonly_dependencies as _upstream_dependencies
+import readonly_generated as _upstream_generated
+_fork_pins.apply(_upstream_dependencies, _upstream_generated)
+
 PRIMITIVES = set('bool char str u8 u16 u32 u64 u128 usize i8 i16 i32 i64 i128 isize f32 f64'.split())
 WRAPPERS = {'Vec', 'Option', 'Arc', 'String', 'VecDeque', 'BTreeMap', 'BTreeSet', 'Result', 'PathBuf'}
 STD = {'std::vec::Vec', 'alloc::vec::Vec', 'std::option::Option', 'core::option::Option',

@@ -57,9 +57,9 @@ def rule(target):
 # Fork Rofocale11: the lint and default-unit recipes also build the two Nuvio library crates in the
 # shipped staticlib; the upstream crate list alone does not name them.
 GATES = {
-    "check-cargo-lint": [r"cargo \+\$\(RUST_TOOLCHAIN\) check --lib --tests -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp -p plx_nuvio_probe -p plx_nuvio_store --features lab-diagnostics"],
+    "check-cargo-lint": [r"cargo \+\$\(RUST_TOOLCHAIN\) check --lib --tests -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_platform_tizen -p plx_owp -p plx_nuvio_probe -p plx_nuvio_store --features lab-diagnostics"],
     "check-cargo-unit-default": [
-        r"cargo \+\$\(RUST_TOOLCHAIN\) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_owp -p plx_nuvio_probe -p plx_nuvio_store\n",
+        r"cargo \+\$\(RUST_TOOLCHAIN\) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_net -p plx_ui -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_playback_contract -p plx_play_uri -p plx_play_feed -p plx_media_codecs -p plx_appkit -p plx_screens -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop -p plx_platform_tizen -p plx_owp -p plx_nuvio_probe -p plx_nuvio_store\n",
         r"ci/test_storage_service_package\.py",
         r"test -p plxnative-storage --bin plxnative-storage",
         r"ci/test_storage_package_isolated\.py",
@@ -67,9 +67,9 @@ GATES = {
         r"ci/test_build_not_always_dirty\.py",
     ],
     "check-cargo-unit-hostsim": [
-        r"cargo \+\$\(RUST_TOOLCHAIN\) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_play_feed -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop --features hostsim",
+        r"cargo \+\$\(RUST_TOOLCHAIN\) test --lib -p plxnative-modules -p plx_base -p plx_machine -p plx_os -p plx_gfx -p plx_plex -p plx_telemetry -p plx_data -p plx_session -p plx_media -p plx_play_feed -p plx_shell_sdl -p plx_platform_webos -p plx_platform_desktop --features sim",
         # W7a: the `host` module used from outside the crate (`make test-host-interface` is the same line)
-        r"cargo \+\$\(RUST_TOOLCHAIN\) test -p plxnative-modules --test host_interface --features hostsim",
+        r"cargo \+\$\(RUST_TOOLCHAIN\) test -p plxnative-modules --test host_interface --features sim",
     ],
 }
 

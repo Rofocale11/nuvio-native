@@ -269,7 +269,7 @@ mod tests {
     use std::rc::Rc;
 
     const BUILTIN_CLASSIC: &str = plx_appkit::hud_format::CLASSIC_HUD;
-    #[cfg(feature = "hostsim")]
+    #[cfg(feature = "sim")]
     const CLASSIC_FIXTURE: &str = include_str!("../appkit/src/hud_format/fixtures/classic/hud.json");
     const REFERENCE_FIXTURE: &str = include_str!("../appkit/src/hud_format/fixtures/reference/hud.json");
 
@@ -362,7 +362,7 @@ mod tests {
         let (code,out,err) = go(&["--hud-info"], &|_| panic!("info read a file"), &never);
         assert_eq!((code,err.as_str()),(0,""));
         let info: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(info["languages"].as_array().unwrap().len(),12);
+        assert_eq!(info["languages"].as_array().unwrap().len(),13);
         let (code,out,err) = go(&["--hud-inspect","ref.json","--lang","de"], &serve(REFERENCE_FIXTURE), &shipped);
         assert_eq!((code,err.as_str()),(0,""));
         let info: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -538,7 +538,7 @@ mod tests {
             (&["--hud-lint", "p.json", "--format", "xml"], "--format is text or json, not \"xml\""),
             (&["--hud-lint", "p.json", "--format", "json", "--format", "text"], "--format given twice"),
             (&["--hud-lint", "p.json", "--lang"], "--lang needs a value"),
-            (&["--hud-lint", "p.json", "--lang", "xx"], "--lang is all or one of en es be ca fr it pt de hu ru pl nl, not"),
+            (&["--hud-lint", "p.json", "--lang", "xx"], "--lang is all or one of en es be ca fr it pt de hu ru pl nl hr, not"),
             (&["--hud-lint", "p.json", "--lang", "system"], "not \"system\""),
             (&["--hud-lint", "p.json", "--lang", "de", "--lang", "fr"], "--lang given twice"),
             (&["--hud-export"], "--hud-export needs a package id"),
@@ -631,7 +631,7 @@ mod tests {
         let (code, _, _) = go_priced(&["--hud-lint", "dir/my hud.json", "--lang", "all"], &reader, &factory, &price);
         assert_eq!(code, 0);
         assert_eq!(read.take(), ["dir/my hud.json"]);
-        assert_eq!((built.get(), priced.get()), (1, 1), "each measurer is built once, for all twelve languages");
+        assert_eq!((built.get(), priced.get()), (1, 1), "each measurer is built once, for all thirteen languages");
     }
 
     #[test]
@@ -640,11 +640,11 @@ mod tests {
         let all = widths(&["--lang", "all"]);
         assert!(de > 0, "a compile measures text");
         assert_eq!(widths(&[]), all, "all is the default");
-        let tags = ["en", "es", "be", "ca", "fr", "it", "pt", "de", "hu", "ru", "pl", "nl"];
+        let tags = ["en", "es", "be", "ca", "fr", "it", "pt", "de", "hu", "ru", "pl", "nl", "hr"];
         let each: usize = tags.iter().map(|tag| widths(&["--lang", tag])).sum();
-        assert_eq!(all, each, "the all run is the twelve single-language runs");
+        assert_eq!(all, each, "the all run is the thirteen single-language runs");
         assert!(all > de);
-        assert!(all >= 5 * de, "twelve languages, not two: all {all}, de {de}");
+        assert!(all >= 5 * de, "thirteen languages, not two: all {all}, de {de}");
     }
 
     #[test]
@@ -752,13 +752,13 @@ mod tests {
     /// `line_h`/`cap_h` that went through `text_tex` would upload a GL texture with no context and take
     /// the whole binary down with a SIGSEGV, which CI would not see and `--hud-lint` would.
     ///
-    /// **In a child process, and only under `hostsim`.** The font switch (`TEXT_OK`), the resolved
+    /// **In a child process, and only under `sim`.** The font switch (`TEXT_OK`), the resolved
     /// application directory and the face paths are each set once per process and never taken back, so a
     /// test that shares a process with any other width or path test would grade that test's state (and
-    /// leave this one's behind). `PLXNATIVE_APP_DIR` is honoured only by a `hostsim` build
+    /// leave this one's behind). `PLXNATIVE_APP_DIR` is honoured only by a `sim` build
     /// (`paths::ENV_STEERABLE`), and the child must START with it: the directory is resolved on first
     /// use. A crash in the child is the parent's assertion failure, not a dead test binary.
-    #[cfg(feature = "hostsim")]
+    #[cfg(feature = "sim")]
     #[test]
     fn the_headless_fonts_measure_and_lint_the_classic_without_a_gl_context() {
         const NAME: &str = "the_headless_fonts_measure_and_lint_the_classic_without_a_gl_context";

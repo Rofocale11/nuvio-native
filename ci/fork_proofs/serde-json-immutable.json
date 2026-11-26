@@ -1,0 +1,697 @@
+{
+  "archive": {
+    "bytes": 158079,
+    "sha256": "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6",
+    "url": "https://static.crates.io/crates/serde_json/serde_json-1.0.154.crate",
+    "verified_before_inspection": true
+  },
+  "declarations": {
+    "Map": {
+      "path": "src/map.rs",
+      "tokens": [
+        "pub",
+        "struct",
+        "Map",
+        "<",
+        "K",
+        ",",
+        "V",
+        ">",
+        "{",
+        "map",
+        ":",
+        "MapImpl",
+        "<",
+        "K",
+        ",",
+        "V",
+        ">",
+        ",",
+        "}"
+      ]
+    },
+    "Map_ordered_UNSUPPORTED": {
+      "path": "src/map.rs",
+      "tokens": [
+        "#",
+        "[",
+        "cfg",
+        "(",
+        "feature",
+        "=",
+        "\"preserve_order\"",
+        ")",
+        "]",
+        "type",
+        "MapImpl",
+        "<",
+        "K",
+        ",",
+        "V",
+        ">",
+        "=",
+        "IndexMap",
+        "<",
+        "K",
+        ",",
+        "V",
+        ",",
+        "BuildHasherImpl",
+        ">",
+        ";"
+      ]
+    },
+    "Map_tree": {
+      "path": "src/map.rs",
+      "tokens": [
+        "#",
+        "[",
+        "cfg",
+        "(",
+        "not",
+        "(",
+        "feature",
+        "=",
+        "\"preserve_order\"",
+        ")",
+        ")",
+        "]",
+        "type",
+        "MapImpl",
+        "<",
+        "K",
+        ",",
+        "V",
+        ">",
+        "=",
+        "BTreeMap",
+        "<",
+        "K",
+        ",",
+        "V",
+        ">",
+        ";"
+      ]
+    },
+    "N_numeric": {
+      "path": "src/number.rs",
+      "tokens": [
+        "#",
+        "[",
+        "cfg",
+        "(",
+        "not",
+        "(",
+        "feature",
+        "=",
+        "\"arbitrary_precision\"",
+        ")",
+        ")",
+        "]",
+        "#",
+        "[",
+        "derive",
+        "(",
+        "Copy",
+        ",",
+        "Clone",
+        ")",
+        "]",
+        "enum",
+        "N",
+        "{",
+        "PosInt",
+        "(",
+        "u64",
+        ")",
+        ",",
+        "NegInt",
+        "(",
+        "i64",
+        ")",
+        ",",
+        "Float",
+        "(",
+        "f64",
+        ")",
+        ",",
+        "}"
+      ]
+    },
+    "N_string": {
+      "path": "src/number.rs",
+      "tokens": [
+        "#",
+        "[",
+        "cfg",
+        "(",
+        "feature",
+        "=",
+        "\"arbitrary_precision\"",
+        ")",
+        "]",
+        "type",
+        "N",
+        "=",
+        "String",
+        ";"
+      ]
+    },
+    "Number": {
+      "path": "src/number.rs",
+      "tokens": [
+        "pub",
+        "struct",
+        "Number",
+        "{",
+        "n",
+        ":",
+        "N",
+        ",",
+        "}"
+      ]
+    },
+    "Value": {
+      "path": "src/value/mod.rs",
+      "tokens": [
+        "pub",
+        "enum",
+        "Value",
+        "{",
+        "Null",
+        ",",
+        "Bool",
+        "(",
+        "bool",
+        ")",
+        ",",
+        "Number",
+        "(",
+        "Number",
+        ")",
+        ",",
+        "String",
+        "(",
+        "String",
+        ")",
+        ",",
+        "Array",
+        "(",
+        "Vec",
+        "<",
+        "Value",
+        ">",
+        ")",
+        ",",
+        "Object",
+        "(",
+        "Map",
+        "<",
+        "String",
+        ",",
+        "Value",
+        ">",
+        ")",
+        ",",
+        "}"
+      ]
+    }
+  },
+  "features": {
+    "definitions": {
+      "alloc": [
+        "serde_core/alloc"
+      ],
+      "arbitrary_precision": [],
+      "default": [
+        "std"
+      ],
+      "float_roundtrip": [],
+      "preserve_order": [
+        "indexmap",
+        "alloc",
+        "dep:foldhash"
+      ],
+      "raw_value": [],
+      "std": [
+        "memchr/std",
+        "serde_core/std"
+      ],
+      "unbounded_depth": []
+    },
+    "guard": "all local manifest/config bytes and complete Cargo.lock pinned except coherent non-resolving root release version; no indexmap/foldhash lock edges",
+    "locked_dependencies": [
+      "itoa",
+      "memchr",
+      "serde",
+      "serde_core",
+      "zmij"
+    ],
+    "supported": [
+      "alloc",
+      "arbitrary_precision",
+      "default",
+      "float_roundtrip",
+      "raw_value",
+      "std",
+      "unbounded_depth"
+    ],
+    "unsupported": [
+      "preserve_order"
+    ]
+  },
+  "grammar": {
+    "Map<K,V>": {
+      "fields": {
+        "map": "MapImpl<K,V>"
+      }
+    },
+    "MapImpl<K,V>": {
+      "not(preserve_order)": "alloc::collections::BTreeMap<K,V>",
+      "preserve_order": {
+        "unsupported": "indexmap::IndexMap<K,V,BuildHasherImpl>"
+      }
+    },
+    "N": {
+      "arbitrary_precision": "alloc::string::String",
+      "not(arbitrary_precision)": {
+        "enum": {
+          "Float": [
+            "f64"
+          ],
+          "NegInt": [
+            "i64"
+          ],
+          "PosInt": [
+            "u64"
+          ]
+        }
+      }
+    },
+    "Number": {
+      "fields": {
+        "n": "N"
+      }
+    },
+    "Value": {
+      "enum": {
+        "Array": [
+          "alloc::vec::Vec<Value>"
+        ],
+        "Bool": [
+          "bool"
+        ],
+        "Null": [],
+        "Number": [
+          "Number"
+        ],
+        "Object": [
+          "Map<alloc::string::String,Value>"
+        ],
+        "String": [
+          "alloc::string::String"
+        ]
+      }
+    },
+    "axioms": [
+      "bool",
+      "u64",
+      "i64",
+      "f64",
+      "alloc::string::String",
+      "alloc::vec::Vec<inert>",
+      "alloc::collections::BTreeMap<inert,inert>"
+    ],
+    "closure": "least finite owned JSON tree; all recursive edges cross owned containers"
+  },
+  "package": {
+    "checksum": "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6",
+    "name": "serde_json",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "version": "1.0.154"
+  },
+  "schema": "plx.readonly.locked-json.v1",
+  "source_files": {
+    "Cargo.toml": {
+      "bytes": 3142,
+      "sha256": "548aafeb7c702b69b9de950033f10b59f70baf38592d275d8ca8cff19f7750c3"
+    },
+    "build.rs": {
+      "bytes": 1206,
+      "sha256": "a681e754be844c7dbef957f5d2d00b01f37c5dca160ef1055a8d8f975697a881"
+    },
+    "src/lib.rs": {
+      "bytes": 14369,
+      "sha256": "e3c3f2864cea66bac10c78dfc312ed8e1de43d2b7410d83bdd352a1c4b339104"
+    },
+    "src/map.rs": {
+      "bytes": 35610,
+      "sha256": "1ba8afd6c643740462171713fd523966920bd726af37963cb8f21e76e9beb69f"
+    },
+    "src/number.rs": {
+      "bytes": 25319,
+      "sha256": "1730b1c1a9b2a75f9e52b165191ca77cb3dbd82fec3b23f41f097f4f07f3410e"
+    },
+    "src/value/mod.rs": {
+      "bytes": 30963,
+      "sha256": "6331d59ea362a74b6cd3d302d08114a63a73a384ff56fef737de29edea2f8d91"
+    }
+  },
+  "trust_boundary": [
+    "reviewed archive bytes and canonical crates.io Cargo identity",
+    "Rust/std sound owned container axioms; arbitrary_precision is owned String",
+    "preserve_order and unknown features/types/configurations rejected",
+    "no attestation of environment/global Cargo config, --config/--extern overrides or compiler unsoundness",
+    "no foreign code execution; runtime requires neither archive/cache/Cargo nor network"
+  ],
+  "workspace": {
+    "configs": {
+      "../.cargo/config": null,
+      "../.cargo/config.toml": null,
+      ".cargo/config": null,
+      ".cargo/config.toml": "82f061c716740e16cfee63a74d87159e0e0dc253e1092b87c54190c603515b14"
+    },
+    "lock_sha256": "7748ae2539d7f026670973d6a661fdd816587a3e7c678facd4ae9e62ce4b75f6",
+    "manifests": {
+      "Cargo.toml": "79bb2dd2b50e3895149d83689036a90989dafc91a3332f51f85476475a170c3f",
+      "appkit/Cargo.toml": "5cc1214cba7746fe0f2d4cfa5047b599e0d5124abe7bdaebe210381021b88c4a",
+      "base/Cargo.toml": "70381756942ed7c9e61532bcb3bdab9a135ebcca5de2e343669b12f2d6086bc7",
+      "data/Cargo.toml": "a593eb0dc89108bf0aeaa97ae81f357c45c935d55e288b9393db8f902db409dd",
+      "gfx/Cargo.toml": "477efc5f80346ca1dcd48db30efdd09c15fe7473e7c49a1157fbac75d6febcd7",
+      "machine/Cargo.toml": "ac864d90649890758fa1ea8bae030139c478af437d81efb4f0e707e6c3136095",
+      "media-codecs/Cargo.toml": "503c8681289314b5c8a63195aad6796cbad93fcb3eedd8d7cba9e8ed0233783f",
+      "media/Cargo.toml": "f0e9429461d0d1c23723198d263a20310845cc1a60870769314525baa512b147",
+      "net/Cargo.toml": "bfdb3a08200642eeeafc9762733718c407529f26dce8a7b90665bc77ac928171",
+      "nuvio-dash/Cargo.toml": "5858a8709ee28f9ec3cf574944c03788f0b258a054e6708e44ebf3aee1519fd6",
+      "nuvio-ffmpeg/Cargo.toml": "2e8225a33a3d79815acfcd95a44a82ec56bf6e45f75bb3f131a3da56f092d1da",
+      "nuvio-probe/Cargo.toml": "4683ea4564ad32e1fa992629728da44dc167a4cbb23eecc941b1e7fdbe383d65",
+      "nuvio-store/Cargo.toml": "f74917f3e7887c29421eeba622cfa8a6dbac9654bf4c214d010706598ce1a7db",
+      "os/Cargo.toml": "1034e9503e0b5903179cc30c3844d25e2521c9cb3e3fb9a0728581b5454a0615",
+      "owp/Cargo.toml": "2c1354bce16b34f0d006fc04cd4c8eb22ef91f00063b53a1113e32f475ecae33",
+      "platform-desktop/Cargo.toml": "268cff40415f26a73a76a13c9f108791a870c081eef3955e958f17e63ed94248",
+      "platform-tizen/Cargo.toml": "dfc77e7a964633ae5b56bd8bb347f60befe04a8ab854b20191baff7079dd9b93",
+      "platform-webos/Cargo.toml": "deacc588a11976f39ff0e9c9e1a74c3e64db55810fed75579a3647ea89e00f9c",
+      "play-feed/Cargo.toml": "4a7ad482e9531f8555ef0353170bcb76094bb6f1691ec9e39b370ead69a2ce8e",
+      "play-uri/Cargo.toml": "48528dd164a910a32f5396ab8f5bc4c6c13f6fd5f1136ee080f8424fe663280b",
+      "playback-contract/Cargo.toml": "bde335ea645552d4f7481b007b80204ecb5bb592caaca22af58a8361cd050dcf",
+      "plex/Cargo.toml": "bde25d6941ce852a3c1090028c7c371fed19756d37ffd6481ef061a5b96c8317",
+      "pmsshim/Cargo.toml": "49267c30480c0d8111c9fecea77afb512f6853abd0da3216fecedeca7c64e0e1",
+      "screens/Cargo.toml": "cd42484a49fac394244ebc7b81f30f7e4f9a31cdf7bc1ace5c3fae21afd6d511",
+      "session/Cargo.toml": "5b22f5c600e2eeef4d6d1a7568a4cf5ca0d4d402b3574fd705c4dab03b004381",
+      "shell-sdl/Cargo.toml": "4aed9782cb2dd6cb8b99045e4f17d6104ef6f89560f102597a76adfea93c5f56",
+      "storage/Cargo.toml": "4b8576b04a5877e95d084a49a16b30224c275ae29b4a192c40725ac819500150",
+      "stremio/Cargo.toml": "09f6813ef96e6c4f5c17d635e02a8a2e9cf978ba49b551a24a06e60aff4874e7",
+      "telemetry/Cargo.toml": "6060d6073012bf11614f6fb80c04f7e9bbe6b2fad25551c45bda244b29d3bca6",
+      "ui/Cargo.toml": "7375c6a73cb2558c7c0f62da7b0bd4beb2a5b78f5460ee35e93b1045c0e80eec"
+    },
+    "owners": {
+      "Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "src/lib.rs",
+        "lib_sha256": "c84aa98fe8f2eb3f7910e0248324a81cc17a60daaf784a2931c8bbbec12f1e01"
+      },
+      "data/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "data/src/lib.rs",
+        "lib_sha256": "f50e94e241c5869250a73583f009041abaf4879a7544bd5a3d95936a9f42a29a"
+      },
+      "media/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "media/src/lib.rs",
+        "lib_sha256": "c15e9804d375fec628df21df57ccaa4abfc78f54f45da19a39ff9c27453f9f16"
+      },
+      "net/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "optional": true,
+            "version": "1"
+          },
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "net/src/lib.rs",
+        "lib_sha256": "fb01ff87004a7309b82525c393b8d32c927c862c16dd1b8b09aada89850a8c74"
+      },
+      "os/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          },
+          {
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "os/src/lib.rs",
+        "lib_sha256": "16a08c82bb5895dd1475c708f0a552d8b57352102f070a5757121164b531294c"
+      },
+      "owp/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "owp/src/lib.rs",
+        "lib_sha256": "78e104e61b5cf3052f18139f5e922576fd7b17890c4b1e7ee0ec71f29d557e72"
+      },
+      "platform-tizen/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "optional": true,
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "platform-tizen/src/lib.rs",
+        "lib_sha256": "1f0b4d1125f19f3c44b49112b42610f48f239211126686fac809ef537c8bb4cc"
+      },
+      "platform-webos/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "platform-webos/src/lib.rs",
+        "lib_sha256": "67645fd4db78771a1e091dccbf1e66cb8060442e4793023dec567d3b5dde7eae"
+      },
+      "play-feed/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "play-feed/src/lib.rs",
+        "lib_sha256": "a26d6da2c0fd5d5d89e1f432bbd376aff649df97b2ffd2299fe0fc09fbc8cd08"
+      },
+      "play-uri/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "play-uri/src/lib.rs",
+        "lib_sha256": "8de76dc167d22d8e4c4302a5efb5b1963b9da32632580c026ebf2ff89047a212"
+      },
+      "plex/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "plex/src/lib.rs",
+        "lib_sha256": "21f51ff3c31160f900f141229bdeaee0af937d7e12aef9baa7b9a946fb6c4e19"
+      },
+      "pmsshim/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "pmsshim/src/lib.rs",
+        "lib_sha256": "1bfd78224252e2253a48c9771ba62b438a82a2cb45b20614d0de313cdb4fe3a9"
+      },
+      "screens/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "screens/src/lib.rs",
+        "lib_sha256": "0fc333d9f54fd131211c7df2b56e21c710bc591e938782661da7a3d1b07b16bb"
+      },
+      "session/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "session/src/lib.rs",
+        "lib_sha256": "4640a9718f8cae45cd37818706ac29fd7a27eafbe89abbb69998dea2b9219ac1"
+      },
+      "storage/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          },
+          {
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "storage/src/main.rs",
+        "lib_sha256": "8726244b78f7d513d9a062b742d56c8e16611dbb6247fb753e9f8d008e257a53"
+      },
+      "stremio/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "stremio/src/lib.rs",
+        "lib_sha256": "15d1bd780f6294d36727de3bbacba48ef74364b99e5051849bfe8f8d49fa5d5b"
+      },
+      "telemetry/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "telemetry/src/lib.rs",
+        "lib_sha256": "f00b8697c55fb037169a502ee32c6941facd4e20cf444d59592704975aaae1f8"
+      },
+      "ui/Cargo.toml": {
+        "dependency": [
+          {
+            "default-features": false,
+            "features": [
+              "alloc",
+              "std"
+            ],
+            "version": "1"
+          }
+        ],
+        "edition": "2021",
+        "lib": "ui/src/lib.rs",
+        "lib_sha256": "f971a02f6b5864b6858772b3c9abc1a758b119f712ca077d6dcce3a66a872017"
+      }
+    },
+    "text_hashing": "sha256-utf8-bytes-crlf-to-lf-local-root-version-v1"
+  }
+}

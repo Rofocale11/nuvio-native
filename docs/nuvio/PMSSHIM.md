@@ -466,10 +466,10 @@ They need a product call before anyone edits behavior:
 ## 16. Corrections made to the other documents
 
 The following older claims were false against this checkout and have been corrected in place; the
-history is preserved with dated correction notes in `MERGE-AUDIT.md`:
+history is preserved with dated correction notes in `MERGE-AUDIT-HISTORY.md`:
 
 - artwork selection (`AGENTS.md`, `ARCHITECTURE.md`, `TMDB.md`, `ID-MANAGEMENT.md`, `HANDOFF.md`,
-  `MERGE-AUDIT.md`) — see §7 and §8 for the actual behavior;
+  `MERGE-AUDIT-HISTORY.md`) — see §7 and §8 for the actual behavior;
 - the trailer key stride (`ID-MANAGEMENT.md`) — §6;
 - `NuvioCache` no longer used by the shim (`ARCHITECTURE.md`, `ID-MANAGEMENT.md`) — §11;
 - `Part` proxy, `PUT /library/parts` and the transcode `start.*` response (`PLAYBACK.md`) — §9;

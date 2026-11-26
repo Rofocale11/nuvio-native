@@ -15,7 +15,7 @@ The name **PlxNative** and the PLX logo and splash artwork — `assets/logo-mast
 the identity of a derived or redistributed work.
 
 <!-- Fork Rofocale11: Nuvio Native ships under its own mark; the PLX masters above are retained as
-upstream source material and are not used as this fork's identity. Recorded in MERGE-AUDIT.md. -->
+upstream source material and are not used as this fork's identity. Recorded in MERGE-AUDIT-HISTORY.md. -->
 **Nuvio Native** is a fork. Its launcher icon, large icon and splash (`pkg/icon.png`,
 `pkg/largeIcon.png`, `pkg/splash.png`) carry the Nuvio mark, not the PLX artwork. The name PlxNative
 is used here only to identify the upstream source and its copyright holder, as the GPL requires;

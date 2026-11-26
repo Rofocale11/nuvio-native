@@ -385,6 +385,8 @@ pub(crate) struct MenuPlayAwait {
     /// Fork Rofocale11: the name in the miss log. A Home hero's Resume waits on the same
     /// continuation but is not a launch link, so it must not report one when the fetch fails.
     miss_label: &'static str,
+    #[cfg(feature = "devtriggers")]
+    api: bool,
 }
 
 /// Which asynchronous load a [`MenuPlayAwait`] is waiting on. Both phases are polled by the one
@@ -408,6 +410,8 @@ impl MenuPlayAwait {
         Self {
             sid, expect, season_index, hud_ms, deadline: now.wrapping_add(12_000), phase: MenuPlayPhase::Detail,
             open: false, stay_on_miss: false, miss_label: "deeplink",
+            #[cfg(feature = "devtriggers")]
+            api: false,
         }
     }
 
@@ -416,18 +420,26 @@ impl MenuPlayAwait {
         Self { open, stay_on_miss: true, ..Self::new(sid, rk, None, plx_screens::player::input::HUD_LINGER_MS, now) }
     }
 
-    /// Fork Rofocale11: the wait for a Home Resume — a hero's OR a Continue Watching card's. The
-    /// shim's hub rows carry no `Media`/`Part`, so playing the row directly refuses on an empty part
-    /// — the press looked inert. Detail's Resume plays the LOADED item instead; this wait loads the
-    /// same detail (no page is opened) and then plays the promoted source remembered for the resume
-    /// point. `from_deck` only names the miss in the log: the two surfaces reach here through the
-    /// same `HomeReq::Play`, but a card's title is not the hero's.
+    // Fork Rofocale11: the wait for a Home Resume — a hero's OR a Continue Watching card's. The
+    // shim's hub rows carry no `Media`/`Part`, so playing the row directly refuses on an empty part
+    // — the press looked inert. Detail's Resume plays the LOADED item instead; this wait loads the
+    // same detail (no page is opened) and then plays the promoted source remembered for the resume
+    // point. `from_deck` only names the miss in the log: the two surfaces reach here through the
+    // same `HomeReq::Play`, but a card's title is not the hero's.
     pub(crate) fn for_home_resume(sid: plx_plex::plex::ServerId, rk: String, now: u32, from_deck: bool) -> Self {
         Self {
             miss_label: if from_deck { "continue watching card resume" } else { "home hero resume" },
             ..Self::for_link(sid, rk, false, now)
         }
     }
+
+    #[cfg(feature = "devtriggers")]
+    pub(super) fn for_api(sid: plx_plex::plex::ServerId, rk: String, now: u32) -> Self {
+        Self { api: true, hud_ms: plx_screens::player::input::HUD_HEADLESS_MS, ..Self::for_link(sid, rk, false, now) }
+    }
+
+    #[cfg(feature = "devtriggers")]
+    pub(super) fn is_api(&self) -> bool { self.api }
 }
 
 /// **What a card ACTIVATION does, once its screen has decided whether the press means PLAY.**
@@ -573,14 +585,20 @@ pub(crate) unsafe fn menu_play_tick(
     let Some(wait) = menu_play_await.clone() else {
         return;
     };
-    let MenuPlayAwait { sid, ref expect, season_index, hud_ms, deadline, phase, open, stay_on_miss, miss_label } = wait;
+    let MenuPlayAwait { sid, ref expect, season_index, hud_ms, deadline, phase, open, stay_on_miss, miss_label, .. } = wait;
     // Something else already moved the app onto the player this frame (a different press, an
     // auto-advance) — the wait is moot and must not fire a second Play on top of it.
+    let expired = now.wrapping_sub(deadline) < u32::MAX / 2;
     if super::bridge::player(pages).is_some() {
+        // An explicit replacement has asked the shared exit to pop the old player.
+        // Its navigation commit may still be pending on this frame.
+        #[cfg(feature = "devtriggers")]
+        if wait.is_api() && !expired {
+            return;
+        }
         *menu_play_await = None;
         return;
     }
-    let expired = now.wrapping_sub(deadline) < u32::MAX / 2;
     if let MenuPlayPhase::Season { gen, idx } = phase {
         // The season fetch is still ours only while its generation stands and the item it hangs
         // off is still the loaded one: another season press, a new detail request or a page's
@@ -1179,7 +1197,7 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
 #[path = "menu_play_season_tests.rs"]
 mod menu_play_season_tests;
 
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(all(test, feature = "sim"))]
 #[path = "item_menu_player_return_tests.rs"]
 mod item_menu_player_return_tests;
 
@@ -1753,6 +1771,8 @@ pub(crate) fn delete_all_local_data(meta: &mut plx_data::stores::metadata::Metad
     mut failures: Vec<String>) -> Vec<String> {
     // Retire the writer before the privacy sweep unlinks its log files.
     plx_os::playback_trace::retire();
+    #[cfg(feature = "devtriggers")]
+    super::api::retire_state_file();
     failures.extend(sweep_local_files(
         plx_base::paths::obsolete_last_place_candidates()
             .into_iter()

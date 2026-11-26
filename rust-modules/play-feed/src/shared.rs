@@ -10,12 +10,12 @@ use crate::native_gate::NativeGate;
 pub use crate::native_gate::{EventScope, NativeEventClass};
 use std::ffi::CString;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
 use std::sync::{Condvar, Mutex};
 
 pub use plx_playback_contract::readout::RefusalPath;
-use plx_playback_contract::feed::ResetScope;
+use plx_playback_contract::feed::{ResetScope, RpuDovi};
 use std::time::{Duration, Instant};
 
 /// Physical 1x transport rate and its unknown speed-audio readout.
@@ -356,6 +356,10 @@ pub struct Shared {
     /// Unlike `demux_failed`, this is not gated on a zero-frame start: a truncated live transfer
     /// is an error rather than a successful early EOF.
     pub demux_io_failed: AtomicBool,
+    /// The failure flag raised beside it is a live playlist that stopped advancing
+    /// (`DemuxEffect::LiveStalled`), stored before that flag; cleared with the flags by the
+    /// session reset.
+    pub hls_live_stalled: AtomicBool,
     /// WHY the demuxer found nothing to feed, when the answer is "the stream itself": the server
     /// delivered audio streams and no video stream. Issue #22's whole shape — a transcode target
     /// the server cannot honour makes PMS drop the video track, and `ff: no video stream` alone
@@ -635,6 +639,10 @@ pub struct Shared {
     /// `demux_failed` in the session reset.
     pub probe_actual_v: AtomicU8,
     pub probe_actual_a: AtomicU8,
+    /// The Dolby Vision the demuxer found in the video's RPUs with no configuration record in the
+    /// container (`DemuxEffect::RpuDovi`): `profile << 8 | bl_compat`, 0 = none (a reported profile
+    /// is never 0). Read through [`Shared::rpu_dovi`]; cleared in the session reset.
+    rpu_dovi: AtomicU16,
     /// Auto-quality facts written by the demux worker and read through `FeedRaw::abr`.
     /// Mode: 0 inactive, 1 progressive Original watchdog, 2 fixed-session HLS controller. The
     /// adaptive worker's own measurements and decisions are not mailboxes: it ships them to the
@@ -670,6 +678,17 @@ pub type PhysicalShared = Shared;
 pub static FEED_SHARED: PhysicalShared = Shared::new();
 
 impl Shared {
+    /// Publish the Dolby Vision the demuxer found in the video's RPUs (`DemuxEffect::RpuDovi`).
+    pub fn note_rpu_dovi(&self, dovi: RpuDovi) {
+        self.rpu_dovi.store(u16::from_be_bytes([dovi.profile, dovi.bl_compat]), Ordering::Relaxed);
+    }
+
+    /// What [`Self::note_rpu_dovi`] published this session, if anything.
+    pub fn rpu_dovi(&self) -> Option<RpuDovi> {
+        let [profile, bl_compat] = self.rpu_dovi.load(Ordering::Relaxed).to_be_bytes();
+        (profile != 0).then_some(RpuDovi { profile, bl_compat })
+    }
+
     /// Record WHICH demuxer exit failed the session, without raising `demux_failed` (an exit that
     /// reaches the shared "produced no access units" tail through a plain `break`). FIRST WINS: a
     /// compare-exchange from 0, so the real cause is kept and any later cascade is ignored.
@@ -721,6 +740,7 @@ impl Shared {
             dg_load_a: AtomicU8::new(0),
             probe_actual_v: AtomicU8::new(0),
             probe_actual_a: AtomicU8::new(0),
+            rpu_dovi: AtomicU16::new(0),
             dg_abr_mode: AtomicU8::new(0),
             dg_abr_kbps: AtomicI64::new(0),
             dg_abr_declared_kbps: AtomicI64::new(-1),
@@ -755,6 +775,7 @@ impl Shared {
             speed_audio_verdict: AtomicU8::new(0),
             demux_failed: AtomicBool::new(false),
             demux_io_failed: AtomicBool::new(false),
+            hls_live_stalled: AtomicBool::new(false),
             demux_no_video: AtomicBool::new(false),
             load_failed: AtomicBool::new(false),
             load_timed_out: AtomicBool::new(false),
@@ -836,12 +857,12 @@ impl Shared {
         self.native_session.native_load_elapsed(epoch)
     }
 
-    #[cfg(all(feature = "test-support", feature = "hostsim"))]
+    #[cfg(feature = "test-support")]
     pub fn test_backdate_native_load_issued(&self, epoch: u32, by: Duration) -> bool {
         self.native_session.test_backdate_native_load_issued(epoch, by)
     }
 
-    #[cfg(all(feature = "test-support", feature = "hostsim"))]
+    #[cfg(feature = "test-support")]
     pub fn test_backdate_native_load_returned(&self, epoch: u32, by: Duration) -> bool {
         self.native_session.test_backdate_native_load_returned(epoch, by)
     }
@@ -876,7 +897,7 @@ impl Shared {
         self.native_session.native_load_abandoned()
     }
 
-    #[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_force_native_idle(&self) {
         self.native_session.test_force_native_idle();
     }
@@ -1079,6 +1100,7 @@ impl Shared {
         self.dg_load_a.store(0, Ordering::Relaxed);
         self.probe_actual_v.store(0, Ordering::Relaxed);
         self.probe_actual_a.store(0, Ordering::Relaxed);
+        self.rpu_dovi.store(0, Ordering::Relaxed);
         self.dg_abr_mode.store(0, Ordering::Relaxed);
         self.dg_abr_kbps.store(0, Ordering::Relaxed);
         self.dg_abr_declared_kbps.store(-1, Ordering::Relaxed);
@@ -1126,6 +1148,7 @@ impl Shared {
         self.speed_audio_verdict.store(SPEED_AUDIO_UNKNOWN, Ordering::Relaxed);
         self.demux_failed.store(false, Ordering::Relaxed);
         self.demux_io_failed.store(false, Ordering::Relaxed);
+        self.hls_live_stalled.store(false, Ordering::Relaxed);
         self.demux_no_video.store(false, Ordering::Relaxed);
         self.load_failed.store(false, Ordering::Relaxed);
         self.load_timed_out.store(false, Ordering::Relaxed);
@@ -1151,7 +1174,7 @@ impl Shared {
     }
 
     /// Start (or restart after a rung commit) the proof for the media that will release this hold.
-    #[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn begin_hls_recovery(&self) {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         clock.recovery.begin();
@@ -1186,7 +1209,7 @@ impl Shared {
             .recovery
     }
 
-    #[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn finish_hls_recovery(&self) {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         clock.recovery = HlsRecoveryEpoch::idle();
@@ -1248,7 +1271,7 @@ impl Shared {
         self.clock_user_held()
     }
 
-    #[cfg(all(any(test, feature = "test-support"), feature = "hostsim"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_initial_clock_hold_for_test(&self) {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         if clock.phase == HlsClockPhase::Running {

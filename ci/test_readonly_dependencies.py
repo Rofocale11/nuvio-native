@@ -12,6 +12,11 @@ import unittest
 from unittest import mock
 
 import readonly_dependencies as proof
+# Fork Rofocale11: upstream's certificate enumerates upstream's workspace; this fork's
+# reviewed certificate lives in ci/fork_proofs so upstream's proof files stay byte-identical
+# and stop conflicting on every merge. Route the module to it before any test runs.
+from fork_proofs import pins as _fork_pins
+_fork_pins.apply(proof)
 
 ROOT = Path(__file__).resolve().parents[1]
 ABSOLUTE = ['::', 'serde_json', '::', 'Value']

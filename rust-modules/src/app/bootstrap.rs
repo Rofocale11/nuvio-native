@@ -171,7 +171,7 @@ impl RuntimePolicy {
     pub(crate) fn capture() -> Self {
         let lookahead = plx_base::devtrig::read("lookahead");
         #[cfg(feature = "devtriggers")]
-        let recorder = matches!(plx_ui::rec::mode_value(&plx_base::devtrig::path("rec")), Ok(Some(_)));
+        let recorder = matches!(crate::dev::scenarios::mode_trigger("rec"), Ok(Some(_)));
         #[cfg(not(feature = "devtriggers"))]
         let recorder = false;
         Self {
@@ -237,7 +237,7 @@ impl Initial {
     pub(crate) fn person_credits(&self) -> Option<u32> {
         self.content.as_ref().map(|v| v.personcredits)
     }
-    #[cfg(any(test, feature = "hostsim"))]
+    #[cfg(any(test, feature = "sim"))]
     pub(crate) fn synthetic_home(seed: u32, port: u16, settings: Option<String>)
         -> Result<Self, &'static str> {
         if port == 0 { return Err("invalid synthetic port"); }

@@ -4,7 +4,7 @@
 //! mark in prominence, together with the exact notice carried in `settings.about.body`. The SVG is
 //! fork-owned and is drawn through the SHARED display-only picture slot (`Header::with_picture`),
 //! so it adds no focus stop, no hit stop and no screen-local drawing primitive. Only `legal.rs`
-//! opts in; this module owns the asset and its paint. Recorded in `docs/nuvio/MERGE-AUDIT.md`.
+//! opts in; this module owns the asset and its paint. Recorded in `docs/nuvio/MERGE-AUDIT-HISTORY.md`.
 
 use plx_machine::machine::Measure;
 use plx_ui::{

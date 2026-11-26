@@ -462,15 +462,15 @@ class ReplayFixtures(unittest.TestCase):
         """Actual CLI and actual guard, without executing any outbound operation."""
         source = os.path.join(self.FIXTURES, 'v13-owned-input-content')
         expected = {
-            'manifest.json': '1929ede78c012ca95d429a4198e59b05fa3510b342e1145bef5c9eb99b80ec23',
-            'rec-0000.jsonl': '373369a73b6f0cfb92f88f8fbdb75bc0a0fee6a0eb5f0835d5e937473163aa5f',
+            'manifest.json': 'aa95e82627a34b67205408a0dc6fe339105172e9297ca1806aa5771b306534a3',
+            'rec-0000.jsonl': '768c9cb43e4f1edf14440d4bfe310ffc03d4795ee7574abf10504a2a938a1ab5',
         }
         for name, digest in expected.items():
             with open(os.path.join(source, name), 'rb') as f:
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), digest)
         with open(os.path.join(source, 'manifest.json'), encoding='utf-8') as f:
             original = json.load(f)
-        self.assertEqual((original['schema'], original['state_fp']), (3, 9159521251572352515))
+        self.assertEqual((original['schema'], original['state_fp']), (3, 8363262880582770195))
         with tempfile.TemporaryDirectory() as root:
             subprocess.run(['git', 'init', '-q', root], check=True)
             fixtures = os.path.join(root, 'tests', 'fixtures', 'replay')
@@ -485,7 +485,8 @@ class ReplayFixtures(unittest.TestCase):
             cases = [('producer', (), None, True),
                      ('raw-producer', ('anchor',), 'DELETE', True),
                      ('legal-enum', ('init', 'data', 'ui_preferences', 'subtitle_size'), 'large', True),
-                     ('unknown-fp', ('state_fp',), 9159521251572352516, False),
+                     ('unknown-fp', ('state_fp',), 8363262880582770196, False),
+                     ('pre-watchlist-v13-fp', ('state_fp',), 9159521251572352515, False),
                      ('old-fp', ('state_fp',), 4239819007634745513, False),
                      ('other-old-fp', ('state_fp',), 13512213413816145485, False),
                      ('schema', ('schema',), 4, False),
@@ -700,8 +701,8 @@ class ReplayFixtures(unittest.TestCase):
             '6-settings-family': 4239819007634745513,
             '12-filmography-detail-return': 4239819007634745513,
             '12-filmography-detail-return-current': 13512213413816145485,
-            'v13-owned-input-content': 9159521251572352515,
-            '13-by-id-filmography': 9159521251572352515,
+            'v13-owned-input-content': 8363262880582770195,
+            '13-by-id-filmography': 8363262880582770195,
         })
 
     def _tool(self, *args):
@@ -8850,10 +8851,11 @@ class DepGates(unittest.TestCase):
         "rust-modules/play-feed/src",
         "rust-modules/appkit/src",
         "rust-modules/screens/src",
-        # `SRC_PLATFORM_WEBOS` / `SRC_PLATFORM_DESKTOP`: the platform crates' sources. `fnlen` reads the webOS
+        # `SRC_PLATFORM_WEBOS` / `SRC_PLATFORM_DESKTOP` / `SRC_PLATFORM_TIZEN`: the platform crates' sources. `fnlen` reads the webOS
         # crate's `port.rs`, so a copy without it fails that rule for a reason the real tree does not share.
         "rust-modules/platform-webos/src",
         "rust-modules/platform-desktop/src",
+        "rust-modules/platform-tizen/src",
         "rust-modules/Cargo.toml",
         "rust-modules/build.rs",
         "rust-modules/net/Cargo.toml",
@@ -8878,6 +8880,8 @@ class DepGates(unittest.TestCase):
         "rust-modules/platform-webos/build.rs",
         "rust-modules/platform-desktop/Cargo.toml",
         "rust-modules/platform-desktop/build.rs",
+        "rust-modules/platform-tizen/Cargo.toml",
+        "rust-modules/platform-tizen/build.rs",
         "rust-modules/.cargo",
         "Makefile",
     )
@@ -9085,6 +9089,7 @@ class DepGates(unittest.TestCase):
                   "rust-modules/storage/Cargo.toml",
                   "rust-modules/storage/build.rs", "rust-modules/platform-webos/Cargo.toml", "rust-modules/platform-webos/build.rs",
                   "rust-modules/platform-desktop/Cargo.toml", "rust-modules/platform-desktop/build.rs",
+                  "rust-modules/platform-tizen/Cargo.toml", "rust-modules/platform-tizen/build.rs",
                   "rust-modules/.cargo/config.toml", "Makefile")
         for rel in inputs:
             target = os.path.join(self.tree, rel)
@@ -9516,7 +9521,7 @@ impl PersonOwnerGateFixture {
         files = {}
         for i, visibility in enumerate(("pub", "pub(crate)", "pub(super)")):
             for j, predicate in enumerate(('test', 'all(test, feature = "devtriggers")',
-                                           'all(any(test, feature = "test-support"), feature = "hostsim")')):
+                                           'all(any(test, feature = "test-support"), feature = "sim")')):
                 files[f"_check_deps_visible_test_{i}_{j}.rs"] = (
                     f"#[cfg({predicate})]\n{visibility} mod fixture {{\n"
                     "    fn work() { std::thread::spawn(|| {}); }\n}\n")
@@ -10433,11 +10438,12 @@ impl PersonOwnerGateFixture {
         ("_check_deps_selftest_platform_webos.rs", "platform-webos"),
         ("_check_deps_selftest_platform_desktop.rs", "platform-desktop"),
         ("bin/_check_deps_selftest_platform_desktop_bin.rs", "platform-desktop"),
+        ("_check_deps_selftest_platform_tizen.rs", "platform-tizen"),
     )
 
     def _plant_in_platform_crates(self, body):
         """`body` planted in a file of each platform crate (the webOS crate's root, the desktop crate's root and its
-        simulator binary's directory), graded by ONE run. Returns the run and the three planted file names."""
+        simulator binary's directory, and the Tizen crate's root), graded by ONE run. Returns the run and the planted file names."""
         r = self._plant_all([(name, body, crate) for name, crate in self.PLATFORM_PLANT_SITES])
         return r, [f"{crate}/src/{name}" for name, crate in self.PLATFORM_PLANT_SITES]
 
@@ -10500,7 +10506,7 @@ impl PersonOwnerGateFixture {
     def test_a_gate_that_reads_the_whole_app_or_os_crate_reads_the_platform_crates(self):
         """W7b, the class: a rule that names `$SRC` (the application crate) or `$SRC_OS` WHOLE read the files the
         platform crates took out of them, and stops reading them if it is not given the platform roots. Every command in
-        `ci/check-deps.sh` that names either root whole names both `$SRC_PLATFORM_WEBOS` and `$SRC_PLATFORM_DESKTOP`.
+        `ci/check-deps.sh` that names either root whole names all three platform roots (`$SRC_PLATFORM_WEBOS`, `$SRC_PLATFORM_DESKTOP` and `$SRC_PLATFORM_TIZEN`).
         The one allowance is the wholly-test classification prelude, one `rust_test_modules.py <root>` command per root,
         which must have a line for each platform root instead. A rule scoped to a directory (`"$SRC/app"`) or a file
         (`"$SRC_OS/tv/plane.rs"`) cannot reach the moved files and is not matched. This reads `check-deps.sh` only: the
@@ -10520,7 +10526,7 @@ impl PersonOwnerGateFixture {
             current = ""
         whole_root = re.compile(r'"?\$SRC(?:_OS)?"?(?=[\s)]|$)')
         prelude = re.compile(r'\s*python3 ci/rust_test_modules\.py "\$SRC(?:_OS)?"\s*')
-        platform_roots = ('"$SRC_PLATFORM_WEBOS"', '"$SRC_PLATFORM_DESKTOP"')
+        platform_roots = ('"$SRC_PLATFORM_WEBOS"', '"$SRC_PLATFORM_DESKTOP"', '"$SRC_PLATFORM_TIZEN"')
         offenders = [command.strip()[:140] for command in logical
                      if whole_root.search(command) and not prelude.fullmatch(command)
                      and not all(root in command for root in platform_roots)]
@@ -11069,7 +11075,7 @@ static mut MUTABLE: u8 = 0;
         "store-seams.txt": 0,
         "threads.txt": 0,
         "ticks.txt": 2,
-        "wall.txt": 3,
+        "wall.txt": 2,
     }
 
     # The Sans-IO ledgers' pins, one number per RULE (the sum over its area files): a ledger only

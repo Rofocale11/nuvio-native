@@ -1,0 +1,1993 @@
+# Nuvio Native upstream merge audit — historical
+
+Reference only: the merges recorded below are complete. The merge in progress is recorded in `MERGE-AUDIT.md`. Each entry is headed with the exact upstream commit range it covers, from the previous merge point to the new upstream head, and names the product-branch landing commit where known.
+
+## `a296450aa`..`0a1edc61f` — 2026-10-10..2026-11-21
+
+Range marker: the fork root `a296450aa` imported upstream tree at `4e454ea03`
+(2026-10-11); this audit covers upstream commits through `0a1edc61f`
+(2026-11-21), the point merged into `integrate/upstream-latest`. The original
+audit did not record its product-branch landing commit.
+
+Merge of `upstream/main` (`plxnative/plx-native@0a1edc61`) into the fork on
+`integrate/upstream-latest`, using the shared import base `4e454ea` (the fork root
+`a296450a` imported that exact tree). 663 upstream commits, 2,288 files changed;
+45 files had true conflicts and are recorded here.
+
+## Device verification update (owner, 2026-11-25)
+
+Every "no device verification", "no TV deploy" and "still needs a TV run" note in the dated
+sections below is superseded by the owner's confirmation on the LG `45UR7500PSC` (webOS 10.3.1),
+except the replay-fixtures item at the end of this section. Confirmed on device:
+
+- DTS, TrueHD and Opus tracks in Auto decode in-app to stereo 48 kHz PCM (this set has no native
+  path for them); the Catalogs selector and capsules, explicit addon failures, and catalog/
+  subtitle caches staying warm across a relaunch (`84a00aa68`, `e0b584c0c`).
+- P7 HDR10 base-layer fallback, cross-device watch sync on a real account, audio/rating/English
+  defaults, visible subtitles, redb relaunch/reboot persistence, the startup prime's 1.2× rate
+  and 3 s floor, the progressive hold's `reason=time`, the 30 s deadline-only `/decision`, the
+  two-level Streams picker's native playback and slide animation, the HUD logo, the
+  last-played-source resume, the in-app reset, and the cold detail open now inside ≤800 ms.
+- The dedicated `plx_nuvio_probe` sim-probe comparison is recorded as done.
+
+**Still not verified:** replay fixtures only (`AltSourcesScreen::SHAPE` and the other shape pins
+need `tools/plxnative-rec rerecord` on a macOS simulator before `make check-replay` is trusted —
+the Linux host cannot do that step). **Owner confirmation (2026-11-26):** multi-hour stability and
+a TV playback run explicitly attributed to the post-extraction probe are verified; no log for them
+was attached to this document.
+
+**Resolution policy:** integrate both sides wherever they can coexist. The fork's
+version wins only where the two are semantically incompatible (app identity, the
+in-process PMS shim, Nuvio account/My List/rating-source behavior, public-root TLS
+trust). Every fork-originated block retained in a comment-capable file carries
+`// Fork Rofocale11: <detailed why>` inline. Files whose format cannot carry a
+comment are listed here instead: locale JSON (strict `value`/`description` object
+shape), replay JSONL and manifests (hash-pinned recordings), `Cargo.lock`, and the
+Debian `control` file.
+
+**After every future upstream merge**, run the static marker check, host gates, ARM build, then the
+synthetic TV boot and Streams-picker acceptance. Record the commands and their output here with the
+merged hash; a compile alone is not a passed merge.
+
+## Documentation corrections (2026-11-26, HEAD `872617531`)
+
+A source audit against the shipped tree found that some prose in the dated documents of record no
+longer matches the code. The correction of record is `docs/nuvio/PMSSHIM.md`, which cites the
+current source lines; the older passages are kept as history but are marked superseded where they
+would otherwise read as current fact.
+
+- **Artwork:** no linear "TMDB backdrop/logo → BetterPosters → metahub" selector exists. A row's
+  `thumb` is `poster_url(id, original)` with the item's own id; only literal `tt…` ids of ≥7 digits
+  are rewritten to BetterPosters, and `tmdb:<n>` rows keep their addon poster. Real rows publish
+  the addon's `background`/`logo` as `art`/`clearLogo`; TMDB backdrop/logo are only on synthetic
+  detail rows. `/photo` falls back to the original on any non-ok/empty response. Corrected in
+  `AGENTS.md`, `ARCHITECTURE.md`, `ID-MANAGEMENT.md`, `TMDB.md`, `HANDOFF.md`, and the tenth pass
+  above; current contract in `PMSSHIM.md` §7–8.
+- **Trailer keys:** the stride is `10_000_000_000` with `MAX_TRAILERS = 12`, not `+ index` and not a
+  `TRAILER_KEY_END` constant. Corrected in `ID-MANAGEMENT.md`; `PMSSHIM.md` §6, §10.
+- **Cache wrappers:** meta/enrich rows were raw JSON written directly at the time of that audit,
+  but catalog/subtitle caches did use `NuvioCache`/`cache_get`/`cache_put`; their durable helpers are
+  no-ops under `cfg(test)`. Meta/enrich were switched to `cache_put` on 2026-11-26 (section below).
+  Corrected in `ARCHITECTURE.md`, `ID-MANAGEMENT.md`; `PMSSHIM.md` §11.
+- **Playback endpoints:** `part()` has no byte proxy; `PUT /library/parts` was a no-op 200 at the
+  time of that audit (wired to the slot pick later the same day, section below); `start.*` is 404.
+  Corrected in `PLAYBACK.md`, `ARCHITECTURE.md`; `PMSSHIM.md` §9.
+- **Identity/auth/data_dir:** plaintext credential admission is client-side discovery policy, the
+  shim validates no token, and `Config::data_dir` is only a legacy-migration directory. Corrected
+  in `AGENTS.md`, `ARCHITECTURE.md`; `PMSSHIM.md` §2–3, §11.
+- **Historical names:** test and symbol names quoted in the numbered pass narratives above are the
+  names at that pass, not necessarily names in this tree. Where behavior matters, use the test
+  names cited in `PMSSHIM.md` §13. Code questions found by this audit but deliberately NOT changed
+  are listed in `PMSSHIM.md` §15.
+
+An independent source audit of `PMSSHIM.md` then corrected two false statements and six bad
+citations in the new document before it was reported: the `OnceLock` was credited with redirecting
+PMS discovery (it redirects the plex.tv account and Discover bases; PMS credential admission is
+`probe.rs:430-458`); `small/medium/large` was attributed to TMDB as well as MetaHub (TMDB uses a
+`w…/original` ladder); the probe cache's 30 min TTL was applied to content keys too (only URL keys
+expire); `clear()` was said to be `cfg(test)`-no-op'd along with the durable get/put helpers; and
+the libcurl, paging-header, `serve.rs` and packaging citations pointed at the wrong lines. The
+shipped behavior was unchanged; only the prose and its source references were fixed.
+
+## Meta/enrichment cache rows gain a TTL envelope (2026-11-26)
+
+- `pmsshim/src/shim_store.rs` (fork-owned) — `MetaCache` and `EnrichCache` now write through
+  `plx_nuvio_store::cache_put`, so their heavy JSON rows carry the 8-byte BE-millis TTL envelope the
+  store's `purge_expired` and `shed_oldest` understand. Before this, the rows began with `{"type":"`
+  and decoded as a far-future expiry, so expired rows were never reclaimed and a file over the 50 MiB
+  budget shed fresh catalog/subtitle rows first. Both `open()` methods accept the old raw-JSON rows,
+  delete ones past the shim's own TTL, and rewrite live ones under an envelope — no stored-data
+  migration. Two regression tests pin the delete-and-rewrite behavior. Host gates: 181 pmsshim lib
+  tests pass and `make check-nodef` passes; an ARM build has not been run.
+- `docs/nuvio/PMSSHIM.md` — §11 and §15 item 1 updated to the new behavior.
+
+## Sign-out, track write-back and a real restart test (2026-11-26)
+
+Owner-accepted fixes; no commit or deploy was made.
+
+- `plex/src/plex/session.rs` (upstream, **marked**) — two edits: a `mod nuvio_signout;` declaration
+  and one call from `clear_for_erase` after the canonical credential clear is confirmed durable.
+  Guarding on durability matters: a sign-out that failed to revoke credentials must not let a
+  remote-holder drop a profile lock.
+- `plex/src/plex/session/nuvio_signout.rs` (new fork-owned file) — clears every `ProfilePins` row in
+  the one redb store by walking the table, with a test-only call witness. This is what makes the
+  documented forgotten-PIN recovery (Sign out, then QR sign in with the phone as the same account)
+  actually work; the shim's own `Account::sign_out()` remains unrouted and is now dead code.
+- `pmsshim/src/shim_pms.rs` (fork-owned) — `PUT /library/parts/{pid}` now decodes the Part id as
+  `ratingKey*1000 + arrival index` and commits the same slot pick as `/nuvio/select`; trailer Parts
+  keep their harmless 200. Two routes, one piece of state.
+- `pmsshim/src/shim_catalog_cache.rs` (fork-owned) — a thread-local store seam lets a test close and
+  reopen the real redb, so a warm Home shelf after a TV relaunch is now covered by a unit test
+  rather than only by the owner's device observation. Production behavior is unchanged.
+- Tests: 844 `plx_plex` lib tests, 183 `plx_pmsshim` lib tests and `make check-nodef` pass. The
+  Sign-out fix still needs the owner's device check (owner tests the TV). No ARM build yet.
+- `docs/nuvio/PMSSHIM.md`, `PLAYBACK.md`, `ARCHITECTURE.md` — updated to the new behavior.
+
+## Synthetic debug mode: one devtrig for sim and TV (2026-11-26)
+
+A network-free `FakeBackend` already existed in fork-owned `plx_pmsshim` but was reachable only
+from unit tests and `pmsshim-serve --fake`. It is now a boot-time choice for both the simulator
+and a debug TV, behind `plxnative-nuviofake`.
+
+New fork-owned files: `rust-modules/src/app/nuvio/nuvio_debug.rs` (child of the fork-owned `nuvio.rs`).
+Fork-owned files changed: `nuvio.rs`, `nuvio-store/src/lib.rs`,
+`pmsshim/src/shim_core.rs`, `shim_pms.rs`, `shim_account.rs`, `bin/serve.rs` (unchanged) —
+`Config::synthetic`, `Account::new_synthetic` and the store's `EPHEMERAL` override make the account
+isolation explicit. `data_dir: None` alone was NOT enough: `WatchState`/`Keys`/caches read the
+global store handle regardless, and the first TV run showed the household's 12 Continue Watching
+rows. The override makes the loaded rows empty even if the real file was opened earlier in boot.
+
+**Upstream file touched:** `rust-modules/src/app/boot.rs` — three branch sites only, all carrying
+`Fork Rofocale11:` with a why: `prepare_store()` runs before `session::load` so the private empty
+store is installed before the household session can be read; the session-init choice keeps
+`captured_boot`'s DevPms authority for a synthetic boot; the boot-gate dev branch gains
+`|| synthetic_boot`. On a future upstream merge, take upstream's surrounding boot gate and reapply
+just these three conditions; do not replace the account path for ordinary boots.
+
+## Fork-only locale keys live in `brand.json` (2026-11-25)
+
+The fork's 22 Nuvio-only keys were removed from all 12 upstream locale directories
+(`locales/{en,es,be,ca,fr,it,pt,de,hu,ru,pl,nl}/{browse,settings,library_header}.json`)
+and added to `nuvio-locales/brand.json`'s `add` map. Each language's existing wording was
+copied verbatim; the English `description` is preserved because the brand hook requires it.
+
+Keys moved: `browse.list.{add,remove,retry,saving,signin}`,
+`browse.streams.{empty,failed,loading,other}`, `library_header.catalogs`,
+`settings.addons.{detail,section,title}`, `settings.playback.p2p{,_enable,_enable.detail,_off,_on}`,
+`settings.ratings.{copy,imdb,title,tomatoes}`.
+
+Why: those 36 upstream locale files were the fork's largest recurring merge-conflict
+surface. The brand hook runs after `discover()` and before `compile()`, so upstream's
+key/placeholder checks still apply to the injected keys; a future upstream key collision
+now fails loudly ("already in locales/<tag>; delete the override") instead of silently
+freezing upstream's wording behind ours.
+
+**Merge policy:** do not re-add any of these keys to an upstream `locales/` file. If upstream
+introduces a key with the same name on a future merge, remove it from `brand.json:add` and
+take upstream's entry, or keep an override here with an explicit fork reason.
+
+Not moved: the 19 `browse.diagnostics.*` English-only keys (`translate:false`). A test reads
+`locales/en/browse.json` for them directly, so they stay in that upstream file.
+
+Verification: a fresh-target `cargo check -p plx_os` generated all 22 typed message functions
+with 13 language arms each; `cargo test -p plx_os --lib` passed 427/427.
+
+## First-playback stall after boot: FFmpeg load order (2026-11-25)
+
+Owner-reported: resume from the big Home hero sometimes sat on "Buffering…" while the torrent
+downloaded normally; pressing Back to the detail page and hitting Continue played immediately.
+Two device logs pin it. Both show the same startup failure — `ff: swresample is MISSING`, avutil
+bound, `avcodec is MISSING`, `avformat is MISSING`, then `ff: FFmpeg unavailable` — and both later
+bind all four during a stream probe. The working run visited a detail page and ran its trailer
+probe *before* first playback; the stalled run went hero → player directly. The demux then logged
+`demux: refusing — bundled FFmpeg ABI is not the one built for`, pushed EOS at true EOF and
+handed the spinner no data while `sbengine` reported `delivered=0MB` against `got=35MB`.
+
+- `rust-modules/media-codecs/src/ffi.rs` (upstream-owned, marked) and
+  `rust-modules/nuvio-ffmpeg/src/lib.rs` (fork-owned duplicate, kept in step): the fork's Opus
+  commit `7c5064a7b` inserted `swresample` at the head of the four-library load list. But the
+  shipped ARM libraries' DT_NEEDED chain is avutil ← swresample ← avcodec ← avformat, the app
+  directory is not on the loader's search path and the libraries carry no rpath, so the first
+  `dlopen` of swresample cannot resolve `libavutil-plx.so.61`. The cascade leaves `ABI_OK` false
+  until a later probe re-boots with avutil already `RTLD_GLOBAL` — which is why the failure looked
+  intermittent and route-dependent. The load list now opens avutil first; a pinned const and a
+  `dependencies_load_before_their_dependents` unit test in both crates keep the order honest.
+- This is a boot-order fix, not a change to the demux, the torrent engine or the hero card: no
+  geometry, route or playback policy moved. The token from the first boot was avutil alone being
+  bound in both logs, and the second boot's successful four-library bind is the proof that the
+  payload itself is deployed correctly.
+- **Device-verified (owner, 2026-11-25):** the reordered build's first boot logs
+  `ff: bound avutil`, `swresample`, `avcodec`, `avformat` in that order with no MISSING line, then
+  `ff: avformat=63.1.102 avcodec=63.1.102 avutil=61.1.102`. A hero-resume in that same session
+  went straight to playback: `ff: open status=200`, demux AUs fed (`feed v#… reply=O`),
+  `primed: … profile=Resume -> Play`, `sink: displayed`, and `feed: presented (plane shows the
+  picture)`. No `demux: refusing`, no `EOS pushed at true EOF`, and the engine reported
+  `delivered=2MB` against `got=2MB`. The route-dependent stall is closed on this set.
+
+## Build / CI / packaging
+
+| File | Integrated from upstream | Kept from fork / why |
+|---|---|---|
+| `.github/workflows/nightly.yml` | Tag-first push with ERR trap, separate release repo, `--repo` download | `com.nuvionative.app.nightly.manifest.json` — the fork's app id; upstream's `com.beb.plxnative.nightly` is a different install the TV would refuse. |
+| `.gitignore` | New upstream target dirs, `tools/node_modules/`, `/.empryo/` | `rust-modules/stremio/nuvio.local.env` — private Stremio/Nuvio-account addon config; upstream has no addon backend. |
+| `Makefile` | Emoji + Arabic/Hebrew font families | `pkg/public-roots.pem` — Mozilla CA list used as the roots-mode trust store for public Stremio CDNs and the Nuvio backend, whose issuers a 2020 TV firmware predates. |
+| `THIRD-PARTY-NOTICES.md` | Upstream's header-availability statement | Embedded SDL2/Mesa/Khronos/jsmpeg notices and the Mozilla CA (MPL-2.0) attribution — still shipped in this fork and must be preserved. |
+| `ci/mkmacapp.py` | Emoji/Arabic/Hebrew font bundling | `public-roots.pem` — same TLS trust reason as `Makefile`. |
+| `ci/module-layers.ini` | `platform`→`os`, playback crates, host-doorway comment, `testrace`/`testheap` | `local_server`, `stremio`, `pmsshim` — the shim identity and addon backend must stay registered or the layer gate rejects the app's own references. |
+| `ci/test_no_host_staticlib.py` | New layer lists, pinned toolchain, upstream workspace tree | `plx_stremio`/`plx_pmsshim` in both lists — the harness symlinks these paths; without them a cargo graph resolve in the throwaway copy fails. |
+| `ipkroot/ctl/control` | Nothing lost (only upstream's identity fields) | `com.nuvionative.app`, version `0.8.0`, fork maintainer/homepage — upstream's `com.beb.plxnative` collides with the real PlxNative install and breaks opkg identity and DB8 separation. No safe comment syntax in a Debian control file. |
+| `pkg/appinfo.json` | Nothing lost (other fields identical) | Fork app id/version/vendor for the same identity reason; JSON permits no comment. `requiredPermissions` emptied 2026-11-24: there is no DB8 record or keymanager service, so the installed app requests no TV database / security-key grant. |
+| `tools/tv-lock.sh` | `PLX_TV_LOCK_LOCAL` short-circuit, `SSH_TV_OPTS`, bounded-run helpers | `NV_DEVICE` ares-novacom branch — this fork drives a non-rooted LG CX through an ares device; upstream's ssh-only helper cannot reach it. |
+
+## Locales and replay fixtures (no comment syntax)
+
+- All six locale files: the fork's pre-existing Nuvio-branded auth, My List, stream-picker
+  and rating-source strings are kept verbatim; upstream's new `browse.detail.*`,
+  HUD, diagnostics, playback grouping and audio keys are added alongside. No new
+  branding was invented, and no existing string was translated or rewritten.
+- The three `rec-0000.jsonl` recordings and their manifests: upstream's newer recordings
+  are taken as atomic traces (mixing frame-codec generations would be incoherent),
+  with only the fork's in-process shim origin `127.0.0.1:36430` patched into the boot
+  lines and the corresponding manifest authority fields. **Open verification item:**
+  upstream's `hash`/`state_fp` were retained; if replay validates the hash against
+  recording bytes, the fixtures need re-recording and re-pinning.
+- `ALPHABET.json`: union of upstream's eight new source vocabularies and the fork's
+  `nuvio_stream_picker` source / `Streams` literal.
+- `pkg/resources/ca/appinfo.json` and `pkg/resources/hu/appinfo.json` (JSON, no comment syntax):
+  the localized tile title was still upstream's `PlxNative` while the other 13 locales said
+  `Nuvio Native`; the package gate rejects a localized descriptor that un-badges a flavoured
+  install. Set both to `Nuvio Native`.
+- `tests/fixtures/replay/README.md`: both branches' chronology kept as prose (HTML
+  comment marker added inline).
+
+## Rust code
+
+| File | Integrated from upstream | Kept from fork / why |
+|---|---|---|
+| `rust-modules/Cargo.toml` | New `plx_shell_sdl` member | `plx_stremio` + `plx_pmsshim` — addon backend and loopback shim feed the player's probed decision. |
+| `rust-modules/Cargo.lock` (no comments) | Upstream's resolved versions, `indexmap`, `plx_shell_sdl` | Fork's `image-webp`, `plx_stremio`, `plx_pmsshim` entries — same local-crate reason. |
+| `rust-modules/data/src/metadata.rs` | Upstream's `fetch_playing_item_choosing`, `PlayedVersion`, new test modules | Fork's `nuvio_rating_preference_tests` — IMDb/RT scores live on the cached detail and the canonical session picks the provider. **Dropped:** the fork's `playing_item_from_metadata` body, which depended on removed APIs. |
+| `rust-modules/media/src/ff.rs` | Upstream's move of the demuxer into `plx_play_feed` | The fork's retained low-level FFmpeg core now lives in `plx_nuvio_ffmpeg` (see "Extract the retained FFmpeg core" below); this upstream file keeps only a glob re-export and a boot shim. The probe itself is `plx_nuvio_probe`. |
+| `rust-modules/media/src/route/plan.rs` | Git's non-conflicted changes | Whole fork `build_stream` — shim `/decision` first, probed Media replaces guessed codecs, `Quality::Original` because the shim has no transcoder. **Follow-up:** port to upstream's new metadata/playqueue APIs. |
+| `rust-modules/net/src/net.rs` | `RedirectFloor` doc rewrite | `diagnostic_peer()` — reduces addon/debrid URLs to scheme+authority before logging so per-request tokens and credentials are never written. |
+| `rust-modules/plex/src/plex/session.rs` | Flattened `Preferences` refactor, `plx_os` rename, new enums/tests | `rating_source` across struct/defaults/constructors/accessors and its DB8 round-trip test — upstream has no rating-provider key, so a pick would be lost on reload. |
+| `rust-modules/plex/src/plex/session/migration_tests.rs` | `plx_os` rename | DB8 namespace `com.nuvionative.app.storage` — upstream's namespace names a different record. |
+| `rust-modules/src/app/preferences.rs` | Single `Choose` write door, `AutoSignIn`, owned present gate | `PreferenceCmd::RatingSource` → `nuvio::set_rating_source` — upstream's door only covers plex.tv-backed player settings. Fork's superseded `Quality` command dropped. |
+| `rust-modules/src/dev/scenarios.rs` | Shared `settings_boot_page` helper | `settings-boot picker-ratings` target — the Nuvio rating picker has no upstream equivalent. |
+| `rust-modules/screens/src/detail/geometry_tests.rs`, `identity_tests.rs`, `detail/tests.rs`, `detail/mod.rs` | Upstream's `caption_policy`, control refactor, watchlist discs, tests | Fork's `list_*` My List state, `NuvioStreamSelected` handling and My List tests — the Nuvio account backend owns those lists, not the plex.tv Watchlist. |
+| `rust-modules/screens/src/family.rs`, `preferences.rs`, `preferences/picker.rs`, `preferences_text_fit_tests.rs`, `settings_nav_structure_tests.rs`, `preferences_tests.rs`, `registry.rs` | Upstream's picker/preference `V5` refactor, new picker kinds, grouped fields, `Choose` | `RatingSource` vocabulary, command, write path and UI — the Nuvio IMDb/RT choice is a detail-presentation preference upstream cannot express. |
+| `rust-modules/screens/src/detail/hero.rs` | Upstream's whole hero control/disc refactor | `ELEM_MY_LIST`, `HeroCtl::MyList`, `HeroSet.list`, `HeroWidths.list`, trailing My List pill — account-backed list toggle, mutually exclusive with upstream's plex.tv Watchlist because `catalog_hex_of_guid` only accepts `plex://` guids. |
+| `rust-modules/screens/src/detail/hero_watchlist_tests.rs`, `no_driver_tests.rs` | Upstream's watchlist/no-driver sweeps | Added `list: false` / `list: 0.0` to their literals — the fork's extra hero field must be initialised in upstream's tests. |
+
+## Upstream files edited after the merge (for future merges)
+
+These were touched only to keep the fork's own code building against newer upstream files;
+each is a place to watch on the next upstream merge.
+
+- `rust-modules/screens/src/detail/hero_watchlist_tests.rs`,
+  `rust-modules/screens/src/detail/no_driver_tests.rs` — added `list: false` / `list: 0.0`
+  because Nuvio Native's `HeroSet`/`HeroWidths` carry an extra My List field.
+- `rust-modules/screens/src/preferences_tests.rs` — added `PickerKind::RatingSource` to the
+  expected Playback field list (the Nuvio IMDb/RT picker).
+- `ci/arm-cc.py` — drops rustc 1.100's `-fuse-ld=lld` for cargo-driven links; the
+  evidence checker parses GNU ld maps, so without this the storage helper cannot link
+  on this host. Reproduced on the original fork commit before changing the wrapper.
+- `ci/check-package.py` — excludes `*-plx-host.so.*` from the "distributed libraries" set.
+  Those gitignored host FFmpeg libraries are staged into `pkg/` for the Linux simulator and are
+  never in `APP_FILES`, so they cannot ship; counting them failed every local `make ipk` once
+  host FFmpeg was staged. Carries an inline `Fork Rofocale11:` marker.
+- `locales/{ca,de,fr,hu,it,nl,pl,pt,ru}/{browse,settings}.json` (18 files, JSON permits no
+  comment) — added the fork's 12 pre-existing Nuvio keys (My List, stream picker, rating
+  source) with the English wording verbatim. Upstream's catalog build requires every
+  English key in every locale; no new wording or branding was introduced. These are the
+  keys to re-check on every upstream locale change.
+
+## In-app DTS / TrueHD / Opus conversion (Fork Rofocale11, 2026-11-22)
+
+All of these carry `// Fork Rofocale11:` comments inline. Re-check each on every upstream merge:
+
+- `rust-modules/os/src/devcaps.rs` — `AppDecoded::auto_convert` opt-in on the DTS, TrueHD and new
+  Opus rows; `auto_converts_codec` / `auto_convert_codecs` helpers; an Auto arm in
+  `Caps::app_decodes_lossy_track`. Upstream's policy (`AppLossy`) is unchanged: the fork's arm is
+  independent of a measured table row and of the debug trigger, but a set that decodes natively
+  still does.
+- `rust-modules/src/app/nuvio.rs` — the shim's `set_audio_codecs` includes the converted codecs,
+  and the prober marks such tracks `decodable`. This is the real Nuvio gate: without it the shim
+  refuses "Audio format not supported" before the player opens the stream. The shim does not use
+  a PMS transcode profile, so no `plex/transcoder.rs` change is needed here.
+- `rust-modules/os/src/devcaps.rs` also carries an AtomicBool opt-in
+  (`fork_enable_auto_convert`), set only by the Nuvio boot; upstream tests never set it, so Plex
+  behavior and its characterization tests stay byte-for-byte unchanged.
+- `docs/nuvio/{PLAYBACK,HANDOFF,VALIDATION}.md` — HTML comment markers replace the old
+  "no DTS/TrueHD conversion" limitation.
+
+## Post-merge port to upstream APIs (plx_media)
+
+Superseded for `ff.rs` by "Extract the retained FFmpeg core" at the end of this file: the low-level
+core described below is no longer in that upstream file. The `ff_subs.rs` note still stands.
+
+The fork's retained FFmpeg core needed adapting to the APIs upstream moved:
+- `media/src/ff.rs`: unconditional std/FFI imports (upstream had them `#[cfg(test)]`
+  because its `ff.rs` is now a facade), `Venc` re-export aliased away from the fork's
+  local struct, header/font caps restored locally, `ass_source::begin` adapted.
+  `#![allow(dead_code)]` / `#![allow(hidden_glob_reexports)]` are required because the
+  fork's ABI table shadows the codecs re-export and most callers moved to `plx_play_feed`.
+- `media/src/ff_probe.rs`: ABI bring-up restored — the probe now loads and version-checks
+  the fork's own dynlib table on first use, otherwise it would refuse every stream.
+- `media/src/ff_subs.rs`: local `pts_ns` and subtitle cue submission mapped to the new
+  typed `ass_source` / `CaptionRetention` API.
+- `media/src/route/plan.rs`: `plx_platform` → `plx_os`, playqueue/metadata/decision
+  signatures, `audio_direct_plays_with`, caps plumbing. Probe-first `build_stream`
+  behavior is unchanged.
+- The fork's duplicate HLS terminal stall guard was **not** kept in-crate: upstream has
+  the identical rule in `plx_play_feed::ff::{StallGuard, arm_active_stall_guard}`, which
+  is the live guard for the shipped demuxer. `ff_acquisition.rs` was removed as dead.
+
+All adaptations carry `// Fork Rofocale11:` comments.
+
+## Verification result
+
+- `make check`: **146 steps all ok**, harness 753 tests OK, all 22 Rust test binaries
+  green (notably `plx_media` 2183, `plx_screens` 2322, `plx_plex` 822, `plx_net` 338,
+  app crate 1486). No test was skipped, ignored or weakened to get there.
+- `SCREEN_SHAPES_PIN` was re-pinned for the merged Also-available shape (which gained
+  `nuvio` and a stream-request correlation id).
+- Three historical replay fixtures were re-recorded by the merge; their reviewed
+  digests are consolidated in `tests/replay-historical-profiles.json`, and the
+  stale doc claim about byte-for-byte unchanged fixtures was corrected.
+- Three reach caps in the fork's shim are now flagged `status = open` by
+  `ci/list-caps.ini` (200 streams, 40 subtitle refs, 20 cast/crew tags) — a known
+  limitation, not a gate failure.
+
+## Post-gate simulator fixes
+
+- `Makefile`: `RUST_INPUTS`'s `find` now excludes colon-named files. A private
+  `nuvio.local.env:Zone.Identifier` Windows artifact in `rust-modules/stremio/`
+  made the prerequisite rule parse as multiple target patterns.
+- `stremio/src/addon_http.rs`: upstream's new net guard refuses redirect-following
+  requests that carry any caller header. Benign addon GETs now follow redirects
+  with no headers (like upstream's public fetch); Nuvio account calls keep their
+  `apikey`/`Authorization` headers and do not follow redirects, so tokens are
+  never replayed to a redirect target. Before this fix every addon request was
+  refused and Home landed with 0 shelves; after it the simulator lands 48 items
+  across 4 shelves.
+- `sim-linux` deliberately needs no host FFmpeg; the ARM `.so`s staged in `pkg/`
+  are not loadable by the host simulator, so `ff: ... MISSING` in a plain
+  `PLXNATIVE_APP_DIR=pkg` run is expected. For verification here,
+  `HOST=1 ./ci/build-ffmpeg.sh` was rebuilt in this checkout. The four x86-64
+  libraries were staged into `pkg/` under distinct loader names
+  (`libavutil-plx-host.so.61`, etc.) added to `media-codecs/src/ffi.rs`'s candidate
+  lists, so the ARM `.so`s used by `make`/the ipk stay untouched. With the normal
+  `PLXNATIVE_APP_DIR=$(pwd)/pkg PLXNATIVE_RUNTIME_DIR=/tmp/plxnative-sim` launch,
+  the sim logs `ff: bound avutil/avcodec/avformat/swscale -> ...-host.so.*` and
+  lands 336 items / 28 shelves from 11 addons, with no redirect refusals.
+  The fork's retained low-level table now carries its own host candidate names in
+  `nuvio-ffmpeg/src/lib.rs` (the probe uses `plx_media_codecs::ffi` directly), or
+  the ABI probe refused every addon stream even though `media-codecs` reported
+  FFmpeg bound. A direct sim launch also needs the
+  `/tmp/plxnative-sim/plxnative-token` dev-token trigger, otherwise it boots the
+  plex.tv sign-in flow instead of registering the Nuvio shim.
+  `ci/stage-host-ffmpeg.sh` remains macOS-only (`.dylib` + `install_name_tool`),
+  so this Linux staging is manual and the staged binaries are untracked.
+
+## Device verification (owner-run, debug install)
+
+Deployed with `make FLAVOR=debug deploy TV=<address>`; `verify-deploy: 48 files match`.
+
+**Set:** LG `45UR7500PSC`, board `K8LPN_DVB`, webOS `10.3.1` (codename
+`ponytail-papikonda`), PowerVR B-Series BXE-4-32. The debug install boot line was
+`install: id=com.nuvionative.app.debug flavour=debug … features=dev`.
+
+**Evidence from the owner's event log** (hostnames and token values omitted):
+
+- `nuvio: shim serving …`, `plex: server slot 1 registered at 127.0.0.1:32420`;
+  the Nuvio QR sign-in completed (`auth: reached "Nuvio" … via 127.0.0.1:32420`)
+  and the account pulled 11 addons (Cinemeta, Streaming Catalogs, Sootio, Meteor,
+  subtitle addons, Unraid, Torrentio, BetterPosters).
+- `ff: bound avutil/avcodec/avformat/swscale -> libav*-plx.so.*` — the ARM FFmpeg
+  libraries bound on the device.
+- `nuvio: probe hevc 3840x2160 fps=23.976 dovi=false audio=4 subs=4`, then
+  `decision: part=directplay … -> DIRECT PLAY`, `SMP: Load returned ok=1`,
+  `vplane: exported window placed` and `videoplane: BOUND`.
+- `ff: open https status=200 …`, `ff: container names 8/8 tracks`,
+  `ff: v=#0 codec=hevc … 3840x2160`, `smp_cb type=4 … hdrType:HDR10`,
+  `feed: presented`, repeated `sink: displayed` (type=49), and
+  `timeline playing t=5s/10606s` advancing through `t=135s/10606s`.
+- A side-loaded subtitle track fetched and prepared (`sidecar: … ready, 1917 cues`,
+  `assperf … late=0 stale=0`).
+- Clean stop: `timeline stopped t=144s/10606s ok=1`,
+  `native callback gate: epoch=1 intercepted=1455 dropped=0 proven=1`,
+  `native lifecycle: off-frame Unload epoch=1 released 510 ms after the stop`,
+  `videoplane: unbound`; no crash-tracer line in the log.
+
+**Scope of the claim:** direct play of a probed addon stream with the hardware
+video plane works on this set. This run played an HDR10 item (`dovi=false` on the
+probe), so it does **not** by itself prove Dolby Vision P8, seek/resume cases, or
+long-duration stability.
+
+**Observed in the same session, not attributed to the merge:** poster art
+`GET /photo/:/transcode status=404`, repeated `curl rc=28` timeouts to a subtitle
+provider host, `marker-grants: seat=owner unavailable (Refused)` in the automated
+boot, and brief `main-thread hang` lines during heavy concurrent probing.
+Playback itself advanced continuously for the whole observed interval.
+
+## Follow-up: the probe is now `plx_nuvio_probe`
+
+The merge left the 383-line fork probe (`ff_probe.rs`) declared from upstream's
+`media/src/ff.rs` with `#[path = "ff_probe.rs"] pub mod probe;` and `use super::*`.
+That is the single largest source of repeated merge pain: any upstream rewrite of
+`ff.rs` changes the names the probe borrows, and the probe carried a **second** FFmpeg
+`dynlib!` table. The two tables disagreed in the Linux simulator — `media-codecs`
+reported FFmpeg bound while the probe refused every addon stream — which is why the
+host-candidate names had to be fixed in both places.
+
+The probe now lives in the fork-owned crate `rust-modules/nuvio-probe`
+(`plx_nuvio_probe`), using `plx_media_codecs::ffi` as its only ABI table. The app's
+adapter (`src/app/nuvio.rs`) calls `plx_nuvio_probe::probe_url` directly; `ff.rs`
+only loses its fork-added module declaration, so a future merge has no fork code to
+re-resolve there. The three local items that are not in the shared table
+(`OFF_STREAM_DISPOSITION`, `OFF_STREAM_AVG_FRAME_RATE` — both pinned by
+`ci/ffabi-assert.c` — and the AVIO seek constants) live in the new crate with a
+comment explaining why they were not added to the upstream file. The transport is
+the same `plx_net` byte-range source with the same `credential_transport_allowed`
+policy as `media::curlio::PlexAuthorization`, bound locally to avoid a dependency
+from the probe back up into the media layer.
+
+**Superseded:** the older duplicate ABI table is no longer in `ff.rs`. It is now in
+`plx_nuvio_ffmpeg`, where the retained `Venc` capture path and the media FFmpeg tests
+reach it through one glob re-export; see "Extract the retained FFmpeg core" below.
+
+Gates: `cargo check --workspace --all-features` clean; `plx_nuvio_probe` unit tests
+3/3; `ci/check-module-layers.py` green (new `[nuvio_probe]` layer, mounted via
+`[package.metadata.plx]`); `make check-nodef` clean; ARM `make` links. Two unrelated
+pre-existing failures were observed and reproduced on the untouched baseline:
+`plx_media::player::tests::the_feed_counts_a_gap_only_between_two_stamped_callbacks`
+and `ci/check-deps.sh`'s `forks` ledger gap at `plex/servers.rs::register_with_client_id`.
+
+## Agent instructions and non-commentable edits (single-store change)
+
+- `rust-modules/Cargo.lock` gained `redb 4.6.0` and `ring 0.17.14` edges for `plx_nuvio_store` and
+  `plx_os`. Lockfiles cannot carry a comment; regenerate rather than hand-edit on merge.
+- `ci/test_storage_service_package.py` was rewritten (not merely patched) to grade the *absence*
+  of a storage helper. It is upstream-owned but carries the fork reason in its module docstring.
+- The new `docs/nuvio/AGENTS.md` is fork-owned and needs no marker.
+
+## TMDB metadata client (Fork Rofocale11)
+
+New fork behaviour, confined to the shim's crate and fork-owned docs. The public API and field
+shapes are pinned in `docs/nuvio/TMDB.md` so the shim lane can code against them.
+
+- `rust-modules/stremio/src/addons_tmdb.rs` (NEW, fork-owned) — TMDB client with a 15-minute
+  `(api_key, path)` cache and a local per-key `Condvar` single-flight (upstream's
+  `plx_base::flight` does not exist here). No request is made when the key is unset. Module doc
+  carries the `Fork Rofocale11:` marker.
+- `rust-modules/stremio/src/lib.rs` — added `pub mod addons_tmdb; pub use addons_tmdb::*;` with
+  an inline `Fork Rofocale11:` comment. Upstream has no TMDB module.
+- `rust-modules/stremio/src/model.rs` — added `Meta::moviedb_id` (`moviedb_id` wire name,
+  lenient `opt_u64` for number/string shapes) with an inline `Fork Rofocale11:` comment. Upstream's
+  Plex model carries no TMDB id; the shim reads this before paying a `/find` round trip.
+- `docs/nuvio/TMDB.md` (NEW, fork-owned doc) — needs no marker.
+
+### Makefile edit (non-commentable per fork policy; recorded here)
+
+`Makefile` is upstream-owned and its variable/hash lines cannot carry a stable inline marker, so
+the edit is recorded here (inline `# Fork Rofocale11:` notes were added above each line too):
+
+- `NUVIO_ENV_VARS` gained `TMDB_API_KEY` so `option_env!("TMDB_API_KEY")` in `plx_stremio` sees the
+  key. The existing `$(if $($(v)),$(v)='$($(v))',)` means an unset key passes nothing to cargo —
+  identical to upstream's build.
+- `TELEMETRY_CFG` gained a conditional `$(if $(TMDB_API_KEY),|$(TMDB_API_KEY),)` field in the
+  `printf` piped to `shasum`. The key is **hashed only**, never written to a tracked file. When the
+  key is unset the field is empty and the `printf` output is byte-identical to upstream's four-field
+  string, so the build stamp and behavior are unchanged; when set, the stamp changes so a
+  configured binary is relinked rather than silently shared with an unconfigured one.
+
+## Account preferences provided by the shim (Fork Rofocale11)
+
+A real Plex account owns the audio/subtitle preference rows and a real PMS echoes them on
+`/api/v2/user/profile`. Nuvio has neither, so the loopback shim provides that surface from the
+one redb file; the app's unchanged account client — not a second preferences path — reads and
+writes it. The contract is the one `tests/mock_pms.py` grades (`/user` embeds the same row as
+`/user/profile`; PUT takes an empty body plus named query keys and returns the updated row).
+
+- `rust-modules/pmsshim/src/shim_account.rs` (fork-heavy file, inline markers) — implements
+  `GET`/`PUT /api/v2/user/profile` over `plx_nuvio_store::Table::AccountPrefs` with the mock's
+  defaults and validation, and makes `/user`, `/home/users` and switch publish ONE identity:
+  one Nuvio login is one Plex-style profile. The uuid is a fixed account identity rather than a
+  live Nuvio profile id so an in-flight addon load at login cannot make the three answers disagree.
+- `rust-modules/plex/src/plex/account/preferences.rs` (upstream-owned, inline markers) —
+  **removed** the fork's earlier `Source::{Plex,Nuvio}` split and `nuvio_load`/`nuvio_save`, which
+  read/wrote redb directly and bypassed the shim. `capture()` still refuses a request with neither
+  an account token nor a registered local server; `load`/`save` now always use the account HTTP
+  path, which `plex_tv()` already points at the shim on Nuvio. This structural field removal is
+  recorded here because a future upstream merge may reintroduce the enum or a direct-store path.
+  `PreferenceRequest::fixture_for_test` keeps its signature, so the screen/test crates are intact.
+
+## Nuvio boot keeps the account authority (Fork Rofocale11)
+
+The first device deploy of the account-preference change still showed Settings dimmed. The event
+log showed why: `boot: dev token` — in this fork `dev::scenarios::dev_token()` returns
+`local_server.token` on every Nuvio boot, so `SessionInit::captured_boot` classified it as
+`DevPms`, wiped the stored credentials and (by upstream design) published no profile. Upstream
+dims the rows when nobody is seated; the shim's account surface is unreachable from Settings until
+a seat exists.
+
+- `rust-modules/src/app/boot.rs` (upstream-owned, inline `Fork Rofocale11:` markers) — new pure
+  `captured_nuvio_boot` keeps `BootstrapAuthority::Account` and the stored identity/extras; the
+  boot chooses it whenever the shim is registered. The `dev_token` is still built so the shim
+  stays the PMS, but a Nuvio boot skips the `ActivateDevBootstrap` branch and resumes the stored
+  sign-in (or opens the Nuvio QR sign-in) instead. This changes the no-session first boot from
+  Home to the QR screen, which is the point: a Settings value has to belong to a profile.
+- `rust-modules/src/app/session_dev_bootstrap_tests.rs` (upstream-owned test file) — added
+  `nuvio_boot_capture_keeps_the_account_authority_and_stored_identity`, contrasting the two
+  captures. The machine itself is untouched: no new ledger site, no `cfg(test)` fork in `step`.
+
+Verification: app crate 1490 lib + 3 host-interface + doc tests pass; `make check-nodef`,
+`ci/check-deps.sh` and `ci/check-module-layers.py` green. Device re-deploy and sign-in not yet
+verified at the time of writing.
+
+## Account watch progress (Fork Rofocale11)
+
+The shim now mirrors local resume points into the Nuvio account's per-profile watch history and
+merges another device's rows back. The port came from the old fork's `053b7d982`, `33efb07ec` and
+`6cc885a85`, re-implemented against this tree (the old `shim_pms.rs` is ~4x larger and its app had
+generation polling this tree lacked). Every upstream-owned Rust file touched carries an inline
+`Fork Rofocale11:` marker; the non-commentable Markdown edits are recorded here.
+
+- `rust-modules/stremio/src/nuvio.rs` (upstream-owned, inline markers) — `WatchProgress` and the
+  two `sync_*_watch_progress` RPCs beside My List; `content_id_sNe` episode keys and a guard that
+  refuses the whole batch before any request.
+- `rust-modules/pmsshim/src/shim_store.rs`, `shim_pms.rs`, `shim_core.rs`, `shim_account.rs`
+  (fork-heavy, inline markers) — `account_keys` in the one redb watch record, newer-wins
+  `merge_remote`, IMDb-first identity, the 60 s throttle, pull-on-boot/profile-switch, and the
+  `content_generation` counter. `load_profile` now drops the `library` guard before firing the sink
+  and installs addons before pulling history (both orderings are load-bearing).
+- `rust-modules/src/app/{nuvio,boot,run}.rs` and `rust-modules/data/src/stores/deck.rs`
+  (upstream-owned, inline markers) — expose the generation, capture its baseline BEFORE the first
+  `/hubs`, re-read Home once per newly observed value (deferred until a server exists), and let a
+  lane placed on an empty preview adopt later cards. No machine step performs IO: `playback_tick`
+  polls a counter and emits the existing refetch effects.
+- `docs/nuvio/{AGENTS,HANDOFF,WATCH-PROGRESS}.md` — Markdown has no comment syntax: added the new
+  document of record and the delivery note here instead of inline markers.
+
+Verification: focused host tests for `plx_stremio`, `plx_pmsshim`, `plx_data` and the app crate
+pass; `cargo check --workspace` green. Cross-device behaviour on a real account was not yet
+verified at this snapshot; the owner confirmed it on the 7500PSC on 2026-11-25 (see top of file).
+
+## Last played source is local (Fork Rofocale11)
+
+- `rust-modules/pmsshim/src/shim_store.rs` and `shim_pms.rs` (fork-heavy, inline markers) — the
+  `Watch` record gains a `LastStream` fingerprint (addon + `info_hash`/`file_idx`, or direct
+  filename/size/height; never a signed URL or arrival index), written only at a successful
+  `/decision` probe and promoted in `ranked()` only when the viewer has not picked in the slot.
+  Finish/scrobble/remove clear it; an account merge does not touch it. This is local-only state in
+  the one redb watch record, so the old fork's `watch.json` wording is deliberately not carried over.
+- `docs/nuvio/{HANDOFF,WATCH-PROGRESS}.md` — Markdown has no comment syntax: the new section and
+  delivery note are recorded here instead of inline markers.
+
+Verification: focused `plx_pmsshim` tests for the fingerprint's persistence, promotion and explicit
+pick precedence; `cargo check --workspace` green. No device verification at this snapshot; the
+owner later confirmed a resume re-selects the last-played file on the 7500PSC on 2026-11-25 (see
+the device verification update at the top of this file).
+
+## Version alignment after the upstream merge (2026-11-23)
+
+The upstream merge moved `rust-modules/Cargo.toml` and `Cargo.lock` to 0.10.0 while the fork's
+`pkg/appinfo.json` and `ipkroot/ctl/control` stayed at 0.8.0. `ci/check-package.py` requires all
+version witnesses to agree, so no `make ipk` could pass on this tree. Bumped the two packaging
+files to 0.10.0 with `ci/bump-version.py 0.10.0` (the repo's shared version writer); neither JSON
+nor a Debian control file can carry an inline `Fork Rofocale11:` marker. Debug/stable package
+filenames and the docs' historical 0.8.0 build records are from before this alignment.
+
+## Catalog hub bounding lost in the upstream merge (2026-11-23)
+
+The pre-merge fork's `shim_pms.rs` bounded catalog work so a slow or dead addon could not hold a
+hub read: `/hubs` honoured the client's hub window, `catalog_hub` passed a `wait` budget into
+`catalog_range`, the catalog cache used one single-flight fill worker with a `retry_at` backoff
+instead of holding a mutex across network fetches, and a finished background warm bumped the
+content generation so the app re-read a partial answer. Commit `06e15f82` replaced all four with
+upstream's simpler unbounded version. The result on the set: `/hubs` took ~19 s cold (0.6 s once
+cached), the app logged 7 × `hubs: source 0 FAILED` before one success, Home needed 10–15 minutes
+to appear, and 8 `pmsshim-catalog` workers outliving the 4 s budget choked browsing.
+
+Restored the bounded `wait` on `catalog_range` (callers pass the hub budget minus 100 ms), the
+single-flight `filling`/`cv` fill worker with a 30 s `CATALOG_RETRY` backoff, and the
+`bump_content()` after `warm()`. Hub-window paging and My List offset handling were deliberately
+left unchanged to avoid a second behaviour change at the same time. A first port also bumped
+`content_gen` from each completed catalog fill, copying the pre-merge fork's separate catalog
+generation; on this tree that drove an endless Home re-read (`home: hubs refresh queued after
+account pull`, FPS → 0) and was removed. All edits in `shim_pms.rs` carry inline `Fork Rofocale11:`
+markers. Regression tests: `playback_regressions::a_dead_catalog_is_bounded_and_backed_off` (a dead
+addon returns inside the budget and is not re-fetched during backoff) and
+`nuvio_tmdb_tests::a_catalog_fill_does_not_bump_account_content`; `plx_pmsshim` 48/48.
+
+The first corrected build still left Home spinning: bounding catalog fetches was not enough,
+because `/hubs` itself did two synchronous network calls the pre-merge fork did not have —
+`saved_hub` pulled the Nuvio account list, and `continue_rows` fetched a TMDB backdrop per
+Continue Watching row. Both are now cached-only on the hub path: `Account::saved_library_cached()`
+reads the 60 s My List cache (the dedicated `/hubs/nuvio/list` route and the background warm still
+refresh it), and `continue_rows` uses `enrich_get(..).art` instead of a network lookup; the now-unused
+`tmdb_backdrop_for` was removed. A cold `/hubs` no longer waits on those hosts. Built for validation
+as a DEV ipk (`make -j10 ipk`, per the owner's preference) — all packaging gates passed.
+
+A third pass restored the last dropped behavior: `catalog_hubs` now takes a hub window and returns
+the whole filtered-list total, and `/hubs` plus `/hubs/sections/{k}` honour `X-Plex-Container-Start`
+/ `X-Plex-Container-Size` and echo `offset` / `totalSize`. This is what made a Recommended page
+re-fetch every catalog on every window and choke the TV; the old fork's own comment named it.
+Regression test `a_hub_window_fetches_only_that_slice_of_catalogs`; `plx_pmsshim` 49/49.
+
+A fourth pass restored the fork's frame-priority mechanism, which the merge had dropped whole.
+`plx_base::task::yield_to_frame_thread()` (renices the calling worker to `+10`) is back in
+`base/src/task.rs`, and `plx_pmsshim/Cargo.toml` regains the `plx_base` dep the pre-merge fork had
+(the crate table in `ARCHITECTURE.md` is updated to match). It is called at the entry of every
+speculative worker: the shim's per-connection handler, catalog fills, stream/subtitle fetches,
+the pre-probe and warm threads, profile fetches, watch-state meta reads, and the poster
+fetch/decode workers. The old fork's comment records the device measurement this answers — a cold
+Library load at `loop=6, 8, 7, 8` with `budget=0/0`, i.e. the frame loop itself starved by fetch
+workers sharing four cores — which is exactly the `budget=…/solo:residency`, `fps=8` signature seen
+after the hub fix. All edits carry inline `Fork Rofocale11:` markers. `plx_pmsshim` 49/49,
+`make check-nodef` clean, dev ipk rebuilt.
+
+A fifth pass fixed the missing catalogs on the Recommended page. The merge had deleted the fork's
+two-list distinction entirely: `Backend::all_catalogs()`, `AddonBackend::all_catalogs()` (backed by
+`stremio::browse_catalogs()`), and `Shim::all_catalogs()` with its own cached `browse_list`. The
+shim's `catalog_page()` also looked up keys only in `home_catalogs()`, so a `showInHome:false`
+catalog could be named by the Library selector but never fetched. `catalog_hubs` now takes the
+numbered list explicitly again: Home passes the full browse list filtered to Home-eligible keys,
+Recommended passes the full browse list filtered by content type, and `/hubs/nuvio/{i}` indexes
+that same full list — so a row's index names the catalog it previewed. This also removes the
+`nuvio.catalog.10/12 read failed` churn seen in the foreground log. Regression test
+`a_catalog_hidden_from_home_still_gets_a_recommended_shelf`; `plx_pmsshim` 50/50.
+
+A sixth pass ported the rest of the old fork's fix for bare headings (`8acf0953e`, whose message
+names these exact symptoms). A CSV listing read (`/library/metadata/{rk1},{rk2},…`) re-resolved
+every card through addon `meta` — measured 9.2 s for 12 cards, past the TV's 15 s loopback deadline,
+so the row read failed and left a heading with a spinner while churning the UI. `Shim` now keeps a
+bounded `cards` map; `remember_card` is called from `preview_row_raw` (where hub rows are built,
+not merely `row()`), and the CSV route answers from it, falling back to the addon only for a key
+never shown. Regression test `a_listing_read_answers_from_cards_already_built`; `plx_pmsshim` 51/51.
+
+A seventh pass enforced the owner's artwork rule: hub posters are BetterPosters by IMDb id with the
+addon's Cinemeta poster as the STRICT fallback, and TMDB is never consulted on that path. The merge
+had added `imdb_base()` (TMDB `/external_ids`) inside `poster_url`, which resolved `tmdb:` catalog
+ids through TMDB while building a hub. `poster_url` now only accepts an IMDb id already on the
+preview or its `Meta`; otherwise it keeps the addon art. TMDB remains confined to the detail page
+and its children (cast, logo, `art`, trailers, More Like This, collections). The existing
+`poster_url_resolves_imdb_ids_and_keeps_addon_art_otherwise` test still covers both branches.
+
+An eighth pass restored the rest of the old fork's artwork and TMDB/ID surface, adapted to this
+repo's one redb store and `plx_os` platform seam:
+
+- `blur_colors`, `UltraBlurColors` on preview/season/episode/collection/Continue Watching rows, the
+  addon's `logo` as the hub row's `clearLogo`, and the MetaHub `small` poster ladder (the measured
+  `solo:residency` fix at card width).
+- `crop_ink` / `logo_png` / `logo_path_key`, logo-only PNG cropping cached in `plx_os::imgcache`;
+  the `photo` route returns a retryable 503 when a row is not ready instead of latching a 404.
+- `TmdbClient::from_env`, `credits`, `person_credits`, `external_ids`, `videos`, `recommendations`,
+  the `series_id` fallback, and the richer `TmdbCredit`/`TmdbMovie`/`TmdbShow`/`TmdbPerson`/
+  `TmdbGenre` types with `TmdbCredit::movie()` / `::show()`.
+- Filmography rows built from the credit's WORK, sorted newest first/undated last, remembered for
+  the batched caption read.
+- `docs/nuvio/ID-MANAGEMENT.md` restored (redb-adapted) and `TMDB.md` updated with the artwork rule.
+
+`plx_pmsshim` 53/53, `plx_stremio` 50/50, `make check-nodef` clean, dev ipk built and deployed.
+
+A ninth pass fixed the two reported page failures. The person page was dialling
+`discover.provider.plex.tv` and getting **401** — the merge had dropped the old fork's
+`local_discover()` first hop in `plex/account.rs::discover()`, which routes Discover reads to the
+installed in-process shim. Restored `local_discover()` / `resolve_local_base()` (plain loopback http
+only), included it in `stand_in_armed()` and the read gate, with the old fork's loopback-only test.
+
+On a related title the shim short-circuited `tmdb_synthetic_row()` to a remembered bare fallback,
+losing cast, Extras and summary; it now always rebuilds the full detail row as the old fork did
+(the client caches details for 15 min). `tmdb_details_row` / `tmdb_show_details_row` publish the
+overview as `summary`, TMDB poster and Genre tags again; fallback rows carry them too. Added
+`warm_synthetic_streams` so clicking a related movie starts the addon stream fetch on detail open,
+and switched `/library/people/{id}/media` to the cast-only `person_credits`.
+
+A tenth pass made Recommended posters use BetterPoster too, per the owner's explicit decision. Home
+gets Cinemeta `tt…` ids; Recommended's extra "Streaming Catalogs" catalogs carry `tmdb:<n>` ids, so
+the `tt…`-only gate left them on the addon poster. `poster_url` now calls `imdb_base` for those: the
+one redb store is read first, a cold miss makes ONE cached TMDB `/external_ids` call (positive and
+negative answers cached under `IMDB_TTL`, `TmdbClient` keyed single-flight shares concurrent
+misses), and all later reads are redb-only. No TMDB image is ever used for a hub. `TMDB.md` and
+`ID-MANAGEMENT.md` record the rule; `plx_pmsshim` 53/53.
+
+**Superseded (2026-11-26):** the shipped code does **not** call `imdb_base` from `poster_url`. The
+thirteenth pass below restored the old fork's rule — the item's own id is passed to
+`Backend::poster`, so only a literal `tt…` id becomes BetterPosters and a `tmdb:<n>` row keeps its
+addon poster (`shim_pms.rs:6386-6399`, `shim_backend.rs:158-162`). The current versions of `TMDB.md`
+and `ID-MANAGEMENT.md`, and `PMSSHIM.md` §7–8, record the shipped behavior; this paragraph is kept
+only as the history of that pass.
+
+An eleventh pass traced the remaining spinner/mixed-art symptom past the shim entirely: every hub
+thumb is BetterPoster and the `/photo` bytes are correct, but `plx_ui::tex` reported
+`budget …/solo:residency` with `residency lost … rearmed … refused …`. The old fork caps an
+oversized CDN decode to the card box and pins the MRU/recent Residency entry; this tree had
+neither. Ported `request_box` / `cap_dims` / `downscale_rgba` into the poster worker (a 500×750
+btttr.cc card now decodes at 250×375, an ordinary `Poster` take), `RECENT_RESIDENCY_GRACE` +
+`mru_residency` into `victim_ok`, and restored `PT_CAP` 96. The temporary `TRACE photo` logging
+used for the diagnosis was removed. `plx_ui` 1761/1761, focused poster cap test passes.
+
+A twelfth pass tried the requested wholesale swap — copying the old fork's whole `pmsshim/src`
+(including `shim_trailer.rs`) over this tree's and rewiring its file caches onto `plx_nuvio_store`.
+It was reverted, not shipped: the old shim is not self-contained. It fails `cargo check -p
+plx_pmsshim` with 56 errors because it calls `plx_base::flight` (7.5 KB module absent here),
+`plx_stremio::sbengine` (32 KB in-process C engine that would REPLACE this tree's EngineFS torrent
+path), `addons::opensubtitles_candidates`, the old flattened `TmdbMovieDetails`/`TmdbShowDetails`
+shape, `Meta::trailer_streams`, `Subtitle::release_title/provider`, `libc`, and `plx_platform`
+(renamed `plx_os` here). Making it build means porting those crates too, not just the shim. The
+old and current shims' `/photo` handler and `poster_url`/`poster_fallbacks` logic are also
+effectively identical, so the swap would not have changed the mixed-poster symptom. The tree was
+restored from a byte-exact backup and `cargo check -p plx_pmsshim` passes again.
+
+A thirteenth pass shipped the requested port after all: the old fork's whole `pmsshim/src` is now
+in this tree, with its **behavior** left intact and only its storage/API boundary adapted:
+
+- Redb: `Keys`, `WatchState`, `MetaCache` and `EnrichCache` now persist in the one `nuvio.redb`
+  (legacy TSV/JSON/JSONL migrated once); account session/preferences likewise. Added
+  `plx_nuvio_store::clear_table`.
+- Missing APIs adapted at the boundary, not ported as second stacks: a local `shim_flight` (the old
+  `base::flight`), `shim_sbengine` backed by this tree's `plx_stremio::torrent`/EngineFS, a local
+  `opensubtitles_candidates` in `plx_stremio::addons`, `plx_os::{imgcache,devcaps}`, `libc`, and
+  the old nested `TmdbMovieDetails`/`TmdbShowDetails` shape plus `Meta::trailer_streams` and the
+  fuller `Subtitle`. Old file-based tests were rewritten to assert redb rows and to serialise on
+  the process-wide store.
+- Deliberately **not** changed: `poster_url` still passes the item's own id to the provider (old
+  fork behavior), and a regression test pins it. The old `/photo` and `poster_fallbacks` paths are
+  unchanged.
+
+Verification: workspace `cargo check` clean, `plx_pmsshim` 154/154, `plx_stremio` 50/50,
+`plx_nuvio_store` 3/3, `plxnative-modules --lib` 1492/1492, `make check-nodef` clean. The owner
+confirmed afterwards that everything is fixed on device. `docs/nuvio/AGENTS.md` now records that
+the old fork's shim behavior is authoritative for future merges.
+
+## Still to verify
+
+Point-in-time list (2026-11-23). Later sections and the current-status blocks at the top of
+`VALIDATION.md` / `HANDOFF.md` supersede part of it: Dolby Vision P8 playback, seek and
+pause/resume were later confirmed by the owner on debug and stable installs. The dedicated
+sim-probe comparison was confirmed on the 7500PSC on 2026-11-25 (see the device verification
+update at the top of this file). Multi-hour stability and a TV playback run attributed to the
+post-extraction probe were confirmed by the owner on 2026-11-26 (no log attached here).
+
+
+## Fourteenth pass — the torrent engine and trailer service
+
+The owner asked for the remaining old-fork pieces as well: `torrent.rs`, the C engine and its
+`ci/build-sbengine.sh`, and the `js-service/trailer` children. This replaced the temporary
+`shim_sbengine` adapter with the real stack:
+
+- `plx_stremio::sbengine` is the old fork's FFI module verbatim (one `sbe_get` symbol through
+  `plx_base::dynlib!`, nested `Tmdb*` details untouched elsewhere). `plx_pmsshim` now calls it
+  directly; the adapter is gone. `torrent.rs` is back to the old rule: always `POST /{hash}/create`
+  before playback, with its regression tests.
+- `boot.rs` starts/stops the engine (`p2p_state_candidates` / `p2p_state_dir_is_private` ported into
+  `plx_base::paths`), `run.rs` stops it on leaving the player and at shutdown. `plx_os` replaced
+  upstream's `platform` edge in `ci/module-layers.ini`, and the new shim/engine modules are listed.
+- Build/packaging: `ci/build-sbengine.sh`, `ci/build-openssl.sh`, `ci/cmake-toolchains/webos-arm.cmake`
+  and `vendor/engine-sources/` ported; `openssl` added to `ci/dependencies.json`. The Makefile stages
+  `libsbengine.so` and the two trailer scripts in `deploy` and `ipk`, verifies them, and pins the
+  engine digest in `unreceipted.sha256`; `ci/check-packaged-elf.py` accepts digest-pinned ELFs.
+  CI builds the engine before packaging and asserts it is staged. The trailer `server.js` is NOT
+  shipped — the engine is the only streaming path, exactly as the old fork retired it.
+- Built from source locally: `build/sbengine/libsbengine.so` (ARMv7 soft-float, `sbe_get` exported,
+  no libssl/libstdc++ in DT_NEEDED). Debug `make -j10 ipk` passes every gate: 7 receipted + 1
+  digest-pinned ELF. `nextest` 1981/1981 across the affected crates, `check-nodef`, module layers
+  and `check-deps`, `make lint` and the ledger ratchet all green. `tools/host-engine-check.sh`
+  (host build of the same engine plus its loopback seeder, running the two `#[ignore]`d real-engine
+  shim tests) was ported and both checks pass on this machine: the real engine held `/decision`
+  silent for 30.04 s past the 15 s media budget and still answered, and a loopback-seeded torrent
+  direct-played on the FIRST decision with 262144 bytes served through the engine byte-identical
+  to the source file. The host tool builds its own pinned OpenSSL 1.1.1w and points CMake at the
+  real `libz.so` because this host ships OpenSSL 4.1 and no standard multiarch zlib symlink.
+  Nothing deployed or committed for this pass.
+
+## Fifteenth pass — enable torrent offers when the engine is present
+
+The engine boot was wired but the shim's `Config::p2p_enabled` still defaulted to `false`, and this
+fork has no boot-time `restore_p2p` or Settings switch to turn it on. `torrent_server()` therefore
+returned `None` and `shim_media::rank` dropped every torrent/magnet stream before the engine could
+resolve one. `app/nuvio.rs` now sets `p2p_enabled: plx_stremio::sbengine::available()`, so torrent
+picks are offered exactly when `libsbengine.so` actually loads; a build without it still hides
+unplayable picks. This is the cheap enable, not the Settings-toggle port — the persisted
+preference and UI row remain unported. `nextest` 1646/1646 on the affected crates; workspace check
+clean.
+
+**Trailer DASH is ported (fifteenth pass).** The player-side pieces from the old fork are now
+present: the strict 529-line SegmentBase MPD parser in the new fork-owned crate `plx_nuvio_dash`
+(pure Rust, no dependencies), the `.mpd` → two progressive fMP4 tracks demux in the new file
+`play-feed/src/dash.rs`, and boot's `set_trailer_reacher` / `probes.attach` in `app/nuvio.rs`.
+Porting was not a verbatim copy: this fork moved the physical demuxer to `plx_play_feed`, so the
+demux was adapted to its session effects (file size, duration, raster and tails publish as
+`DemuxEffect`, not direct `SHARED` atomics), two-lane curl transport and `hls::Resource` API.
+
+**Trailer audio pacing (device log, "plays then cuts out").** The DASH demux originally pushed
+one audio AU per video frame, mirroring the old fork. A 4K VP9 frame is ~42 ms but an AAC AU is
+~23.2 ms, so audio media time fell behind video from the first second (~16 s by the end of a
+150 s trailer) and Starfish's audio clock ran out of data. The audio lane now reads AUs until its
+pts reaches the last video AU's pts (bounded to 12 AUs per demux iteration), with a pure
+`audio_needs_catch_up` predicate and three host tests. This is a NEW rule, not an old-fork port:
+the old loop had the same 1:1 cadence. The old fork's actual audio-sync fixes — `#1343`
+(`audio_stale_ahead`, counted drops) and `#874` (`PushGate`) — are already present in this tree,
+and `pts_ns`/ADTS framing in the DASH demux are byte-for-byte the old code. The old fork's
+`9ccab8649` (`PrimeProfile::Preview`: start the audioSync master clock only after an audio AU is
+accepted) is NOT ported — this tree's prime implementation is upstream's and has no preview
+profile; the device log showed audio accepted before the sink was configured, so it was not the
+cause here.
+
+**The lost upstream arm that made all of the above unreachable.** The first device run after the
+port still failed: the log showed no `dash:` line at all — the planner sent the trailer Part to
+`/video/:/transcode/universal/start.mkv` (`directPlay=0&directStream=1`), and the shim answered a
+90-byte "no transcoder" body. `plan.rs::part_is_streamable` accepted only `.mkv`/`.mp4`/`.m4v`;
+the old fork also accepted `.mpd`, and that arm — plus its test — was dropped by an earlier upstream
+merge. Restored both (with a `Fork Rofocale11:` marker). This is the exact merge hazard the new
+crate layout is meant to shrink: a one-line arm in an upstream file can silently disable a whole
+fork feature, so the contract now has tests at both ends (generator→parser, and part-key→route).
+
+**What an upstream merge touches.** The edits to upstream-owned files for this feature are:
+two comments in `play-feed/src/ff.rs` (a `#[path = "dash.rs"] mod dash;` declaration and the
+`.mpd` routing branch in `demux`), the restored `.mpd` arm in `media/src/route/plan.rs` and its
+test, one dependency line each in `play-feed/Cargo.toml` and the workspace manifest, and two `uses`
+edges in `ci/module-layers.ini`. Everything else is new files:
+`rust-modules/nuvio-dash/` and `rust-modules/play-feed/src/dash.rs`. As a child module of `ff`,
+the demux borrows the private AVIO helpers (`packet_to_annexb`, `parse_extradata`, `adts_params`,
+`HlsInput`, `read_cb`…) without making any of them `pub`, so an upstream rewrite of `ff.rs` cannot
+drag fork code into the merge. The generator/parser contract is pinned by a test that feeds the
+MPD `shim_pms::dash_manifest` actually emits to `plx_nuvio_dash::parse_manifest`.
+
+## Sixteenth pass — the Watchlist page reads My List (2026-11-23)
+
+Clicking the Watchlist pill read "Can't reach your Watchlist" because the page still used upstream's
+`LiveWatchlistIo` → `discover.provider.plex.tv/library/sections/watchlist/all` with a Nuvio token
+(HTTP 401). **This is not the account watch-progress feature recorded above**: that is Continue
+Watching (`/:timeline` → `sync_*_watch_progress`), which was ported earlier. My List itself is
+**not in redb** — `plx_stremio::nuvio::saved_library` pages the Nuvio backend's `sync_pull_library`
+RPC and the shim keeps a 60-second in-memory cache. redb holds the session, preferences, watch
+state, key table and metadata caches; the shim's `my_list_entries` / `set_my_list_saved` are the
+existing door to My List.
+
+Ported the old fork's 2026-11-02 tier-C fix (`UPSTREAM-LOG.md` there), adapted to this tree's
+Sans-IO job design:
+
+- **New fork-owned `rust-modules/src/app/watchlist_io.rs`** — `MyListIo` implements this tree's
+  `WatchlistIo` (`page`, `released`, `write`, `find`, generations) from `Shim::my_list_entries` /
+  `set_my_list_saved`. Page 0 refreshes the account cache; every row is reported as held by the
+  shim, so a tile is playable and opens the shim-backed Detail; writes map the 12-byte id back to
+  a shim ratingKey. Three host tests pin the identity, guid form and series/movie kind.
+- `rust-modules/src/app/adapters/stores.rs` — the one production IO construction now builds
+  `MyListIo` with the captured snapshot instead of `LiveWatchlistIo`. Fork marker inline.
+- `rust-modules/src/app/bridge.rs` — `watchlist_input` seats a local identity when no plex.tv
+  token exists but the Nuvio shim is signed in; otherwise `WatchlistStore::open` stops at
+  `NoAccount` before any read. The shim IO ignores those credential fields; no request is built
+  from them. Fork marker inline.
+- `rust-modules/src/app/mod.rs` — new `mod watchlist_io;` (fork marker inline).
+- `rust-modules/plex/src/plex/models.rs` — restored `NUVIO_HEX_MARK`, `hex_of_rating_key`,
+  `rating_key_of_hex` and `catalog_hex_of_item`, and routed `guid_hex` / `show_guid_hex` through
+  the latter so shim rows carry the same `NVIO`+ratingKey id as Watchlist tiles; without it the
+  Detail/Home disc and the hold-menu rows cannot agree with the page. Fork markers inline.
+
+Upstream file surface on the next merge: the four inline edits above plus the new fork-owned file.
+The Discover catalog page (a list title with no server copy) still uses upstream's plex.tv read in
+both forks and is not part of this port. Verification: full nextest 1495/1495, `make check-nodef`,
+module layers, `check-deps` and ledger ratchet all green. No device verification yet.
+
+**Device follow-up — the Detail disc was still gated on a plex guid.** The Watchlist page worked on
+the set, but Detail showed the older named "Add/Remove My List" button instead of the bookmark disc,
+and no menu Add/Remove row. Two gates in `screens/src/detail/mod.rs` still used
+`catalog_hex_of_guid(&d.guid)`, which refuses a shim's `nuvio://...` guid: the cached
+`watchlist_hex` the app feeds the disc, and `HeroSet::watchlist`. Both now use
+`catalog_hex_of_item(&d.guid, &d.rk)` (fork markers inline), and `HeroSet::list` stands down when
+the disc exists — the old fork had ONE My List control, not two. The disc's press also had to be
+keyed by the resolved NVIO hex (`hero::press` decodes a `plex://` guid tail, which a `nuvio://`
+guid does not carry); its Add/Remove actions now name the same id as the Watchlist store's writes.
+Regression test `a_shim_movie_gets_the_watchlist_disc_and_a_working_press` pins all three.
+
+A workspace-wide `--workspace --lib` run has six failures that are NOT from this change: four
+(`the_feed_counts_a_gap_only_between_two_stamped_callbacks` and the three transcoder lossy-gate
+tests) reproduce unchanged on a detached worktree at `b26d45dd`; the other two are order-dependent
+and pass in isolation. The project's default nextest scope is green.
+
+**Retiring the old named My List UI once the disc worked.** With the disc now the only My List
+control, the fork's earlier `HeroCtl::MyList` / `ELEM_MY_LIST` / `HeroSet::list` / `HeroWidths::list`
+button was removed from `screens/src/detail/hero.rs` and `detail/mod.rs`: no variant, element id,
+focus stop, measured width, label (`list_label`), draw arm, press arm or a11y entry. Its two UI
+tests were removed and the remaining `HeroSet` literals in detail tests no longer initialise a
+`list` bit. This is a UI-only removal: `DetailScreen::SHAPE` still names `list_state`,
+`list_pending` and `list_error`, and `state_fp()` hashes every screen SHAPE into the pinned replay
+fingerprints, so those fields, their addressed `NuvioReq::MyList` read, its landing and the
+`browse.list.*` locale data stay. They are marked in code as legacy replay state, never as a second
+Watchlist implementation. Removing them properly means re-recording the V13 anchor and historical
+replay profiles, which is a separate change.
+
+**Two-level Streams picker (2026-11-23).** The old fork's Detail Streams menu was a drill-in: first
+the addons that answered for the item, then one addon's ranked streams, picked with the same
+`plx_ui::page_stack::PageStack` + `plx_ui::panel_motion::PanelMotion` the player's Subtitles/More
+menus and the Library menu stand on. That UI was lost in the merged tree, which left a flat stream
+list; it has now been restored **without the old fork's IO**. The old `screens/src/alt_sources.rs`
+started two workers from the screen (`task::spawn` at old `request_streams` and `commit`), slept on
+a thread, read `client_for` in `new()` and on both workers, locked an `Arc<Mutex<Option<StreamReply>>>`
+mailbox in `Tick`, and wrote the process-global `route::set_available_streams` from that step. The
+merged tree's `AppFx::Nuvio(NuvioReq::Streams/Select)` effects, the app's `execute_nuvio` worker and
+the addressed `ScreenEvent::Async` answers with a `RequestId` fence are kept unchanged; the screen
+only builds forms, steps motion from `Tick` and emits effects. The pure helpers that were also lost
+(`source_list::addon_pages`, `addon_name`, `untagged_source`, `seeders_fact`, `stream_row_with` and
+`StreamChoice.seeders`, which the shim already sends) were ported back into `appkit`/`plex`, and the
+`browse.streams.other` locale key into every shipped language. `NuvioStreamSelected` now starts the
+picked stream immediately through Detail's `play_hero` (the old fork's behavior) instead of only
+re-reading the item.
+
+This changes `AltSourcesScreen::SHAPE`, so both shape pins moved and **the committed replay
+fixtures need `tools/plxnative-rec rerecord` on a macOS simulator** before `make check-replay` is
+trusted; the Linux host cannot do that step. Host evidence for the change: 33 focused `alt_sources`
+tests (including six pinned two-level tests, the all-language fit test and the title-band pop),
+a Detail test that a pick emits a Play effect, full nextest 1495/1495, `make check-nodef`, module
+layers, `check-deps`, ledger ratchet. Native playback and the slide animation needed a TV run at
+this snapshot; the owner confirmed both on the 7500PSC on 2026-11-25 (see top of file). The replay
+fixtures remain unverified.
+
+**Post-deploy fix — BACK no longer snaps the addon list to the top.** `AltSourcesScreen::reconcile`
+fell back to `form.opening_key()` when the engine's focus key was from the page that had just been
+popped, which re-seated the first row (and scrolled the list back to the top) even though
+`pop_stream_page` had restored the cursor onto the opener. It now uses the selected row first, the
+same rule `LibraryMenuScreen::reconcile` uses for its Genre drill-in. Regression test
+`a_pop_reconciles_focus_to_the_opener_not_the_first_row` pins a stale second-level focus key through
+the pop.
+
+**Episode rows open the Streams picker on Nuvio shows (2026-11-23).** `ContentPanel::AltSources`
+carries an optional episode ratingKey (the panel is no longer `Copy`), `ContentPanel::surface`
+uses it as the picker's subject, and Detail keeps an unhashed `streams_episode` latch. On a Nuvio
+show BOTH episode rows — the still (`episodes::Action::Play`) and the title
+(`Action::OpenDetail`) — now open the same two-level picker for THAT episode instead of playing
+`Media[0]` or pushing its detail page; the addressed `NuvioStreamSelected` answer then calls
+`play_episode_at` for the latched episode, or `play_hero` when the picker came from the hero pill.
+The Nuvio gate is the pure `is_nuvio_item(d)` guid check, not the old fork's `client_for` in a
+screen step. Plain Plex episodes keep direct play and their detail page. Three tests pin the two
+rows, the latch and the hero fallback; full nextest, `check-nodef` and `check-deps` are green.
+
+**Player `…` → Streams picker (2026-11-23).** The old fork's player overflow menu replaced the
+playback-quality ladder with a two-level addon stream picker. Replacing the whole upstream
+`appkit/more_menu.rs` is exactly what makes an upstream merge painful, so this port does the
+opposite: the Nuvio menu lives in a NEW fork-owned child module,
+`appkit/src/more_menu/nuvio_streams.rs`, and the upstream file carries only marked routing
+branches (two enum variants per type, key/title/a11y/label arms, a `root_form` parameter and a
+`refresh_to` revision). **The quality ladder's upstream code is kept intact, not deleted** — it is
+simply not offered while the shim has streams for the playing item, because under the shim a
+stream IS the quality. Plain Plex playback keeps the upstream menu byte-for-byte. That is the
+"whatever makes merges easy" choice: an upstream change to the ladder lands without touching a
+single fork branch; the only recurring conflict surface is the small marked seam.
+
+The data path is this fork's typed effect boundary, not the old fork's `AVAILABLE_STREAMS` global:
+the player overlay emits `NuvioReq::Streams { sid, rk, delay_ms }` from `step` (first tick, then
+poll while the shim says `complete: false`), consumes the addressed `NuvioResult::Streams` behind a
+`RequestId` fence and lands it in the panel's captured state. A stream row reports
+`Action::NuvioStream(index)` through the ordinary `PlayerReq::More` path; `app/nuvio_more.rs`
+(fork-owned, one marked match arm in `app/playback.rs`) performs `/nuvio/select` and the same
+real stop + fresh resolve the old fork's `SetStream` used. Both levels use the shared
+`source_list::addon_pages` / `stream_row_with`, so the P2P seeder count reaches the player too.
+`StreamList` gained `Clone` (fork-owned `plex/nuvio.rs`) so an addressed answer can be taken by
+value. Five module tests and one overlay effect/answer test pin the pages, the seeder fact, the
+polling and the replacement of the Quality row; full default nextest, `check-nodef`, layers,
+deps and ledger are green. The six workspace-wide failures are the known baseline.
+
+**Home hero shows the plot under the identity band (2026-11-23).** Upstream deliberately replaced
+the hero plot with the "Movie · Year · Length" band (v0.10.0 rc1, owner's request), keeping the
+synopsis only on Detail. The owner has now asked for the plot on Home too. Both upstream files
+carry `Fork Rofocale11:` markers at the edit:
+
+- `screens/src/home/mod.rs` — `hero_plot()` reads the shim-published `summary` (the addon's
+  `description`, see `pmsshim::preview_row`) for movies, shows and episodes; `hero_content()` stacks
+  the plot under the identity band in one shared `VStack`, and `hero_ladder()` reserves the extra
+  lines so the title rises with the block while the foot stays pinned at 638. Kinds with no
+  identity band (season, collection) keep their single premise line. Plain Plex content shows the
+  same band-plus-plot as Nuvio content — the change is not gated on the shim.
+- `screens/src/home/hero_line_tests.rs` — the anchor test now reserves the plot's lines, and
+  `a_movie_and_a_show_show_their_plot_under_the_identity_band` pins the plot for a movie, a show and
+  an episode, the empty-summary case, and the single-line premise for a collection.
+
+No screen shape, element id or focus group changed, so the replay fingerprints are untouched.
+Focused hero-line tests and `make check-nodef` are green. The upstream `ui/src/CLAUDE.md` sentence
+that said Home only reads metadata or a premise was corrected in place with a `Fork Rofocale11:`
+marker (it is Markdown prose with comment syntax, so the inline marker is enough).
+
+**Player title is the clear logo when one resolves (2026-11-23).** Upstream's HUD package format
+has no logo slot: `hud_format/schema.rs` binds its only image cell to `info.still`, and `title.main`
+is a text cell; there is no `logo` mention anywhere in `hud_format`, `player_hud` or `screens/player`.
+Under the shim the addon's `logo` IS published as the row's `clearLogo`, and `/photo/…/clearLogo`
+resolves it from the show's (or movie's) rating key, so the artwork already exists — it only had no
+place in the player.
+
+- **New fork-owned `appkit/src/player_hud/render/nuvio_logo.rs`** — resolves the playing item's
+  `NowPlaying.detail_rk` (the SHOW for an episode, the movie otherwise) on its current server, fetches
+  the texture through the SHARED `plx_ui::tex::logo_src`, and sizes/places it with the SHARED
+  `hero_logo::{fit, place}` Compact rung. No new art loader, no worker, no global, no
+  `NowPlaying` field, no HUD-format binding or version bump. A pure test pins the show-not-episode
+  key rule.
+- `appkit/src/player_hud/render.rs` — one `mod` line and two marked branches in the private
+  `draw_title`: when a logo is ready the kicker is still drawn through upstream's own
+  `draw_player_title_at` with a null title (which releases the marquee clock), and the logo is
+  painted in the title rung's band. **Every no-logo case, including all plain-Plex playback, keeps
+  the typed title unchanged.** The appkit tests, including the frozen HUD goldens and the classic
+  census, stay green with no fixture changes.
+- **Sizing follow-up (owner, after two device looks):** the Compact rung was too small (~246 px wide
+  for a 5:1 wordmark) and a 3x area was far too big (~740 px). The proportional target is the
+  footprint of the 54 px typed title it replaces (~400-430 px), so the fork-owned `LogoRung::Custom`
+  is now ~1.55x Compact linearly: a 5:1 wordmark lands near 387x77. It stays bottom-anchored on the
+  typed line so it grows UP into the picture, never over the playbar, and the episode kicker is
+  lifted above the painted top so the mark cannot cover `S2 · E4`. A pure test pins the ratio and
+  the typed-title width band.
+
+No screen shape, element id or focus group changed, so replay fingerprints are untouched. A host
+pass cannot prove the texture resolves on the device; the TV still needs a `--guest`/mock capture
+under the lock, and a raw-URL play with no shim row has no logo to show (text fallback remains).
+
+**Continuous AU clock for app-decoded multichannel Opus (2026-11-23).** The addon files' Opus
+packets carry 20 ms of audio stamped 160 ms apart. `PcmConverter`'s clock and `ff_pcm::AuBatcher`
+both re-anchor on an `AU_GAP_TOLERANCE_NS` (20 ms) gap, so each 20 ms decoded block inherits the
+160 ms spacing and the TV plays 20 ms then waits 140 ms — the stutter. Upstream never sees it
+(`OPUS_AUTO_MAX_CHANNELS = 2` makes PMS convert the track to a continuous stereo stream); the fork
+has no transcoder. No encoder code is involved.
+
+- **New fork-owned `play-feed/src/opus_reframe.rs`** — a pure `OpusReframe` clock: the first decoded
+  block anchors at the packet's pts (keeping the demuxer's `FirstAudioPts` and first-AU logic valid),
+  later blocks are stamped at `previous + the bytes' own duration`. Four pure tests pin the anchor,
+  the 160 ms → 20 ms clock, partial blocks and seek re-anchoring.
+- `play-feed/src/ff.rs` — one `#[path]` `mod` line and three marked lines (setup, seek reset, stamp).
+  Gated on `app_decoded == "opus"`; DTS, MP3, Vorbis, TrueHD, FLAC/ALAC/LPCM and all native codecs
+  keep their existing timestamps.
+- `ci/build-ffmpeg.sh` — `--disable-swresample` became `--enable-swresample` (marked). FFmpeg 9.0.2
+  declares `opus_decoder_deps="swresample"`; without it configure silently sets
+  `CONFIG_OPUS_DECODER=0` despite `--enable-decoder=opus` and `avcodec_find_decoder` refuses the
+  track. The rebuilt library carries `libavcodec/opus/dec.o`.
+- `media-codecs/src/ffi.rs` and `media/src/ff.rs` (the latter's table now in `nuvio-ffmpeg/src/lib.rs`) — a `swresample` dynlib table and one extra item in
+  the dependency-ordered `load_libraries()` loop, before `avcodec`. The new `libavcodec` carries
+  `NEEDED libswresample-plx.so.7`; without opening it first with RTLD_GLOBAL, `dlopen(RTLD_NOW)`
+  failed and the existing loader reported it misleadingly as "avcodec is MISSING from the app
+  directory" — every play refused at boot. Both loaders are device-only; the host test loader is
+  unchanged.
+
+A blind `drain_aq` at the reload rebase was tried and reverted: it broke six hostsim seek/lead
+tests that legitimately pre-seed AUs across a rebase, so the fix relies on the re-stamp alone.
+
+Focused `plx_play_feed` tests (358), `make test-hostsim C=plx_media` (2500), `make check-nodef` and
+a `make -j10` ARM cross-build are green. A host pass cannot prove the PCM feed is smooth on the
+television; one `--guest` play under the TV lock with the deployed debug build is still required.
+
+**Four-profile rate-gated startup prime (2026-11-24).** Ported the old fork's start decision adapted
+to this tree's route/feed split. New fork-owned `playback-contract/src/prime_plan.rs` carries the
+three route facts (preview, resume, seek) across the contract boundary, and `play-feed/src/prime_profile.rs`
+holds the pure policy table, `PrimeFacts`/`prime_gate_ready` and the smoothed `PrimeRate` sampler
+with eight unit tests. The demuxer here already publishes progressive A/V media tails, so no new
+publisher was needed — the earlier assumption that the rate reading was unavailable was wrong.
+
+Upstream surfaces touched, all marked and limited to a field, a branch or a `mod` line:
+`playback-contract/src/lib.rs` (mod), `playback-contract/src/feed.rs` (`OpenRequest.prime_plan`),
+`media/src/player/route_start.rs` (plan built from `ps`), `play-feed/src/control.rs` (pass it to
+`prepare_native_open`, plus the sample-rig field), `play-feed/src/lib.rs` (mod), `play-feed/src/feed_state.rs`
+(four Engine fields + `restart_seek_prime`), `play-feed/src/native_executor.rs` (freeze the plan on
+the prepared Load, one rate sample and one `gate` term in `try_prime`, a preview decoder arm, seek
+restart, and `rate=`/`profile=` in the `primed:` log), and `media/src/player/engine.rs` (hostsim rig
+fields). This checkout's old fixed floors `PRIME_NS = 700 ms` / `PRIME_AUDIO_NS = 300 ms` remain
+as the Seek row and as the accepted-data decoder floor; nothing else about decoder readiness,
+runway certificates or rebuffer holds changed.
+
+Two adaptations matter. (1) The deeper 3 s/2 s and 2 s/1 s floors are applied only when the rate
+gate is on: segmented HLS keeps its own runway controller and a rig without a demux tail keeps the
+700/300 ms floors, otherwise a scrub reload whose seek target was already consumed stalls behind a
+film's startup buffer. (2) A trailer keeps its profile across a reload and starts on one accepted
+AU with the existing 500 ms audio escape. The rate sampler records a stalled counter as zero, not
+"no sample", and `i64::MIN` (no reading yet) blocks the gate rather than releasing it.
+
+Verified: 365 `plx_play_feed` tests, 2500 `plx_media` hostsim tests, `make check-nodef` and a
+`make -j10` ARM cross-build. The television still has to prove that a cold source actually reaches
+the 1.2× rate and that the 3 s floor does not regress first-play latency; no device run was made.
+
+**Playable-resume for progressive stall holds (2026-11-24, follow-up).** A hold used to release only
+on a byte cap or EOF, which on the owner's slow torrent meant 18–23 s of Buffering with several
+seconds already staged. New fork-owned `play-feed/src/hold_resume.rs` holds the pure rule and its
+three tests: resume at **3 s** of video reserve (300 ms of audio when the lane exists). The upstream
+edit in `native_executor.rs` is one `#[path]` mod, one `ProgressiveRelease::Time` variant with its
+`reason=time` name, and one marked branch at the hold's release decision. The byte-cap/EOF check
+runs FIRST and still wins — a remux whose queues cap at ~2 s must not wait for three seconds it can
+never stage. The one upstream test encoding the old "hold stands forever" policy
+(`progressive_rebuffer_pump_tests.rs`) was updated with markers to pin `reason=time` and the
+"no second hold before the first resume" ordering instead. A 0.4x link now earns several short
+holds; that is the requested trade-off, not a fix for the source bitrate.
+
+Verified after this change: 368 `plx_play_feed` tests and 2500 `plx_media` hostsim tests, plus
+`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy at this
+snapshot; later device confirmation is recorded at the top of this file.
+
+**Thirty-second deadline-only Nuvio `/decision` (2026-11-24, follow-up).** A cold torrent can hold
+the shim's `/decision` with no bytes while the engine finds peers. The Nuvio decision already had a
+120 s absolute deadline, but `BodyPolicy::Deadline` also composes a 15 s silence watchdog, so the
+player gave up early and showed a playback error. The owner asked for a 30 s maximum wait. Upstream
+edits, all marked: `plex/src/http.rs` adds a `liveness: bool` to `Deadline` (true keeps every
+existing caller identical) and `request_until_outcome_deadline_only`; `plex/src/plex/client.rs` adds
+a `send_until_deadline_only` / `get_json_with_headers_until_deadline_only` twin; `plex/src/plex/transcoder.rs`
+uses that twin for the Nuvio MDE decision with a 30 s deadline instead of the 120 s one. The
+engine's own resolve cap (`sbengine::resolve_stream(..., 30_000)`) is unchanged, so both bounds end
+together. No new fork crate or file is involved in this change.
+
+Verified: `plx_plex` 834 passed with the three pre-existing lossy-gate profile-list failures (an
+extra `opus` codec, unrelated to this change), `plx_play_feed` 368, `plx_media` hostsim 2500, plus
+`make check-nodef` and a `make -j10` ARM cross-build (see final gate run). No TV deploy at this
+snapshot; later device confirmation is recorded at the top of this file.
+
+**`build-ipk.yml` is now this fork's sole IPK/release workflow (2026-11-24).** The new fork-owned
+`.github/workflows/build-ipk.yml` is ported from the old fork: a `v*` tag builds the ARM engine and
+package, runs the tagged-release gates, and attaches the `.ipk` plus `ipk.sha256` to the GitHub
+Release; a manual dispatch builds the same package as a test artifact without publishing. Two
+boundary adaptations to this tree: the old nightly + `rust-src` install is replaced by the
+repository's pinned-toolchain action (this tree pins its release in `rust-modules/rust-toolchain.toml`
+and ships prebuilt ARMv7 std), and the
+bare `make setup-env` by the repository's cached, self-verifying NDK action whose `sdk-dir` output
+feeds the engine build and ELF checks. The workflow still passes `NUVIO_SUPABASE_*`, the login-web
+URLs and `TMDB_API_KEY` and masks them in the public log — the upstream `build-package.yml` passes
+none of them.
+
+Upstream edits, both marked and both kept small for the next merge: `release.yml` has only its
+`push: tags: ['v*']` publisher commented out (`workflow_dispatch` remains, so the file stays a valid
+workflow and the old publisher can be restored by uncommenting three lines); `ci/test_ci_workflows.py`
+asserts that *either* `release.yml` or `build-ipk.yml` carries the tag trigger, accepting both the
+upstream inline spelling and the fork's list spelling, so an upstream merge restoring the trigger
+needs no test change. All other upstream workflow files are untouched.
+
+Verified: all 103 `ci.test_ci_workflows` tests pass, and the new workflow's YAML structure was
+diffed against the known-valid old fork file. No GitHub run has been triggered, and no commit, push
+or deploy was made for this change.
+
+**Ship libswresample with the Opus decoder (2026-11-24, follow-up).** `ci/build-ffmpeg.sh` enables
+the swresample dependency of FFmpeg 9's native Opus decoder, and `media-codecs/src/ffi.rs` /
+`media/src/ff.rs` (now `nuvio-ffmpeg/src/lib.rs`) open `libswresample-plx.so.7` with `RTLD_GLOBAL`
+before `libavcodec`, but the Makefile's `FFMPEG_SONAMES` never staged that library — so a clean IPK carried a `libavcodec` with
+`NEEDED libswresample-plx.so.7` and no such file. A GitHub-built package would therefore have had
+the Opus build flag and the loader entry but no working decoder. Upstream edits, all marked:
+`Makefile` adds the SONAME to `FFMPEG_SONAMES`, to the deploy-time FFmpeg retirement glob and to
+`FFMPEG_HOST_NAMES`; `ci/build-ffmpeg.sh` adds it to the strip/link-evidence loop — without that,
+staging failed with `elf_sha256 mismatch` on a clean tree because no receipt existed for it;
+`ci/stage-host-ffmpeg.sh` adds its `/plx` load command to the rewrite list.
+`THIRD-PARTY-NOTICES.md` has no comment syntax for a marker, so its FFmpeg row now names the extra
+library here instead.
+
+Verified: after the FFmpeg receipt fix, `make ipk` completes and `ci/check-package.py` passes
+`THIRD-PARTY-NOTICES names exactly the distributed libraries`; the package reports
+"8 receipted + 1 digest-pinned ELF files verified", with `libswresample-plx.so.7` staged and the
+packaged `libavcodec` still declaring the dependency it satisfies. All 103 `ci.test_ci_workflows`
+tests pass.
+
+**First dispatch run: NDK path and key masking (2026-11-23).** The owner dispatched a stable build
+on `nuvio-native`; it failed at "Build the IPK", exit 2. Two fork-workflow defects, both fixed in
+`build-ipk.yml` (no upstream file touched):
+
+1. The "Build the C torrent engine" step passes `WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}`, but
+   the "Build the IPK" step did not. The Makefile then used its default `$HOME/webos-ndk/...`,
+   which does not exist on the runner, so `src/access.o` failed with
+   `FileNotFoundError: .../arm-webos-linux-gnueabi-gcc` (make Error 1). The step now passes the
+   action's `sdk-dir` output too.
+2. `TMDB_API_KEY` was a repository **Variable**, and the step's `::add-mask::` loop ran after the
+   runner had already printed the step's `env:` block — so the key appeared in plaintext in a
+   public run log. The owner rotated the key and created a repository Secret; the workflow now
+   reads `secrets.TMDB_API_KEY` and the ineffective in-script mask loop is gone. The other values
+   (Supabase URL/anon key, login URLs) remain Variables: they are public client configuration.
+   `INNERTUBE_KEY` was also put in Secrets, but nothing in this tree reads it — the YouTube key is
+   a literal in `js-service/trailer-decipher.js` and there is no build-time substitution, so that
+   secret is currently unused.
+
+Verified: the failed run's head SHA was `25b37b75`, the commit with the swresample fix, so the
+workflow was running the intended tree. The fixes were committed as `bbf99e502` and pushed to
+`nuvio-native`. The owner confirmed the TMDB key was rotated, not merely moved to a Secret, and
+the rotated value is present in no tracked file.
+
+Rerun `45247306988` was green (12m11s) on `bbf99e502`: Build the IPK, package assertions, the
+C-engine check, the AVFrame probe and artifact upload all passed, with only a non-fatal Node 20
+deprecation annotation from `upload-artifact`. The downloaded `nuvio-native-ipk-stable` artifact
+carries `libsbengine.so`, `libswresample-plx.so.7` and an Opus-enabled `libavcodec` whose
+`NEEDED libswresample-plx.so.7` is satisfied; its version is 0.10.0 with the stable app id, and
+`ipk.sha256` matches the package. The run log shows `TMDB_API_KEY: ***` and no key-shaped strings.
+Release-only gates (ELF, size budget, font hinting, webosbrew, firmware matrix and the release
+attach) were skipped by design on this `workflow_dispatch` run; the owner confirmed on 2026-11-26
+that they are verified separately (no tag-run log attached here).
+
+## Home hero dissolve port (Fork Rofocale11)
+
+Ported the old fork's home big-hero animation: hero flip is now a fade/dissolve (incoming art fades
+in over a stationary outgoing art; hero copies cross-fade) instead of a horizontal slide, and the
+dive-to-grid art uses the old fork's full-panel fade (no vertical translation).
+
+- `rust-modules/screens/src/home/mod.rs` (upstream): `Backdrop::draw`/`paint`/`ground_key` now take
+  `flip: Option<f32>` instead of `slide: Option<(f32,f32)>`; `art_rect` no longer translates
+  vertically; added `flip_progress`, `flip_art`, `flip_faces`, `flip_ease`; hero copy and pagers use
+  `flip_faces`. Marked with `Fork Rofocale11:` comments.
+- `rust-modules/screens/src/home/tests.rs`, `hero_shade_tests.rs`: updated to the new flip API.
+
+## Multicolour ground under Home grid (Fork Rofocale11)
+
+The current tree flattened the Home ground to the mean of its corners at the hero-to-grid cull, so
+focusing a poster changed one flat colour instead of showing the poster's four-corner gradient.
+
+- `rust-modules/ui/src/widgets.rs` (upstream): restored `AmbientWash::is_uniform`, marked
+  `Fork Rofocale11:` — a flat clear is only the same picture when all four corners are one colour.
+- `rust-modules/screens/src/home/mod.rs`: `Backdrop::paint` flattens only when `is_uniform`, so the
+  item-keyed bilinear gradient stays under the shelves. Marked.
+- `rust-modules/screens/src/home/tests.rs`: expectation updated and marked.
+
+`cargo test -p plx_screens` passes (2343 tests).
+
+### Why these edits are in upstream files
+
+The dissolve is a change to the rendering of existing upstream screens, not a new feature with its
+own state or store. The helpers (`flip_*`) could move to a fork-owned child module, but the art and
+copy drawing they drive lives in `Backdrop::draw`/`paint` and `HomeScreen::draw_hero`, so the
+upstream file must change anyway; splitting only the helpers would leave the same conflict surface
+plus an indirection. No new persisted state or new crate is involved. Every upstream edit above
+carries a `Fork Rofocale11:` comment and is listed here.
+
+## Detail-page latency port (2026-11-24)
+
+Status and design are in the new `docs/nuvio/DETAIL-LATENCY.md`; the old fork's 452-line plan of
+the same name is not in this checkout and its line numbers are stale. The following edits close
+every implemented stage it described plus the three it left as plans (2C, 3B, 3C).
+
+**Upstream files touched (every edit carries a `Fork Rofocale11:` why-comment):**
+
+- `rust-modules/net/src/net.rs` — three `curl_share_*` entries and a pointer-shaped
+  `curl_share_setopt` wrapper in the runtime `dynlib!` table, `CURLOPT_SHARE`/`CURL_LOCK_DATA_*`/
+  `CURLSHOPT_LOCKFUNC` constants, two process-lifetime pthread mutexes, `share_handle()`, and the
+  attach block in `request_tls_sink`'s attempt closure. Reason: a process-wide DNS/TLS-session
+  share so a detail open stops paying a fresh lookup and full handshake. Key mode, the lab's pinned
+  transfers and resolve-pinned requests are excluded because they need fresh handshakes or must not
+  leak a `CURLOPT_RESOLVE` entry into other handles. A stale test comment that said nothing in the
+  product shares a handle was corrected. **The old fork's constant values were wrong** (`10237`
+  and `CURLSHOPT_*` ids instead of `CURL_LOCK_DATA_*` values): verified against curl 7.53.1's
+  headers and a host probe, and corrected here so the share actually works. A further correction
+  followed the first device run: curl requires mutex callbacks for a share used by several threads
+  and says `CURL_LOCK_DATA_CONNECT` is unsupported across concurrent threads even with locks, so
+  only DNS and SSL-session caches are shared now — the connection cache stays per-call.
+- `rust-modules/data/src/metadata.rs` — `ALL_LEAVES_MAX_ROWS`, `fetch_all_leaves`, pure
+  `leaves_for_season`, a new `load_show_seasons` signature, `beside` siblings for seasons and
+  all-leaves in `fetch_full`, phase timers, and pure `detail_summary_line`. Reason: the old plan's
+  3B/3C (collapse and parallelise the show chain) and Stage 0's app-side split log. The shim's
+  season rows and the later-page `/children` path are unchanged; a non-Nuvio server keeps the
+  original serial chain.
+- `rust-modules/src/app/adapters/stores.rs` — one `eventlog::log` line in the focus-warm worker.
+  Reason: the old fork's `detail: warm …` line is how a TV run proves the 750 ms dwell fired.
+
+**Fork-owned files (no upstream reconciliation):**
+
+- `rust-modules/plex/src/plex/nuvio.rs` — `Client::all_leaves`, guarded by `is_nuvio()`, for the
+  shim's `/library/metadata/{rk}/allLeaves` route. This is a new method on an existing fork-owned
+  module, so no upstream file or `mod` declaration changed.
+- `rust-modules/nuvio-store/src/lib.rs` — new `imdb_tmdb` table and `Table::ImdbTmdb`, holding a
+  plain 8-byte BE u64 with no TTL envelope, in the one `nuvio.redb`.
+- `rust-modules/pmsshim/src/shim_tmdb_ids.rs` (new) — `PersistentIdLookup`, which caches IMDb→TMDB
+  ids permanently while leaving negatives and non-IMDb ids alone; `shim_pms.rs` routes its four
+  real-client resolver call sites through it and widens `TmdbIdLookup` to `pub(crate)`.
+- `rust-modules/pmsshim/src/shim_backend.rs` + `shim_pms.rs` — `Backend::addons_fingerprint` with
+  an `AddonBackend` override using transport urls and `disabled` flags; `addons_changed()` returns
+  early when the set is unchanged. Reason: the old fork's Stage 2A fix, kept inside fork-owned
+  files so upstream `app/nuvio.rs` needs no edit. An initial catalog-only fingerprint missed
+  catalog-less addons and transport swaps; it was replaced before verification.
+- `rust-modules/pmsshim/src/lib.rs` one `mod` declaration and `ci/module-layers.ini` one
+  `[pmsshim] members` entry for the new module.
+
+**Trailer-videos follow-up (same day, after the first device runs).** Four TV opens showed
+`meta_ms=20…53` but `related_ms=1315…1944`, each preceded by two
+`trailer: youtube ids from tmdb videos` lines. The shim's `/extras` route builds trailer candidates
+twice per open and both builds re-fetched the full TMDB details object that enrichment had already
+paid for. `shim_store.rs` now keeps the raw `videos` answer in `Enrichment`, `shim_pms.rs` reads it
+before any network call, and rows without it are refreshed once (old-shape migration). Three
+fork-owned files only; no new upstream edit.
+
+Verified on the working tree: `plx_net` 338 passed, `plx_pmsshim` 159 passed, `plx_data` 1662
+passed, `plx_nuvio_store` 4 passed, `plx_plex` 821 passed with the same three pre-existing lossy-gate
+`opus` failures reproduced against unmodified `nuvio.rs`; `make check-nodef`, `check-module-layers`,
+`check-deps`, `git diff --check` and the debug ARM cross-build all green. On-device after the final
+deploy: warm movie and series re-opens `ms=84…282`, `related_ms=5…233`, inside the ≤300 ms warm
+target; a title never seen before still paid one TMDB enrichment up front (`ms=1439…2061`), so the
+≤800 ms cold target is not met on a first open. See `DETAIL-LATENCY.md` for the full run record.
+
+**Player Subtitles drill-down (2026-11-24), from https://github.com/Rofocale11/nuvio-native-old
+(branch `nuvio-native`) at `83339172d`.** The old fork's commits `9a58f217d` ("collapse multi-track subtitle expansion to one
+track per language") and `2de0b4e94` ("make popped-out subtitle track dynamic based on active
+selection") are the authoritative behavior: a multi-track "yours" language gets ONE root row —
+the drawn track, else the stream's `selected`, else the first — and its other variants are folded
+into the existing Other languages drill-in. This checkout had upstream's flat list (every variant
+expanded into its own inline section), so:
+
+- `rust-modules/data/src/metadata/sub_layout.rs` — `sub_sections` takes `active_sub: Option<usize>`,
+  keeps each bucket's `LangGroup`, promotes one `SubRow::Flat`, folds the rest into `other` and
+  re-sorts it. Inline `SubHeader::Language` / `SubRow::InLanguage` construction is retired (the
+  variants remain for the Other-languages language page). Reason: old-fork player behavior; the
+  flat expansion is a wall of tracks when an addon supplies many sidecars for one language.
+  The only boundary adaptation is the new `active_sub` argument; the fork's `ForcedOnly` row and
+  `plx_os` rename are preserved.
+- `rust-modules/appkit/src/track_menu.rs` — `TrackMenuState::sub_model` passes the live
+  `active_sub`, and its test helper does the same. Three upstream tests that assumed inline
+  expansion were re-pointed at the drill-down (root row plus language page) instead of ignored:
+  the nameless-forced label, the "Track N" ordinals and the scroll-restore premise (40 distinct
+  languages, since 40 tracks of one language now collapse to one row).
+- `rust-modules/screens/src/player/overlay_tests.rs` — the pointer-click test now opens the Other
+  languages page before clicking the second English track (the sibling is a direct pick there) and
+  compares ROW stops, not the page's pointer-only title-band stop. Reason: same collapsed shape.
+- `docs/player-submenus.md` — the root/opening-row prose now describes the collapse; the change is
+  marked with an inline HTML comment.
+
+Verified on the working tree: `plx_data` `metadata::sub_layout::tests` 14/14 (including a new
+test that pins active-track promotion, the `selected` fallback and the siblings moving down), the
+whole `plx_data` lib suite 1663/1663, `plx_appkit` 968/968, `plx_screens` 2343/2343 and
+`plxnative-modules` 1496/1496, `make check-nodef`, `git diff --check`, and a debug ARM
+`make FLAVOR=debug` cross-build (fresh 32-bit `pkg/plxnative` ELF). No commit, deploy or TV work.
+
+## `make check` alignment (2026-11-24)
+
+The gate was red on the committed tree for pre-existing fork/upstream drift, unrelated to the
+subtitle drill-down. Fixed without weakening any gate:
+
+- **Registries/composition** — `ci/list-caps.ini` (fork cap sites classified from the old fork's
+  registry plus code for its later stages, stale `date_of` entry removed), `ci/plex-requests.ini`
+  (the shim's `/allLeaves` and the single redb InstallPrefs write), `ci/third-party-crates.json`
+  (redb and the reached ring/untrusted rows; stale `not_shipped` entries removed — JSON has no
+  comment syntax, hence this record), regenerated `THIRD-PARTY-NOTICES.md`, and `RUST_INPUTS` in
+  the `Makefile` (nuvio-store/nuvio-dash).
+- **Pinned-test expectations** — `test_test_fast`, `test_ci_split`, `test_no_host_staticlib`
+  (all gained the fork's library crates), `test_deploy_manifest` (the fork's VERIFY_FILES tail),
+  `test_build_gc` (the real fix was `tools/build-gc.sh`'s `derived_output` allow-list: the fork's
+  host-FFmpeg, CMake and OpenSSL paths are rebuildable output), `test_ci_timeouts` (a curl PACKAGE
+  in an apt-install line is not a fetch), and `check-plex-requests`/`check-list-caps` themselves.
+- **Proof certificates** — re-derived `ci/proofs/{serde-json-immutable,platform-generated-enums}.json`
+  and their SHA pins after the fork's workspace changed. The machine-shape failures were a
+  downstream symptom of the stale serde-json certificate, not a defect in SessionMachine;
+  `check-machine-shape.py` is green with the registry unchanged.
+- **Cargo-branch failures exposed by the green python branch** — the shared TLS session cache must
+  be skipped for the identity probe's learning request (`net.rs`, or curl resumes the session and
+  `CURLINFO_CERTINFO` has no leaf); the Opus app-decode fork adds `opus` to the Force Direct Play
+  expectation in `plex/transcoder.rs`; and the nuvio-store cache test now uses
+  `plx_base::testscratch` so it leaves no TMPDIR entry (with its `test-support` dev-dependency).
+
+Verified on the working tree: `make check` **146 steps — all ok**, `make check-nodef`,
+`git diff --check`, and a 32-bit ARM `make FLAVOR=debug` cross-build. No commit or deploy.
+
+## Redb recovery and size budget (2026-11-24)
+
+- **`os/src/storage/redb_backend.rs`** (fork-owned): the `get` RPC now validates an object's
+  `_kind`, `_id` and canonical state against the running app's flavour before serving it. An
+  unreadable record (a store copied across debug/stable, a wrong `state` flavour, corrupt JSON)
+  is moved to `<id>.rejected-<millis>` and read as missing, so `Backend` creates a fresh Cleared
+  state and sign-in works again. The rest of the file — addons, watch state, session, caches — is
+  untouched. This is the automatic, one-record version of deleting the whole file by hand.
+- **`nuvio-store/src/lib.rs`** (fork-owned): added a 50 MiB soft budget (`BUDGET_BYTES`). At boot,
+  `Store::open` purges expired TTL cache rows, sheds the oldest live cache rows if the file is
+  still over budget, then calls redb's `compact()` before the store is installed. `cache_put`
+  enforces the same budget during a run by purging/shedding cache rows; no file is ever
+  truncated. Durable tables (`ImdbTmdb`, `Watch`, `Keys`, `AccountSession`, `Addons`,
+  `InstallPrefs`) are never discarded to meet the budget — an over-budget store made only of
+  durable data is logged and left intact. Qualification (2026-11-26): this holds for tables that
+  use the store's 8-byte BE-millis TTL envelope. At the time of that audit the shim's
+  `MetaCache`/`EnrichCache` values were raw JSON with their own `at` stamp, so `purge_expired` could
+  not recognise them as expired and `shed_oldest` sorted them last. That gap was closed later the
+  same day by writing those rows through `cache_put` and deleting expired ones in `open()` (section
+  "Meta/enrichment cache rows gain a TTL envelope"); see `PMSSHIM.md` §11 and §15.
+- Tests: `plx_os` redb backend 6/6 (foreign kind, wrong flavour, valid record preserved),
+  `plx_nuvio_store` 6/6 (expired purge, over-budget shed/compact, durable rows survive).
+
+## Torrent/debrid diagnostics panel (2026-11-24)
+
+Ported the old fork's three-way delivery column so a torrent shows its swarm and a debrid/addon
+link shows its own five facts instead of nine inert Plex-controller placeholders. The old
+`diagnostics.rs` was NOT copied: the two files differ by ~2,700 lines (crate renames, a different
+chart legend, newer ABR/LinkState machinery), so a wholesale copy would not compile here.
+
+Fork-owned:
+- **`src/app/diagnostics/diagnostics_nuvio.rs`** (new child module): the `model_rows` three-way
+  switch, `swarm_rows` (Peers/Seeds/Rate/Window/Engine/Refetch/Quality), the File/Size/Rate/
+  Quality/Ram debrid block, `file_name`/`file_size`/`file_line`/`link_rate`/`ram_value` and the
+  old fork's exact swarm test. Calls the parent's private `abr_rows`/`abr_quality`/`mb`/`since`
+  via `super`, so no upstream code moved.
+
+Upstream surfaces touched, intentionally minimal:
+- **`src/app/diagnostics.rs`**: one `mod` declaration and one delegating `model_rows(ps, d, now)`;
+  `RIGHT_ROWS` 9→10 plus `SWARM_ROWS`/`LINK_ROWS` budgets; upstream test sites adapted to the new
+  row counts. **Correction after the owner's TV test:** my first pass kept this tree's
+  `.max(RIGHT_ROWS)` floor on the chart's `cy`, which left a five-pitch blank gap for debrid links.
+  The old fork has no floor (`cy = top + height(wrapped_line_count(cols[1]))`); the floor is now
+  removed here too, so the chart starts under the column's actual rows.
+- **`plex/src/plex/models.rs`**: `Media.p2p` and `Media.addon_name`, both `#[serde(default)]`, so a
+  real PMS answer reads false/empty and no playback decision can change. `MediaPart.file`/`size`
+  already existed.
+- **`media/src/route/plan.rs`**: `Plan.file`/`file_bytes`/`p2p`/`addon`, captured from the same
+  probed `nuvio_media` that supplies the codecs (this tree uses `media_version(None)`, not the old
+  fork's `primary_media()`).
+- **`media/src/route/decision.rs`**: `PlaybackSession.src_file`/`src_bytes`/`p2p`/`src_addon`,
+  `IDLE`, the two `publication()` copies, the pure
+  `route::{source_file, source_bytes, is_p2p, addon_name}` accessors, and the no-codec preservation
+  guard in `apply_plan` so a refused landing cannot flip the panel mid-play. These fields are
+  diagnostics-only; no route predicate reads them.
+- **`locales/en/browse.json`**: 16 `translate:false` catalog keys copied verbatim from the old
+  fork, plus `field.addon`, `field.headroom` and `headroom`; the three `chart.budget*` keys were
+  removed with the fictional lane. No translator catalog changes are needed.
+- **Chart (owner direction 2026-11-24):** the BUDGET/DEMAND lane, `LinkState`, `chart_demand_kbps`
+  and `chart_budget_demand` are removed — the shim opens no adaptive controller. The two real lanes
+  (network activity, buffer health) split the whole plot, and the debrid column gained two honest
+  rows instead of blank space: `Addon` (which addon supplied the link) and `Headroom` (observed mean
+  rate as a multiple of the file's own declared bitrate, fault-tinted below `1.0x`). `LINK_ROWS` is
+  now 7. Headroom is deliberately NOT the old fictional budget: both halves are measured facts
+  already on `Diag`/the debrid Rate row.
+
+Tests: `plx_plex` p2p/addon parse 1/1, `plx_media` Plan→session propagation 1/1, app diagnostics
+54/54 (old fork's exact swarm fixture, revised stable-schema rule, 2-lane chart, headroom maths).
+
+### Post-deploy tuning (2026-11-24)
+
+After the owner tested the deployed build:
+- **Headroom no longer faults at 0.9x.** A mean slightly below the file's declared average is normal
+  for VBR and the buffer was healthy (4.0 s); the tint now fires only below `0.75x`. The number is
+  unchanged — only `Field::fault` was loosened, and the test pins both arms.
+- **Chart aligned with the value column.** The old key gutter was measured from the long uppercase
+  captions (~200 px), pushing the bars ~68 px right of the field values. `chart_key_width()` is now
+  the field rows' `FIELD_KEY_W + space::SM`, and the two captions are shortened to `NETWORK` /
+  `BUFFER` so they fit at the existing `DIAGNOSTIC` 20 rung. No new font role was added to the
+  shared design tokens, and the `Cell` glyph-measure cache is gone with the measured gutter.
+
+## Settings: hide the three inert Playback rows, port Addons and P2P (2026-11-24)
+
+Owner direction: the shim has no transcoder and forces Original, so Default quality, Direct Play
+and Playback engine must not be offered. Their stored values and picker code stay (fork rule:
+hide, never delete upstream features); all three already default to the values the owner wants —
+Original, Auto and Standard (`UriEngine::Off`) — so a hidden non-default pick cannot change a
+Nuvio stream either.
+
+### Upstream files edited (re-check on the next upstream merge)
+
+- **`rust-modules/screens/src/preferences.rs`** — `shown()` hides `Quality`/`DirectPlay`/`UriEngine`
+  rows only; `field_form()` appends a fork-owned `p2p_section()` for the Playback kind;
+  `RowId::P2pToggle` (key 20, past every upstream key), `Action::ToggleP2p`, `Value::P2pEnabled`
+  and the command write path. All carry inline `Fork Rofocale11:` markers.
+- **`rust-modules/screens/src/inputs.rs`** — `ScreenInputs.p2p_enabled` (default `true`), its
+  `same_facts` term and the fixture capture. The P2P row reads the frame's published input, not a
+  process-global, so no new IO site is introduced in a screen.
+- **`rust-modules/screens/src/registry.rs`** — `PreferenceCmd::P2pEnabled { on, reply }`,
+  `word::ADDONS`, the a11y coverage entry and `ARMS` 49→50.
+- **`rust-modules/screens/src/family.rs`** — `SettingsPage::Addons`, new forward ScreenId **122**
+  (Diagnostics is 121), word `addons`, exhaustive-match arms.
+- **`rust-modules/screens/src/settings.rs`** — only a `#[path]` module declaration, the mount arm
+  and the signed-in root row (`RootId::Addons`, key 13) for the fork-owned page.
+- **`rust-modules/screens/src/settings_{nav_structure,v2,composed,draw_and_lifecycle}_tests.rs`
+  and `preferences_tests.rs`** — field-list pins, root-row counts, a11y namespace and the Playback
+  scroll pin (244→370, from the P2P section); two new focused fork tests pin exactly which rows are
+  hidden and that the toggle reads the published input and writes the flip.
+- **`rust-modules/plex/src/plex/nuvio.rs`** — the old fork's `AddonControl` seam (trait, OnceLock,
+  `register_addon_control` / `installed_addons` / `set_addon_enabled`), ported verbatim. The screens
+  crate cannot name `pmsshim`, so Settings reaches the addon set through this boot-registered
+  control; no new store record.
+- **`rust-modules/src/app/preferences.rs`** — `P2pEnabled` executes on the retained storage worker
+  with a durable reply, like `RatingSource`/`AutoSignIn`.
+- **`rust-modules/src/app/bridge.rs`** — publishes the live shim switch into captured
+  `ScreenInputs` and bumps the revision on a toggle; a redundant local comparison is kept as a
+  hedge against a future upstream rewrite dropping the fork-only `same_facts` term.
+- **`rust-modules/src/app/nuvio.rs`** (fork-heavy) — `Settings.p2p_enabled` in the ONE redb
+  `LocalSettings` value (`#[serde(default = "default_p2p_enabled")]` + a hand-written `Default`,
+  because a derived `Default` would turn torrents OFF on a fresh install), boot's engine-gated
+  config, `p2p_enabled()` / `set_p2p_enabled()` (persist to redb then apply live with
+  `shim.set_p2p`), and the boot-registered `AddonControl` that replaces the live `AddonBackend`
+  set, records the override in shim account prefs and clears dependent caches.
+- **`tests/manifest.json`** (JSON, no comment syntax) — the `settings-playback` scene's `comment`
+  no longer says the page shows Default Quality / Direct Play; the `picker-quality` boot target
+  still resolves because the picker code is kept.
+
+### New fork-owned file
+
+- **`rust-modules/screens/src/settings_addons.rs`** — the old fork's Addons page adapted to this
+  tree's `family`/`FormTable`, `plx_os` messages and `word::ADDONS`: a keyed toggle list over
+  `installed_addons()` with `set_addon_enabled()` on activation, a real-builder fit test in every
+  shipped language and a toggle-row test.
+
+### Non-commentable edits recorded here
+
+- **`locales/{en,es,be,ca,fr,it,pt,de,hu,ru,pl,nl}/settings.json`** — 8 keys copied verbatim from
+  the old fork (`settings.playback.p2p*`, `settings.addons.*`); en/es/be translations are the old
+  fork's, the other languages use English fallback because the catalog requires every key in every
+  language. The root row's `settings.playback.detail` was likewise replaced with the old fork's
+  "Subtitles, HDR and playback." (its translations for es/be/fr/it/pt/de/hu, English fallback for
+  ca/ru/pl/nl) — the old sentence advertised the now-hidden rows.
+- **`tests/fixtures/replay/ALPHABET.json`** — `addons` joined the a11y namespace alternation so
+  `the_replay_alphabet_names_exactly_the_namespaces_the_table_reports` passes. This widening does
+  NOT move `SCREEN_SHAPES_PIN` or invalidate the three replay recordings.
+
+### Decisions and deliberate omissions
+
+- **No `AddonsPage::SHAPE` in `SCREEN_SHAPES`.** Adding any entry moves `SCREEN_SHAPES_PIN` and
+  invalidates all committed replay fixtures; the page's state is already captured by `LogicalState`.
+- **No fps scene or boot target for Addons.** It would need `bootstrap.rs`/`dev/scenarios.rs`
+  edits and a TV measurement; not required for the feature and out of scope here.
+- `AddonsPage` reads the two `nuvio` accessors directly from `new`/`rebuild`, mirroring the
+  retained `nuvio::rating_source()` pattern. This is the same process-global tension the old fork
+  has; a future bridge-publication refactor would move both to `ScreenInputs`.
+
+## Docs audit (2026-11-25)
+
+Reconciled every file in `docs/nuvio/` against the working tree at the then-current HEAD
+`eef501647`. No Rust code, build input, upstream seam or gate changed; all edits are in Markdown.
+Only fork-owned files
+were changed without a marker; the one upstream-owned file touched (`docs/player-submenus.md`)
+keeps its existing inline `Fork Rofocale11:` marker. Corrections made:
+
+- `AGENTS.md` — added `ID-MANAGEMENT.md` and `DETAIL-LATENCY.md` to the documents of record,
+  flagged the two dated snapshot docs, and listed the caches/id map in the one-store rule.
+- `ARCHITECTURE.md` — added `plx_nuvio_dash` to the crate table, recorded version 0.10.0 and the
+  Settings additions, and replaced the stale `NuvioCache` description: after the wholesale old-fork
+  shim port the meta/enrich rows are written by the shim's own caches, the tmdb→IMDb direction is
+  the in-memory `Shim::imdb_ids` map, and only IMDb→TMDB is durable (`imdb_tmdb`, no TTL).
+- `ID-MANAGEMENT.md` / `TMDB.md` — same cache/id correction; removed the claims that `imdb_base`
+  is redb-backed and that `IMDB_TTL` keys the hub-poster mapping.
+- `PLAYBACK.md` — removed the 120 s / 30 s contradiction (120 s for Plex, 30 s deadline-only for
+  Nuvio) and added current tree status.
+- `DETAIL-LATENCY.md` — updated crate/test counts (the three opus failures are gone) and replaced
+  the stale "nothing verified" paragraph with the measured warm result and the unmet cold target.
+- `HANDOFF.md` / `VALIDATION.md` — kept their dated records intact but added current-status
+  sections and annotated DB8, 0.8.0, old test counts, the old shim port and the torrent-server
+  statements that are no longer true of the shipped tree.
+- The "Still to verify" list above was annotated in place rather than silently rewritten.
+- Local checkout paths to the two forks were replaced with durable URLs: current fork
+  https://github.com/Rofocale11/nuvio-native, authoritative old fork
+  https://github.com/Rofocale11/nuvio-native-old (`nuvio-native` branch). Commit ids are kept
+  because they identify the exact revisions; folder paths can be deleted at any time.
+
+## Library header: Catalogs replaces the fabricated Collections count (current status)
+
+The Movies/TV Shows header no longer shows a "Collections · N" control or the "…" library-options
+pill. Both came from upstream Plex vocabulary this fork cannot honour: the app's Collections probe
+counted cached TMDB rows plus a page-size hint (a number the shim never actually knew), and the
+ellipsis offered library management for a Plex library this fork has no server for. The slot now
+holds a **Catalogs** selector over the section's addon catalogs, which our own shim exposes as
+`Meta.Type` `catalogKey`; it is tab-dependent for free (movie catalogs on Movies, show catalogs on
+TV Shows). The Collections page itself is kept and still works by command, restored view or script.
+The authoritative change is old fork commit `e93158f16`, adapted to this tree's current APIs.
+
+Upstream seams touched (each reconciliation point for the next merge):
+
+- `plx_plex` library / `MetaType` plumbing and `plx_stremio` shim — the catalog key is a `Meta.Type`
+  `catalogKey`, not a Plex collection count.
+- `plx_data` browse — the store now supplies the section's catalog entries and the active catalog
+  to the header; the old probe's request/answer has no source here. The catalog's parse, landing,
+  validation and wire filter live in the fork-owned child module `browse/catalog.rs`; upstream
+  `browse/mod.rs` changes only by `mod catalog;`, the `CatalogEntry` re-export, two fields in
+  `SecState`, the call sites and the mechanical `catalogs: None` struct literals.
+- `plx_screens` `library/{header,toolbar,menu,mod}.rs` and `registry.rs` — the header's first stop
+  is Catalogs (label alone; the menu's check marks the catalog in force), Recommended follows, the
+  ellipsis menu is gone, and `LibraryLike::collections_count` no longer exists.
+- `rust-modules/src/app` — `collections_probe.rs` deleted with its `mod` declaration, the
+  `LibraryLike` implementation and its per-directory warm calls in `bridge.rs`, and the `collections`
+  visual-facts field in `plex_visual_inputs.rs`. The route rig now seeds the section's catalogs and
+  pushes the Collections page by command; the test whose only premise was the fabricated count is
+  gone (Catalogs visibility/label is asserted in the screens tier).
+
+#### Scrolled capsule addendum
+
+The same Catalogs change also makes the scrolled capsule name what the rows on screen are: the
+library, the catalog in force, the count, the sort and the active filter (for example
+`Films · Netflix Movies 115 · Popularity · Horror`). The criterion gained a filter word through
+`LibraryScreen::filter_value` in `screens/src/library/header.rs`, and the capsule's leading run is
+built by `capsule_words` in `screens/src/library/draw.rs`; `CapsuleText::get_keyed` now keys on the
+catalog as well. Both files are upstream-owned and carry inline `Fork Rofocale11:` markers, as do
+the two tests (`scroll_chrome_tests.rs`, `header_tests.rs`) that pin the new text and its rebuild
+rule. The shared capsule painter in `plx_ui` was not changed.
+
+### Non-commentable edits recorded here (docs-only agents notes)
+
+- **`locales/*/library_header.json` (12 files)** — `library_header.collections` replaced by
+  `library_header.catalogs`. Values for `be`, `de`, `es`, `fr`, `hu`, `it` and `pt` are copied
+  verbatim from the old fork's catalogs key; English carries the old fork's exact value and
+  translator description. `ca`, `nl`, `pl` and `ru` were not in the old fork's catalog at that
+  revision, so they use the English fallback `Catalogs` (the en description is the source text).
+  JSON cannot carry a `Fork Rofocale11:` marker.
+- **`rust-modules/screens/src/CLAUDE.md`** — the Library-header prose no longer says the right
+  cluster holds "Collections › and Recommended ›" or that library navigation lives in an ellipsis
+  menu; it now describes Catalogs/Recommended on the left, no ellipsis, and command-only access to
+  the Collections page. This Markdown prose has no comment syntax, so the fork reason is recorded
+  here.
+- **`docs/nuvio/FEATURE.md`** is not present in this checkout, so the old fork's new "Catalogs
+  control" feature paragraph has nowhere to land; if the file is reintroduced, port that paragraph
+  from `e93158f16`.
+- `docs/nuvio/ARCHITECTURE.md` makes no claim this change contradicts (its "Catalogs → PMS library
+  sections" line remains true); `docs/nuvio/AGENTS.md` needed no edit.
+
+## Fault-aware stream/subtitle caches and an explicit Retry (current status)
+
+The cache work had one production flaw: the shim's backend fetches returned a bare `Vec`, so a
+provider that timed out and a provider that honestly answered "nothing here" were the same empty
+list. A stream fan-out that failed was cached as an empty `StreamSlot` for its whole 30-minute TTL,
+the picker saw `complete: true` and stopped polling, and the viewer had an empty Streams menu with
+no way to ask again. Subtitles had no cache at all, so the natural next step — persisting the
+candidate list — would have made the same lossy signal permanent.
+
+The fix separates the three states and keeps the fault out of durable storage:
+
+- `plx_stremio` now has `Fetch<T>` (`rows`, `faulted`, `answered`, `asked`) and reported variants of
+  `streams`/`subtitles`. `fan_out_reported` tells a provider that never answered from one that
+  answered with no rows. `streams_from_addon` returns `Option<Vec<Stream>>` (`None` = transport
+  fault, `Some(empty)` = no streams). The old `Vec` methods are thin wrappers, so no caller changes.
+- `plx_pmsshim::shim_backend::Backend` gained `streams_fetch`/`subtitles_fetch` with default
+  implementations; only `AddonBackend` overrides them. Test fakes keep the old methods unchanged.
+- `shim_pms.rs` keeps `faulted`/`answered`/`asked`/`retry_at` on `SlotState`. A fault with no rows
+  is a short 30 s backoff, a real empty answer a 5 min TTL, real rows the existing 30 min TTL.
+  `Ranked` carries the fault outward; `/nuvio/streams` answers `faulted`, `failed`,
+  `retryAfterMs` and `subtitlesFaulted`. `retry=1` drops the slot and fans out again at once.
+- `shim_subtitle_cache.rs` (fork-owned) caches candidates for 6 h, a real empty answer for 10 min,
+  and a fault for nothing durable — only a 30 s in-memory backoff. It uses `Flight` single-flight,
+  and `addons_changed()` clears it along with the other addon-dependent caches. Unit tests use a
+  memory-only instance so one test's rows cannot answer another test's shim.
+- `plx_nuvio_store` gained one TTL-enveloped `SUBTITLE_CACHE` table; it joins `CACHE_TABLES`, so the
+  50 MiB budget sheds it and boot expiry applies. No new file, no DB8 kind.
+
+Upstream seams touched (each a small marked diff):
+
+- `plx_plex/nuvio.rs` — `StreamList` gained three serde-defaulted fault fields and `nuvio_streams`
+  a `retry` flag.
+- `screens/registry.rs` — `NuvioReq::Streams` gained `retry`; `screens/alt_sources.rs` sends
+  `false` (ordinary polls never bypass the backoff).
+- `screens/player/overlay.rs` — the picker's Retry arm re-arms an addressed request and keeps the
+  panel open; ordinary polling passes the menu's retry flag.
+- `appkit/more_menu.rs` — one `Action::NuvioRetryStreams` variant, its focus key, a11y name and
+  label (the existing `settings.audio.retry` string, so no locale file changed).
+- `appkit/more_menu/nuvio_streams.rs` (fork-owned child) — fault state, the Retry row and the
+  retry-aware poll. The root row stays reachable after a fault so the Retry row can be seen.
+- `src/app/bridge.rs` and `src/app/playback.rs` — a worker branch for the retry flag and a no-op
+  arm for the action the overlay already handled.
+
+No locale key was added, so `ci/check-localization.py` has no non-commentable edit to record.
+
+## Durable catalog pages and account addon-change detection (current status)
+
+A TV relaunch used to re-fetch the first page of every catalog (the ~15 s cold launch), because the
+catalog rows lived only in `Shim::catalogs`. They are now written to a `CATALOG_CACHE` table by
+`pmsshim/src/shim_catalog_cache.rs` with the in-memory cache's existing 15-minute TTL, and seeded
+back into the in-memory entry before any fill starts. A failed fill is never written, and a fill
+that outlived an addon change (`stale`) is not published.
+
+How a change is detected:
+
+- **Settings addon change / profile switch** — the existing `addons_changed()` fingerprint
+  (`transport_url`, `disabled`) clears the caches and recomputes `Shim::catalog_ns`.
+- **Manifest content change** (catalog added/renamed, genre options changed) — the namespace also
+  includes the installed manifests' catalog declarations, so old rows are missed without clearing
+  the meta/enrich caches. Recorded in `catalog_namespace()` in `shim_pms.rs`.
+- **Nuvio account addon add/remove** — at boot, `Account::account_addons_fingerprint()` makes ONE
+  REST read of the profile's addon rows (no manifest fetches) via the new
+  `nuvio::addons_fingerprint`. It is compared with the fingerprint written when the set was last
+  applied (`nuvio::addon_set_fingerprint`, stored under `InstallPrefs/account_addons_fp` before
+  local enable/disable overrides are applied, so a local toggle cannot force a re-fetch). Changed →
+  `Account::load_profile(None)` runs the existing sink path: manifests, cache clear, warm. A fault
+  returns `None` and keeps the persisted set.
+- **Catalog content change** — the Stremio protocol has no change signal; only the 15-minute TTL
+  bounds it. This is documented in `ARCHITECTURE.md` and is not claimed to be instant.
+
+New fork-owned file: `pmsshim/src/shim_catalog_cache.rs`. Upstream seams touched, all with
+`Fork Rofocale11:` markers: `nuvio-store/src/lib.rs` (table, cache enum, budget list, `def`/get/put
+arms), `stremio/src/nuvio.rs` (three fingerprint helpers), `pmsshim/src/{lib,shim_pms,shim_account}.rs`
+(module, field/init, seeding and write on fill, namespace recompute, account probe), and
+`src/app/nuvio.rs` (boot probe in the existing `nuvio-boot` task). `ci/module-layers.ini` registers
+the new shim module; no locale key changed.
+
+## User-facing rebrand to Nuvio Native (Fork Rofocale11, 2026-11-25)
+
+**No upstream locale file was edited.** That is the whole point: a key-by-key copy of ~120 strings
+into fork JSON would freeze upstream wording, and every one of those lines would conflict at the
+next upstream locale change. Instead:
+
+- `nuvio-locales/brand.json` (fork-owned data) holds ordered substring replacements, a small keyed
+  override map and the honest identity paragraphs, in all 12 shipped languages.
+- `rust-modules/os/build_support/catalog_brand.rs` (new fork-owned child module) applies them after
+  upstream's `discover()` and before its `compile()`, so upstream's key/placeholder/plural checks
+  still run on the strings that ship. A final scan fails the build if any string INHERITED from a
+  locale still names Plex. Overridden strings are reviewed fork text: they may say "fork of
+  PlxNative" and "not affiliated with Plex" as required attribution.
+- Upstream surface: `os/build.rs` (one `#[path]` mod, one `rerun-if-changed`, one call) and
+  `os/build_support/catalog.rs` (`build_with` takes a hook; `build` stays a `#[cfg(test)]` wrapper
+  because this file is also compiled as `i18n::catalog_tests`). All marked.
+
+Hardcoded UI lines, each with a `Fork Rofocale11:` marker: `screens/src/legal.rs` (`CONTACT_URL`
+now the project's GitHub Issues, its test rewritten, `mod legal_tmdb`, `Header::with_picture` in
+both draw branches), `screens/src/consent.rs` and `screens/src/consent_document_tests.rs` (the
+rename), `appkit/src/player_hud/state.rs` (`PLEX_PASS` → `SUBSCRIPTION` = "premium features"),
+`src/app/diagnostics.rs`, `media/src/player/mod.rs` and `screens/src/login.rs` (support/diagnostics
+read-outs use the new `plx_os::brand::UI_PRODUCT`), `src/app/boot.rs` (hostsim window title only;
+the device keeps the lowercase process name). `pkg/appinfo.json`'s `appDescription` lost its
+PlxNative mention (JSON cannot carry a marker).
+
+New fork-owned files: `os/src/brand.rs` (user-facing product name), `os/src/lib.rs` has the one
+marked `mod` line, `screens/src/legal/legal_tmdb.rs` (the shared `PictureSlot` that draws the mark),
+and `assets/nuvio/tmdb_logo.svg`. The mark is the **unmodified official SVG** from
+<https://www.themoviedb.org/about/logos-attribution> (the owner downloaded it; sha256
+`5bdc75aaebeb75dc7ae79426ddd9be3b2be1e342510f8202baf6bffa71d7f5c4`), drawn at its native
+190.24 × 81.52 aspect and tinted with `theme::TEXT_SECONDARY`. TMDB requires the logo in
+About/Credits together with the exact notice, which the `settings.about.body` override prints in
+all 12 languages. Replacing the asset needs no code change as long as the viewBox aspect is updated
+in `legal_tmdb.rs` if a different mark is chosen.
+
+The wire identity is deliberately untouched: `plx_plex::plex::identity::PRODUCT` remains
+`PlxNative` for `X-Plex-Product`, and every PMS header, route and `ratingKey` stays as upstream
+wrote it. This app does not use a Plex server, but it still speaks the dialect that lets the
+upstream player work.
+
+`TRADEMARKS.md` was corrected: the shipped icons/splash are the Nuvio mark (commit `e5f6726b7`),
+not PLX artwork, and the PLX name and marks remain upstream's. Upstream `LICENSE`, `LICENSING.md`,
+`THIRD-PARTY-NOTICES.md` and copyright lines were not modified.
+
+The upstream tests that pinned old copy were updated with markers: `screens/src/{home,library}/tests.rs`
+and `ui/src/decision_alert.rs` (failure/consent wording), `media/src/player/mod.rs` (support line
+and the no-subscription failure note), `src/app/diagnostics.rs` (Server row's three arms) and
+`screens/src/legal.rs` (the contact point and the privacy-boundary assertions), and
+`rust-modules/tests/host_interface.rs` (the simulator window title). The longer product
+name also exceeded four measured fit columns, so short overrides were added only for the affected
+languages: `settings.hud.newer_format` (`be`, `ca`), `settings.language.restart_hint`
+(`es`, `fr`, `it`, `ru`, `pl`, `nl`), `browse.auth.plaintext_remote` (`fr`),
+`browse.auth.insecure` (`nl`) and `widgets.menu.quality_converted_note` (all twelve). The Privacy
+document's Plex-service paragraph was rewritten to name only the Nuvio account, the Stremio addons,
+TMDB and BetterPosters; the only upstream product names left in the UI are the required GPL fork
+attribution and the non-affiliation sentence in About/Legal.
+
+Because the build script and catalog compiler are pinned executable sources, their change required a
+reviewed re-pin of `ci/proofs/platform-generated-enums.json` and its `CERTIFICATE_SHA256` in
+`ci/readonly_generated.py`, with a new review entry naming the brand hook. The new fork module was
+added to `[os]` in `ci/module-layers.ini`. No enum producer, include namespace, catalogue grammar
+or manifest/lock certificate changed; the two other pinned certificates were left alone.
+
+## Three resume bugs (Fork Rofocale11, 2026-11-25)
+
+A failing regression was written and observed failing before each fix. Every Rust edit carries an
+inline `Fork Rofocale11:` marker; this section is the merge record the fork rules also require.
+
+- `rust-modules/src/app/content.rs` — `hero_resume_uses_loaded_detail` now answers true for any
+  Home Play with a resume point, not just the hero. A Continue Watching card's Play loads the
+  CARD's detail, so an episode card resumes that exact episode at its own offset instead of being
+  refused on the part-less hub row. `hold_feature` takes `&mut PlaybackSession` and calls
+  `plx_media::route::cancel_play`: the engine may still be held by a halted trailer preview, and a
+  held play issues no `request_play`, so the preview's resolve is still the current generation when
+  it lands and is applied as a full play before the app's `is_preview()` guard can discard it
+  (`playing item: rk=<trailer>` then a 404 and fps 0 in the owner's event log).
+- `rust-modules/src/app/input.rs` — `MenuPlayAwait::for_hero_resume` became `for_home_resume` with
+  a `from_deck` flag used only to name the right surface in the miss log; the item menu's Play
+  Trailer hold passes the session through to `hold_feature`.
+- `rust-modules/pmsshim/src/shim_pms.rs` (fork-wholesale shim) — `part_stream` resolves a stale Part
+  arrival index from the fresh ranking by `last_stream` identity when the rebuilt slot has nothing
+  at that index; a stream still present there wins, so an explicit in-session pick is never
+  overridden. `warm_remembered_torrent` factors the `/nuvio/warm` body and is now called from the
+  detail read — the page a viewer resumes from — so the remembered swarm starts dialling before
+  Play. No new durable state; `last_stream` and the engine's own state dir remain the sole homes.
+- `rust-modules/media/src/route/decision_resolve_route_tests.rs` (test-only) — pins that a
+  superseded preview landing is dropped at `pump_play`'s generation gate and installs no trailer
+  `PlayingItem`.
+
+Why these are upstream edits rather than new fork files: each change is a branch or a helper inside
+the function that already owns the decision (`activate_home_item`, `hold_feature`, the shim's part
+route and the app's preview wait). Extracting them into child modules would add a `mod` plus an
+indirection without removing the upstream branch, so the edits were kept to the minimum and marked.
+Where a fork-owned home existed already — the shim, ported wholesale — the helper lives there.
+The tests are the durable pin; no new crate, module layer, wire identifier or persisted record was
+introduced.
+
+### Non-commentable edits recorded here
+
+- `ci/list-caps.ini` — re-keyed `[pmsshim/src/shim_pms.rs::warm_torrent]` to
+  `[pmsshim/src/shim_pms.rs::warm_remembered_torrent]`, the symbol that now holds the 12-hex
+  log-tag slice. Same `not-a-list` class and reason; no cap was added or removed. The re-key is
+  required because `ci/check-list-caps.py` matches cap sites by symbol.
+
+## Trailer cache eviction and stale comments (Fork Rofocale11, 2026-11-25)
+
+All three touched files are fork-owned (added by fork commits), so no upstream `Fork Rofocale11:`
+marker is required; this section is the durable record.
+
+- `rust-modules/pmsshim/src/shim_trailer.rs` — `TrailerCache::insert` now drops expired rows and
+  evicts the oldest surviving id at the 256-entry cap instead of `clear()`-ing the whole table.
+  The old policy discarded every still-valid 30-minute answer after about 21 titles (12
+  candidates each), so browsing back re-paid a Node spawn for each trailer. A new test pins that
+  only the oldest id leaves and that re-inserting an existing id does not evict anything.
+- `rust-modules/pmsshim/src/shim_trailer.rs`, `rust-modules/pmsshim/src/shim_pms.rs`,
+  `rust-modules/stremio/src/sbengine.rs` — corrected comments that named a `GOOGLEVIDEO_WINDOW`
+  constant and a Node-child fallback, neither of which exists in this tree. The proxy field is
+  now described as unused (`publish_trailer` passes no BaseURL overrides, so `dash_urls()` has no
+  production caller); `docs/nuvio/TRAILERS.md` and `docs/nuvio/TORRENT-ENGINE.md` were aligned.
+- `rust-modules/pmsshim/src/shim_pms.rs` — `trailer_tracks_reachable` now keeps a 60-second verdict
+  per (video, audio) pair, so the detail publish and the player's Part request do not repeat four
+  googlevideo range asks (the device log showed `dash pair served to its end` twice on a cache
+  hit). A new test pins that the second publish reuses the verdict. The short TTL preserves the
+  gate's throttle-detection job; long-lived positive answers stay in the separate RAM
+  `TrailerCache`. `docs/nuvio/TRAILERS.md` records the new TTL.
+
+## Autoplay dwell trial: 2 s → 1 s → 2 s (Fork Rofocale11, 2026-11-25)
+
+- `rust-modules/media/src/player/preview.rs` (upstream `plx_media`) — `DWELL_S` was tried at 1.0
+  with an inline `Fork Rofocale11:` marker, then restored to 2.0 after the owner's device run.
+  The full event log showed `preview: start` before `trailer: node resolved` in the cold runs: at
+  1 s the dwell is shorter than the prefetch, so the wait moved from the dwell into `dwell_ms`
+  without reducing detail-open-to-picture time, and spent the 14 process-lifetime `CYCLE_BUDGET`
+  admitted Loads sooner. 0 was never tried for the same reason. The final constant matches
+  upstream; the comment records the trial and why it was reverted. The two-timer fetch/reveal
+  design in `docs/trailer-ux-plan.md` §2.1 remains unimplemented.
+- `rust-modules/pmsshim/src/shim_pms.rs` (fork-owned) and `docs/nuvio/TRAILERS.md` — the comments
+  and table rows were taken to 1 s during the trial and returned to 2 s with the constant.
+
+## Extract the retained FFmpeg core into `plx_nuvio_ffmpeg` (Fork Rofocale11, 2026-11-25)
+
+`upstream/main` at `0a1edc61` has an 88-line `rust-modules/media/src/ff.rs` (a facade over
+`plx_media_codecs::ffi` plus test-module declarations). The fork's copy had grown to 1,442 lines:
+upstream deleted the low-level core when it moved the physical demuxer into `plx_play_feed`, and
+Nuvio kept it for the dev MPEG1/TS encoder, the verified struct offsets, the Dolby Vision side-data
+reader and the ABI boot/ffprobe gates. Every upstream edit of that file was therefore a conflict
+over ~1,300 fork lines. The extraction completes the move that `ci/module-layers.ini` already
+claimed for the probe.
+
+- **New fork-owned crate** `rust-modules/nuvio-ffmpeg` (`plx_nuvio_ffmpeg`), mounted as the
+  `nuvio_ffmpeg` layer (`uses = base media_codecs`, both downward): the runtime-bound FFmpeg symbol
+  table (now `pub`, so media's `use super::*` tests still reach the wrappers), pointer-width offset
+  constants, `parse_dovi_conf`/`dovi_conf`/track-name and stream accessors, the `Venc` capture
+  encoder, `boot`'s library/ABI gate and the `/tmp/plxnative-ffprobe` smoke test. It keeps its own
+  `dynlib!` table because `plx_media_codecs::ffi`'s wrappers are `pub(crate)` and cannot be named
+  from another crate (`base/src/dynlib.rs` documents the two forms).
+- **`rust-modules/media/src/ff.rs` (upstream-owned)** shrinks to 129 lines; its fork delta against
+  `0a1edc61` is now **+50/−9** (was **+1364/−10**). The remaining delta is one glob re-export
+  (`pub use plx_nuvio_ffmpeg::*;`), a `pub fn boot()` shim that keeps the
+  only upward call (`crate::curlio::boot()`) in media, test-only C/atomic imports, and marked
+  comments. The upstream `pub use plx_media_codecs::{SpeedDecoder, Venc}` line stays partially:
+  `SpeedDecoder` is kept, `Venc` comes from the fork glob as before. No upstream test module was
+  rewritten; all 15 `#[path]`/`use super::*` modules are byte-identical to the baseline.
+- **Dead code removed rather than moved**: media's copy of `begin_ass_sources` (no callers; the live
+  one is `plx_play_feed::ff::begin_ass_sources` and needed `crate::player` internals) and the
+  unused `SEEK_*` constants. `set_feed_audio`, `pushed_any` and `majors` remain in the fork crate
+  because they are part of the retained ABI surface and cost nothing there.
+- **Wiring**: workspace member, `plx_media` dependency, `plx_nuvio_ffmpeg/devtriggers` on the media
+  and root feature lists, and a `[nuvio_ffmpeg]` layer with a `nuvio_ffmpeg` edge from `[media]`.
+  `Cargo.lock` (no comment syntax) gained the `plx_nuvio_ffmpeg` package entry.
+- `ci/list-caps.ini` — re-keyed the four ASS attachment caps to
+  `[nuvio-ffmpeg/src/lib.rs::…]` and dropped the `media/src/ff.rs::begin_ass_sources` section: the
+  media copy had no caller and was removed, while the live demux-side site in `play-feed/src/ff.rs`
+  was never a declared cap site. The four `class = work` entries and their reasons are unchanged.
+- `ci/test_no_host_staticlib.py` (upstream-owned, marked) and `Makefile` — a new workspace member
+  must be added to the mutation harness's `WORKSPACE_FILES` symlink list and to `RUST_INPUTS`, or the
+  throwaway workspace cannot resolve `plx_media`'s new path dependency and `make check` fails four
+  staticlib tests with "failed to read .../nuvio-ffmpeg/Cargo.toml". This is a hardcoded-list cost
+  of adding a crate, not a dirty-tree artefact: committing would not have fixed it. Focused checks
+  after the fix: `ci/check-rust-inputs.py` ok (25 path crates), `ci/test_no_host_staticlib.py` 13/13.
+- **Proof certificates (JSON, no comment syntax)** — re-derived
+  `ci/proofs/serde-json-immutable.json` from the checksum-verified serde_json 1.0.154 archive and
+  `ci/proofs/platform-generated-enums.json` from the reviewed local producers, and re-pinned
+  `CERTIFICATE_SHA256` in `ci/readonly_dependencies.py` and `ci/readonly_generated.py`. The first
+  regeneration was needed because both certificates hash the workspace manifests and lockfile, which
+  gained the new crate; the five `make check` failures (`check-machine-shape`, its test,
+  `test_transition_arguments` and both readonly tests) were all downstream of the stale serde-json
+  proof, not defects in `SessionMachine` — the same five scripts pass on a pristine HEAD worktree.
+  The generated proof was rewritten in the original key order/indent to keep the diff to four hash
+  lines. Review: enum grammar, source list and crate source are unchanged; only manifest/lock hashes
+  and the new `nuvio-ffmpeg/Cargo.toml` entry moved.
+- The earlier prose in this file that placed the duplicate ABI table or `ff::probe` in `ff.rs`
+  described the pre-extraction tree and has been corrected above.
+
+Gates on this tree: `plx_media` 2182 passed / 105 ignored; `plx_pmsshim` 167 passed / 2 ignored;
+`make check-nodef` exit 0; ARM `make -j10` exit 0; `ci/check-module-layers.py` green;
+`ci/check-deps.sh` all gates green; `ci/check-list-caps.py` 424 sites classed;
+`git diff --check` clean.
+
+## QR sign-in caption (2026-11-25)
+
+- `rust-modules/screens/src/login.rs` (upstream-owned, marked) — the caption beside the QR now says
+  `nuvio.tv/link`, not `plex.tv/link`. This is a correctness fix, not a cosmetic rebrand: the app
+  still calls `/api/v2/pins`, `/api/v2/pins/qr/{code}` and `/api/v2/pins/{id}`, but
+  `plx_pmsshim::shim_account` answers all three from the Nuvio device login — `nuvio::start_login`
+  and `nuvio::poll_login` — and the QR PNG encodes Nuvio's `verification_uri_complete`, built from
+  `DEVICE_LOGIN_WEB_BASE_URL` / `TV_LOGIN_WEB_BASE_URL` (Makefile `NUVIO_ENV_VARS`, exported by
+  `.github/workflows/build-ipk.yml` from gitignored `rust-modules/stremio/nuvio.local.env`). Only
+  the displayed destination changed; no network call, sign-in behaviour or `qr_layout` geometry did.
+  The owner confirmed the flow lands on Nuvio from repeated real logins.
+- `ci/localization-exceptions.json` (no comment syntax) — the untranslatable-literal exception now
+  names the new caption. `ci/check-localization.py` fails both on an unlisted hardcoded string and
+  on an unused exception, so the entry had to move with the literal.
+- The upstream `session/src/auth/ports.rs` and mock PMS code still name `plex.tv` — that is the
+  vocabulary the shim intentionally preserves, not the destination a Nuvio build presents to the
+  viewer. `tests/screenshots/scenes.json`'s note that the demo QR encodes `https://plex.tv/link`
+  describes the **mock's** QR, not the shipping shim's.
+
+## Multi-profile on the public Nuvio API (2026-11-26)
+
+New fork-owned code: `stremio/src/nuvio.rs`'s profile-management/settings/avatar calls,
+`pmsshim/src/shim_profiles.rs`, `nuvio-store/src/pins.rs`, `plex/src/plex/nuvio_profiles.rs` and
+`screens/src/settings_nuvio_profiles.rs`. The upstream diff is only:
+
+- `plex/src/plex/mod.rs`, `screens/src/settings.rs`, `screens/src/family.rs`,
+  `screens/src/registry.rs`, `rust-modules/src/app/nuvio.rs` — one `mod`/variant/mount/arm each,
+  all marked `Fork Rofocale11:`. Settings gains one signed-in root row and one page (ScreenId 123,
+  route word `nuvio-profiles`); the app registers a `ProfileControl` beside `AddonControl`.
+- `screens/src/settings_v2_tests.rs` and `settings_draw_and_lifecycle_tests.rs` — the root row
+  census and the longest-root scroll pitch (370 → 430 px) for that one added row, marked.
+- `tests/fixtures/replay/ALPHABET.json` (no comment syntax) — the replay alphabet now accepts the
+  `nuvio-profiles` accessibility namespace, exactly as the registry census demands.
+- `nuvio-locales/brand.json` (fork-owned) — six new `add` keys for the management rows.
+
+The account's `pin_enabled`/`pin_locked_until` are read-only in the public API: there is no
+verify/set/unlock call. They are advisory only on the TV; a tile is locked by a PBKDF2 verifier
+in `nuvio.redb` that the shim holds and checks. The first PIN is set without a gate (physical
+access), changing or clearing an existing one requires the current PIN, and a forgotten one is
+recovered by signing out and scanning the existing QR sign-in as the same account.
+
+### Device fixes after the first multi-profile deploy (2026-11-26)
+
+- `pmsshim/src/shim_account.rs` (fork-owned) — `switch` now returns the account profile's `name`
+  as `title`. The upstream session stores that string as the seated profile's display name;
+  returning the product name made the top-left chip read "Nuvio" after every pick.
+- `plex/src/plex/nuvio_profiles.rs` (fork-owned) — the control now holds an in-process snapshot;
+  `profiles()`/`avatars()` are lock reads, and all HTTP runs on workers (`refresh`, `save`,
+  `delete`, `set_pin`). The first debug run crashed with `main-thread block: PMS HTTP at
+  plex/src/plex/nuvio_profiles.rs:51 (fatal; aborting)` because the Settings page called the
+  control on the frame thread. `plex/src/plex/nuvio_profiles.rs:51` was that call.
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — the page rebuilds when the snapshot
+  generation moves and never performs IO in `step`; PIN digits are no longer written into logical
+  state, and current-PIN verification is left to the shim's worker.
+- `rust-modules/src/app/boot.rs` (upstream, marked) — one condition: a known, unlocked previous
+  profile skips the who's-watching picker even with upstream Auto Sign In off. A TV-locked profile
+  still shows the picker, and an unloaded snapshot fails closed to it.
+- `docs/nuvio/ARCHITECTURE.md` — the same behaviour is recorded in the multi-profile section.
+
+### Forgotten TV PIN recovery (2026-11-26)
+
+- `pmsshim/src/shim_account.rs` (fork-owned) — `sign_out()` now removes all six TV PIN verifiers
+  from the one redb file and logs `nuvio: TV PINs cleared on sign-out`. The earlier prose claiming
+  that sign-out + QR re-sign-in recovered a forgotten PIN was wrong: the verifier table survived
+  sign-out, so the path did not exist. Recovery is now: Settings/account menu → Sign out, then QR
+  sign in with the phone as the same account. A remote-holder cannot use this to remove a lock
+  because re-sign-in needs the phone.
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — the PIN rows now show which PIN is being
+  asked for ("Enter current PIN" / "Enter new PIN again") instead of an empty value.
+- `nuvio-locales/brand.json` (fork-owned) — two new `add` keys for those prompts.
+- `nuvio-locales` fit test still drives the real form; no upstream locale catalog was edited.
+
+### Profile management page UX (2026-11-26)
+
+- `screens/src/settings.rs` (upstream, marked inline) — `sentence_for(RootId::NuvioProfiles)` now
+  uses the fork-owned `msg::nuvio_profiles_detail()` instead of upstream's `change_profile` string;
+  the old sentence did not say what the page offers. No upstream locale file was edited.
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — keyboard rows (Rename, Set/Clear TV PIN)
+  moved to the first section; the page reads the cached boot snapshot instead of refreshing on
+  every mount, and snapshot landings use `FormTable::refresh_with` so the row under the cursor keeps
+  focus; Add/Delete/Forgot PIN set a pending row drawn as an inline `Spinner` until the generation
+  moves. `Fork Rofocale11:` markers remain on the module doc.
+- `nuvio-locales/brand.json` (fork-owned, no comment syntax; recorded here) — added
+  `nuvio.profiles.detail` in all eleven shipped languages.
+
+### Profile snapshot refresh moved to client install (2026-11-26)
+
+- `src/app/boot.rs` (upstream, marked inline) — `install_pms_owned` now calls
+  `nuvio_profiles::refresh()` after `install_captured_registry` sets the current PMS client. The
+  existing refresh in `nuvio::boot()` runs before that client exists, so its worker published an
+  empty roster and Settings > Profiles listed no profiles. With the fetch at client install the
+  page can be a pure cache reader again.
+
+### Forgot-PIN QR navigation and locked-profile auto sign-in (2026-11-26)
+
+- `src/app/run.rs` (upstream, marked inline) — `follow_auth_landing` is now followed from any route
+  while the session phase is `Creating`. The Forgot-PIN row raises `StartLogin` from Settings, but
+  the follower used to run only on the Login/Profiles routes, so the phase changed and nothing
+  rooted the QR page — the row appeared dead.
+- `src/app/boot.rs` (upstream, marked inline) — the picker gate is now
+  `boot_shows_picker(...) || nuvio_profiles::must_show_picker(uuid)`. The old `&& auto_login_allowed`
+  only applied the TV-PIN lock when upstream had ALREADY chosen the picker, so Auto Sign In walked
+  straight into a locked profile.
+- `plex/src/plex/nuvio_profiles.rs` (fork-owned file) — `tv_pin_locked`/`must_show_picker` read the
+  durable `ProfilePins` table directly instead of the HTTP snapshot, which has not landed at boot.
+  An empty snapshot now means "not yet known", not "locked".
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — the inline spinner is measured in the
+  route's sectioned table frame, the same frame `TableScreen` paints into; measuring against
+  `Rect::FULL` drew it two rows above the pressed one.
+
+### Delete slot 1, avatar focus and account preference identity (2026-11-26)
+
+- `screens/src/settings_nuvio_profiles.rs` (fork-owned) — `save` now keeps the row that triggered
+  the roster write (Avatar, Share main addons or Rename) instead of always landing on Rename, which
+  was the first row. Delete is disabled on slot 1 (the API refuses to delete it, so the armed row
+  could never complete) and the armed confirmation reads "Press again".
+- `nuvio-locales/brand.json` (fork-owned, no comment syntax; recorded here) — added
+  `nuvio.profiles.delete_again` in all eleven shipped languages.
+- `pmsshim/src/shim_account.rs` (fork-owned) — `/api/v2/user` and `/api/v2/user/profile` now answer
+  with the seated profile's `id`/`uuid` (`nuvio-profile-<slot>`) instead of a constant `nuvio`
+  identity. Upstream's preference client proves the token's owner by matching this DTO to the
+  seated `UserRef`; the constant failed that check and Settings > Audio & subtitles showed Retry.

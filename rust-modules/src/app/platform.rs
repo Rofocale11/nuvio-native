@@ -4,15 +4,19 @@
 //! it does not compile. It carries four things, split by who reads them:
 //!
 //! - `services`: [`plx_os::tv::Services`], what the LOWER layers read through the private `tv`
-//!   accessors (identity, the secure store, Home and the toast, the legacy webOS media verbs).
-//!   `run_application` installs it into `tv` once, and nothing else in the app reads it.
+//!   accessors (identity, the secure store, Home and the toast, the legacy webOS media verbs), and
+//!   its `layout` group, which `plx_base::paths` reads. `run_application` hands it over once, through
+//!   [`Platform::install_services`]: the table goes into `tv`, and the `layout` group goes into
+//!   `plx_base::paths`, which `tv` sits above. Nothing else in the app reads it.
 //! - `shell`: the window, the bus and the pointer's visibility, [`Shell`]. Its consumers are boot
 //!   (`app::boot` brings the window up with the platform it was handed: `init`, then `open`, which
 //!   returns the [`Surface`] the `App` owns from then on), the loop (`app::run` drives it every
 //!   frame, through `App::platform`, and presents and polls through the surface) and the bridge, which
 //!   holds the shell for the dispatcher's two opaque-region hooks and lends it to the pointer's own
-//!   callers (`input`, `playback`), which hide and show the Magic Remote's pointer through it.
-//! - `diag`: the six frame probes, [`FrameProbe`], read by the loop. The renderer's clear hook takes
+//!   callers (`input`, `playback`), which hide and show the Magic Remote's pointer through it. Its `frame` hook
+//!   states the platform's [`FrameSeam`] (a software [`Pacer`] and the [`Present`] hooks around the swap), which
+//!   the loop runs at the frame's present.
+//! - `diag`: the six frame probes and the heartbeat's tag, [`FrameProbe`], read by the loop. The renderer's clear hook takes
 //!   plain functions, so the platform's entry installs it (`gfx::install_clear_probe`).
 //! - `media`: [`MediaBoot`], the platform's two boot-time playback steps. `early_init` runs once before
 //!   the first adapter exists; `compose` installs the platform's drivers on the adapter and hands
@@ -37,16 +41,34 @@ use plx_media::route::PlaybackSession;
 use plx_os::tv::Services;
 use std::os::raw::c_void;
 
-/// What a platform's boot asks of SDL, as plain data: [`InitHooks`] (the two steps a platform runs
-/// around `SDL_Init`), and [`OpenAsk`] with its [`Placement`] (the window's title, place and size). The
-/// shell crate's own types, re-exported rather than copied: they hold no SDL type. `host` re-exports all three,
+/// What a platform's boot asks of SDL, as plain data: [`InitHooks`] (the steps a platform runs around
+/// `SDL_Init` and behind the GL context, the [`SdlFlavor`] its SDL's events are laid out in and the
+/// [`GlProfile`] it asks for), and [`OpenAsk`] with its [`Placement`] (the window's title, place and size). The
+/// shell crate's own types, re-exported rather than copied: they hold no SDL type. `host` re-exports them all,
 /// beside the SDL helpers below that take them, for a platform crate.
 pub(crate) use plx_shell_sdl::{InitHooks, OpenAsk, Placement};
+#[cfg(test)]
+use plx_shell_sdl::{GlProfile, InitSteps, SdlFlavor};
+
+/// The window a platform asks for, stated by the platform: its title and where, and how big. The
+/// application adds the one thing that is not the platform's (`OpenAsk::high_dpi`, which a frame dump
+/// clears) and hands the pair to [`Shell::open`].
+///
+/// The title is furniture a television never draws (no window manager, no decoration) and the first
+/// thing a desktop shows, so the platforms spell it differently: the television keeps the
+/// process-shaped name every log, `pidof` recipe and skill already uses.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowPlan {
+    pub title: &'static std::ffi::CStr,
+    pub placement: Placement,
+}
 
 /// The platform's window, bus and pointer, as the application drives them: the SDL window and its
 /// surface, the opaque-region hint, the platform bus pump, and the visibility of the Magic Remote's
-/// pointer. Every call runs on the loop thread, and every hook is required: a platform with nothing
-/// to do states a no-op, as the desktop and the test-only host platform do.
+/// pointer. Every call runs on the loop thread, and every hook is required (a platform with nothing
+/// to do states a no-op, as the desktop and the test-only host platform do) except the three keyboard
+/// hooks, whose defaults are SDL's own calls: a platform whose keyboard is not SDL's (Tizen) states them,
+/// and does the work on whatever thread its toolkit needs.
 ///
 /// `init` and `open` are the two steps that bring the surface up, and they are two because the
 /// application reads the stored session between them (the window size is a setting): SDL and the GL
@@ -54,6 +76,16 @@ pub(crate) use plx_shell_sdl::{InitHooks, OpenAsk, Placement};
 /// `app::boot` pins it. A platform whose surface is not SDL's states its own pair; every SDL one is the
 /// shell crate's (`plx_shell_sdl`), reached through [`sdl_init`] and [`sdl_open`].
 pub trait Shell: Sync {
+    /// What the platform states about its SDL: the [`InitHooks`] its `init` and `open` hand to
+    /// [`sdl_init`] and [`sdl_open`], read back by the application for the [`SdlFlavor`] its SDL's
+    /// events are laid out in (every decode and every synthetic key is in that layout). A platform
+    /// that is not SDL's states the flavour it is built against all the same, and says so: it has
+    /// no SDL window, and no event of its own is in that layout.
+    fn sdl(&self) -> InitHooks;
+    /// The window the platform asks for. `stored` is the size the stored Interface resolution setting
+    /// asks for, `None` for Automatic (the canvas): a platform that offers no such setting ignores it.
+    /// Read after the stored session and before [`open`](Shell::open), whose `OpenAsk` is built from it.
+    fn window(&self, stored: Option<(std::os::raw::c_int, std::os::raw::c_int)>) -> WindowPlan;
     /// Bring the platform's windowing up and ask for the GL context, once, FIRST: before the stored
     /// session is read and before [`open`](Shell::open). A refusal ends the boot with that `Exit`.
     fn init(&self, mt: &MainThread) -> Result<(), Exit>;
@@ -90,6 +122,27 @@ pub trait Shell: Sync {
     /// remote's OK arrives as a click at wherever the invisible pointer sits, which the loop reads as
     /// the OK key (`input::click_is_ok`). `false` where a click is always a real one.
     fn hide_is_cursor_swap(&self) -> bool;
+    /// What this platform does around the frame's present: its pacer and its present hooks
+    /// ([`FrameSeam`]). A platform with nothing to do states [`FrameSeam::NONE`].
+    fn frame(&self) -> &'static FrameSeam;
+    /// Whether this platform has a system on-screen keyboard to raise (`textinput::available`). Probed, never
+    /// assumed. The SDL shells take the default, SDL's own answer (`SDL_HasScreenKeyboardSupport`); a platform
+    /// whose keyboard is not SDL's (Tizen's Ecore IMF) states its own, with [`show_keyboard`](Shell::show_keyboard)
+    /// and [`hide_keyboard`](Shell::hide_keyboard) beside it. Its commits arrive through [`EventSink::text`] (an SDL
+    /// shell's through `poll`), and a dismissal the platform made by itself through
+    /// [`EventSink::keyboard_dismissed`].
+    fn keyboard_available(&self) -> bool {
+        plx_shell_sdl::text::has_screen_keyboard()
+    }
+    /// Raise the keyboard (`textinput::start`, which keeps the "have I asked" edge, so this runs once per raise).
+    /// SDL's `SDL_StartTextInput` by default.
+    fn show_keyboard(&self) {
+        plx_shell_sdl::text::start_input()
+    }
+    /// Dismiss it (`textinput::stop`, once per dismissal). SDL's `SDL_StopTextInput` by default.
+    fn hide_keyboard(&self) {
+        plx_shell_sdl::text::stop_input()
+    }
 }
 
 /// The window the application presents to and reads events from, owned by `App` for the rest of the
@@ -98,10 +151,11 @@ pub trait Shell: Sync {
 ///
 /// `window` is the raw handle the [`Shell`]'s per-window calls still take (`bind_window`,
 /// `grab_surface`, and `textinput`'s focus read), so every call site the `frame` gate pins stays where
-/// it is; W9 folds those into this trait (plan, §1). **Two event paths, one of them temporary:** a
+/// it is; folding those into this trait was expected of W9, which kept them (the Tizen shell states them as no-ops
+/// over a null `window`), so the fold waits for the SDL shells to deliver through the sink and is not scheduled. **Two event paths, one of them temporary:** a
 /// platform delivers its events through [`deliver`](Surface::deliver) and [`EventSink`]; the SDL shells
 /// still deliver through [`poll`](Surface::poll), SDL-shaped bytes, and their `deliver` delivers nothing.
-/// `poll` is retired once the SDL shells deliver through the sink (W9 at the latest). There is no
+/// `poll` is retired once the SDL shells deliver through the sink (not scheduled). There is no
 /// destructor: the `App` is leaked at exit and a worker may still hold the handle, so the end is the
 /// explicit, decided [`quit`](Surface::quit).
 pub trait Surface {
@@ -167,6 +221,11 @@ pub trait EventSink {
     fn key(&mut self, action: Option<Action>, raw: Option<RawKey>, edge: Edge) -> bool;
     /// One commit from the platform's text input, possibly empty.
     fn text(&mut self, text: &str);
+    /// The platform took its on-screen keyboard down by itself (the viewer closed it on the panel), after a
+    /// [`Shell::show_keyboard`]: the application drops the field's keyboard ownership as it does when the OS
+    /// takes the screen away, so the next OK on the field raises the panel again. A platform that cannot tell
+    /// (SDL's: `textinput` records why) never calls it.
+    fn keyboard_dismissed(&mut self);
     /// One pointer event at authored 1920x1080 coordinates.
     fn pointer(&mut self, x: f32, y: f32, edge: PointerEdge);
     /// One tick of the wheel, in signed whole ticks.
@@ -183,11 +242,11 @@ pub trait EventSink {
 /// `pub` for `host`, which re-exports it for the two real platform crates.
 ///
 /// # Safety
-/// `hooks` must be sound to call on the SDL main thread (`mt` is the proof of the thread) at the two
-/// points `plx_shell_sdl::init::init` calls them.
-pub unsafe fn sdl_init(mt: &MainThread, hooks: InitHooks) -> Result<(), Exit> {
+/// `hooks.steps.before` and `after` must be sound to call on the SDL main thread (`mt` is the proof of
+/// the thread) at the two points `plx_shell_sdl::init::init` calls them.
+pub unsafe fn sdl_init(mt: &MainThread, hooks: &InitHooks) -> Result<(), Exit> {
     plx_shell_sdl::init::init(mt, hooks).map_err(|_| Exit::refused(1))?;
-    plx_shell_sdl::init::request_gl(mt);
+    plx_shell_sdl::init::request_gl(mt, hooks.gl);
     Ok(())
 }
 
@@ -196,8 +255,13 @@ pub unsafe fn sdl_init(mt: &MainThread, hooks: InitHooks) -> Result<(), Exit> {
 ///
 /// `pub` for `host`. It stays in the application crate: the `Surface` it returns is implemented for
 /// `plx_shell_sdl::Window` here (the orphan rule), so a platform crate cannot rebuild it.
-pub fn sdl_open(mt: &MainThread, ask: &OpenAsk) -> Result<Box<dyn Surface>, Exit> {
-    plx_shell_sdl::Window::open(mt, ask)
+///
+/// # Safety
+/// `hooks.steps.after_context` must be sound to call on the SDL main thread (`mt` is the proof of the
+/// thread), once, with the new GL context current (see `plx_shell_sdl::Window::open`).
+pub unsafe fn sdl_open(mt: &MainThread, hooks: &InitHooks, ask: &OpenAsk) -> Result<Box<dyn Surface>, Exit> {
+    // SAFETY: the caller's contract above.
+    unsafe { plx_shell_sdl::Window::open(mt, hooks, ask) }
         .map(|window| Box::new(window) as Box<dyn Surface>)
         .map_err(|_| Exit::refused(1))
 }
@@ -208,6 +272,68 @@ pub fn sdl_open(mt: &MainThread, ask: &OpenAsk) -> Result<Box<dyn Surface>, Exit
 #[cfg(test)]
 pub(crate) fn detached_surface() -> Box<dyn Surface> {
     Box::new(plx_shell_sdl::Window::DETACHED)
+}
+
+/// What a platform does around the frame's present, as two groups the loop reads once per presented frame
+/// (`run::present_and_swap`, the pump): a software [`Pacer`] and the [`Present`] hooks that sit between the
+/// frame's last draw and the swap. The loop owns WHERE they run; the platform owns what they do, so a
+/// wall-clock read, an environment read or a simulator's compositor stand-in is the platform's and never a
+/// line in the application. Every hook is required: a platform with nothing to do states
+/// [`FrameSeam::NONE`], which the television and the Tizen build do.
+pub struct FrameSeam {
+    pub pacer: Pacer,
+    pub present: Present,
+}
+
+/// A platform's software frame pacing, for a host whose swap does not wait for the display (WSLg's X11/GLX
+/// accepts interval 1 without blocking). The pacer's stamp is a `u64` the platform alone reads, so the
+/// application never holds a clock: recorded replays continue to see only their injected ticks.
+pub struct Pacer {
+    /// Asked once at boot, after the swap interval is set: does this platform pace in software now?
+    /// `vsync` is whether the application asked the driver for interval 1 (a frame dump and
+    /// `plxnative-novsync` ask for 0, and then nothing waits).
+    pub armed: fn(vsync: bool) -> bool,
+    /// The top of a frame the pacer is armed for: the stamp [`end`](Pacer::end) is handed back.
+    pub begin: fn() -> u64,
+    /// After a presented frame's swap: wait out what is left of the frame period.
+    pub end: fn(started: u64),
+}
+
+/// The hooks a platform runs between a presenting frame's last draw and its swap.
+pub struct Present {
+    /// On a frame the video plane is bound for, after the straighten pass and before the capture seam,
+    /// the screenshot seam and the swap: put whatever the television's compositor would put UNDER the UI.
+    /// The television does nothing (its compositor is the real one); the simulator composes the decoded
+    /// picture, or black.
+    pub compose_under: fn(),
+    /// On every presenting frame, after the screenshot seam and before the swap: a platform that rendered
+    /// into an offscreen target copies it to the window here.
+    pub before_swap: fn(),
+}
+
+fn never_armed(_vsync: bool) -> bool {
+    false
+}
+fn no_stamp() -> u64 {
+    0
+}
+fn no_wait(_started: u64) {}
+fn no_hook() {}
+
+impl Pacer {
+    /// No software pacing: the swap paces the frame, as on the television and every desktop but WSLg.
+    pub const NONE: Pacer = Pacer { armed: never_armed, begin: no_stamp, end: no_wait };
+}
+
+impl Present {
+    /// Nothing between the last draw and the swap.
+    pub const NONE: Present = Present { compose_under: no_hook, before_swap: no_hook };
+}
+
+impl FrameSeam {
+    /// The seam of a platform whose swap paces the frame and whose compositor is not ours: the
+    /// television and the Tizen build state it.
+    pub const NONE: FrameSeam = FrameSeam { pacer: Pacer::NONE, present: Present::NONE };
 }
 
 /// The dev frame probe (`/tmp/plxnative-framecb`): the platform's presentation-callback clock, read
@@ -225,6 +351,10 @@ pub trait FrameProbe: Sync {
     fn acquired(&self);
     /// The probe's log fields since the previous line; `""` unarmed.
     fn fields(&self) -> String;
+    /// Appended to every heartbeat line, last: `""` on a television, ` sim=1` on the simulator, whose
+    /// numbers are about a different machine and must say so on the line itself (`tests/run.py` and the
+    /// `ui-sim` skill grep the text).
+    fn heartbeat_tag(&self) -> &'static str;
 }
 
 /// What a platform's composition installed that the route session also has to know: the resolver the
@@ -300,8 +430,23 @@ impl Platform {
 
     /// Hand the lower layers the platform's `tv` services, once: `run_application` does it before
     /// anything reads `tv`. A second call is refused by `tv` and changes nothing.
+    ///
+    /// The second line publishes the platform's [`Layout`](plx_os::tv::Layout) into `plx_base::paths`
+    /// (`paths` is below `tv` and cannot read it, as `scrub::set_identities` is pushed from above). It
+    /// must run before the first read of `app_dir()` (`pre_boot_diagnostics`' `appdir:` line, the
+    /// first one); a refusal is logged here, after the fact, because `paths` itself never logs.
+    ///
+    /// The third line publishes the platform's [`Libraries`](plx_os::tv::Libraries) into `plx_base::dynlib`
+    /// the same way (the shape is `plx_base::choice::Choice`'s, shared with the layout): it must run before
+    /// the first libcurl table or EGL probe loads, none of which runs before this install.
     pub(crate) fn install_services(&self) {
         let _ = plx_os::tv::install(self.services);
+        if let Err(refused) = plx_base::paths::publish(self.services.layout) {
+            plx_base::eventlog::log(&format!("layout: not published: {refused}"));
+        }
+        if let Err(refused) = plx_base::dynlib::publish(self.services.libraries) {
+            plx_base::eventlog::log(&format!("libraries: not published: {refused}"));
+        }
     }
 }
 
@@ -310,8 +455,30 @@ impl Platform {
 #[cfg(test)]
 struct HostShell;
 
+/// What the test-only shells state about their SDL: the stock layout and a core profile, as a
+/// desktop's, because the rig's tests that reach SDL's real queue run on a desktop's SDL. Test builds only.
+#[cfg(test)]
+pub(crate) const HOST_TEST_SDL: InitHooks =
+    InitHooks { steps: InitSteps::NONE, flavor: SdlFlavor::Stock, gl: GlProfile::Core41 };
+
+/// The window the test-only shells ask for: the canvas, no retry. Test builds only.
+#[cfg(test)]
+const HOST_TEST_WINDOW: WindowPlan = WindowPlan {
+    title: c"host-test",
+    placement: Placement::Panel {
+        size: (plx_base::surface::LOGICAL_W as std::os::raw::c_int, plx_base::surface::LOGICAL_H as std::os::raw::c_int),
+        fallback: None,
+    },
+};
+
 #[cfg(test)]
 impl Shell for HostShell {
+    fn sdl(&self) -> InitHooks {
+        HOST_TEST_SDL
+    }
+    fn window(&self, _stored: Option<(std::os::raw::c_int, std::os::raw::c_int)>) -> WindowPlan {
+        HOST_TEST_WINDOW
+    }
     fn init(&self, _mt: &MainThread) -> Result<(), Exit> {
         Ok(())
     }
@@ -332,6 +499,9 @@ impl Shell for HostShell {
     fn hide_is_cursor_swap(&self) -> bool {
         false
     }
+    fn frame(&self) -> &'static FrameSeam {
+        &FrameSeam::NONE
+    }
 }
 
 /// The frame probe of a process with no platform: always unarmed. Test builds only.
@@ -348,6 +518,9 @@ impl FrameProbe for HostProbe {
     fn fields(&self) -> String {
         String::new()
     }
+    fn heartbeat_tag(&self) -> &'static str {
+        ""
+    }
 }
 
 /// A shell whose hide is a cursor swap, counting what the application asks of it. Test builds only.
@@ -361,6 +534,12 @@ pub(crate) struct SwapShell {
 
 #[cfg(test)]
 impl Shell for SwapShell {
+    fn sdl(&self) -> InitHooks {
+        HOST_TEST_SDL
+    }
+    fn window(&self, _stored: Option<(std::os::raw::c_int, std::os::raw::c_int)>) -> WindowPlan {
+        HOST_TEST_WINDOW
+    }
     fn init(&self, _mt: &MainThread) -> Result<(), Exit> {
         Ok(())
     }
@@ -384,6 +563,61 @@ impl Shell for SwapShell {
     }
     fn hide_is_cursor_swap(&self) -> bool {
         true
+    }
+    fn frame(&self) -> &'static FrameSeam {
+        &FrameSeam::NONE
+    }
+}
+
+/// A shell whose system keyboard is its own, not SDL's (the Tizen shape), counting the raises and dismissals
+/// the application asks of it. Test builds only: the SDL stubs a host test runs on have no panel, so only a shell
+/// that states the keyboard hooks can show that `textinput` asks the platform and not SDL.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct KeyboardShell {
+    pub(crate) shows: std::sync::atomic::AtomicUsize,
+    pub(crate) hides: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl Shell for KeyboardShell {
+    fn sdl(&self) -> InitHooks {
+        HOST_TEST_SDL
+    }
+    fn window(&self, _stored: Option<(std::os::raw::c_int, std::os::raw::c_int)>) -> WindowPlan {
+        HOST_TEST_WINDOW
+    }
+    fn init(&self, _mt: &MainThread) -> Result<(), Exit> {
+        Ok(())
+    }
+    fn open(&self, _mt: &MainThread, _ask: &OpenAsk) -> Result<Box<dyn Surface>, Exit> {
+        Ok(detached_surface())
+    }
+    fn bind_window(&self, _win: *mut c_void) {}
+    fn grab_surface(&self, _win: *mut c_void) {}
+    fn release_surface(&self) -> bool {
+        false
+    }
+    fn arm_opaque_region(&self) {}
+    fn opaque_route(&self, _player: bool) {}
+    fn clear_opaque_region(&self) {}
+    fn pump_bus(&self) {}
+    fn hide_pointer(&self) {}
+    fn show_pointer_after_motion(&self) {}
+    fn hide_is_cursor_swap(&self) -> bool {
+        false
+    }
+    fn frame(&self) -> &'static FrameSeam {
+        &FrameSeam::NONE
+    }
+    fn keyboard_available(&self) -> bool {
+        true
+    }
+    fn show_keyboard(&self) {
+        self.shows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn hide_keyboard(&self) {
+        self.hides.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -466,6 +700,16 @@ mod tests {
         s.show_pointer_after_motion();
         assert!(!s.hide_is_cursor_swap(), "no hide, so a click is always a real one");
 
+        // The frame seam is the NONE of each group: no pacing, nothing around the swap. Destructured with no `..`,
+        // so a hook added to a group breaks this test until it is pinned.
+        let FrameSeam { pacer: Pacer { armed, begin, end }, present: Present { compose_under, before_swap } } =
+            *s.frame();
+        assert!(!armed(true) && !armed(false), "a platform that states no pacer never arms one");
+        end(begin());
+        compose_under();
+        before_swap();
+        assert_eq!(p.heartbeat_tag(), "", "only a simulator tags its heartbeat");
+
         p.request();
         p.prepare_begin();
         p.prepare_end();
@@ -531,6 +775,9 @@ mod tests {
             fn text(&mut self, _: &str) {
                 self.0 += 1;
             }
+            fn keyboard_dismissed(&mut self) {
+                self.0 += 1;
+            }
             fn pointer(&mut self, _: f32, _: f32, _: PointerEdge) {
                 self.0 += 1;
             }
@@ -549,14 +796,14 @@ mod tests {
         let surface = detached_surface();
         let mut ev = [0u8; 128];
         while surface.poll(&mut ev) {}
-        plx_shell_sdl::inject::synth_key(plx_ui::consts::SDLK_UP, 0);
+        plx_shell_sdl::inject::synth_key(HOST_TEST_SDL.flavor, plx_ui::consts::SDLK_UP, 0);
         let mut count = Count::default();
         surface.deliver(&mut count);
         assert_eq!(count.0, 0, "an SDL surface delivers nothing through the sink");
         // `synth_key` pushes the two edges of a tap, down then up: both are still the queue's.
         for edge in ["down", "up"] {
             assert!(surface.poll(&mut ev), "the pushed key's {edge} edge is still the queue's, through `poll`");
-            assert!(plx_shell_sdl::event::decode(&ev).is_some(), "and it decodes as before ({edge})");
+            assert!(plx_shell_sdl::event::decode(HOST_TEST_SDL.flavor, &ev).is_some(), "and it decodes as before ({edge})");
         }
         assert!(!surface.poll(&mut ev), "and the queue is empty after them");
     }
@@ -595,8 +842,27 @@ mod tests {
         assert!(hits.is_empty(), "an SDL function is declared outside `app/clock.rs`: {hits:?}");
     }
 
-    /// Every `.rs` file under the application crate's `src` and the two platform crates' (`../platform-webos`,
-    /// `../platform-desktop`: the code that builds a `Platform` and could install a table by itself), as text.
+    /// The source directories that can build a `Platform` and so could install a table by itself: the application
+    /// crate's `src` and every platform crate's (`../platform-*/src`, found by listing the workspace directory, so
+    /// the next platform crate needs no edit here), the platform ones sorted by name.
+    fn crate_source_dirs() -> Vec<std::path::PathBuf> {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut platforms: Vec<std::path::PathBuf> = std::fs::read_dir(manifest)
+            .expect("the rust-modules directory")
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter(|dir| {
+                let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.starts_with("platform-") && dir.join("src").is_dir()
+            })
+            .map(|dir| dir.join("src"))
+            .collect();
+        platforms.sort();
+        let mut dirs = vec![manifest.join("src")];
+        dirs.extend(platforms);
+        dirs
+    }
+
+    /// Every `.rs` file under [`crate_source_dirs`], as text.
     fn crate_sources() -> Vec<String> {
         fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("read a source directory") {
@@ -609,11 +875,29 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for src in ["src", "platform-webos/src", "platform-desktop/src"] {
-            walk(&manifest.join(src), &mut out);
+        for src in crate_source_dirs() {
+            walk(&src, &mut out);
         }
         out
+    }
+
+    /// The walk above reads every platform crate, the Tizen one included: a platform that installs its table before
+    /// `run_application` must turn the install test red, so none can be missing from what it reads.
+    #[test]
+    fn the_install_walk_reads_every_platform_crate() {
+        let dirs = crate_source_dirs();
+        let names: Vec<&str> = dirs
+            .iter()
+            .map(|dir| dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).expect("a crate directory"))
+            .collect();
+        assert_eq!(
+            dirs.first(),
+            Some(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")),
+            "the application crate's src is first"
+        );
+        for platform in ["platform-webos", "platform-desktop", "platform-tizen"] {
+            assert!(names.contains(&platform), "{platform}/src is not walked: {names:?}");
+        }
     }
 
     /// `run_application` installs the services as its first statement, before anything can read
@@ -656,5 +940,111 @@ mod tests {
             1,
             "`tv::install` is called by `Platform::install_services` and nowhere else"
         );
+    }
+
+    /// The layout is published by the install's second line, and nothing the process runs before that
+    /// line reads `app_dir()` or the state root: not `run_application` (the install is its first
+    /// statement), not a platform's entry, and not `host`. A read earlier than the publish would
+    /// freeze the derivation (`paths::publish` then refuses, and the platform's directories are
+    /// silently not used). Reads the source, like the install pin above, because no host test can run
+    /// the entry.
+    #[test]
+    fn the_layout_is_published_second_and_nothing_reads_the_directories_before_it() {
+        let install = include_str!("platform.rs")
+            .split_once("pub(crate) fn install_services(")
+            .expect("install_services")
+            .1
+            .split_once("\n    }\n")
+            .expect("the end of install_services")
+            .0;
+        let tv_install = install.find(concat!("tv::", "install(")).expect("the tv install");
+        let publish = install.find(concat!("paths::", "publish(")).expect("the layout publish");
+        assert!(tv_install < publish, "the layout is published right after the install, never before it");
+        assert_eq!(
+            install.matches(concat!("paths::", "publish(")).count(),
+            1,
+            "one publish, in install_services"
+        );
+        assert_eq!(
+            crate_sources().iter().map(|text| text.matches(concat!("paths::", "publish(")).count()).sum::<usize>(),
+            1,
+            "`paths::publish` is called by `Platform::install_services` and nowhere else"
+        );
+        // The library names are published by the install's third line, for the same reason: the first
+        // libcurl table or EGL probe that loads freezes `Libraries::HOST` and the platform's word is lost.
+        let libraries = install.find(concat!("dynlib::", "publish(")).expect("the libraries publish");
+        assert!(publish < libraries, "the libraries are published after the layout, right after the install");
+        assert_eq!(install.matches(concat!("dynlib::", "publish(")).count(), 1, "one publish, in install_services");
+        assert_eq!(
+            crate_sources().iter().map(|text| text.matches(concat!("dynlib::", "publish(")).count()).sum::<usize>(),
+            1,
+            "`dynlib::publish` is called by `Platform::install_services` and nowhere else"
+        );
+
+        // What runs before the install: the application's entry up to it, `host::run`, and each
+        // platform's own entry. None names a directory read.
+        let reads = [
+            concat!("app_", "dir("),
+            concat!("in_app_", "dir("),
+            concat!("app_dir_", "line("),
+            concat!("persistent_state_", "root("),
+        ];
+        let body = include_str!("mod.rs")
+            .split_once("fn run_application(")
+            .expect("run_application")
+            .1
+            .split_once('{')
+            .expect("run_application's body")
+            .1;
+        let before = body.split_once(concat!("platform.install_", "services();")).expect("the install").0;
+        let host = include_str!("../host.rs");
+        let port = include_str!("../../platform-webos/src/port.rs");
+        let desktop = include_str!("../../platform-desktop/src/lib.rs");
+        // The simulator's `main` runs before `plx_platform_desktop::run`, which is `host::run`.
+        let sim = include_str!("../../platform-desktop/src/bin/sim.rs")
+            .split_once("fn main(")
+            .expect("the simulator's main")
+            .1
+            .split_once(concat!("plx_platform_desktop::", "run("))
+            .expect("the simulator's call to the desktop entry")
+            .0;
+        // The Tizen entry runs on the host's thread before the loop thread calls `host::run`: its exports and
+        // everything `plx_host_start` calls (the launch string, the UDP log, the dev preset, the window), plus
+        // the two layout hooks, which run after the publish and may not call back into what they answer.
+        let tizen = [
+            ("exports.rs", include_str!("../../platform-tizen/src/exports.rs")),
+            ("hosted.rs", include_str!("../../platform-tizen/src/hosted.rs")),
+            ("launch.rs", include_str!("../../platform-tizen/src/launch.rs")),
+            ("devboot.rs", include_str!("../../platform-tizen/src/devboot.rs")),
+            ("log_udp.rs", include_str!("../../platform-tizen/src/log_udp.rs")),
+            ("ecore.rs", include_str!("../../platform-tizen/src/ecore.rs")),
+            ("layout.rs", include_str!("../../platform-tizen/src/layout.rs")),
+        ];
+        let mut texts = vec![
+            ("run_application", before),
+            ("host.rs", host),
+            ("platform-webos port.rs", port),
+            ("platform-desktop lib.rs", desktop),
+            ("platform-desktop bin/sim.rs (main, up to the run call)", sim),
+        ];
+        texts.extend(tizen);
+        // Nor does any of it load a shared table or read the library names: the curl tables and the EGL
+        // probe are the application's own, after the install. (Tizen's Ecore and EGL tables are its OWN
+        // literals, loaded on the host thread before the install by design; they never call these.)
+        let loads = [
+            concat!("dynlib::", "libraries("),
+            concat!("curl::", "load("),
+            concat!("global_", "init("),
+            concat!("curlmulti::", "load("),
+            concat!("raw::", "load("),
+        ];
+        for (what, text) in texts {
+            for read in reads {
+                assert!(!text.contains(read), "{what} must not read `{read}` before the layout is published");
+            }
+            for load in loads {
+                assert!(!text.contains(load), "{what} must not use `{load}` before the libraries are published");
+            }
+        }
     }
 }

@@ -5,7 +5,7 @@
 //! `plx_shell_sdl`, and the LG SDL's two boot hooks to `system`.
 
 use super::*;
-use super::platform::{OpenAsk, Placement, Platform};
+use super::platform::{OpenAsk, Platform};
 
 /// Log every Rust panic (message + source location + thread) to the event log AND the
 /// persistent crash log BEFORE it unwinds. A panic that crosses an extern "C" boundary
@@ -334,9 +334,10 @@ mod seam_order_tests {
 
     /// The Interface resolution is read from the stored session, so the session has to be read
     /// BEFORE the window is created (`Shell::open`, the one place the window size is applied) and the
-    /// window request has to come from it. SDL itself comes up before the session is read, as it always
-    /// has (`plx_shell_sdl::init` pins the order of its own steps). Reads the source for the reason the
-    /// tests above give.
+    /// window request has to come from it, through the platform's own `Shell::window` (which arms the
+    /// smaller-window retry before the first window is asked for: it is part of the plan it returns). SDL
+    /// itself comes up before the session is read, as it always has (`plx_shell_sdl::init` pins the order of
+    /// its own steps). Reads the source for the reason the tests above give.
     #[test]
     fn the_stored_session_is_read_before_the_window_is_created() {
         let source = include_str!("boot.rs");
@@ -348,113 +349,30 @@ mod seam_order_tests {
             .find(concat!("plx_plex::plex::session::", "load()"))
             .expect("construct reads the stored session");
         let request = body
-            .find(concat!("requested_drawable(", "&session)"))
-            .expect("the window request is derived from the session");
+            .find(concat!("shell.", "window(session.ui_resolution()"))
+            .expect("the window request is the platform's, derived from the session");
         let window = body.find(concat!("shell.", "open(")).expect("construct opens the window");
-        assert!(load < request && request < window, "session read, then request, then Shell::open");
+        assert!(load < request && request < window, "session read, then the platform's window ask, then Shell::open");
         let init = body.find(concat!("shell.", "init(")).expect("construct brings the platform's SDL up");
         assert!(init < load, "SDL comes up before the session is read, the order boot has always had");
     }
 
-    /// Automatic is the native canvas on every set and asks for no smaller window. The other
-    /// options ask for exactly their size.
+    /// A record that predates the setting, or holds a spelling this build does not know, or the retired
+    /// explicit 1080p, is Automatic: the size the stored setting asks for is `None`, which every platform
+    /// reads as the canvas. (What the other settings ask for, and what each firmware does with it, is the
+    /// webOS platform's: `plx_platform_webos`'s `port.rs`.)
     #[test]
-    fn the_setting_maps_to_the_requested_window() {
+    fn a_record_without_a_usable_setting_asks_for_no_smaller_window() {
+        for record in [r#"{"client_id":"c"}"#, r#"{"client_id":"c","ui_resolution":"4320p"}"#, r#"{"client_id":"c","ui_resolution":"1080p"}"#] {
+            let session: plx_plex::plex::session::Session = serde_json::from_str(record).unwrap();
+            assert_eq!(session.ui_resolution().size(), None, "{record}");
+        }
         use plx_plex::plex::session::UiResolution as R;
-        for major in [1, 2, 3] {
-            assert_eq!(super::drawable_for_setting(major, R::Auto), None);
-            assert_eq!(super::drawable_for_setting(major, R::Hd900), Some((1600, 900)));
-            assert_eq!(super::drawable_for_setting(major, R::Sd540), Some((960, 540)));
-        }
-        assert_eq!(super::drawable_for_setting(3, R::Hd720), Some((1280, 720)));
-        // webOS 4+, or a set that never said, keeps the canvas whatever a record carried over holds
-        for major in [0, 4, 5, 6, 22] {
-            for mode in R::LADDER {
-                assert_eq!(super::drawable_for_setting(major, mode), None, "major {major} {mode:?}");
-            }
-        }
-        // a record that predates the setting, or holds a spelling this build does not know, is Automatic
-        let old: plx_plex::plex::session::Session = serde_json::from_str(r#"{"client_id":"c"}"#).unwrap();
-        assert_eq!(super::drawable_for_setting(3, old.ui_resolution()), None);
-        let unknown: plx_plex::plex::session::Session =
-            serde_json::from_str(r#"{"client_id":"c","ui_resolution":"4320p"}"#).unwrap();
-        assert_eq!(super::drawable_for_setting(3, unknown.ui_resolution()), None);
-        // the retired explicit 1080p reads as Automatic
-        let retired: plx_plex::plex::session::Session =
-            serde_json::from_str(r#"{"client_id":"c","ui_resolution":"1080p"}"#).unwrap();
-        assert_eq!(super::drawable_for_setting(3, retired.ui_resolution()), None);
+        assert_eq!(R::Auto.size(), None);
+        assert_eq!(R::Hd900.size(), Some((1600, 900)));
+        assert_eq!(R::Sd540.size(), Some((960, 540)));
     }
 
-    /// A persisted size the set will not give must never brick launch: a refused smaller window is
-    /// retried ONCE at the native canvas, and a refused native window has nowhere left to fall.
-    #[test]
-    fn a_refused_smaller_window_retries_once_at_the_native_canvas() {
-        assert_eq!(super::window_fallback((1600, 900)), Some((super::SCR_W, super::SCR_H)));
-        assert_eq!(super::window_fallback((960, 540)), Some((super::SCR_W, super::SCR_H)));
-        assert_eq!(super::window_fallback((super::SCR_W, super::SCR_H)), None, "the native canvas has no fallback");
-    }
-
-    /// The smaller-window retry is armed before the first window is asked for, from the size that
-    /// request carries: `construct` evaluates `window_fallback(` as part of the placement it hands
-    /// `Shell::open`. The retry loop itself, the destroy of a half-made window before it, and the
-    /// density fit before the drawable probe are the shell crate's (`plx_shell_sdl::Window::open`,
-    /// which pins their order). Reads the source for the reason the tests above give.
-    #[test]
-    fn the_smaller_window_fallback_is_armed_before_the_window_is_opened() {
-        let source = include_str!("boot.rs");
-        let body = source.split_once(concat!("pub(crate) unsafe fn ", "construct(")).expect("construct").1;
-        let retry = body.find(concat!("window_fallback(", "size)")).expect("asks for the fallback size");
-        let open = body.find(concat!("shell.", "open(")).expect("opens the window");
-        assert!(retry < open, "the retry is armed before the first attempt");
-    }
-}
-
-/// The window to ask for when it is not the 1920x1080 canvas, `None` for the canvas (1:1): whatever
-/// `/tmp/plxnative-drawable=<W>x<H>` says when that trigger is armed (debug builds only; it
-/// outranks the setting and is bounded to 640x360..=1920x1080 so a typo cannot ask for nonsense),
-/// else, on webOS 1-3 only, the install-wide Settings > System > Interface resolution choice.
-/// **Automatic is the canvas on every set**, and webOS 4+ is always the canvas; a smaller window is
-/// only ever a webOS 1-3 owner's pick (or the debug trigger).
-///
-/// What was measured, with the heartbeat framedrop A/B (not `profile-tv` counters, so no cause is
-/// claimed): on a 2016 55UH650V (webOS 3.4.3, Mali-T760) at 1280x720, average 46.9 -> 54.5 fps and
-/// frames over 33 ms from 7.1% to 0.5%; on a 2017 OLED C7V (webOS 3.9.3, Mali-T820) frames over
-/// 16.7 ms from 36% at 1080p to 2% at 1280x720 and 16% at 1600x900. The same owner found 720p text
-/// "disturbingly soft" on the C7V, which is why this is opt-in rather than a webOS-release rule.
-/// `surface::probe` reads back what webOS granted and `scale`/`viewport` fit the canvas into it.
-#[cfg(not(feature = "hostsim"))]
-fn requested_drawable(session: &plx_plex::plex::session::Session) -> Option<(c_int, c_int)> {
-    if let Some(v) = plx_base::devtrig::read("drawable") {
-        let parsed = v.trim().split_once('x').and_then(|(w, h)| {
-            Some((w.trim().parse::<c_int>().ok()?, h.trim().parse::<c_int>().ok()?))
-        });
-        let ok = parsed.filter(|&(w, h)| (640..=SCR_W).contains(&w) && (360..=SCR_H).contains(&h));
-        log(&format!("surface: drawable trigger {:?} -> {:?}", v.trim(), ok));
-        if ok.is_some() {
-            return ok;
-        }
-    }
-    let chosen = session.ui_resolution();
-    let major = plx_os::tv::device::info().major;
-    let size = drawable_for_setting(major, chosen);
-    log(&format!("surface: webOS major {major}, Interface resolution {chosen:?} -> {size:?}"));
-    size
-}
-
-/// Where to retry when the set refuses a window of size `asked`: the native canvas, unless that is
-/// what was asked, which has nowhere left to fall back to.
-#[cfg(any(not(feature = "hostsim"), test))]
-fn window_fallback(asked: (c_int, c_int)) -> Option<(c_int, c_int)> {
-    (asked != (SCR_W, SCR_H)).then_some((SCR_W, SCR_H))
-}
-
-/// The window an Interface resolution choice asks for on firmware `major`: `None` for Automatic,
-/// the native canvas, and `None` on every set the setting is not offered on (webOS 4+ or unknown,
-/// [`plx_os::tv::device::offers_ui_resolution`]) whatever is stored, so a record carried over
-/// from another set cannot shrink the interface where the owner has no way to change it back.
-#[cfg(any(not(feature = "hostsim"), test))]
-fn drawable_for_setting(major: u32, chosen: plx_plex::plex::session::UiResolution) -> Option<(c_int, c_int)> {
-    if plx_os::tv::device::offers_ui_resolution(major) { chosen.size() } else { None }
 }
 
 /// Advance the once-per-second LOOP-RATE window: bump `iters_ct` and, when a full second has
@@ -644,6 +562,7 @@ pub(super) fn activate_server_owned(
     let _ = bridge.hubs_run(plx_data::stores::hubs::HubsCmd::Reset).changed;
     bridge.person_run(plx_data::stores::person::PersonCmd::Reset);
     bridge.collection_run(plx_data::stores::collection::CollectionCmd::Reset);
+    bridge.livetv_run(plx_data::livetv::LiveTvCmd::Reset);
     // before the stores reset: a stop the previous identity left in flight must not land on this one
     plx_media::route::retire_pending_stops();
     let mut endpoints = bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Reset).endpoints;
@@ -723,9 +642,9 @@ pub(crate) unsafe fn boot(
 
 // Fork Rofocale11: the in-process C torrent engine replaces the retired Node `server.js`.
 // These statics belong to boot's lifecycle; teardown takes them from a different call site.
-#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "sim"), not(test)))]
 static P2P_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "sim"), not(test)))]
 static SBENGINE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Start the in-process C torrent engine when its library loads. This is the only streaming
@@ -733,7 +652,7 @@ static SBENGINE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// the engine, or firmware fwcompat has not graded it) torrents are unavailable on that install.
 #[allow(dead_code)] // the call sits in start_p2p_service's ARM-only body
 pub(crate) fn start_sbengine() {
-    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "sim"), not(test)))]
     {
         if !plx_stremio::sbengine::available() {
             plx_base::eventlog::log("sbengine: libsbengine.so not available; torrents unavailable (no Node fallback)");
@@ -815,7 +734,7 @@ pub(crate) fn start_sbengine() {
 /// Stop the C torrent engine. Idempotent; safe to call twice.
 #[allow(dead_code)] // the call sits in stop_p2p_service's ARM-only body
 pub(crate) fn stop_sbengine() {
-    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "sim"), not(test)))]
     {
         if SBENGINE_STARTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
             plx_stremio::sbengine::stop_engine();
@@ -828,7 +747,7 @@ pub(crate) fn stop_sbengine() {
 /// never on a controlled/replay boot. `js-service/server.js` is NOT spawned — engine only. The
 /// trailer decipher child is separate and owned by the trailer resolver.
 pub(crate) fn start_p2p_service() {
-    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "sim"), not(test)))]
     {
         std::thread::spawn(|| {
             start_sbengine();
@@ -845,7 +764,7 @@ pub(crate) fn start_p2p_service() {
 
 /// Stop the engine and signal the parked start thread to exit. Idempotent.
 pub(crate) fn stop_p2p_service() {
-    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(test)))]
+    #[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "sim"), not(test)))]
     {
         stop_sbengine();
         P2P_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -929,58 +848,51 @@ pub(crate) unsafe fn construct(
         Some(initial) => initial.session.persisted.clone(),
         None => plx_plex::plex::session::load(),
     };
-    // The television is placed at 0,0 at exactly canvas size (unless a webOS 1-3 owner picked a smaller
-    // Interface resolution, `requested_drawable`) and takes the panel. A desktop window is centred at
-    // whatever fits the display: `Placement::Desktop`, which the shell plans and corrects for the
-    // display's pixel density once a window exists (`plx_shell_sdl::window`).
+    // The window to ask for is the PLATFORM's (`Shell::window`): a television is placed at 0,0 at exactly
+    // canvas size (unless a webOS 1-3 owner picked a smaller Interface resolution, which the stored
+    // session carries) and takes the panel; a desktop window is centred at whatever fits the display and
+    // corrected for its pixel density once a window exists (`plx_shell_sdl::window`).
     // **A stored size the set will not give must never brick launch.** If the window or its GL
     // context is refused at a smaller size the owner chose, the shell frees whatever was made and
-    // retries ONCE at the native canvas (`fallback`); only a refused native window is fatal. On a
-    // desktop the request is the desktop's own size, not a setting, so there is no retry there.
-    #[cfg(feature = "hostsim")]
-    let placement = Placement::Desktop;
-    #[cfg(not(feature = "hostsim"))]
-    let placement = {
-        let size = requested_drawable(&session).unwrap_or((SCR_W, SCR_H));
-        Placement::Panel { size, fallback: window_fallback(size) }
-    };
-    // The title is furniture a television never draws (no window manager, no decoration) and
-    // the first thing a desktop shows, so the two builds spell it differently: the device keeps
-    // the process-shaped name every log, `pidof` recipe and skill already uses.
-    // Fork Rofocale11: the simulator window is user-visible; the device name below stays the
-    // lowercase process name that logs, pidof recipes and skills already use.
-    #[cfg(feature = "hostsim")]
-    let title = c"Nuvio Native";
-    #[cfg(not(feature = "hostsim"))]
-    let title = c"plxnative";
+    // retries ONCE at the native canvas (the plan's `fallback`); only a refused native window is fatal. On a
+    // desktop the request is the desktop's own size, not a setting, so there is no retry there. The title
+    // is the platform's too: furniture a television never draws and the first thing a desktop shows.
+    #[allow(unused_mut)] // Fork Rofocale11: only the sim build renames the window title.
+    let mut plan = platform.shell.window(session.ui_resolution().size());
+    // Fork Rofocale11: the simulator window is user-visible, so it keeps the product name; the
+    // device title stays the lowercase process name that logs, pidof recipes and skills use (the
+    // webOS platform already states it). Only the title is overridden; placement and fallback
+    // remain the platform's own answer.
+    #[cfg(feature = "sim")]
+    {
+        plan.title = c"Nuvio Native";
+    }
     // A frame dump's drawable is exactly the window's size in points: it is the one desktop window
     // that does not ask for ALLOW_HIGHDPI, so its window is the 1920x1080 points of the canonical
     // Linux host on a Retina display too, and the shell's density fit finds nothing to correct.
     // (Absent from every shipping build.)
-    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    #[cfg(all(feature = "sim", feature = "devtriggers"))]
     let high_dpi = !crate::dev::framedump::requested();
-    #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
+    #[cfg(not(all(feature = "sim", feature = "devtriggers")))]
     let high_dpi = true;
     // The window and its GL context: created (with the retry above), corrected for the display's
     // density, and its drawable probed (`surface::probe` reads it once, for good). The `Surface` it
     // returns is the `App`'s for the rest of the process.
-    let surface = platform.shell.open(&mt, &OpenAsk { title, placement, high_dpi })?;
+    let surface = platform.shell.open(&mt, &OpenAsk { title: plan.title, placement: plan.placement, high_dpi })?;
     let win = surface.window();
     // vsync on → the frame rate locks to the panel refresh. `/tmp/plxnative-novsync` uncaps it so
     // `fps=` reports the true GPU render rate. WSLg's X11/GLX swap accepts interval 1 without
-    // blocking, so the software budget in `run` follows the same switch.
+    // blocking, so the platform's software pacer (`Shell::frame`) follows the same switch.
     // A frame dump never waits on the display: every iteration is a render, at swap interval 0 and
-    // with the Linux software pacer off (`vsync_enabled` also gates `wslg_frame_pacing`).
-    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    // with the software pacer off (`vsync_enabled` is what the pacer is asked with).
+    #[cfg(all(feature = "sim", feature = "devtriggers"))]
     let dumping = crate::dev::framedump::requested();
-    #[cfg(not(all(feature = "hostsim", feature = "devtriggers")))]
+    #[cfg(not(all(feature = "sim", feature = "devtriggers")))]
     let dumping = false;
     let vsync_enabled = !dumping && (controlled || !crate::dev::scenarios::novsync_armed());
     surface.set_swap_interval(if vsync_enabled { 1 } else { 0 });
-    #[cfg(all(feature = "hostsim", target_os = "linux"))]
-    let wslg_frame_pacing = vsync_enabled
-        && std::env::var_os("WSL_DISTRO_NAME").is_some()
-        && std::env::var("SDL_VIDEODRIVER").as_deref() == Ok("x11");
+    let frame = platform.shell.frame();
+    let frame_pacing = (frame.pacer.armed)(vsync_enabled);
     {
         let r = glGetString(GL_RENDERER);
         let v = glGetString(GL_VERSION);
@@ -995,7 +907,8 @@ pub(crate) unsafe fn construct(
     // The system on-screen keyboard, PROBED — see `crate::textinput`'s module doc. Both facts
     // on this line are preconditions that fail in complete silence, and nothing in this tree
     // had ever read either of them:
-    //   support= `SDL_HasScreenKeyboardSupport` — does this firmware's SDL have a panel at all.
+    //   support= `Shell::keyboard_available` — does this platform have a panel at all (SDL's
+    //            `SDL_HasScreenKeyboardSupport` on an SDL shell).
     //   focus=   `SDL_WINDOW_INPUT_FOCUS` — `SDL_StartTextInput` shows the panel only
     //            `if (SDL_GetKeyboardFocus())`. Clear, and it enables text events, returns
     //            void, and no panel appears.
@@ -1017,9 +930,11 @@ pub(crate) unsafe fn construct(
     // this window, and the window is created here, a long way from where BACK is decided.
     platform.shell.bind_window(win);
     let keyboard = plx_shell_sdl::text::keyboard_probe(win);
+    // `support=` is the platform's answer (`Shell::keyboard_available`): SDL's own on an SDL shell, so the
+    // same number as before there, and Ecore IMF's on Tizen, whose keyboard is not SDL's.
     log(&format!(
         "keyboard: support={} active={} focus={} winflags=0x{:x}",
-        keyboard.support,
+        i32::from(platform.shell.keyboard_available()),
         keyboard.active,
         i32::from(keyboard.wflags & SDL_WINDOW_INPUT_FOCUS != 0),
         keyboard.wflags
@@ -1152,6 +1067,8 @@ pub(crate) unsafe fn construct(
         super::adapters::poster::init();
         crate::capture::init(); // dev live UI capture stream
     }
+    #[cfg(feature = "devtriggers")]
+    super::api::init(); // command API — both transports are devtrig-only; a release build has no door at all (see api.rs's doc)
 
     // Any dev trigger under /tmp marks the boot as automated (the harness token override,
     // autoplay/detail captures, playback-path knobs): those runs need a deterministic Home,
@@ -1839,6 +1756,8 @@ pub(crate) unsafe fn construct(
         last_route_reported,
         ptr,
         menu_play_await: None,
+        #[cfg(feature = "devtriggers")]
+        api_waiting: Default::default(),
         deeplink: Default::default(),
         prev,
         refresh_hubs,
@@ -1849,8 +1768,8 @@ pub(crate) unsafe fn construct(
         ev,
         remote,
         surface,
-        #[cfg(all(feature = "hostsim", target_os = "linux"))]
-        wslg_frame_pacing,
+        frame_pacing,
+        frame,
         t0,
         instr,
         measure_fault_logged: false,

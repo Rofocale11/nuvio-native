@@ -98,12 +98,12 @@ impl RuntimeOwners {
         self.session.machine.read()
     }
 
-    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    #[cfg(all(feature = "sim", feature = "devtriggers"))]
     pub(crate) fn landgate(&self) -> &plx_machine::landgate::Gate {
         &self.stores.machines.landgate
     }
 
-    #[cfg(all(feature = "hostsim", feature = "devtriggers"))]
+    #[cfg(all(feature = "sim", feature = "devtriggers"))]
     pub(crate) fn open_claims(&self) -> Vec<&'static str> {
         use plx_data::stores::StoreId;
         let mut open = Vec::new();
@@ -145,6 +145,12 @@ impl Harness {
 
     pub(crate) fn from_parts(runtime: RuntimeOwners, retained: BridgeRetained) -> Self {
         Self { runtime, retained }
+    }
+
+    #[cfg(all(feature = "sim", feature = "play-feed"))]
+    pub(crate) fn swap_parts(&mut self, runtime: &mut RuntimeOwners, retained: &mut BridgeRetained) {
+        std::mem::swap(&mut self.runtime, runtime);
+        std::mem::swap(&mut self.retained, retained);
     }
 
     pub(crate) fn bridge(&mut self) -> Bridge<'_> {

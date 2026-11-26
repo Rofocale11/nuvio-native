@@ -1375,7 +1375,7 @@ BUILD = build_configuration(STAMP_TEXT)
 # the separate, narrower check below.
 DEV_ONLY_SONAMES = {"libswscale-plx.so.10"}   # the dev capture stream's scaler; RELEASE=1 drops it
 # Fork Rofocale11: the Linux simulator's host FFmpeg libraries are staged into pkg/ under distinct
-# `*-plx-host.so.*` loader names (docs/nuvio/MERGE-AUDIT.md). They are gitignored and never in
+# `*-plx-host.so.*` loader names (docs/nuvio/MERGE-AUDIT-HISTORY.md). They are gitignored and never in
 # APP_FILES, so they cannot ship in the ipk. Grading them as distributed libraries made every local
 # ipk build fail as soon as a developer staged host FFmpeg for the simulator.
 HOST_ONLY_MARKER = "-plx-host.so."

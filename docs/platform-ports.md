@@ -37,6 +37,11 @@ changes move the rest, so a lane re-verifies a citation by grep on the symbol, a
 Layer rules quoted from `ci/module-layers.ini` are quoted at `e9924f0f9` (`[play_uri] uses = base platform
 playback_contract`, `:148`): after Wave R the same line reads `uses = base os playback_contract`.
 
+W8c-4 renames the Cargo feature `hostsim` to `sim`. This page is a record, so every `hostsim` it names as a feature, a cfg or a
+`--features` value (the facts, the target shape and the as-landed notes of W8c-1 to W8c-3 included) is the feature that is called `sim` from
+W8c-4 on; the make target `test-hostsim`, `rust-modules/target-hostsim`, `HOSTSIM_SUITE` / `HOSTSIM_PKGS`, the CI job `host unit tests (hostsim)`,
+the module `app::adapters::hostsim` and the replay manifests' `"hostsim"` string keep their names.
+
 ## Problem
 
 PlxNative is one Rust application (17 layer crates, the 13 named in `docs/module-layers.md:12-17` plus playback_contract, media_codecs, play_uri and play_feed, under the top crate `plxnative-modules`) that
@@ -98,8 +103,8 @@ Citations in this section quote the tree at e9924f0f9 with its old names (see "N
   (`workers/ globals/ forks/ fxlanes/`) is one total, "so an entry may move between the area files of
   a family" (`ci/check-ledger-ratchet.py` docstring). No `ci/allow` file names `webos.rs`,
   `keymanager`, `port.rs` or `system.rs` as an entry. `grep -n 'webos\|keymanager\|system\.rs\|port\.rs'
-  ci/allow/...` hits only explanatory text: `wall.txt:7` names `app/window_activity.rs` "out of
-  system.rs".
+  ci/allow/...` hits only explanatory text: `wall.txt:7` named `app/window_activity.rs` "out of
+  system.rs" (a line W8c-3 deleted).
 
 ### The port table
 
@@ -310,6 +315,7 @@ Citations in this section quote the tree at e9924f0f9 with its old names (see "N
   - `EGL_SONAMES: &[&str] = &["libEGLfk.so.2", "libEGL.so.1", "libEGL.so"]` (`gfx/src/egl.rs:110`);
   - libcurl's `["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"]`
     (`net/src/net/connect_only.rs:14`).
+  (As found, at the time of the review. W8b has since moved both into the platform's `libraries` group.)
 - F28. Branch `samsung/hello-tpk` now carries the hello-world. `git log --oneline
   origin/main..origin/samsung/hello-tpk` lists `72c5cd82a` ("tizen/hello: sign with a Samsung
   certificate profile, stream the log over UDP"), `ab0ba40ca` ("tizen/hello: log without eprint, ...")
@@ -667,7 +673,8 @@ the emulator runs (E1-E13) measured it, the item says so.
   Option B's `Ecore_Wl2_Window*`. SDL2 on a retail Tizen TV is not evidenced (2d, 1); the emulator ran static SDL2 + SDL2_ttf with `SDL_Init(TIMER|EVENTS)`
   and no video driver (E10), so the dummy-video-driver variant of Option A was not exercised. Option B drawing
   from a Rust thread works on the emulator (H3, H4; E6, E8) and is unmeasured on a retail set.
-- T6. URI playback via `Tizen.Multimedia.Player` (C#) is proven:
+- T6. URI playback through the platform's player is proven. The host drives the native libcapi-media-player (P/Invoke), not
+  `Tizen.Multimedia.Player`, because the managed `Display` cannot take our window at API8 (measured 2026-11-22):
   - only the User-Agent and Cookie headers pass;
   - no DTS or TrueHD;
   - esplusplayer feed is firmware-dependent (2e).
@@ -686,8 +693,8 @@ The Tizen hello-world (F28) exists to answer these, and the text cites them by n
 - H3: whether Option B, a native Ecore_Wl2 window, draws from a Rust thread (T5).
 - H4: whether Ecore main-thread handlers and a Rust loop thread run without deadlock (T5, F32).
 - H5: whether static SDL2 and SDL2_ttf draw text and a GLES2 texture through our path (F15).
-- H6: whether `Tizen.Multimedia.Player` shows a mock title beneath our window and survives a TV-menu round trip
-  (T6, W10).
+- H6: whether the native libcapi-media-player, driven by the host (the managed `Display` cannot take our window at API8, measured
+  2026-11-22), shows a mock title beneath our window and survives a TV-menu round trip (T6, W10).
 - H7: whether the application's own renderer, `plx_gfx`, compiles its shader programs and draws on the set's GL
   (README "H7" on `samsung/hello-tpk` at `e8da14ce6`; F40 says why a rejected required shader ends the process).
 - H8: whether the application's own libcurl binding (`plx_net` on the `dynlib!` loader) finds a libcurl on the set
@@ -868,6 +875,26 @@ split by who reads it (critic M4):
      and consent is neither read nor written, whatever the authority says; only the install's own preference
      file persists. It replaces the `target_os = "linux"` + `target_arch = "arm"` fence the persistence
      layers chose their store by; the helper's wake-up (`storage::client::install_activator`) is not a member: its type is the helper's wire diagnostics and `tv` names no `storage` (L15), so it stays a `storage`-owned install point the webOS port calls;
+   - `layout { payload_dir, state_root, fallback_dir }` (W9, W8b): two `fn() -> PathBuf` hooks, the package's read-only
+     payload directory and the directory the app's record files live under, and the payload directory of last resort
+     (a `&'static str`: the platform's install prefix, for a process whose `/proc/self/exe` cannot be read; webOS states
+     the Developer Mode one, the desktop and Tizen the neutral `.`, `NO_FALLBACK_DIR`). The type is `plx_base::paths::Layout` (`paths` is below `tv`
+     and cannot read it; `tv` re-exports it), and `Platform::install_services` publishes it into a publish-once slot in
+     `paths` as its second line, after the `tv` install, so `app_dir()` and `persistent_state_root()` answer from it and
+     fall back to the derivation (`current_exe` and the environment) when none was published. `Layout::DERIVED` states
+     "no layout of my own": the desktop and the host-test value say it (webOS says it with its own `fallback_dir`), and their `appdir:` line is unchanged.
+     A publish after `app_dir()` was read, or a second one, is refused (`paths` never logs, so `install_services` logs
+     the refusal). The runtime root and the app id stay out: the webOS C shim freezes both before any Rust runs;
+   - `libraries { curl, egl }` (W8b): the OS-owned library names that differ per platform, two ordered `&[&str]` lists:
+     the three libcurl tables (`net`, `curlio`'s `curlmulti`, `connect_only`'s `raw`, declared `dynlib! { curl:
+     platform(curl) { .. } }`) and the EGL probe (`gfx/src/egl.rs`). The type is `plx_base::dynlib::Libraries`
+     (`dynlib` is below `tv`; `tv` re-exports it) and `Platform::install_services` publishes it as its third line,
+     through the same publish-once cell as the layout (`plx_base::choice::Choice`). webOS states curl
+     `["libcurl.so.4", "libcurl.so.5"]` and EGL `["libEGLfk.so.2", "libEGL.so.1", "libEGL.so"]`; the desktop the union
+     (adding the Mac's `libcurl.4.dylib`); Tizen `["libcurl.so.4"]` and `["libEGL.so.1"]`. `Libraries::NONE` is the
+     empty statement (a table then reports a missing library with its own log line); a process that published
+     nothing, a host test, reads `Libraries::HOST`, the union. Bundled `-plx` libraries, zlib, gst and a platform
+     crate's own tables (Tizen's Ecore and EGL chain loads before the install) stay literal;
    - `legacy_webos_media { sink, display_sink, uri_media }`: the Starfish, ACB and `com.webos.media` verbs (F31),
      named for what they are (critic M3). Every hook is required (Decision 2, C): a platform states each field,
      a named `NONE` being a statement and a `Default`-filled gap not allowed. The one exemption is this group:
@@ -879,7 +906,7 @@ split by who reads it (critic M4):
    pub struct Platform {
        pub services: &'static tv::Services,
        pub shell: &'static dyn Shell,        // a Sync FACTORY of the loop's surface (Target shape 8)
-       pub diag: &'static dyn FrameProbe,    // the six frame probes; a named NONE is fine
+       pub diag: &'static dyn FrameProbe,    // the six frame probes and the heartbeat tag; a named NONE is fine
        pub media: MediaBoot,                 // Target shape 6a
    }
    pub fn run_application(p: &'static Platform) -> Exit;   // returns; Target shape 7
@@ -903,7 +930,9 @@ ruled (2026-11-21, Decision 3 amended) that `Shell` and `Surface`, with the rest
 are reachable ONLY through `plxnative_modules::host` (Target shape 8), never as general `pub` items of the
 application crate; `HostEvent` stays app-private, and a platform reports input through `EventSink`. W7a publishes
 today's `Shell` (12 methods) and `Surface` (5, plus `deliver`) as they are; the fold toward the shape above (one
-`Surface`, `video_hole`, `pump`) is W9's, which is the first change with a second implementation to fold toward.
+`Surface`, `video_hole`, `pump`) was expected of W9, the first change with a second implementation to fold toward.
+W9 kept those calls (see its D1 note); the fold waits for the SDL shells to deliver through the sink and is not
+scheduled.
 The dispatcher's rig hooks (`ui/src/dispatch.rs:728-730`) keep delegating through `run::rig_*`.
 
 ### 2. Input and lifecycle: canonical actions (review M6, C8; critic F11)
@@ -1145,10 +1174,11 @@ Ecore names to `remote_token_key` pairs".
   - Threads. `plx_host_start` runs on the host's main thread inside `OnCreate`: it creates the Ecore_Wl2 window and
     registers the key handlers there (the hello-world's model, F28; E6, E8), copies the table and the launch
     string, spawns the loop thread and returns. `plx_host_post` may be called from any thread: a bounded queue
-    push and a wake, never a block. `plx_host_stop` runs on the host main thread, sets `stopping` and returns.
+    push (256 entries; a full queue drops the newest input and counts it), never a block; the loop drains it every
+    iteration through `Surface::deliver`, so nothing is woken. `plx_host_stop` runs on the host main thread, sets `stopping` and returns.
   - The loop thread runs `run_application` and mints `MainThread` (F32). There the token means "the loop thread":
     it authorises the player adapter and EGL, NOT Ecore window calls, and `MainThread::assume`'s safety text
-    (`base/src/task.rs:138`, "the SDL main thread") is updated in W9 before it is minted there. Work that must run
+    (`base/src/task.rs:138`, "the SDL main thread") is updated in W9 (landed): it names the loop thread of a hosted platform. Work that must run
     on the host thread leaves as a queued request through the callback table and comes back as an addressed
     completion event; the loop never waits on the host thread.
   - Ownership: a string passed into the library is copied before the call returns; a string passed to the host
@@ -1188,10 +1218,11 @@ Ecore names to `remote_token_key` pairs".
   only": the entry is `pub(crate)`, and a platform crate has nothing else to call), and the ready media values of
   "What `host` carries beyond the types" below. The re-exports are `Platform`,
   `Services`, `Shell`, `Surface`, `FrameProbe`, `MediaBoot`, `Composition`, `Exit`, `Release` and an `EventSink`
-  trait, the two SDL helpers `sdl_init` and `sdl_open` with `InitHooks` (W7b), and the vocabulary their signatures
+  trait, the frame seam's three types `FrameSeam`, `Pacer` and `Present` (W8c-3; they do not retire), the two SDL helpers `sdl_init` and `sdl_open` with `InitHooks` (W7b), and the vocabulary their signatures
   use: `MainThread`, `OpenAsk`, `Placement`, `Lifecycle`, `PointerEdge`, `Action`, `RawKey` and `Edge`. The eight application-crate items (`Platform`, `Shell`, `Surface`, `FrameProbe`, `MediaBoot`,
-  `Composition`, `Exit`, `Release`) are reachable ONLY through `host` (owner ruling, 2026-11-21; Decision 3, amended):
-  `Exit` and `Release` are `pub` inside the private `app`, and `Platform` and the traits are `pub` in a private
+  `Composition`, `Exit`, `Release`), the frame seam's three (`FrameSeam`, `Pacer`, `Present`), and the four of the hosted contract's exit half added in W9 (`HostGate`, `InFlight`,
+  `Completion`, `Stopped`), are reachable ONLY through `host` (owner ruling, 2026-11-21; Decision 3, amended):
+  `Exit`, `Release` and the four are `pub` inside the private `app`, and `Platform` and the traits are `pub` in a private
   module, so no path outside `host` names them. `Services` is not one of the eight: it stays `plx_os::tv::Services`,
   already a `pub` type of a lower crate, which `host` re-exports beside them. A platform crate names the APPLICATION
   crate's types through `host` alone, but not everything it builds is the application's: a `Services` is built from
@@ -1204,13 +1235,14 @@ Ecore names to `remote_token_key` pairs".
   shared; thread-affine state (window, GL context, the Ecore handles) lives only in a `Surface` that
   `Shell::open(&self, &MainThread, &OpenAsk)` returns on the loop thread and that the app owns inside `App`.
 - Events. The platform reports input through `EventSink` (`key(Option<Action>, Option<RawKey>, Edge) -> bool`, `text`,
-  `pointer`, `wheel`, `lifecycle`, `quit`); the APP converts to its private `HostEvent` (a private `HostQueue`, the
+  `keyboard_dismissed`, `pointer`, `wheel`, `lifecycle`, `quit`); the APP converts to its private `HostEvent` (a private `HostQueue`, the
   one place), so the owner's decision that the event API stays private holds. `Action`, `RawKey` and `Edge` are
   lower-layer types: `RawKey` moved to `plx_ui::consts` beside `raw_pair` and `action_of` (a `pub(crate) use` keeps
   the app's old path). `Surface::deliver(&self, &mut dyn EventSink)` is ADDITIVE, beside `Surface::poll`: `deliver` is
   required, `poll` is defaulted to `false` and `#[doc(hidden)]`, and the loop's `drain_sdl` drains `poll` as before and
   then calls `deliver` once. The SDL shells deliver nothing through the sink, so every SDL event still comes through
-  `poll` (a unit test pins both). `poll` is RETIRED once the SDL shells deliver through the sink, W9 at the latest.
+  `poll` (a unit test pins both). `poll` is RETIRED once the SDL shells deliver through the sink. W9 landed without that: `poll` remains, and
+  the retirement is not scheduled.
 - What `host` carries beyond the types (W7b). The application keeps the playback composition (`app/adapters/backends.rs`:
   `acb_init`, `compose_native`, `compose_feed`) until W11a moves it into the webOS platform, and the simulator's video
   sink (`HOST_SINK`, `adapters/hostsim.rs`) draws the decoded picture, which only the application may. So `host` hands a
@@ -1219,12 +1251,26 @@ Ecore names to `remote_token_key` pairs".
     compiled in every build of the application because it carries no `cfg` (the application cannot know which platform crate names it);
   - `FEED_MEDIA` (`hostsim` builds only), the desktop's `MediaBoot`: a no-op `early_init` and `compose` over
     `backends::compose_feed` alone, so no URI driver and no resolver;
+  - `NO_MEDIA` (W9; no `cfg`, like `WEBOS_MEDIA`), the `MediaBoot` of a platform with no playback (a Tizen build without its `uri` feature): a no-op
+    `early_init` and a `compose` that installs nothing, so `BackendSet::NONE` and no resolver, which the one
+    `publish_composition` path logs as `compose: backends=none resolver=no`;
+  - `HostGate`, `InFlight`, `Completion` and `Stopped` (W9; no `cfg`), the exit half of the hosted contract (Target shape 7):
+    `HostGate::enter` admits each host-bound callback until the stop, `stop` closes it, `report` answers the loop thread's
+    `on_stopped` only once nothing is in flight (`clean` needs `Release::Complete` too) and `expire` is the deadline
+    thread's never-clean report; `Completion::deliver` makes `on_stopped` fire exactly once. They are the application's
+    own types beside `Exit` and `Release` and do NOT retire at W11a; a platform that is not hosted never names them;
   - `HOST_SINK` (`hostsim` and `play-feed`, the cfg of the module it lives in), the simulator's video sink the desktop's
     `Services` hold, re-exported under exactly that cfg so a television build never has it;
+  - `SIM_PRESENT` (W8c-3; `hostsim` builds only), the simulator's `Present` hooks, the compositor stand-in under a bound frame and the
+    supersampled copy to the window. They draw (`plx_gfx`, the decoded picture), so they stay in the application and the desktop's
+    `FrameSeam` states them beside the pacer it owns. It retires with the simulator's picture (`adapters::hostsim`) at W11a;
+    `FrameSeam`, `Pacer` and `Present` themselves do not retire;
+  - `WindowPlan`, `InitSteps`, `SdlFlavor` and `GlProfile` (W8c-2, no `cfg`): the platform's window ask and the SDL values `InitHooks`
+    carries. They stay with the SDL helpers (no retirement at W11a);
   - `sdl_init`, `sdl_open` and `InitHooks`, which the webOS crate's `port.rs` and the desktop crate's `src/lib.rs` call. `sdl_open` stays in the
     application crate: `impl Surface for plx_shell_sdl::Window` can live only there (the orphan rule).
 
-  Each media value and the `HOST_SINK` re-export RETIRE AT W11a, when the composition moves into the webOS platform (and
+  Each media value (`WEBOS_MEDIA`, `FEED_MEDIA`, `NO_MEDIA`), the `HOST_SINK` re-export and `SIM_PRESENT` RETIRE AT W11a, when the composition moves into the webOS platform (and
   the Feed over the host sink into the desktop); the SDL helpers are not part of that. `publish_composition` is not
   exported: the desktop's test of the published composition (`platform_desktop.rs`'s, before the move) named it, and the move reworked that test onto
   `PlayerAdapter::composed_backends()`, which is why the desktop crate needs `plx_media` in that test only and the webOS crate
@@ -1267,7 +1313,7 @@ Ecore names to `remote_token_key` pairs".
 | lifecycle | SDL app events | SDL app events | C# OnPause/OnResume/OnTerminate through `plx_host_post`; stop request and completion |
 | key store | keymanager3 / palm, `Durable` | `HostFile` (later Keychain) | `MemoryOnly` first (client id, language, resolution kept; Decision 7, B), then the Tizen store |
 | identity, caps | `webos::probe`, codec table, jail verdict | host values, `NotApplicable` | `Tizen` + version, player codec set, `NotApplicable` |
-| backends | Feed (Starfish) + URI (`play-uri`, ACB) | Feed over `HostSink` | URI over `Tizen.Multimedia.Player` (W10), Feed later (W12) |
+| backends | Feed (Starfish) + URI (`play-uri`, ACB) | Feed over `HostSink` | URI over the device's native media player, `libcapi-media-player`, called from the C# host (W10), Feed later (W12) |
 | display evidence | the LG driver's (ACB, exported window) | n/a | the Tizen driver's own |
 | storage helper | LS2/DB8 service (`rust-modules/storage`) | none | none |
 | diagnostics | event, crash and stderr descriptors (`main.c`, F19) | unchanged | in-app UDP log sink, required (Target shape 7, E5) |
@@ -1310,8 +1356,9 @@ Ecore names to `remote_token_key` pairs".
   and signing path. Each platform records its tested configurations, one per Rust target it is tested on. Tizen has
   two (Decision 8). x86_64 is a first-class configuration of `mk/platform-tizen.mk`: the TV 10.0 emulator, `tizen80`,
   the Samsung Public certificate profile the emulator needs too (E2), and the configuration W9's MVP is accepted on.
-  armv7 softfp (T3) with the NDK sysroot, a named firmware range and the same kind of profile is the retail
-  configuration; it is recorded but untested until a retail set answers H1 and H2. Their variables are printed by the
+  The armv7 soft-float configuration uses the pinned NDK sysroot and builds a SUPER ALPHA
+  nightly for Tizen 6.0 and newer. Apps2Samsung re-signs it for each install. A retail TV still
+  needs to answer H1 and H2. See [the Samsung nightly guide](samsung-nightly.md). Their variables are printed by the
   CI job and quoted in the PR. What has run so far is x86_64 on the Tizen 10 emulator (E1-E13): it exercised
   `tizen80`, the signing path and the host contract but neither the ARM library nor the NDK sysroot (H1, H2), and its
   results read "emulator only". A further configuration (aarch64, `tizen90`, glibc 2.40) is added only when a
@@ -1332,7 +1379,7 @@ Ecore names to `remote_token_key` pairs".
   does the same with a `tizen` feature.
 - Stages that need a second invocation exist already: the hostsim type-check (`.github/workflows/ci.yml:379`),
   `make test-hostsim`, the `sim-*`/`macapp` builds, `check-cargo-unit-hostsim` and `check-nodef`
-  (`Makefile:1928`), which after W7 also checks `-p plx_platform_webos`. A Tizen clippy pass runs in the Tizen CI job.
+  (`Makefile:1928`), which after W7 also checks `-p plx_platform_webos`. No clippy pass runs with the `tizen` feature yet: the Tizen CI job links and verifies, and `make PLATFORM=tizen tizen-check` only type-checks.
 - The hostsim gate (review M11, F35). `check-cargo-unit-hostsim` keeps its eleven packages, including
   `-p plxnative-modules --features hostsim`, and adds `plx_platform_desktop`; `HOSTSIM_PKGS` is the developer's
   loop. Before and after every PR that moves tests (W4, W7), a script lists the discovered test names
@@ -1340,13 +1387,16 @@ Ecore names to `remote_token_key` pairs".
   only, the app's lifecycle suite (`run.rs:3915`) and the Feed suites included. A separate check asserts that each
   artifact root has exactly one `plx_platform_*` in its normal dependency tree.
 - Tizen link shape: `cargo rustc --crate-type staticlib` of `plx_platform_tizen` (F24), then `cc -shared
-  -Wl,--whole-archive` over it plus `svg.o`, `sentry_context.o`, `crashtrace.o` and libass-plx. No `main.c`,
-  `access.c`, `exit.c`, `starfish.c` or `video_plane.c`; no cdylib crate type, so `ci/test_no_host_staticlib.py`
-  is untouched.
-- CI: `cross-build` (`ci.yml:531`) stays required and webOS-only. A new compile-only `tizen` job builds the `.so`
-  and checks its exports against the C# `DllImport` list (T7); it stops at the `.so` (`build.sh --so-only` needs
-  no certificate): the `.tpk` needs a device-bound profile that stays out of the repo (T7, E2). The simulators
-  job runs `PLATFORM=desktop`.
+  -Wl,--whole-archive` over it plus `svg.o` and a STATIC SDL2 + SDL2_ttf built from the pins in `ci/dependencies.json`
+  (`tizen/build-sdl.sh`), with `-z defs`, a version script that exports only the header's three `plx_host_*` names and
+  `-lGLESv2` (decision D3). No `main.c`, `access.c`, `exit.c`, `starfish.c` or `video_plane.c`, and none of
+  `sentry_context.o`, `crashtrace.o` or libass: nothing the emulator build reaches references them. No cdylib crate type,
+  so `ci/test_no_host_staticlib.py` is untouched. `docs/tizen.md` is the build's page.
+- CI: `cross-build` (`ci.yml:531`) stays required and webOS-only. The compile-only Tizen job is its own workflow,
+  `.github/workflows/tizen.yml` (job `tizen-so`, not a required check): it builds the `.so` (`make PLATFORM=tizen tizen-so`),
+  verifies it (`tizen-verify`: DT_NEEDED allowlist, undefined symbols, exports equal to `plx_host.h` and to the C# `DllImport`
+  list) and runs the platform crate's own tests with its feature; it stops at the `.so`: the `.tpk` needs a device-bound
+  profile that stays out of the repo (T7, E2). The simulators job runs `PLATFORM=desktop`.
 
 ## Workstreams (ordered; every PR ships webOS)
 
@@ -1748,8 +1798,8 @@ W3d. Neutral types (L15b item 2 prerequisites; part of item 3).
   the application crate (W7a expected `plx_media` too; after W7b's first lane only the desktop crate's test of the composed backends needs it, see the next bullet). The test has no `[[test]]`
   entry (cargo discovers `tests/*.rs`), so no `Cargo.toml` and no `ci/proofs` certificate changed. `make
   test-host-interface` is the incremental loop and `check-cargo-unit-hostsim` runs the same line, pinned in
-  `ci/test_ci_split.py` (`GATES`). `Surface::poll` and `Surface::deliver` coexist until W9 retires `poll`; the SDL
-  shells' `deliver` delivers nothing. `sdl_init` and `sdl_open` were not published by W7a: the first lane of W7b decides
+  `ci/test_ci_split.py` (`GATES`). `Surface::poll` and `Surface::deliver` coexist until the SDL shells deliver through
+  the sink (W9 did not do it; not scheduled); the SDL shells' `deliver` delivers nothing. `sdl_init` and `sdl_open` were not published by W7a: the first lane of W7b decides
   what the two real platform crates need of them (the next bullet). The W6 minors rode along (the reviewer note's inventory claim, and the SDL crate's
   source-file pin reading only `*.rs` entries).
 - As landed (W7b, first lane, before the move; three commits, no file moves): (1) the surface pins read an attribute and its
@@ -1785,7 +1835,7 @@ W3d. Neutral types (L15b item 2 prerequisites; part of item 3).
     manifest line, and selects nothing. The alternative, a virtual workspace manifest with the application in its own directory, would have touched every path
     in the application and every certificate input.
   - `host` gained `WEBOS_MEDIA`, `FEED_MEDIA`, `HOST_SINK`, `sdl_init`, `sdl_open` and `InitHooks` (Target shape 8, "What `host` carries beyond
-    the types"). The two media values and `HOST_SINK` retire at W11a, when the composition moves into the platforms; the SDL helpers do not.
+    the types"); W8c-3 added `FrameSeam`, `Pacer`, `Present` and `SIM_PRESENT`. The two media values and `HOST_SINK` retire at W11a, when the composition moves into the platforms; the SDL helpers do not.
   - The simulator binary lives in the desktop crate (`platform-desktop/src/bin/sim.rs`, `required-features = ["hostsim"]`), not in the
     application, so a `--bins` build of the application compiles none.
   - Each platform crate has its own `build.rs`, the same `host_link::emit` call as the application's: `cargo:rustc-link-arg` (the nanosvg object) reaches only
@@ -1825,9 +1875,67 @@ W3d. Neutral types (L15b item 2 prerequisites; part of item 3).
 - W8b, one row per fact: the library name lists (F27) become per-platform lists supplied through the
   platform (`dynlib!` stays shared); `paths`'s fallback install prefix becomes a platform value; the
   storage helper is packaged only by `PLATFORM=webos`; `main.c` and `starfish.c` are webOS-only.
+  Rust half done: the first two rows (`tv::Services` states `libraries`, and `layout.fallback_dir`; see the
+  `libraries` and `layout` groups above) and the native-backend `compile_error!`, which moved from the application
+  crate to `plx_platform_webos` (a rule of the webOS build, not of every 32-bit ARM Linux one); the Makefile rows
+  follow.
+  As landed (the Makefile PR, the Makefile rows): the goals that build the webOS package (`WEBOS_TV_GOALS` in the `Makefile`: `all`, `ipk`, `install`,
+  `deploy`, `test`, `pkg/plxnative`, the storage helper `pkg/plxnative-storage`, `src/%.o`, `symbols`, `symbols-libs`,
+  `sentry-symbols`, `libass`, `sentry-native`) are refused at parse time, above the stamp reset, under an explicit
+  `PLATFORM=desktop` or `tizen`; `SRCS` is untouched and no file moved (the keying is the goal, because the one C unit another
+  platform compiles, `svg.c`, is built by its own rule). `PLATFORM=webos`, the default, prints the same `make -B -n` text, and the
+  queries answer under every value. `make sim all` implies `desktop` from `sim` and so refuses `all` (one PLATFORM per
+  invocation); `PLATFORM=webos make sim all` takes both.
 - W8c, the 363 non-fence `feature = "hostsim"` lines (360 cfg lines and three doc comments), sorted per crate: a
   host difference becomes a platform value or runner; simulator tooling goes under a renamed `sim` feature; a test
   seam goes to `test-support`.
+  As landed (W8c-4, the rename): the Cargo feature `hostsim` is `sim` in every member manifest that defines or forwards it (the application
+  crate, `plx_base`, `plx_machine`, `plx_os`, `plx_gfx`, `plx_plex`, `plx_telemetry`, `plx_data`, `plx_session`, `plx_media`, `plx_play_feed`,
+  `plx_shell_sdl`, `plx_platform_desktop` and `plx_platform_webos`; `fuzz/Cargo.toml` names `plx_media/sim`), in every `feature = "sim"` cfg, and in every
+  `--features` of the Makefile, `.github/workflows/`, `ci/mkmacapp.py` and `tests/paging_link.py`. `git grep -h 'feature = "hostsim"' <rev> -- 'rust-modules/*.rs' | wc -l`,
+  at `21aee59d4` and this branch's head: 188 -> 0, and `feature = "sim"` 0 -> 188 (a pure rename, so the same 188 lines). The unit,
+  default and `sim` test lists are unchanged. The manifests' prose says what `sim` still selects after W8c-2 and W8c-3 (the media seam,
+  the simulator's sink and compositor stand-in, the supersampled present, the dump switch, the steerable runtime root, the desktop window fit):
+  the GL context request, the window flags and the key, wheel and text layouts are platform values and are not its. The two readonly
+  certificates (`ci/proofs/serde-json-immutable.json`, `ci/proofs/platform-generated-enums.json`) pin the manifests and `os/build_support/catalog.rs`,
+  `os/src/i18n/mod.rs` and the application's `src/lib.rs`, all of which this rename touches, so they are re-sealed in this change (owner-approved), as its last commit.
+  As landed (W8c-3, the frame seam): `Shell::frame` is a required hook returning a `FrameSeam { pacer: Pacer,
+  present: Present }` (each group has a `NONE`), `FrameProbe::heartbeat_tag` a required method and
+  all reachable through `host`. The webOS and Tizen platforms state `FrameSeam::NONE` and `""`; the desktop states the WSLg-aware pacer
+  (`platform-desktop/src/pacer.rs`: armed on Linux under WSL's X11 SDL driver, the `Instant`, sleep and two
+  environment reads the loop's `WslgFrameBudget` had in `app/window_activity.rs`, so `ci/allow/wall.txt` 3 -> 2 and
+  its `ci/ports.ini` entry goes), the simulator's present hooks the application keeps because they draw
+  (`host::SIM_PRESENT`: compose-under on a bound frame and the supersampled copy to the window), and ` sim=1`. The app's preview-admission `seam_absent` asks the sink
+  (`VideoSink::lacks_video_path`, W8c-1). The two arms no CI configuration builds (`hostsim` without `play-feed`:
+  `dev/scenarios.rs` autopause `at=`, `dev/scenarios/screenshot.rs` clockstop) are deleted. `feature = "hostsim"`
+  lines in `rust-modules` (`git grep -h 'feature = "hostsim"' <rev> -- 'rust-modules/*.rs' | wc -l`, at `65e2044cd` and this
+  branch's head): 207 -> 188, a delta of 19. The
+  application reads the seam from `App::frame`, asked once at boot, so a TV's frame path makes no `dyn Shell` call
+  per frame, only the empty hooks. The test lists of `plxnative-modules` (default and `hostsim`) and
+  `plx_platform_webos` are unchanged; `plx_platform_desktop`'s `lib.rs` goes 6 -> 7 and its Linux-only
+  `pacer.rs` adds 3, so 6 -> 10 on a Linux build. The `not(hostsim)` term of `src/lib.rs`'s `compile_error!` stays
+  for W8b.
+  As landed (W8c-2): the SDL shell's host differences are platform values. `Shell::sdl()` returns the platform's `InitHooks`
+    (`steps: InitSteps { before, after, after_context }`, `flavor: SdlFlavor`, `gl: GlProfile`) and `Shell::window()` its
+    `WindowPlan { title, placement }`. webOS states `Lg`, `Es2` and its panel placement (the stored-size ask moved into
+    `platform-webos`); the desktop states `Stock`, `Core41`, `Placement::Desktop` and the VAO bind as `after_context` (it owns the
+    two vertex-array externs, `glGenVertexArrays` and `glBindVertexArray`, which left `gfx`; `gfx` keeps its own `glGetString`); Tizen states `Lg`, `Es2`, no steps and the panel placement a Tizen build compiled
+    before (its own values to confirm on a device, W9). The flavour reaches the decoders as an argument (`decode_key`,
+    `decode_wheel_dy`, `encode_key`, `encode_key_repeat`, `text_off`, through `App::sdl_flavor()`), never a process-global, and the
+    window flags derive from `Placement` (`window_flags_of`); `surface::probe` takes a `DrawableNote` instead of reading a cfg. Both
+    layouts now run in the default test pass (`plx_shell_sdl` 46 -> 49 default tests). Lines naming `feature = "hostsim"`
+    (`git grep -h 'feature = "hostsim"' <rev> -- 'rust-modules/*.rs' | wc -l`, at `221cb3dc0` and this branch's head): 235 -> 207, a delta of 28
+    (`shell-sdl` 30 -> 18, `src/app` 94 -> 79, `gfx.rs` 9 -> 7, `base/src/surface.rs` 14 -> 13). Left as they are (S lines):
+    supersample, compositor model, the dump switch, the desktop window fit, the three desktop-only SDL externs, `ENV_STEERABLE`.
+    `host` gained `WindowPlan`, `InitSteps`, `SdlFlavor` and `GlProfile`; like the SDL helpers beside them they do not retire at W11a.
+  As landed (W8c-1): `plx_media`'s 70 `all(test, hostsim)` gates are `cfg(test)`, and `play-feed`'s 8 test-seam lines
+  likewise (`shared.rs` hooks `any(test, test-support)`); `ffi_host` is two exclusive declarations of one file (`hostsim`;
+  `any(test, test-support)` without it), because one `cfg` mixing `hostsim` with `test` is a production-visible fork the
+  `forks` ledger counts. `test_physical`'s sink is always the host sink. `pump.rs`'s `cfg!(hostsim)` read is the required
+  `VideoSink::lacks_video_path` (webOS `false`, host `!clocksink`, `NoSink` `false`, `RefusingSink` forwards); the four `os`
+  dead-code `cfg_attr`s are deleted. Discovered tests, `cargo test --lib -- --list`: `plx_media` default 2272 -> 2592
+  (320 gained, 0 lost; with `hostsim` 2592 -> 2592), `plx_play_feed` default 351 -> 368 (17 gained; with `hostsim` 368 -> 368, one
+  test renamed `hostsim::` -> `host_seam::`), `plx_os` 417 -> 417 in both. `make test-crate C=plx_media` now runs 2488 passed / 104 ignored.
 - Verify: the F9/F12 grep count before and after; `ci/check-ledger-ratchet.py` at or below every family
   total (a host difference that needs IO becomes a runner, never a `forks/` line); fw-compat-reviewer on
   W8b; a build-bench table for W8b. Risk: size. W8c blocks nothing Tizen needs; only W8a does.
@@ -1855,12 +1963,21 @@ W3d. Neutral types (L15b item 2 prerequisites; part of item 3).
   credential is persisted; per Decision 7, B only `client_id`, language and interface resolution are, in the
   `install_preferences` v2 file, and every other setting is forgotten each launch: stated in the PR); identity
   `Tizen`, `native_video: NotApplicable`, `PLAYBACK_BACKENDS=none`, `BackendSet::NONE` with Play disabled and a
-  reason; `mk/platform-tizen.mk` with its two configurations, x86_64 first class and armv7 recorded (the PLATFORM
+  reason; `mk/platform-tizen.mk` with its two configurations, x86_64 for the emulator and armv7 for the nightly (the PLATFORM
   axis); the CI compile-only job.
 - Verify: a build-bench table; the export check against `DllImport`; the webOS ARM link command unchanged
   (`make -n` diff); fw-compat-reviewer; the packaged `.so`'s dependencies inspected, that exact `.tpk` loaded;
   `ci/check-deps.sh` confirms the new thread and the host-table static trip no ledger (UNVERIFIED: the ledgers scan
   machine crates; this crate is runner code).
+  - D1, the null window handle (landed): on Tizen `Surface::window()` returns null and `bind_window`,
+    `grab_surface` and the other SDL-shaped `Shell` calls are stated no-ops, because the window is Ecore's and the
+    W9 build never initialises SDL's video subsystem; of the calls that still read the handle,
+    `textinput`'s `has_focus` returns `None` for a null window before any SDL call (logged as `focus=?`), and only
+    the on-screen-keyboard probe (`keyboard_probe(win)`, called from `app/boot.rs`) takes SDL's "no window"
+    answer from `SDL_GetWindowFlags(NULL)`. Pinned by
+    `the_real_sdl_answers_a_null_window_with_video_uninitialised` (`shell-sdl/src/text.rs`) and
+    `a_null_window_has_no_focus_reading_and_asks_sdl_nothing` (`src/textinput.rs`); the Tizen crate's
+    own tests run under `cargo test --lib -p plx_platform_tizen --features tizen`.
   - MVP acceptance (Decision 8): an emulator run (x86_64, the TV 10.0 image) against `tests/mock_pms.py`, never a
     real account: the interface draws, the Ecore keys drive it, there is no playback, and the log reaches a UDP
     receiver with no sequence gap (E5). It is labelled emulator only and gives no frame-rate or latency claim (E6).
@@ -1876,15 +1993,74 @@ W3d. Neutral types (L15b item 2 prerequisites; part of item 3).
   proves the emulator only: a retail set may still fail H1 or H2.
 
 ### W10 (H). The Tizen URI playback driver
-- Prerequisites: W9, W6c, and H6: `Tizen.Multimedia.Player` shows a mock title beneath our window with
+- Prerequisites: W9, W6c, and H6 (restated below): the native player shows a mock title beneath our window with
   the alpha model that works (report 2e, open conflict). It also survives a TV-menu round trip (review
   M9). The hello-world plays no media (F28, F37), so H6 needs a step-3 probe and a retail set: the
-  emulator cannot test `Tizen.Multimedia` (F37) and the runs did not probe it (E9, E11). The Home round trip of E11
+  emulator could not be assumed to run `Tizen.Multimedia` (F37, E9, E11); the 2026-11-22 probe then measured the native player chain on it (below), which still shows no picture and says nothing of a retail set. The Home round trip of E11
   covers the window and the EGL surface on the emulator only, with no player, so it is not H6. The tester request
   for H6 (with H1 and H2) is posted only with the owner's approval (Decision 5).
 - Goal: a `UriDriver` in `plx_platform_tizen` over `PlxHostApi` player calls (T6): capabilities (no
   DTS/TrueHD, token in the query string, no variable speed), `display()` evidence including readiness, and
   the shell's `video_hole`. No LG binding is faked and no default is published (Target shape 6b).
+- H6, restated (W10 inventory): `player_set_ecore_wl_display` with the library's Ecore_Wl2 window shows a mock
+  title beneath a window whose alpha is on. The managed `Display(Window)` cannot take our window (it takes a
+  MediaView, an ElmSharp window or a NUI window), so the host calls the native player directly (D1 = P1).
+- As landed (PR A, the host ABI and the C# player): `plx_host.h` is version 2: `player_open` and `player_verb`
+  appended to `PlxHostApi` (size-gated, both or neither), player events through `plx_host_post` carrying an epoch
+  (still exactly three exports), `E_STALE` for an event of an epoch that is not live, and a player event queue of its
+  own in `Hosted` (lossless but for position and buffering). A v1 host or NULL pointers is "no playback", never a
+  refused start. The host is `PlxPlayer.cs` over `libcapi-media-player.so.0` (`PlayerNative.cs`): one video thread, a
+  host-side position poll, events posted straight from native callbacks. The window is found host-side
+  (`ecore_wl2_display_window_find(display, 1)`), not passed in the table (measured on the emulator 2026-11-22: it is the
+  pointer the library logs). `tizen-abi` also checks the delegates' widths. Not in PR A: the Rust `TizenUriDriver`
+  and the composition (PR B), the window's alpha and the video hole (PR B), anything on a retail set.
+- As landed (PR B, the driver and its composition; it has run on the Windows emulator against the mock server (below) and has NOT been run on a retail set, H6 OPEN):
+  `TizenUriDriver` (`rust-modules/platform-tizen/src/player/`, the platform crate's own `uri` feature) is a Sans-IO
+  `DriverSet` + `UriDriver` over a `HostPlayer` port that `hosted` implements; every request and event carries the epoch
+  and a completion after a stop is dropped. Capabilities: progressive URI, pause, seek, and `audio_track` (a deviation
+  from D4's "progressive, pause, seek only": the planner issues `SelectTrack` for any title whose audio stream the server
+  states, so the offer of a title fails without it; the driver settles that request for the source's one audio stream by
+  construction, not on native evidence, and `TizenQualifier` certifies ONLY a source with a single audio stream until the
+  retail default stream is measured), and `subtitle_off` (a second deviation, below). `TizenQualifier` certifies a source only where Standard would direct-play it
+  and never a converted PMS output. `subtitle_choice = Off` (any subtitle stream, none selected) is carried: the driver states
+  `subtitle_off` (the host gives the player no subtitle, and the emulator run in `docs/tizen.md`, "Subtitles off", showed
+  none drawn from a default-flagged embedded track), so `SubtitleOff` is refused only on evidence without it. A selected
+  embedded subtitle still fails `subtitle_track`, a sidecar is `requires_client_subtitle`, and Boost Dialog, Auto on a
+  non-local link and a relay are refused before the qualifier is asked; with no Feed and `qualify_pms` Unknown each ends as
+  `NoQualifiedBackend` (the resolver tests pin them); a track pick
+  the driver cannot carry is refused by the shared reconfigure door instead of replacing the playing title (and a Quality rung, which only a Feed or a converting provider can carry, is neither offered nor applied: `PlaybackSession::quality_pick_carriable`); a stall or failure of the original is not re-resolved on a composition with no Feed and no converting provider (`can_retry_uri_after_release`), so the viewer reads the stall and not a refusal; the parked attempt's `stopped` timeline goes out at the restore's retire and at an exit, at its own position; the codec table stays `Caps::assumed()` (D8). `player::MEDIA` replaces `NO_MEDIA`
+  behind `uri`; `mk/platform-tizen.mk` builds with it (`TIZEN_URI=0` builds without), and the identity line says which build it is.
+  The shared conformance suite (`plx_playback_contract::uri_conformance`, D7) runs over `FakeUriDriver` and this driver, and
+  the mock's `--extra-media-video-only` serves a local video-only file for the audio-less emulator. Still open: an emulator run of it with the video-only mock; H6 on a
+  retail set (decode, sound, armv7, the TV-menu round trip); a picture through this driver (the window's alpha and the straighten pass are PR B2's; this driver emits no `Presented`); the retail player's default audio stream; and how a real PMS answers `X-Plex-Platform: Tizen`.
+- As landed (PR B2, the video plane under our UI and Home): measured on the TV 10.0 x86_64 emulator 2026-11-22 (scratch
+  probe; emulator only): (a) with the window alpha ON the native player's OVERLAY video shows only through pixels the frame
+  clears to (0, 0, 0, 0), the UI around it intact (the player route clears that way whether or not a plane is bound, `app/run.rs`
+  `fr.player`, and `PlayerScreen` has no ground: measured at `3d56d35b2` with no plane ever bound, the "Playback failed" read-out sits on
+  exact (0, 0, 0) black on the emulator, whose compositor had nothing under the window; a retail set's answer is H6's); (b) the video plane mixes STRAIGHT alpha (measured with the window translucent, not re-taken for the opaque `has_video` window; pixel-exact: a straight
+  (255, 255, 255, 128) strip is a 50 % veil over it) while window-over-window composition is premultiplied, which is webOS's split, so
+  the existing straighten pass and `frame_clear_through` / `opaque_route` chain are the answer, not a new one (D6); (c) the player
+  raises nothing at OnPause: `player_pause` there and `player_start` at OnResume resume in about 130 ms at the same position, the picture
+  back when the window is (about 2 s). The code: the window was made translucent at creation (alpha 1), and since 2026-11-26 it is opaque and states
+  `has_video` instead (`ecore::WindowMode`; a translucent window shows the TV's home screen through its alpha-0 pixels on a
+  retail set, `docs/tizen.md`). The mode is a window flag either way, so `Shell::opaque_route` stays a stated no-op; the straighten COPY program is its own source,
+  `fs_straighten_copy.frag`, with no preprocessor directive (the suspect above: the shared file's `#extension` lines in branches not
+  taken), the fetch file keeps the two fetch variants, a test pins the arithmetic equal; `PlxPlayer.PauseForHome` / `ResumeAfterHome`
+  (C#, video thread) pause what is playing at OnPause (the OnResume start was dropped in the PR B1 review round: the library owns the resume); an accepted CLOSE retires its epoch at the
+  door (`E_STALE` after). The shader file is shared with webOS: its fetch programs' preprocessed text is token-identical to before, and
+  a `glGetProgramBinaryOES` before/after identity check on the LG set is OWED (not run here). Emulator run at `3d56d35b2`
+  (2026-11-22, the Windows session): the `.tpk` built with MSBuild 0 warnings, 0 errors and `check-tizen-so` passed; no shader compile
+  failure and the log reads `straighten: no framebuffer fetch - the pass copies the frame`; the UI is opaque and correct at alpha 1
+  (Home, detail, back); a clean stop and 0 log gaps; a Home round trip resumes the same pid and comes back drawn; the unbound player route
+  as above. At that run no player was bound yet, so Home with a player open (`PauseForHome` / `ResumeAfterHome`) had not been exercised; the first run of PR B1's driver did (below). Still UNVERIFIED: a picture
+  through the real URI driver (PR B1; the later emulator runs drove it against the mock and no reading of the picture was taken), anything on a retail set (H6 OPEN).
+- As landed (PR B1 review round; the first Windows-emulator run of the driver at `126d1f04c` found these; emulator and mock data only, nothing here is "verified" on a set): the driver is split into a pure
+  `player/machine.rs` (a Sans-IO machine in `MACHINES`, no ledger line) and a thin executor `driver.rs`; a Busy-refused CLOSE is retried, a pause suspends the stall grace, SEEK_DONE
+  `b = -2` (expired) is not a refusal (the seek may still land; POSITION is the authority); a position that stops advancing while Playing is a stall; a CLOSE the library cannot send after
+  `plx_host_stop` (`Refusal::Stopping`) releases the attempt and `OnTerminate` closes the player before waiting for `on_stopped` (the C# is NOT compiled here); one library log line per player ABI event (positions and buffering
+  rate-limited); the EOS "off-route engine" line is guarded while a URI attempt is releasing. **Home with a player open never resumed: fixed in code, emulator re-run pending** (the library parks a URI attempt with
+  `Stop(Suspend)` at the background, then the restore's `begin_resume` answered `NoRoute` because a URI original plan installs no `url`; a parked URI original is now re-resolved at the saved position through the foreground flight, `player::pump_uri_restore`, shared with webOS `play-uri`; the library owns the resume and the host never starts a player at OnResume; see `docs/tizen.md`).
+- As landed (PR B1 review rounds 4 and 5; the emulator runs at `126d1f04c`, `fc5d28594` and `b62e1276e` against the mock found these; emulator and mock data only, nothing here is "verified" on a set, and each fix is "fixed in code, emulator re-run pending"): round 4 sent the parked attempt's `stopped` at its own position when the restore retires it and at an exit, stopped re-resolving a stalled URI title into a refusal no composed backend can answer, and withheld the Quality ladder on a composition that converts nothing. Round 5: a restore whose request door refused no longer leaves the parked attempt owing a stop it already sent (`route::restore_uri_original` answers `UriRestoreStart`, the attempt is finalized when its report went out); a `PLAYER_CLOSED` of a live epoch is still heard after `plx_host_stop` (the confirmation of a CLOSE the host had already accepted, so the stop is not held for `STOP_DEADLINE` and reported unclean); `PlxPlayer.Shutdown` sets `shuttingDown` under the start gate and `EnsureThreads` and `DoOpen` honour it (C#, NOT compiled); the failure read-out offers no *Change quality* where `quality_pick_carriable()` is false (`FailureContext::quality_carriable`). A stall leaves the PMS session open under the read-out exactly as the webOS Feed does (`release_failed_engine`: "nothing is reported as stopped", Back ends it): no change. **Open measurement:** two main-thread hangs of about 300 to 400 ms around the host's `Buffering` and `SeekDone epoch=2` lines during the URI restore have no cause established from the code (see `docs/tizen.md`, "Review round 5"); to diagnose with spans, per the `profile-tv` skill's method.
 - Verify: `DriverSet` contract tests against the fake host table, and a late completion after stop; a
   device run on mock media. Risk: UNVERIFIED how PMS's decision answers `X-Plex-Platform: Tizen`: measured
   on the mock, then on a household-owned test server only with the owner's consent.

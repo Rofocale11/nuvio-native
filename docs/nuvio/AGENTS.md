@@ -114,4 +114,5 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
   snapshots; the current status is at the top.
 - `docs/nuvio/HANDOFF.md` — delivery history and known limitations. It opens with the current
   status; everything below the first section is the 2026-10-10 snapshot.
-- `docs/nuvio/MERGE-AUDIT.md` — upstream conflicts and non-commentable fork edits.
+- `docs/nuvio/MERGE-AUDIT.md` — the CURRENT merge only: its conflicts, regressions and non-commentable fork edits. A fresh file is written at the start of every upstream merge, after rotating the previous one into history.
+- `docs/nuvio/MERGE-AUDIT-HISTORY.md` — completed audits, reference only, never current policy. Every entry MUST be headed with its exact commit range, `## <previous upstream merge point>..<new upstream head> — <date>..<date>`, plus the product-branch merge commit once it lands, so a reader can tell precisely which upstream commits that audit resolved. A merge is not finished until the old audit is appended under that marker and a fresh `MERGE-AUDIT.md` exists.

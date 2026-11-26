@@ -15,8 +15,12 @@
 //!   refusing `NoSink`.
 //!
 //! The shell's hooks and the frame probe are plain no-ops, bar the two that bring SDL up and open its
-//! window (`init` and `open`, the shell crate's, with nothing around `SDL_Init`): SDL owns the window
-//! and its event loop, there is no compositor to hint, no bus to pump and no remote pointer to hide.
+//! window (`init` and `open`, the shell crate's, with nothing around `SDL_Init`), the frame seam and the
+//! heartbeat's ` sim=1` tag: SDL owns the window and its event loop, there is no compositor to hint, no
+//! bus to pump and no remote pointer to hide. The frame seam is the desktop's own (`Shell::frame`): the
+//! WSLg-aware software frame pacer in `pacer.rs` (a wall-clock read, a sleep and two environment reads,
+//! all of it IO and so the platform's), and the simulator's present hooks the application publishes
+//! (`host::SIM_PRESENT`).
 //! The secure store is
 //! `SecureHooks::NONE`: nothing seals, so a session is the 0600 plaintext file the session layer
 //! writes itself, which the simulator's harnesses plant and read.
@@ -28,16 +32,21 @@
 //! webOS port (the Wayland handles, glib, luna-service2) is `plx_platform_webos`, which no desktop crate
 //! depends on and the application never names. The simulator links without a television library to drop.
 //!
-//! The crate is compiled only under `hostsim` (its own feature, in no default set), so a default-feature
+//! The crate is compiled only under `sim` (its own feature, in no default set), so a default-feature
 //! pass that lists this package builds an empty library, and a television build never builds it. It is a
 //! mounted module of the `platform desktop` layer (`ci/module-layers.ini`): nothing names it, and it names
 //! no other platform (`docs/platform-ports.md`, W7). The `plxnative-sim` binary beside it
 //! (`src/bin/sim.rs`) is its executable.
-#![cfg(feature = "hostsim")]
-use plxnative_modules::host::{self, sdl_init, sdl_open, Exit, FrameProbe, InitHooks, MediaBoot, OpenAsk, Platform, Shell, Surface};
+#![cfg(feature = "sim")]
+mod pacer;
+
+use plxnative_modules::host::{
+    self, sdl_init, sdl_open, Exit, FrameProbe, FrameSeam, GlProfile, InitHooks, InitSteps, MediaBoot, OpenAsk, Placement,
+    Platform, SdlFlavor, Shell, Surface, WindowPlan,
+};
 use plx_os::devcaps::dv::{self, DvCapability, DvProbe, ProbeSource};
 use plx_os::tv::toast::{Identity, Outcome, Sent};
-use plx_os::tv::{IdentityHooks, LegacyWebosMedia, SecureHooks, Services, StorageHooks, SystemHooks};
+use plx_os::tv::{IdentityHooks, Layout, Libraries, LegacyWebosMedia, SecureHooks, Services, StorageHooks, SystemHooks};
 use std::ffi::CStr;
 use std::os::raw::{c_int, c_void};
 
@@ -67,6 +76,14 @@ static SERVICES: Services = Services {
     secure: SecureHooks::NONE,
     system: SystemHooks { go_home, poll_home: SystemHooks::NONE.poll_home, deliver_toast },
     storage: StorageHooks::NONE,
+    layout: Layout::DERIVED,
+    // One crate serves the Mac (libcurl in the dyld shared cache: `libcurl.4.dylib`) and Linux/WSLg (`.so.4`),
+    // and a developer's Linux box may carry either EGL: the union of every name, stated here.
+    libraries: Libraries {
+        curl: &["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"],
+        egl: &["libEGLfk.so.2", "libEGL.so.1", "libEGL.so"],
+    },
+    crash_capture: plx_os::tv::crash_capture::Hooks::NONE,
     legacy_webos_media: LegacyWebosMedia {
         sink: SINK,
         display_sink: DISPLAY,
@@ -105,6 +122,59 @@ fn deliver_toast(_message: &str, identity: Identity) -> Sent {
     Sent { reply: None, outcome: Outcome::NoBus }
 }
 
+/// What the desktop platform states about its SDL: the stock SDL2 a desktop links ([`SdlFlavor::Stock`]'s event
+/// layout), a core 4.1 context (macOS has no GLES at all), no step around `SDL_Init`, and the one step behind the
+/// GL context a core profile needs: the vertex array object it has no default for.
+const SDL: InitHooks = InitHooks {
+    steps: InitSteps { before: InitSteps::NONE.before, after: InitSteps::NONE.after, after_context: bind_core_profile_vao },
+    flavor: SdlFlavor::Stock,
+    gl: GlProfile::Core41,
+};
+
+/// The window a desktop asks for: centred at whatever fits the display, sized for its pixel density once a
+/// window exists (the shell crate's `Placement::Desktop`), titled as a desktop shows it. The request is the
+/// desktop's own size, not a setting, so the stored Interface resolution is not read and there is no retry.
+const WINDOW: WindowPlan = WindowPlan { title: c"PlxNative", placement: Placement::Desktop };
+
+/// Bind the one vertex array object a desktop core profile requires.
+///
+/// **GLES2 has no VAOs and a core profile has no DEFAULT one**, and the difference is silent: with
+/// VAO 0 bound, `glVertexAttribPointer` and `glDrawArrays` raise `GL_INVALID_OPERATION` and draw
+/// nothing at all. `glClear` is unaffected, so the symptom is a window painted the clear colour and
+/// a completely empty interface — which is exactly what the first simulator screenshots were, at
+/// every frame sampled.
+///
+/// One VAO for the process is enough and is not a simplification: the renderer has a single
+/// attribute layout — attribute 0, the shared unit quad in one static VBO, set up by `init_gl` and
+/// never rebound. There is nothing for a second VAO to describe.
+///
+/// **This is the desktop platform's, and only its**, because these two entry points do not EXIST in GLES2:
+/// the television's libGLESv2 exports neither, so naming them in a crate the television links would be a
+/// link-time undefined symbol on the device. The shell crate runs it right behind the context's creation
+/// (`InitSteps::after_context`), before the renderer's first call.
+///
+/// # Safety
+/// On the thread whose GL context was just made current, which is where the shell crate calls it.
+unsafe fn bind_core_profile_vao() {
+    extern "C" {
+        fn glGetString(name: u32) -> *const u8;
+        fn glGenVertexArrays(n: c_int, arrays: *mut u32);
+        fn glBindVertexArray(array: u32);
+    }
+    /// `GL_VERSION`.
+    const GL_VERSION: u32 = 0x1F02;
+    // This platform is not necessarily a core profile — Mesa GLES2 exists on desktops too, and there VAO 0
+    // is legal and these entry points are absent. Ask the driver, as the renderer's shader preamble does.
+    let version = glGetString(GL_VERSION);
+    let es = version.is_null() || std::ffi::CStr::from_ptr(version.cast()).to_bytes().starts_with(b"OpenGL ES");
+    if es {
+        return;
+    }
+    let mut vao: u32 = 0;
+    glGenVertexArrays(1, &mut vao);
+    glBindVertexArray(vao);
+}
+
 /// The desktop shell: SDL owns the window and its event loop (`init` and `open` are the shell crate's,
 /// with no hook around `SDL_Init`), so nothing is bound, grabbed, hinted or pumped, and no surface is
 /// ever held. The pointer is a mouse the application does not hide, so hiding and showing it do
@@ -112,12 +182,21 @@ fn deliver_toast(_message: &str, identity: Identity) -> Sent {
 struct DesktopShell;
 
 impl Shell for DesktopShell {
+    fn sdl(&self) -> InitHooks {
+        SDL
+    }
+    fn window(&self, _stored: Option<(c_int, c_int)>) -> WindowPlan {
+        WINDOW
+    }
     fn init(&self, mt: &host::MainThread) -> Result<(), Exit> {
-        // SAFETY: `InitHooks::NONE` calls nothing.
-        unsafe { sdl_init(mt, InitHooks::NONE) }
+        // SAFETY: the desktop states no step around `SDL_Init`, and its one other step (the vertex array)
+        // is run by the shell crate behind the context, not here.
+        unsafe { sdl_init(mt, &SDL) }
     }
     fn open(&self, mt: &host::MainThread, ask: &OpenAsk) -> Result<Box<dyn Surface>, Exit> {
-        sdl_open(mt, ask)
+        // SAFETY: `SDL` is this platform's own table (its `after_context` is `bind_core_profile_vao`, sound with the new
+        // context current), called on the main thread `mt` proves.
+        unsafe { sdl_open(mt, &SDL, ask) }
     }
     fn bind_window(&self, _win: *mut c_void) {}
     fn grab_surface(&self, _win: *mut c_void) {}
@@ -133,7 +212,16 @@ impl Shell for DesktopShell {
     fn hide_is_cursor_swap(&self) -> bool {
         false
     }
+    fn frame(&self) -> &'static FrameSeam {
+        &FRAME
+    }
 }
+
+/// The desktop's frame seam: the WSLg-aware software pacer (`pacer`: armed on Linux under WSL's X11 driver,
+/// where the swap does not wait for the display) and the simulator's present hooks (`host::SIM_PRESENT`: the
+/// compositor stand-in under a bound frame, and the supersampled copy to the window), which the application
+/// keeps because they draw.
+static FRAME: FrameSeam = FrameSeam { pacer: pacer::PACER, present: host::SIM_PRESENT };
 
 /// The desktop frame probe: always unarmed, there is no compositor callback to clock.
 struct DesktopProbe;
@@ -146,6 +234,15 @@ impl FrameProbe for DesktopProbe {
     fn acquired(&self) {}
     fn fields(&self) -> String {
         String::new()
+    }
+    /// Every simulator heartbeat ends ` sim=1`. The heartbeat is the app's perf surface: `tests/run.py --fps`
+    /// grades `loop=` and `fps=` from it, and the floors are calibrated to the SM9000's Mali. A Mac renders the
+    /// same interface through a completely different GPU, driver and compositor, so those numbers are not merely
+    /// optimistic, they are about a different machine. A log line is the unit that gets pasted into an issue or
+    /// handed between agents, so the disclaimer has to travel ON the line rather than sit in a doc. Tools grep
+    /// the text.
+    fn heartbeat_tag(&self) -> &'static str {
+        " sim=1"
     }
 }
 
@@ -189,11 +286,38 @@ mod tests {
         assert!(!shell.hide_is_cursor_swap());
     }
 
+    /// **The desktop's frame seam is the pacer and the simulator's present hooks, and the heartbeat says
+    /// it is a simulator.** Off Linux the pacer is never armed; on Linux it is armed only under WSLg
+    /// (`pacer.rs` grades the two facts), so a test machine's own environment never has to be WSL.
+    #[test]
+    fn the_desktop_frame_seam_states_its_pacer_and_the_simulators_present_hooks() {
+        let shell: &dyn Shell = &DesktopShell;
+        let frame = shell.frame();
+        assert!(std::ptr::fn_addr_eq(frame.present.compose_under, host::SIM_PRESENT.compose_under));
+        assert!(std::ptr::fn_addr_eq(frame.present.before_swap, host::SIM_PRESENT.before_swap));
+        #[cfg(not(target_os = "linux"))]
+        assert!(!(frame.pacer.armed)(true), "off Linux the driver's swap paces the frame");
+        assert!(!(frame.pacer.armed)(false), "an uncapped run (frame dump, novsync) never waits on the display");
+        assert_eq!(DesktopProbe.heartbeat_tag(), " sim=1");
+    }
+
     /// A desktop has no storage helper: the session, the install's preferences and the consent record
     /// are files. The same value a host test reads from `Services::HOST_TEST`.
     #[test]
     fn the_desktop_table_keeps_the_account_in_files() {
         assert_eq!(SERVICES.storage.authority, plx_os::tv::authority::Authority::Files);
+    }
+
+    /// **The desktop states the union of library names and no install prefix.** The lists are the ones a
+    /// process that published nothing reads (`Libraries::HOST`), so the simulator and the host tests open the
+    /// same libcurl and EGL; the Mac's `libcurl.4.dylib` is what lets it sign in at all. The layout is the
+    /// derivation, whose last resort is the current directory.
+    #[test]
+    fn the_desktop_table_states_the_union_of_library_names_and_no_install_prefix() {
+        assert_eq!(SERVICES.libraries, Libraries::HOST);
+        assert_eq!(SERVICES.libraries.curl, ["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"]);
+        assert_eq!(SERVICES.libraries.egl, ["libEGLfk.so.2", "libEGL.so.1", "libEGL.so"]);
+        assert_eq!(SERVICES.layout.fallback_dir, plx_base::paths::NO_FALLBACK_DIR);
     }
 
     /// **The desktop declares no SDL function.** The window, the GL context, the queue and the text-input

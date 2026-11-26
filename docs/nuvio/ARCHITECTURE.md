@@ -6,7 +6,7 @@ PlxNative's GPU-rendered UI and native Starfish/ACB video pipeline.
 
 Current state: branch `nuvio-native` at `1db875cc8` (2026-11-25); the deployed 0.10.0 stable
 build is from `84a00aa68`. Dated delivery history lives in `HANDOFF.md` and `VALIDATION.md`;
-the upstream conflict surface is in `MERGE-AUDIT.md`.
+the upstream conflict surface is in `MERGE-AUDIT-HISTORY.md`.
 
 ## Findings that drive the design
 

@@ -13,6 +13,8 @@ pub(crate) mod hud_source;
 #[cfg(feature = "devtriggers")]
 mod a11y_state;
 #[cfg(feature = "devtriggers")]
+mod api;
+#[cfg(feature = "devtriggers")]
 mod anim_diagnostics;
 mod card_motion_policy;
 mod player_presentation;
@@ -20,19 +22,6 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::sync::atomic::Ordering::Relaxed;
 
 // ---- constants (SDL 2.0.4 + GLES2 + app) ----
-/// Appended to every heartbeat on a simulator build, and empty on a television.
-///
-/// The heartbeat is the app's perf surface: `tests/run.py --fps` grades `loop=` and `fps=` from it,
-/// and the floors are calibrated to the SM9000's Mali. A Mac renders the same interface through a
-/// completely different GPU, driver and compositor, so those numbers are not merely optimistic —
-/// they are about a different machine. A log line is the unit that gets pasted into an issue or
-/// handed between agents, so the disclaimer has to travel ON the line rather than sit in a doc.
-const SIM_TAG: &str = if cfg!(feature = "hostsim") {
-    " sim=1"
-} else {
-    ""
-};
-
 const GL_COLOR_BUFFER_BIT: c_uint = 0x0000_4000;
 const GL_RENDERER: c_uint = 0x1F01;
 const GL_VERSION: c_uint = 0x1F02;
@@ -49,13 +38,6 @@ use plx_ui::consts::{
     classify, is_bound, is_ok, Key, SDLK_RETURN, WCODE_CH_DOWN_KEY, WCODE_CH_UP_KEY,
     WCODE_POINTER_HIDDEN,
 };
-// The window we ASK SDL for. `surface::probe` then reads back what we actually got.
-// Both are read only by the television's window request (`boot.rs`): the desktop's own sizing is
-// `plx_shell_sdl`'s, so a hostsim build has no reader of either and they share one gate.
-#[cfg(any(not(feature = "hostsim"), test))]
-const SCR_W: c_int = plx_base::surface::LOGICAL_W as c_int;
-#[cfg(any(not(feature = "hostsim"), test))]
-const SCR_H: c_int = plx_base::surface::LOGICAL_H as c_int;
 pub(crate) const COLS: c_int = 10;
 
 // Phase 1a of the UI restructure split this file: everything above `run_application` moved into
@@ -74,13 +56,14 @@ pub(crate) mod words;
 pub(crate) mod page_title;
 pub(crate) mod clock;
 mod clock_notice;
+mod server_security_notice;
 mod hint_taught;
 mod recorder;
 mod window_activity;
 mod exit;
 // `pub`, not `pub(crate)`, because `host` re-exports them: a `pub use` cannot re-export a binding the crate
 // only sees, and `app` itself is private, so this reaches no further than `host`.
-pub use exit::{Exit, Release};
+pub use exit::{Completion, Exit, HostGate, InFlight, Release, Stopped};
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod nuvio;
@@ -229,6 +212,9 @@ pub(crate) struct App {
     /// already finished by then). See `input::menu_play_tick`, driven every frame beside
     /// `pump_detail()` (`app/run.rs`).
     pub(crate) menu_play_await: Option<MenuPlayAwait>,
+    /// Socket replies owned by the frame loop until their command settles.
+    #[cfg(feature = "devtriggers")]
+    api_waiting: std::collections::VecDeque<api::InFlight>,
     /// A title another app asked to open (`deeplink`), until Home is up to hand it to
     /// `menu_play_await`.
     pub(crate) deeplink: deeplink::DeepLink,
@@ -255,11 +241,14 @@ pub(crate) struct App {
     /// The window and its GL context (`Shell::open`): the swap, the event poll, the raw handle the
     /// shell's per-window calls take, and the process's SDL quit. Thread-affine, like the loop.
     surface: Box<dyn platform::Surface>,
-    /// WSLg accepts swap interval 1 on X11/GLX without pacing the compositor. This boot-scoped
-    /// flag enables the host-only software frame budget while leaving native Linux and macOS on
-    /// their driver swap behavior.
-    #[cfg(all(feature = "hostsim", target_os = "linux"))]
-    wslg_frame_pacing: bool,
+    /// Whether the platform's software frame pacer is armed (`Shell::frame`'s `Pacer::armed`, asked
+    /// once at boot with whether vsync is on). The desktop arms it on WSLg, whose X11/GLX swap accepts
+    /// interval 1 without waiting; every other platform's swap paces the frame and this is `false`.
+    frame_pacing: bool,
+    /// The platform's frame seam (`Shell::frame`), asked once at boot so the per-frame path calls
+    /// its hooks directly instead of making a `dyn Shell` call to find them first: the pacer's
+    /// `begin`/`end` and the simulator's compose-under and pre-swap present hooks (all empty on a TV).
+    frame: &'static platform::FrameSeam,
     /// Boot time (`SDL_GetTicks` at the end of boot): the origin of every dev-script delay AND
     /// the clock a replay restores from controlled initial inputs — a field BOTH sides
     /// write, so it stays here rather than on `dev::scenarios::Scenarios`.
@@ -281,7 +270,7 @@ pub(crate) struct App {
     /// own drop increments, so dropping the `App` drops it whatever the other fields are. A field,
     /// not a static. Read by the hostsim lifecycle tests, which build the `App` the rig needs.
     #[cfg(test)]
-    #[cfg_attr(not(all(feature = "hostsim", feature = "play-feed")), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "sim", feature = "play-feed")), allow(dead_code))]
     drop_probe: exit::DropProbe,
 
     /// The frame plan's GLASS half (spec §8.3): the layer/region source registry, shared chrome
@@ -319,6 +308,12 @@ pub(crate) struct App {
 }
 
 impl App {
+    /// The layout SDL's events are in, as the platform states it (`Shell::sdl`): what every decode of a
+    /// polled event and every synthetic key this process pushes is read and written in.
+    pub(crate) fn sdl_flavor(&self) -> plx_shell_sdl::SdlFlavor {
+        self.platform.shell.sdl().flavor
+    }
+
     /// Application/runner mutations belong to the page, never an ambient damage queue.
     pub(crate) fn note_presentation_damage(&mut self, why: plx_machine::present::Provenance) {
         self.pages.present.note_in_scope(plx_machine::present::Scope::Page,
@@ -505,7 +500,7 @@ fn finish_recording(rec: &mut recorder::Recplay, gate: &plx_machine::landgate::G
 }
 
 /// Simulator tooling emits the entire typed contract, never a patched household auth file.
-#[cfg(any(test, feature = "hostsim"))]
+#[cfg(any(test, feature = "sim"))]
 pub fn synthetic_home_initial(seed: u32, port: u16, settings: Option<String>)
     -> Result<String, &'static str> {
     let content = settings.as_deref() == Some("flow12");

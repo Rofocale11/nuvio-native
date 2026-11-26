@@ -59,7 +59,7 @@ class BoundaryTests(unittest.TestCase):
                 self.assertTrue(boundary.screen_violations(source))
 
     def test_shipping_disabled_developer_io_still_fails(self):
-        for cfg in ('feature = "devtriggers"', 'all(feature = "hostsim", not(test))',
+        for cfg in ('feature = "devtriggers"', 'all(feature = "sim", not(test))',
                     'any(test, feature = "devtriggers")'):
             self.assertTrue(boundary.screen_violations(f'#[cfg({cfg})] fn helper() {{ std::fs::read("x"); }}'))
 
@@ -67,7 +67,7 @@ class BoundaryTests(unittest.TestCase):
         source = '''
         // std::fs::read("comment")
         fn pure() { let s = r#"std::fs::read("data")"#; }
-        #[cfg(all(test, feature = "hostsim"))]
+        #[cfg(all(test, feature = "sim"))]
         #[allow(dead_code)] mod fixtures { fn seed() { std::fs::read("x"); } }
         #[cfg(any(test, feature = "test-support"))]
         fn fixture() { plx_base::devtrig::read("x"); }
@@ -89,9 +89,10 @@ class BoundaryTests(unittest.TestCase):
             self.assertTrue(boundary.check_screens(root))
 
     def _extension_tree(self, directory, planted=None):
-        """The three roots the closed-ladder gate reads, empty, with one file planted in one of them."""
+        """The four roots the closed-ladder gate reads, empty, with one file planted in one of them."""
         root = Path(directory)
-        for rel in ('rust-modules/src', 'rust-modules/platform-webos/src', 'rust-modules/platform-desktop/src'):
+        for rel in ('rust-modules/src', 'rust-modules/platform-webos/src', 'rust-modules/platform-desktop/src',
+                    'rust-modules/platform-tizen/src'):
             (root / rel).mkdir(parents=True)
             (root / rel / 'lib.rs').write_text('')
         if planted:
@@ -107,7 +108,8 @@ class BoundaryTests(unittest.TestCase):
         RED against the one-root gate: each platform crate's files fail, and are named."""
         ladder = 'fn word(arg: &AppArg) { match arg { AppArg::Home => "home", AppArg::Search => "search" } }'
         for rel in ('rust-modules/platform-webos/src/system.rs', 'rust-modules/platform-webos/src/webos/toast.rs',
-                    'rust-modules/platform-desktop/src/bin/sim.rs', 'rust-modules/platform-desktop/src/lib.rs'):
+                    'rust-modules/platform-desktop/src/bin/sim.rs', 'rust-modules/platform-desktop/src/lib.rs',
+                    'rust-modules/platform-tizen/src/lib.rs'):
             with self.subTest(file=rel), TemporaryDirectory() as directory:
                 root = self._extension_tree(directory, (rel, ladder))
                 errors = boundary.check_extension_registration(root)

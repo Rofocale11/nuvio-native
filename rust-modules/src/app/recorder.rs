@@ -240,7 +240,6 @@ pub(crate) fn state_fp_v11() -> u64 {
     plx_ui::rec::state_fp(&["ControlledHomeInitV11", "ControlledInstallLanguageV1{install_language:Preference};ControlledRunningLanguageV1{running_language:Preference};PlayerPresentation:unsupported_domain_neutral_no_ambient;NativePreview:controlled_port_unavailable", &state_fp_v10().to_string()])
 }
 
-/// The reviewed historical census owns these bytes, not today's changing InputMachine.
 #[cfg(test)]
 fn frozen_base_census() -> &'static Value {
     static CENSUS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
@@ -248,23 +247,25 @@ fn frozen_base_census() -> &'static Value {
 }
 
 #[cfg(test)]
-fn historical_input_shape() -> &'static str {
-    frozen_base_census()["prior_vector"][1].as_str().expect("historical Input shape")
+fn historical_census() -> &'static [Value] {
+    frozen_base_census()["prior_vector"].as_array().expect("historical census vector")
 }
 
-/// Fork Rofocale11: the fork widened `DetailScreen` with `list_pending` / `list_error` /
-/// `list_state`, `AltSourcesArg` with `nuvio`, and `AltSourcesScreen.streams` with `req`. Those
-/// fields belong in TODAY's census (and are hashed into the V13 producer fingerprint below), but
-/// the historical V12/V13-era profile identities must stay byte-identical to the recordings: the
-/// reviewer froze the pre-fork screen shapes in `prior_vector`, and `FP_PRIOR` is the fingerprint
-/// those immutable recordings carry. Read those frozen shapes back by name, the same way the
-/// InputMachine and AppFrame rows are frozen, instead of letting the current screen shapes move a
-/// reviewed historical fingerprint. No fork field is removed from any current shape.
+// Fork Rofocale11: the fork widened `DetailScreen` with `list_pending` / `list_error` /
+// `list_state`, `AltSourcesArg` with `nuvio`, and `AltSourcesScreen.streams` with `req`. Those
+// are current-shape facts. The historical profile identities must stay byte-identical to the
+// recordings, so the frozen `prior_vector` rows are read below instead of today's shapes; no
+// fork field is removed from any current shape.
 #[cfg(test)]
-fn historical_screen_shape(prefix: &str) -> &'static str {
-    frozen_base_census()["prior_vector"].as_array().expect("frozen prior vector")
-        .iter().find_map(|v| v.as_str().filter(|s| s.starts_with(prefix)))
-        .unwrap_or_else(|| panic!("frozen historical shape {prefix} is missing"))
+fn historical_input_shape() -> &'static str {
+    historical_census()[1].as_str().expect("historical Input shape")
+}
+
+/// The screen census starts at AppArg and is the suffix of the reviewed historical vector.
+#[cfg(test)]
+fn historical_screen_shapes() -> impl Iterator<Item = &'static str> {
+    historical_census().iter().map(|value| value.as_str().expect("historical shape"))
+        .skip_while(|shape| !shape.starts_with("AppArg{"))
 }
 
 #[cfg(test)]
@@ -299,7 +300,7 @@ pub(crate) fn state_fp_v7() -> u64 {
     shapes.push(RESOLUTION_SHAPE_V1);
     shapes.push("CaptureReadinessV2{before_dispatch:pending:bool,text:bool}");
     shapes.push("MeasurementV1{query:Width(text:bytes,sz:i32,bold:bool)|Cap(sz:i32)|Line(sz:i32),answer:f32bits:u32}");
-    shapes.extend_from_slice(plx_screens::registry::SCREEN_SHAPES);
+    shapes.extend(historical_screen_shapes());
     plx_ui::rec::state_fp(&shapes)
 }
 
@@ -314,25 +315,10 @@ fn session_app_prior_vector() -> Vec<&'static str> {
     shapes.push(RESOLUTION_SHAPE_V1);
     shapes.push("CaptureReadinessV2{before_dispatch:pending:bool,text:bool}");
     shapes.push("MeasurementV1{query:Width(text:bytes,sz:i32,bold:bool)|Cap(sz:i32)|Line(sz:i32),answer:f32bits:u32}");
-    shapes.extend_from_slice(plx_screens::registry::SCREEN_SHAPES);
-    // Fork Rofocale11: see `historical_screen_shape` — the fork's Detail/AltSources additions are
-    // current-shape facts and must not be read into the reviewed historical census. Applied after
-    // the screen shapes are appended, so the frozen rows replace them here and nowhere else.
-    // The Catalogs header adds a fourth shape fact: `PendingTransactions` gains a
-    // `Catalog{key:Option<str>}` grid action and `LibraryScreen` names it in its census. Both are
-    // current facts; freezing them here keeps the V13-era fingerprint (and the two replay manifests
-    // that carry it) byte-identical. JSON fixtures cannot carry this note, so the reason lives here.
-    for shape in &mut shapes {
-        if shape.starts_with("DetailScreen{") {
-            *shape = historical_screen_shape("DetailScreen{");
-        } else if shape.starts_with("AltSourcesScreen{") {
-            *shape = historical_screen_shape("AltSourcesScreen{");
-        } else if shape.starts_with("PendingTransactions{") {
-            *shape = historical_screen_shape("PendingTransactions{");
-        } else if shape.starts_with("LibraryScreen{") {
-            *shape = historical_screen_shape("LibraryScreen{");
-        }
-    }
+    // Fork Rofocale11: historical fingerprints are frozen, never a projection of today's shapes.
+    // The fork's current Detail/AltSources/Catalogs additions stay in the producer census below and
+    // must not move the reviewed V13-era identities; JSON fixtures cannot carry this note.
+    shapes.extend(historical_screen_shapes());
     shapes
 }
 
@@ -1513,7 +1499,7 @@ pub(crate) fn features() -> Vec<String> {
     if cfg!(feature = "devtriggers") {
         v.push("devtriggers".into());
     }
-    if cfg!(feature = "hostsim") {
+    if cfg!(feature = "sim") {
         v.push("hostsim".into());
     }
     if cfg!(feature = "lab-diagnostics") {
@@ -1927,7 +1913,9 @@ mod tests {
         ] {
             let mut event = [0u8; 128];
             event[..4].copy_from_slice(&code.to_ne_bytes());
-            assert_eq!(decode_host_event(&event), Some(HostEvent::Lifecycle(edge)), "{code:#x}");
+            for flavor in super::super::events::BOTH_FLAVORS {
+                assert_eq!(decode_host_event(flavor, &event), Some(HostEvent::Lifecycle(edge)), "{flavor:?} {code:#x}");
+            }
             let recorded = enc_lifecycle(edge.sdl_code());
             let legacy: Value = serde_json::from_str(&format!(r#"{{"kind":"lifecycle","code":{code}}}"#)).unwrap();
             assert_eq!(recorded, legacy, "{code:#x}");
@@ -2890,23 +2878,13 @@ mod tests {
         // `ProductResolutionV2` (the by-id `Id` resolution row, a11y-ids D6) moves the full census
         // from 0xea74_3865_5115_46c5, which `the_pre_content_navigation_recording_shape_is_refused`
         // keeps refused at the shape boundary like every older value.
-        // Fork Rofocale11: re-pin the CURRENT V13 producer census after the upstream merge. The
-        // fork's intentional additions are all in this digest: `DetailScreen.list_pending`,
-        // `.list_error` and `.list_state` (Nuvio My List state on the detail page),
-        // `AltSourcesArg.nuvio` (whether the item's server is a Nuvio backend) and
-        // `AltSourcesScreen.streams.req` (the correlation fence for the new `AppFx::Nuvio` shim
-        // effects and their addressed `AppMsg::Nuvio` answers). No fork field is removed; the
-        // historical profile identities above are kept frozen separately.
-        // Fork Rofocale11: the two-level Streams picker adds `streams.page` and `streams.root`
-        // to `AltSourcesScreen::SHAPE`, which the V13 producer census reaches through the screen
-        // shape inventory. Previous pin 0xabe1_a9c9_0d91_8bd5; the committed replay anchors need
-        // re-recording before a scenario replay is trusted.
-        // Fork Rofocale11: the Catalogs header adds a `Catalog{key:Option<str>}` grid action to
-        // `PendingTransactions`, which `LibraryScreen` carries in the producer census, so the
-        // current fingerprint moves to 0x4d25_20c6_8811_41e. The old value is kept in this comment
-        // as the identity the pre-Catalogs recordings carry; the historical fixture and its pins
-        // are untouched.
-        assert_eq!(state_fp(), 0x4d25_20c6_8811_41e, "current V13 producer census");
+        // Fork Rofocale11: re-pin the CURRENT V13 producer census for the combined tree. The
+        // fork's intentional additions (DetailScreen My List state, AltSourcesArg.nuvio,
+        // AltSourcesScreen.streams.req and the Catalogs grid action) are all in this digest, and
+        // upstream's new shapes join it; the historical identities above stay frozen separately.
+        // The committed replay anchors need re-recording before a scenario replay is trusted.
+        assert_eq!(state_fp(), 0x69ea_58c7_af97_cbe2, "current V13 producer census");
+        assert_ne!(state_fp(), 0x7f1d_280c_909c_8603, "the census before Filmography's Watchlist menu");
         assert_ne!(state_fp(), 0xea74_3865_5115_46c5, "the census without the `Id` resolution row");
         assert_ne!(state_fp(), 0x3ed9_2e0f_25bd_7f8e, "V12 cannot describe captured positive-swap presentation inputs");
     }

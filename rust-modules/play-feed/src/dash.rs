@@ -42,6 +42,8 @@ fn dash_fetch_manifest(
         range: Arc::clone(&transport.range),
         credential_gate: transport.credential_gate,
         observer: Arc::clone(&observer),
+        // Upstream's Live TV segment carry is never armed by a trailer DASH playlist.
+        carry: None,
     };
     let (mut src, size, _landed) = if let Ok(auth) = crate::hls::InheritedAuth::capture(&resource) {
         let request_path = auth

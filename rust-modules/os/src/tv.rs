@@ -1,5 +1,6 @@
 //! The television, as everything outside the port sees it (step L15, docs/module-layers.md).
 pub mod authority;
+pub mod crash_capture;
 pub mod device;
 pub mod home;
 pub mod launch;
@@ -12,17 +13,22 @@ pub mod toast;
 pub mod uri;
 
 pub use authority::StorageHooks;
+/// The layout group's type is `plx_base`'s (`paths` cannot read `tv`); platforms name it from here, like the other groups.
+pub use plx_base::paths::Layout;
+/// The libraries group's type is `plx_base`'s too (`dynlib` is below `tv`, and `plx_net` and `plx_gfx` read it there).
+pub use plx_base::dynlib::Libraries;
 
 use std::sync::OnceLock;
 
 /// What the platform's settings service said about the locale. i18n owns the parse and the log lines.
-#[cfg_attr(any(feature = "hostsim", test, feature = "test-support"), allow(dead_code))] // Reply/Unavailable: TV arm only
 pub enum LocaleReply { NoPlatform, Unavailable, Reply(String) }
 
-/// What the lower layers read from the platform, in five groups. Installed once ([`install`]) before
+/// What the lower layers read from the platform, in eight groups. Installed once ([`install`]) before
 /// anything reads it, and read only by `tv`'s own modules, so no other module can issue a verb the
-/// interfaces below do not offer. The window, the bus pump and the frame probe are NOT here: only
-/// the loop reads them, so they belong to the application's own `Platform`.
+/// interfaces below do not offer. The exceptions are [`layout`](Services::layout) and
+/// [`libraries`](Services::libraries): they are no verbs, and the application's `Platform::install_services`
+/// reads them to publish them into `plx_base::paths` and `plx_base::dynlib`. The window, the bus pump and the
+/// frame probe are NOT here: only the loop reads them, so they belong to the application's own `Platform`.
 ///
 /// Every hook is required. A platform states each field of each group, and a named `NONE` is that
 /// statement; a gap filled in by `Default` is not allowed. The one exemption is
@@ -32,6 +38,16 @@ pub struct Services {
     pub secure: SecureHooks,
     pub system: SystemHooks,
     pub storage: StorageHooks,
+    /// Where the platform's payload and state live. `Platform::install_services` publishes it into
+    /// `plx_base::paths`, right after the install: the one group `tv` itself never reads, because `paths`
+    /// is below `tv` and is what reads it.
+    pub layout: Layout,
+    /// The names of the OS-owned libraries that differ per platform: libcurl and the EGL probe's. Like
+    /// [`layout`](Services::layout) it is no verb and `tv` never reads it: `Platform::install_services`
+    /// publishes it into `plx_base::dynlib`, which the tables in `plx_net` and `plx_gfx` read. A platform
+    /// with neither states [`Libraries::NONE`].
+    pub libraries: Libraries,
+    pub crash_capture: crash_capture::Hooks,
     pub legacy_webos_media: LegacyWebosMedia,
 }
 
@@ -122,6 +138,9 @@ impl Services {
         secure: SecureHooks::NONE,
         system: SystemHooks::NONE,
         storage: StorageHooks::NONE,
+        layout: Layout::DERIVED,
+        libraries: Libraries::HOST,
+        crash_capture: crash_capture::Hooks::NONE,
         legacy_webos_media: LegacyWebosMedia::NONE,
     };
 }
@@ -165,9 +184,18 @@ mod tests {
             secure: SecureHooks { seal, open, remove, mode },
             system: SystemHooks { go_home, poll_home, deliver_toast },
             storage: StorageHooks { authority },
+            layout: Layout { payload_dir, state_root, fallback_dir },
+            libraries: Libraries { curl, egl },
+            crash_capture: crash_capture::Hooks { start, stop, set_user, record_window },
             legacy_webos_media: LegacyWebosMedia { sink, display_sink, uri_media },
         } = Services::HOST_TEST;
 
+        assert!(start.is_none());
+        stop();
+        set_user(None);
+        record_window(crash_capture::Breadcrumb {
+            stage: "test", playing: None, version: None, display: None, surface: None,
+        });
         probe_device();
         start_capability_probe();
         assert!(repair_native_video.is_none(), "a platform with nothing to repair states no hook");
@@ -200,6 +228,12 @@ mod tests {
         );
 
         assert_eq!(authority, authority::Authority::Files, "no storage helper: the app keeps its records in files");
+
+        assert_eq!(payload_dir(), plx_base::paths::app_dir(), "no layout stated: the payload is where the executable is");
+        assert_eq!(state_root(), plx_base::paths::persistent_state_root(), "and the state root is the derived one");
+        assert_eq!(fallback_dir, plx_base::paths::NO_FALLBACK_DIR, "and no install prefix to fall back to");
+
+        assert_eq!((curl, egl), (Libraries::HOST.curl, Libraries::HOST.egl), "no platform: the union, the process's own default");
 
         assert!(!sink.feed_abi_is_cow(), "the refusing sink, not a native one");
         assert_eq!(display_sink.window_mode(), sink::VP_NONE);

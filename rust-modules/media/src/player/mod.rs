@@ -57,11 +57,11 @@ mod pump; // gated: the per-frame tick reads and drives `FEED_SHARED`/`FEED_TX` 
 pub mod report;
 #[cfg(test)]
 mod no_feed_tests; // the doors a session with no Feed composed answers as a URI-only build always did
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 mod diag_sample_tests; // the Stats-for-nerds rows the Feed writes are the readout's last sample of it
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 mod foreground_flight_tests;
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 mod resume_tests;
 #[cfg(test)]
 mod shared;
@@ -292,7 +292,7 @@ pub use engine::{
 /// ticks a scripted clock past the release deadline (`dev::uriprobe`'s tests).
 #[cfg(any(test, feature = "test-support"))]
 pub use route_start::exit_native_with;
-pub use route_start::{begin_resume, exit_native, land_resume, retire_if_server_stopped, stop_bufferfeed,
+pub use route_start::{begin_resume, exit_native, land_resume, pump_uri_restore, retire_if_server_stopped, stop_bufferfeed,
     stop_for_replacement, suspend_bufferfeed, BufferfeedStartOutcome, NativeExit, ResumeOutcome, ResumeStart,
     start_playback, start_playback_tracked, suspend_playback_if_attempt};
 pub use route_start::suspend_bufferfeed as suspend_playback;
@@ -565,12 +565,12 @@ pub fn finish_paused_seek(ps: &mut crate::route::PlaybackSession, pa: &mut adapt
     true
 }
 
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 pub fn force_pause_result_for_test(result: Option<c_int>) {
     plx_play_feed::ffi_host::force_pause_result_for_test(result);
 }
 
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 pub fn force_play_result_for_test(result: Option<c_int>) {
     plx_play_feed::ffi_host::force_play_result_for_test(result);
 }
@@ -723,6 +723,12 @@ pub fn request_seek(
     pa: &mut adapter::PlayerAdapter,
     ns: i64,
 ) {
+    // A live channel has no seekable timeline: the HLS reader follows the edge and reads no target,
+    // so an armed seek would hold the spinner up for the rest of the playback.
+    if crate::route::is_live(ps) {
+        log("seek: refused on a live channel");
+        return;
+    }
     report::note_seek_for(crate::route::playback_trace_generation());
     crate::route::note_user_seek_intent(ns);
     // One intent, one event, one command. The event un-ends a stream that had drained, numbers the
@@ -982,6 +988,8 @@ pub enum FailureKind {
     /// `/decision` refused the item outright — the server can neither direct play nor convert it.
     /// The earliest and most certain failure: it happens before an engine exists.
     DecisionRefused,
+    /// The DVR has no available tuner for this channel.
+    TunersBusy,
     /// The explicit Direct Play policy cannot deliver the requested original stream.
     PlaybackPolicy,
     /// Transcoding, and the server produced no video stream — it found no usable video target.
@@ -1032,6 +1040,7 @@ impl FailureKind {
         use plx_telemetry::telemetry::classes::FailureClass as C;
         match self {
             FailureKind::DecisionRefused => C::DecisionRefused,
+            FailureKind::TunersBusy => C::TunersBusy,
             FailureKind::PlaybackPolicy => C::PlaybackPolicy,
             FailureKind::NoVideoTranscodeTarget => C::NoVideoTranscodeTarget,
             FailureKind::NoVideoTrack => C::NoVideoTrack,
@@ -1085,6 +1094,10 @@ pub struct FailureContext {
     /// The failed attempt has a Plex request that can be resolved again. A URL/dev-trigger
     /// playback has none, so nothing that retries can do anything.
     pub can_retry: bool,
+    /// Some composed backend could carry a Quality rung the viewer picks ([`crate::route::PlaybackSession::quality_pick_carriable`]:
+    /// a Feed, or a URI provider that certifies a converted output). Without one the ladder is withheld from the More menu and a rung
+    /// is refused, so the read-out's *Change quality* would open an empty ladder: it is not offered (the rule above).
+    pub quality_carriable: bool,
     /// The sandbox repair can still be started (nothing is running or finished).
     pub repair_idle: bool,
 }
@@ -1104,6 +1117,9 @@ pub struct FailureContext {
 ///   no [`TryAgain`](FailureAction::TryAgain): the same request gets the same answer. A different
 ///   rung is a different request, so the ladder stays where a transcode or a direct play could
 ///   succeed instead.
+/// * On a composition no backend can carry a rung for (no Feed, a URI provider that certifies no converted output;
+///   [`FailureContext::quality_carriable`]) [`ChangeQuality`](FailureAction::ChangeQuality) is not offered either: the More menu
+///   withholds the ladder there, so the button would open onto nothing.
 /// * A file with no video track and an unrepairable sandbox get nothing but *Back*.
 pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureAction> {
     use FailureAction as A;
@@ -1124,6 +1140,7 @@ pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureActi
         // The file itself has no picture; no rung and no retry puts one in it.
         K::NoVideoTrack => {}
         K::ServerStopped => {}
+        K::TunersBusy => { if cx.can_retry { v.push(A::TryAgain); } }
         _ if cx.forced => {
             if cx.can_retry {
                 v.push(A::PlayAutomatically);
@@ -1140,7 +1157,11 @@ pub fn failure_actions(kind: FailureKind, cx: FailureContext) -> Vec<FailureActi
                 if transient {
                     v.push(A::TryAgain);
                 }
-                v.push(A::ChangeQuality);
+                // A rung is a request for the server to convert: on a composition nothing can convert for, the ladder is
+                // withheld from the More menu and a pick is refused, so the button would open onto nothing.
+                if cx.quality_carriable {
+                    v.push(A::ChangeQuality);
+                }
             }
         }
     }
@@ -1158,6 +1179,7 @@ pub fn failure_context_captured(ps: &crate::route::PlaybackSession, diagnostic_f
     FailureContext {
         forced: crate::route::forced_direct_play(ps) || diagnostic_forced,
         can_retry: crate::route::can_retry_current_play(ps),
+        quality_carriable: !crate::route::is_live(ps) && ps.quality_pick_carriable(),
         repair_idle: ps.repair_status == plx_os::tv::native_video::State::Idle,
     }
 }
@@ -1445,6 +1467,16 @@ pub fn error_captured(ps: &crate::route::PlaybackSession, diagnostic: Option<&st
     }
     // The typed verdict, not the sentence: a refused preview is ours, not the server's, and must
     // not read as `DecisionRefused`.
+    if crate::route::tuners_busy(ps) {
+        return ErrorShape {
+            kind: FailureKind::TunersBusy,
+            caption: plx_os::i18n::msg::widgets_verdict_tuners_busy_c(),
+            panel: plx_os::i18n::msg::widgets_verdict_tuners_busy(),
+            readout: plx_os::i18n::msg::widgets_verdict_tuners_busy(),
+            detail: std::borrow::Cow::Borrowed(""),
+            no_pass: false,
+        };
+    }
     if crate::route::play_refused_as_preview(ps) {
         return preview_not_direct_shape();
     }
@@ -2833,7 +2865,7 @@ pub fn failtest_policy_shape_for_test(verdict: &str) -> ErrorShape {
 #[cfg(any(test, feature = "test-support"))]
 pub fn every_failure_row() -> Vec<(FailureKind, FailureContext, Vec<FailureAction>)> {
     use FailureKind as K;
-    let kinds = [K::DecisionRefused, K::PlaybackPolicy, K::NoVideoTranscodeTarget, K::NoVideoTrack,
+    let kinds = [K::TunersBusy, K::DecisionRefused, K::PlaybackPolicy, K::NoVideoTranscodeTarget, K::NoVideoTrack,
         K::MediaSource, K::PlaybackInterrupted, K::TvPipeline, K::LoadTimeout,
         K::ReleaseTimeout, K::JailMissingRtkmem, K::ResolveFailed, K::PreviewNotDirect, K::ServerStopped,
         K::Unspecified];
@@ -2841,9 +2873,11 @@ pub fn every_failure_row() -> Vec<(FailureKind, FailureContext, Vec<FailureActio
     for kind in kinds {
         for forced in [false, true] {
             for can_retry in [false, true] {
-                for repair_idle in [false, true] {
-                    let cx = FailureContext { forced, can_retry, repair_idle };
-                    out.push((kind, cx, failure_actions(kind, cx)));
+                for quality_carriable in [false, true] {
+                    for repair_idle in [false, true] {
+                        let cx = FailureContext { forced, can_retry, quality_carriable, repair_idle };
+                        out.push((kind, cx, failure_actions(kind, cx)));
+                    }
                 }
             }
         }
@@ -3217,6 +3251,21 @@ mod tests {
         assert_eq!(shape.detail, verdict);
     }
 
+    #[test]
+    fn busy_tuners_have_clear_wording_and_only_retry_or_back() {
+        let _guard = plx_base::testlock::serial();
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        crate::route::refuse_for_test(&mut ps, crate::route::PlayVerdict::TunersBusy);
+        let shape = error_now(&ps);
+        assert_eq!(shape.kind, FailureKind::TunersBusy);
+        assert_eq!(shape.readout, plx_os::i18n::msg::widgets_verdict_tuners_busy());
+        for forced in [false, true] {
+            let cx = FailureContext { forced, can_retry: true, repair_idle: false, quality_carriable: false };
+            assert_eq!(failure_actions(shape.kind, cx), vec![FailureAction::TryAgain, FailureAction::Back]);
+            assert_eq!(failure_actions(shape.kind, FailureContext { can_retry: false, ..cx }), vec![FailureAction::Back]);
+        }
+    }
+
     /// **Each cause converts to its own telemetry class, under the code it always had.** The class
     /// enum is telemetry's and the match that fills it is this layer's, so a copy-paste that sent
     /// two causes to one class would merge two dashboard series without any compile error. (The
@@ -3236,6 +3285,7 @@ mod tests {
             (K::LoadTimeout, "load_timeout"),
             (K::ReleaseTimeout, "release_timeout"),
             (K::ResolveFailed, "resolve_failed"),
+            (K::TunersBusy, "tuners_busy"),
             (K::PreviewNotDirect, "preview_not_direct"),
             (K::ServerStopped, "server_stopped"),
             (K::Unspecified, "unspecified"),
@@ -3254,7 +3304,7 @@ mod tests {
     /// every rung Force overrides. The fix is the one change that re-enables the fallback.
     #[test]
     fn forced_direct_play_offers_the_fix_and_never_the_quality_ladder() {
-        let cx = FailureContext { forced: true, can_retry: true, repair_idle: true };
+        let cx = FailureContext { forced: true, can_retry: true, quality_carriable: true, repair_idle: true };
         let row = failure_actions(FailureKind::PlaybackPolicy, cx);
         assert_eq!(row.first(), Some(&FailureAction::PlayAutomatically));
         assert!(!row.contains(&FailureAction::ChangeQuality), "{row:?}");
@@ -3296,9 +3346,32 @@ mod tests {
             assert_eq!(row.contains(&A::Repair), kind == K::JailMissingRtkmem && cx.repair_idle, "{at}");
         }
         // and a transient failure without Force keeps both of its recoveries
-        let cx = FailureContext { forced: false, can_retry: true, repair_idle: true };
+        let cx = FailureContext { forced: false, can_retry: true, quality_carriable: true, repair_idle: true };
         let row = failure_actions(K::PlaybackInterrupted, cx);
         assert_eq!(&row[..2], &[A::TryAgain, A::ChangeQuality]);
+    }
+
+    /// **The read-out offers no *Change quality* when no composed backend can carry a rung.** The ladder is withheld from the
+    /// More menu on such a composition (`quality_pick_carriable`, round 4's R5) and `set_quality` refuses a rung, so the failure
+    /// read-out's button opened `More { page: Quality }` onto nothing: the emulator's stall read-out offered it on a URI-only
+    /// composition. The rule (`failure_actions`): an action is offered only if it can change the outcome. Everything else in the
+    /// row is as before: a transient failure keeps *Try again*, and a Feed composition keeps the rung.
+    #[test]
+    fn a_composition_that_can_carry_no_quality_rung_is_not_offered_change_quality_on_a_failure() {
+        use FailureAction as A;
+        use FailureKind as K;
+        for (kind, cx, row) in every_failure_row() {
+            if !cx.quality_carriable {
+                assert!(!row.contains(&A::ChangeQuality), "{kind:?} {cx:?}: the ladder leads nowhere — {row:?}");
+            }
+        }
+        let uri_only = FailureContext { forced: false, can_retry: true, quality_carriable: false, repair_idle: true };
+        assert_eq!(failure_actions(K::PlaybackInterrupted, uri_only), [A::TryAgain, A::Back]);
+        let feed = FailureContext { quality_carriable: true, ..uri_only };
+        assert_eq!(failure_actions(K::PlaybackInterrupted, feed), [A::TryAgain, A::ChangeQuality, A::Back]);
+        // Force still offers its own recovery, the one change that re-enables the fallback.
+        let forced = FailureContext { forced: true, ..uri_only };
+        assert_eq!(failure_actions(K::PlaybackInterrupted, forced), [A::PlayAutomatically, A::TryAgain, A::Back]);
     }
 
     #[test]
@@ -3836,7 +3909,6 @@ mod tests {
     /// User Play releases the transport pause, but an internal runway hold owns the media clock.
     /// Calling the ordinary seam here would bypass the only place that checks fresh A/V media and
     /// recreate the short burst/freeze cycle after a manual Pause/Play during rebuffering.
-    #[cfg(feature = "hostsim")]
     #[test]
     fn user_resume_cannot_bypass_an_internal_hls_rebuffer_hold() {
         let _guard = plx_base::testlock::serial();
@@ -4064,7 +4136,7 @@ mod tests {
         assert_eq!(e.kind.code(), "preview_not_direct", "{:?}", e.kind);
         assert_ne!(e.kind, FailureKind::Unspecified);
         assert!(e.detail.is_empty(), "no server sentence rides a refusal that is ours");
-        let cx = FailureContext { forced: false, can_retry: true, repair_idle: false };
+        let cx = FailureContext { forced: false, can_retry: true, quality_carriable: true, repair_idle: false };
         assert_eq!(failure_actions(e.kind, cx), vec![FailureAction::Back], "same item, same refusal: no Try Again");
     }
 
@@ -4752,7 +4824,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "hostsim"))]
+#[cfg(test)]
 mod native_failure_regressions {
     use super::*;
     struct JailGuard;
