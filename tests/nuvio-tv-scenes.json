@@ -1,0 +1,75 @@
+{
+  "scenes": [
+    {
+      "name": "home-idle",
+      "screen": "home",
+      "route": "home",
+      "settle_s": 8,
+      "run_s": 14,
+      "warmup_s": 5,
+      "keys": [],
+      "expect": [],
+      "note": "settled Home: numbers only, tvdev-safe; no floor until a release baseline exists"
+    },
+    {
+      "name": "home-nav",
+      "screen": "home",
+      "route": "home",
+      "settle_s": 8,
+      "run_s": 18,
+      "warmup_s": 5,
+      "key_gap": 0.6,
+      "keys": ["down", "down", "up", "up"],
+      "expect": [],
+      "note": "short D-pad walk on Home: numbers only, tvdev-safe"
+    },
+    {
+      "name": "detail-idle",
+      "screen": "home",
+      "route": "detail",
+      "open_detail": true,
+      "settle_s": 8,
+      "run_s": 14,
+      "warmup_s": 5,
+      "keys": [],
+      "expect": [],
+      "note": "picks a shelf card from THIS boot's snapshot; numbers only, tvdev-safe"
+    },
+    {
+      "name": "home-nav-release",
+      "screen": "home",
+      "route": "home",
+      "settle_s": 8,
+      "run_s": 18,
+      "warmup_s": 5,
+      "loop_floor": 30,
+      "framedrop": 22,
+      "worst_ceiling_ms": 90,
+      "stall_ceiling_ms": 250,
+      "key_gap": 0.6,
+      "keys": ["down", "down", "up", "up"],
+      "expect": [],
+      "note": "GRADED, release only. Baselined 2026-11-27 (2 runs): loop robust_min=48, worst robust_max=63-64ms, stall peak=125-205ms; ceilings 90/250ms"
+    },
+    {
+      "name": "home-nav-deep",
+      "screen": "home",
+      "route": "home",
+      "settle_s": 6,
+      "run_s": 4,
+      "warmup_s": 5,
+      "loop_floor": 30,
+      "framedrop": 22,
+      "worst_ceiling_ms": 220,
+      "stall_ceiling_ms": 300,
+      "walk_drop_max": 5,
+      "walk_max_ms": 33,
+      "key_gap": 0.5,
+      "pause_after": 15,
+      "pause_s": 2,
+      "keys": ["down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up"],
+      "expect": [],
+      "note": "30-key Home walk on the benchmark-only addon: 15 down @0.5s, 2s pause, 15 up @0.5s. keyseq spaces keys on the set. Cache state is a GATE concern across boots (run 1 cold, run 2 warm). SMOOTHNESS CONTRACT: from the first key onward at most 5 frames over 22ms and no frame over 33ms; boot/first-mount is reported, not graded. 220/300ms ceilings are retained only as gross-regression backstops"
+    }
+  ]
+}

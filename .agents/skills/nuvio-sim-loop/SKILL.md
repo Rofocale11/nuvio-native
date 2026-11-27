@@ -4,8 +4,9 @@ description: >
   The default host debug/test loop for Nuvio Native agents. Boots the desktop simulator AS THE REAL
   APP — in-process shim, public Stremio addons, dedicated TMDB key, real fetch/cache paths — with a
   sealed identity and private store, so no Nuvio login, owner or TV is needed. Use for UI, data-layer,
-  enrichment and performance iteration instead of upstream's mock_pms.py or a device run. TV is only
-  for playback, and only with the owner's permission.
+  enrichment and performance iteration instead of upstream's mock_pms.py or a device run. The TV is
+  NOT the default: load the `nuvio-tv-loop` skill for device-only work or benchmarks. That loop is
+  self-service on the debug install under its own contract, with no per-action owner prompt.
 ---
 
 # nuvio-sim-loop — test the real app on the host
@@ -13,7 +14,10 @@ description: >
 The fork's `plx_pmsshim` already serves the PMS REST surface in-process, so there is no upstream
 `mock_pms.py` to imitate. The missing piece was an account-free boot that still uses the REAL addon
 backend: `plxnative-nuviolive`. Full details: `docs/nuvio/SIM-LOOP.md`. For the same profile on the television
-read `docs/nuvio/TV-LOOP.md` and use `tools/nuvio-tv.py` — it is a separate runbook and a separate lock-taking command.
+load the `nuvio-tv-loop` skill and read `docs/nuvio/TV-LOOP.md` — a separate runbook and a separate
+lock-taking command. Its
+`bench --scene NAME` lane is the graded device counterpart of this host loop; debug install only,
+never stable, and no agent deploy without the owner's approval.
 To confirm or reproduce a regression
 in a fork-specific behavior, use the scenarios in `docs/nuvio/SCENARIO.md` (exact command, pass
 evidence and failure signature for each).

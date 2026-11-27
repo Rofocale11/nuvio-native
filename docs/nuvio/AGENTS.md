@@ -91,8 +91,16 @@ fork's rules. `MERGE-AUDIT.md` records the API adaptations made in the wholesale
   dedicated TMDB key from the gitignored `nuvio.local.env`, with a sealed identity and private
   store; no sign-in and no owner involvement. Use `plxnative-nuviofake` only for fixed-content
   deterministic tests.
-  The device twin is `docs/nuvio/TV-LOOP.md` (`tools/nuvio-tv.py`): same live profile on the TV, with
-  a persistent session and one lease, for agents with explicit permission. Keep `SIM-LOOP.md` host-only.
+  The device twin is the `nuvio-tv-loop` skill; its runbook is `docs/nuvio/TV-LOOP.md` and its tool
+  is `tools/nuvio-tv.py` — same live profile on the TV, with a persistent session and one lease.
+  Keep `SIM-LOOP.md` host-only.
+- Standing owner authorization (2026-11-27): an agent may drive the **debug** install through
+  `tools/nuvio-tv.py` (`start`/`shot`/`state`/`press`/`expect`/`bench`) without asking per action,
+  under the self-service contract in `TV-LOOP.md`: sealed `nuviolive`, no account writes, lock
+  arbitration, sound muted; `bench` blanks the panel, but the owner may leave it on for an
+  interactive session (explicit override 2026-11-27). This is the permission the device verbs need. It does **not**
+  extend to the stable install, to any deploy, or to `PLX_TV_IN_USE_OK=1` — those still need the
+  owner in that session. `ARM_PROFILE=release` only for a graded timing scene.
 - The owner tests the TV, and only with explicit permission in the session. Acquire the TV lock for
   any device command; release it immediately after. Never boot with a real account for screenshots.
   Upstream's `--guest`/mock cannot do this on this fork: the in-process shim short-circuits its

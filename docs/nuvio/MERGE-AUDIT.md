@@ -133,12 +133,18 @@ The live simulator profile is a later fork feature on the merged tree. Its exact
 
 The device twin of the host loop is a later fork feature, not part of the merge above.
 
-- `tools/tv-session.sh` — upstream file, TWO marked `Fork Rofocale11:` edits: `fifo_send` now reads
+- `tools/tv-session.sh` — upstream file, marked `Fork Rofocale11:` edits: `fifo_send` now reads
   the jailed FIFO's uid/gid and writes the token with `setpriv`, because this firmware refuses a
   root write and the old error was swallowed; the offline FIFO selftest stubs `tvq` so it never
-  opens an ssh session to the television. No other upstream behaviour changed.
-- New fork-owned files with no upstream counterpart: `tools/nuvio-tv.py` and
-  `docs/nuvio/TV-LOOP.md`. `SIM-LOOP.md` stays host-only; the pointer in
+  opens an ssh session to the television. Later in the TV-loop work the same file gained ONE more
+  marked edit, the `keyseq <gap> <token>...` verb: `key` spends two seconds in `fifo_send`'s remote
+  time box per token, which stretched a 0.5 s benchmark cadence to ~2.5 s, so keyseq sends a whole
+  walk in ONE ssh command and spaces the FIFO writes on the set. Its refusal and batching cases are
+  covered by the offline key-door selftest. No other upstream behaviour changed.
+- New fork-owned files with no upstream counterpart: `tools/nuvio-tv.py`,
+  `tests/nuvio-tv-scenes.json`, `tests/nuvio-tv-benchmark-addons.json`,
+  `docs/nuvio/TV-LOOP.md` and
+  `.agents/skills/nuvio-tv-loop/SKILL.md`. `SIM-LOOP.md` stays host-only; the pointer in
   `.agents/skills/nuvio-sim-loop/SKILL.md` is fork-owned.
 
 ## Gate results on merged tree (uncommitted)

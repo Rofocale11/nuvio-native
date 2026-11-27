@@ -37,6 +37,81 @@ self-heal for unreadable canonical records and a 50 MiB cache-only soft budget. 
 stable package built from `84a00aa68` was deployed with `make FLAVOR=stable RELEASE=1 deploy`
 (`verify-deploy: 50 files match`) and the owner confirmed it works.
 
+### Pre-release TV gate (2026-11-27, uncommitted)
+
+`tools/nuvio-tv.py gate --scene home-nav-deep` is a **local owner-run** pre-release check, not a CI
+gate: `ci.yml` has no runtime that renders or holds 60 fps, and this loop never touches the stable
+install. It boots the debug install with the owner-approved `ARM_PROFILE=release` binary and the
+benchmark-only addon, and grades `loop_floor` / `worst_ceiling_ms` / `stall_ceiling_ms` over a strict
+majority of boots.
+
+The gate is a **cache-state A/B across boots**: run 1 deletes the debug install's image cache and
+`nuvio.redb` before booting, so it is pure cold; run 2 reuses what run 1 created, so it is warm. The
+evidence JSON records each run's `cache` label and full grade. `--runs 3` gives one cold and two warm
+boots. This replaces the earlier within-walk "cold down / warm up" reading of the words.
+
+The scene is **15 Down @0.5 s, 2 s rest, 15 Up @0.5 s**; each leg is ONE `tv-session.sh keyseq`
+call, so the cadence is spaced on the set (the old per-key `key` path cost ~2.5 s per key). An
+earlier, pre-reset run of this shape (panel on) passed: `loop robust_min=55`, `fps median=59`, worst
+robust-max 30.7 ms, stall peak 162.7 ms over 60 drops, with the down leg at 162.7 ms / 37 drops and
+the up leg at 36.8 ms / 23 drops. Log: `/tmp/nuvio-tv-bench-c4zw7nlp/bench-home-nav-deep.log`. The
+220/300 ms ceilings are inherited from the old 20-key baselines; the cold/warm gate result supersedes
+this single run. `fps=` is reported, never gated: the present gate skips settled frames, so a 60 fps
+median is not the contract.
+
+Definitive cold/warm gate run: **2/2 PASS** (`/tmp/nuvio-tv-gate-6tlj7fpi/gate-home-nav-deep.json`).
+The reset line confirmed exactly what was erased: the debug install's `-imgcache` directory and
+`nuvio.redb`; after boot 2 both existed again.
+
+| Boot | Cache state | loop robust_min | worst robust-max | stall peak | drops | down / up legs |
+|---|---|---|---|---|---|---|
+| 1 | cold — imgcache + redb erased | 55 | 44.2 ms | 168.9 ms | 34 | 168.9 ms / 26 drops · 42.9 ms / 8 |
+| 2 | warm — reuse of run 1 | 51 | 34.4 ms | 180.9 ms | 71 | 180.9 ms / 49 drops · 34.4 ms / 22 |
+
+The cold boot's down leg carries the cache-fill cost (168.9 ms, 26 drops); the warm boot has few
+worst-frame outliers but MORE over-budget frames overall (71 vs 34) and a 180.9 ms stall in its down
+leg. Neither is a stable 60 fps result — the gate is a gross-regression gate, not a 60 fps claim.
+An earlier cold/warm run (`/tmp/nuvio-tv-gate-ng202vgx/`) passed 2/2 too, with a 278.5 ms stall in
+the warm boot — close to the 300 ms ceiling — which is why that ceiling should not be tightened
+without more samples. Logs of the definitive run:
+`/tmp/nuvio-tv-bench-a0guh_q4/bench-home-nav-deep.log` and
+`/tmp/nuvio-tv-bench-ycdr8gsb/bench-home-nav-deep.log`.
+
+#### Smoothness verdict and cause (2026-11-27)
+
+The old 220/300 ms ceilings were too loose to answer "is scrolling smooth". The scene now grades
+only the window from the first key: **at most 5 frames over 22 ms and none over 33 ms across the
+30-click walk**; the first-mount stall is reported as `boot max=… (informational)`. Re-running the
+gate with that contract: **0/2 FAIL** (`/tmp/nuvio-tv-gate-9uqwztww/gate-home-nav-deep.json`) —
+cold 28 frames over 22 ms with a 46.1 ms max, warm 87 with a 37.2 ms max. So the build is not smooth
+enough by the only verdict that answers the owner's question. The old PASS figures above are
+gross-regression evidence only.
+
+A draw-class A/B on the same walk with the same warm cache isolates where the scroll jank comes
+from (one run per mask, walk window only, boot excluded):
+
+| Leg | Frames >22 ms | Max frame |
+|---|---|---|
+| baseline | 65 | 31.5 ms |
+| `plxnative-drawmask=image` | 71 | 30.7 ms |
+| `plxnative-drawmask=card` | 14 | 36.5 ms |
+| `plxnative-drawmask=glass` | 12 | 31.9 ms |
+
+Removing card or glass drawing removes ~80% of the hitches; removing image drawing does not. The
+frame-time breakdown agrees: `results=` (network delivery) is 0.1–0.2 ms in the worst walk frames —
+time goes to `draw` (`pagex2`/`src` card and row painting) and `swap`, with occasional `prepare` +
+`px=` texture uploads. So the scroll jank is **app drawing workload, not addon fetching**.
+
+This is not purely a TV fault either. `profile-tv` records the T820 at a fixed 672 MHz with no DVFS,
+thermal and CPU frequency ruled out, and a GPU-queue floor where late frames wait in `clear` while
+the CPU is idle. A near-empty draw mask still misses 0–3 refreshes per 60; a normal Home grid misses
+7–15. The hardware sets the budget; the app's card/glass drawing spends more than it. The remaining
+12–14 hitches with card/glass off are consistent with that floor. Attribution to GPU queue versus
+CPU work for THIS scene still needs a `framecb`/`framering` scheduler trace or HWCNT leg; the A/B
+names the drawing classes, not the ultimate wait. Logs:
+`/tmp/nuvio-tv-bench-fy2fndey/` (baseline), `y8lh_xwv` (no image), `sbxym7u6` (no card),
+`yv5gqoh8` (no glass).
+
 ### Device verification on the 7500PSC (owner, 2026-11-25)
 
 The owner confirmed on the LG `45UR7500PSC` (webOS 10.3.1, board `K8LPN_DVB`):

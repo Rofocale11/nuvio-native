@@ -6,6 +6,11 @@
 #   tv-session.sh status         re-assert an existing session without disturbing it
 #   tv-session.sh key <token>…   send key tokens (down, ok, back, play, pause, stop, …); never `focus:`,
 #                                `press:` or `state:` (the three verbs below are their one door)
+# Fork Rofocale11: the Nuvio TV benchmark needs an exact 0.5 s cadence; `key`'s per-token time box
+# made a 15-key walk arrive at ~2.5 s per key, so keyseq sends the whole walk in ONE ssh command.
+#   tv-session.sh keyseq <gap> <token>…
+#                                send a whole key walk in ONE ssh command, spacing the FIFO writes
+#                                by <gap> seconds on the set (benchmark cadence, see below)
 #   tv-session.sh click <x> <y>  click at authored 1920x1080 coords
 #   tv-session.sh focus <id>     move focus to the element an accessibility id names (`nav.watchlist`)
 #   tv-session.sh press <id> [--rk <ratingKey>]
@@ -1127,7 +1132,9 @@ selftest_door() {  # $1 = scratch file, then the door and its words
   local marker=$1 rc
   shift
   : > "$marker"
-  ( tv() { printf '%s\n' "$1" >> "$marker"; }; require_lock() { :; }; info() { :; }; "$@" ) >/dev/null 2>&1; rc=$?
+  # Fork Rofocale11: keyseq asks tvq for the FIFO owner, so stub it here too — this selftest must
+  # never open an ssh session to the television.
+  ( tv() { printf '%s\n' "$1" >> "$marker"; }; tvq() { :; }; require_lock() { :; }; info() { :; }; "$@" ) >/dev/null 2>&1; rc=$?
   printf '%s %s' "$rc" "$(grep -c . "$marker")"
 }
 
@@ -1145,6 +1152,8 @@ selftest_key_doors_in() {  # $1 = scratch file
   local -a refused=(
     "cmd_key press:home.continue.card.0" "cmd_key focus:nav.watchlist" "cmd_key state:abc"
     "cmd_key back press:home.continue.card.0" "cmd_key press:home.hero.play back"
+    # Fork Rofocale11: keyseq refuses the same id tokens and a bad/zero gap before sending anything.
+    "cmd_keyseq 0.5 press:home.continue.card.0" "cmd_keyseq abc down" "cmd_keyseq 0 down"
     "cmd_press home.hero.play" "cmd_press home.hero.info" "cmd_press home.hero.watchlist"
     "cmd_press itemmenu.play" "cmd_press itemmenu.watchlist_remove" "cmd_press itemmenu.version.0"
     "cmd_press detail.hero.play" "cmd_press detail.hero.restart" "cmd_press detail.hero.trailer"
@@ -1169,6 +1178,9 @@ selftest_key_doors_in() {  # $1 = scratch file
 press:x")" = "2 0" ] || { bad "key sent a word with a newline in it"; return 1; }
   # the doors that stay open: key tokens through `key`/`click`, and the ids through their verbs
   [ "$(selftest_door "$m" cmd_key back ok)" = "0 2" ] || { bad "key did not send two key tokens"; return 1; }
+  # Fork Rofocale11: keyseq batches a whole walk into ONE tv call, spaced by the set-side gap.
+  [ "$(selftest_door "$m" cmd_keyseq 0.5 down down)" = "0 1" ] || { bad "keyseq did not batch two keys into one call"; return 1; }
+  grep -q 'sleep 0.5' "$m" && grep -q "'down'" "$m" || { bad "keyseq did not space the FIFO writes by 0.5s"; return 1; }
   [ "$(selftest_door "$m" cmd_click 10 20)" = "0 1" ] && grep -q "'ck:10,20'" "$m" || { bad "click did not send ck:10,20"; return 1; }
   [ "$(selftest_door "$m" cmd_focus nav.watchlist)" = "0 1" ] && grep -q "'focus:nav.watchlist'" "$m" || { bad "focus did not send its token"; return 1; }
   [ "$(selftest_door "$m" cmd_press home.hero.play --rk 12)" = "0 1" ] && grep -q "'press:home.hero.play@12'" "$m" || { bad "press --rk did not send press:<id>@<rk>"; return 1; }
@@ -1486,6 +1498,48 @@ cmd_key() {
   local t
   for t in "$@"; do key_word_ok "$t" || exit 2; done
   send_tokens "$@"
+}
+
+# Fork Rofocale11: a graded Nuvio TV walk needs an exact cadence (0.5 s between keys). `key` spends
+# two seconds in fifo_send's remote time box PER token, so driving 15 keys one verb at a time makes
+# the walk ~2.5 s per key instead of 0.5 s. keyseq sends the WHOLE walk in ONE ssh command and spaces
+# the FIFO writes on the set, reusing fifo_write's escaping and the jailed-uid write unchanged.
+cmd_keyseq() {  # $1 = gap in seconds (one decimal), $2... = key tokens in order
+  [ $# -ge 2 ] || { echo "usage: tv-session.sh keyseq <gap> <token>..." >&2; return 2; }
+  local gap="$1"; shift
+  # Whole tenths keep the arithmetic in integer Bash; the set's shell needs no bc/awk.
+  local tenths
+  case "$gap" in
+    [0-9]) tenths="${gap}0" ;;
+    [0-9].[0-9]) tenths="${gap%.*}${gap#*.}" ;;
+    *) echo "tv-session: keyseq gap must be 0.1-9.9 seconds (one decimal)" >&2; return 2 ;;
+  esac
+  [ "$tenths" -gt 0 ] 2>/dev/null || { echo "tv-session: keyseq gap must be positive" >&2; return 2; }
+
+  local t stmt seq="" owner uid gid wrapped count=0 timebox
+  for t in "$@"; do
+    key_word_ok "$t" || return 2
+    stmt=$(fifo_write "$t") || return 2
+    [ -n "$seq" ] && seq="$seq; sleep $gap; "
+    seq="$seq$stmt"
+    count=$((count + 1))
+  done
+  require_lock "tv-session keyseq"
+  owner=$(tvq "command -v setpriv >/dev/null 2>&1 && stat -c '%u:%g' $REMOTE_FIFO 2>/dev/null")
+  # The time box covers the last gap plus five seconds, so a FIFO with no reader cannot hang ssh.
+  local total=$((tenths * (count - 1) + 50))
+  timebox="$((total / 10)).$((total % 10))"
+  if [ -n "$owner" ] && [ "${owner#*:}" != "$owner" ]; then
+    uid=${owner%%:*}; gid=${owner##*:}
+    wrapped=${seq//\\/\\\\}; wrapped=${wrapped//\"/\\\"}
+    wrapped=${wrapped//\$/\\\$}; wrapped=${wrapped//\`/\\\`}
+    tv "setpriv --reuid=$uid --regid=$gid --clear-groups sh -c \"$wrapped\" & P=\$!; ( sleep $timebox; kill \$P 2>/dev/null ) & Q=\$!; wait \$P; kill \$Q 2>/dev/null"
+  else
+    # No FIFO yet (or no setpriv): the offline selftest takes this branch.
+    tv "($seq) & P=\$!; ( sleep $timebox; kill \$P 2>/dev/null ) & Q=\$!; wait \$P; kill \$Q 2>/dev/null"
+  fi
+  info "sent $count key(s) at ${gap}s"
+  return 0
 }
 
 cmd_click() {
@@ -1949,6 +2003,8 @@ case "${1:-}" in
   background|foreground|fg) cmd_lifecycle "$@" ;;
   status) shift; cmd_status ;;
   key)    shift; cmd_key "$@" ;;
+  # Fork Rofocale11: the benchmark's exact-cadence walk door, one ssh command for the whole leg.
+  keyseq) shift; cmd_keyseq "$@" ;;
   click)  shift; cmd_click "$@" ;;
   focus)  shift; cmd_focus "$@" ;;
   press)  shift; cmd_press "$@" ;;
