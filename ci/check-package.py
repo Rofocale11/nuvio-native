@@ -1084,6 +1084,11 @@ def check_tracked_resources(expect_title: str) -> list:
         desc = d.get("appDescription", "")
         check(bool(desc.strip()) and desc != english,
               f"{loc}/appinfo.json appDescription is present and actually translated")
+        # Fork Rofocale11: `nuvio-locales/brand.json` rewrites CATALOG strings, not these
+        # appinfo resources, so its "Plex" -> "Nuvio" rule cannot reach a store description.
+        # Three upstream locales shipped "unofficial Plex client" here; forbid the claim.
+        check(not re.search("plex", desc, flags=re.IGNORECASE),
+              f"{loc}/appinfo.json appDescription must not describe the product as Plex")
         # The English sentence is a trademark disclaimer. A translation that transliterated the
         # mark ("플렉스") would both lose the disclaimer's force and misuse it, and no reader of
         # this repository is placed to catch that by eye in twelve languages.

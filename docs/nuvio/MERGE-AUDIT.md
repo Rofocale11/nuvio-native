@@ -38,12 +38,15 @@ branches in upstream files; this is the surface a future `upstream/main` merge m
   `preview_played_for` (the slot natural EOS already writes), so walking back to the hero does
   not spend a second Load and video-plane BOUND edge. Upstream change is one marked branch in
   `preview_tick`, one in `collapse_background_preview`, the helper and a field-doc correction.
-- `pkg/resources/hr/appinfo.json` (non-commentable JSON): Croatian was added upstream in
-  `cc14d0af1` with the upstream brand in `title`, unlike the other 15 locales. The stable
-  packaging gate (`ci/check-package.py`) refuses it; the title is now the untranslated product
-  brand, `Nuvio Native`. The translated `appDescription` is untouched. `catalog_brand.rs` only
-  rewrites catalog strings, not appinfo resources, so this one field cannot be fixed in
-  `nuvio-locales/brand.json`.
+- `pkg/resources/{ca,hr,hu}/appinfo.json` (non-commentable JSON): upstream added these locales
+  with the upstream brand in `title` and descriptions calling the app an unofficial Plex client.
+  The titles are now `Nuvio Native` and the descriptions say "native Stremio addon client" in
+  each language, matching the other 13 locales. `catalog_brand.rs` rewrites CATALOG strings only,
+  so `nuvio-locales/brand.json`'s "Plex" -> "Nuvio" rule cannot reach appinfo resources; the
+  fix has to live in these files.
+- `ci/check-package.py`: added a gate rejecting "plex" in any locale appDescription. Without it
+  a newly translated locale can silently ship a Plex client claim in the webOS store listing,
+  because the existing check only required a non-empty, non-English description.
 
 ## Proof certificates — durable fix for the recurring conflict
 
