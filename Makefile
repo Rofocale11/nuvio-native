@@ -1637,8 +1637,11 @@ test: deploy run
 # DISK_TREE is the cargo target dir the entry writes (absolute), DISK_NEED the entry's estimate in GiB when
 # it is not the table's value for that dir's name (tools/disk-budget.py NEED_GIB). `ci/test_disk_preflight.py`
 # finds every target whose recipe runs cargo and fails when one is missing from this list.
+# Fork Rofocale11: `sim-nuvio` and `sim-nuvio-linux` build the host sim with cargo, so they need the
+# same disk-preflight gate as `sim-macos`/`sim-linux` (ci/test_disk_preflight.py enforces this).
 DISK_ENTRIES = check check-replay check-cargo-lint check-cargo-unit-default check-cargo-unit-hostsim lint \
                test-fast test-crate test-hostsim test-host-interface check-nodef check-ass check-ffmpeg sim-macos sim-linux screenshots-sim site-video-sim \
+               sim-nuvio sim-nuvio-linux \
                $(RUST_LIB) pkg/plxnative-storage macapp macapp-zip build-bench build-bench-quick fuzz-hud
 $(DISK_ENTRIES): | disk-preflight
 

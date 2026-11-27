@@ -212,13 +212,19 @@ def run(args: argparse.Namespace) -> None:
 
     # Seal the boot and point it at the tracked public addon list. Nothing here reads the
     # household's addon config, account or redb.
-    arm(runtime, LIVE_TRIGGER)
-    addon_file = Path(args.addons).resolve() if args.addons else ADDONS_FILE
-    if not addon_file.is_file():
-        fail(f"public addon list not found: {addon_file}")
-    private_addons = runtime / "nuvio-public-addons.json"
-    shutil.copyfile(addon_file, private_addons)
-    arm(runtime, ADDONS_TRIGGER, str(private_addons))
+    if args.fake:
+        # Fork Rofocale11: S16's control boot — fixed catalog, no public addons, no TMDB.
+        arm(runtime, "nuviofake")
+        expected = []
+        args.no_final_proof = True
+    else:
+        arm(runtime, LIVE_TRIGGER)
+        addon_file = Path(args.addons).resolve() if args.addons else ADDONS_FILE
+        if not addon_file.is_file():
+            fail(f"public addon list not found: {addon_file}")
+        private_addons = runtime / "nuvio-public-addons.json"
+        shutil.copyfile(addon_file, private_addons)
+        arm(runtime, ADDONS_TRIGGER, str(private_addons))
     for extra in args.trigger:
         name, sep, value = extra.partition("=")
         if not name or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in name):
@@ -253,7 +259,7 @@ def run(args: argparse.Namespace) -> None:
         env["PLXNATIVE_SHOT"] = str(runtime / f"{args.shot}.png")
 
     say(f"nuvio-sim: boot {binary.name} in {runtime}")
-    proc = subprocess.Popen([str(binary), "127.0.0.1", "32400"], env=env, cwd=str(REPO),
+    proc = subprocess.Popen([str(binary), "127.0.0.1", str(args.port)], env=env, cwd=str(REPO),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     fifo_fd = None
     try:
@@ -271,10 +277,29 @@ def run(args: argparse.Namespace) -> None:
                 text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else text
                 shot = wait_for_shot(log, text, args.timeout, proc)
                 say(f"nuvio-sim: shot {shot}")
-        # A key can change the screen; re-check expectations against the final log.
+        # Fork Rofocale11: upstream fps scenes specify a measured run window (often 18-340 s).
+        # The host loop used to stop after the last key, leaving too few heartbeat samples to
+        # grade. Dwell here so a scene's `run_s` means the same thing it means on the TV.
+        if args.a11y_state:
+            # Fork Rofocale11: a behavioral scene needs the LIVE accessibility snapshot, not just
+            # the event log (the log does not record which subtitle row a press selected). Ask the
+            # app for one snapshot while it is still running, before teardown.
+            import a11y
+            try:
+                doc = a11y.state(runtime, timeout=args.timeout)
+                Path(args.a11y_state).write_text(
+                    json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+                say(f"nuvio-sim: a11y snapshot {args.a11y_state}")
+            except (TimeoutError, OSError) as exc:
+                fail(f"no a11y snapshot: {exc}", 1)
+        if args.run_s > 0:
+            time.sleep(args.run_s)
+        # A key can change the screen; re-check expectations against the final log. Fork Rofocale11:
+        # a deliberate privacy erase unlinks the runtime, so that scene opts out of this SECOND
+        # check; the boot-time proof above has already run and is still authoritative.
         final = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else text
         missing = [n for n in expected if n not in final]
-        if missing:
+        if missing and not args.no_final_proof:
             fail(f"final log lost expected lines {missing}", 1)
     finally:
         if fifo_fd is not None:
@@ -332,13 +357,22 @@ def parser() -> argparse.ArgumentParser:
                    help="`selftest` checks wiring offline; `run` boots the simulator")
     p.add_argument("--runtime", help="instance root (default: a fresh /tmp/nuvio-sim-*)")
     p.add_argument("--bin", default=str(DEFAULT_BIN), help="simulator binary")
+    p.add_argument("--port", type=int, default=32400,
+                   help="PMS/shim port (32400); use distinct ports for parallel scene runners")
     p.add_argument("--addons", help="public addon JSON (default: tests/nuvio-public-addons.json)")
     p.add_argument("--trigger", action="append", default=[], metavar="NAME[=VALUE]",
                    help="extra dev trigger in the instance root (repeatable)")
     p.add_argument("--keys", default="", help="tokens to send, e.g. 'down,down,right,ok'")
     p.add_argument("--key-gap", type=float, default=0.6, help="seconds between keys (default 0.6)")
     p.add_argument("--settle", type=float, default=8.0, help="seconds to let Home land (default 8)")
+    p.add_argument("--run-s", type=float, default=0.0,
+                   help="dwell after keys before closing, so a scene's run window is sampled")
     p.add_argument("--shot", help="write a screenshot named <shot>-N.png in the instance root")
+    p.add_argument("--a11y-state", help="write the live accessibility snapshot to this JSON file")
+    p.add_argument("--fake", action="store_true",
+                   help="boot the fixed nuviofake catalog instead of nuviolive (S16 control)")
+    p.add_argument("--no-final-proof", action="store_true",
+                   help="skip the post-key log re-check (a privacy erase deletes the runtime log)")
     p.add_argument("--expect", action="append", default=[], metavar="LINE",
                    help="event-log substring that must appear (repeatable)")
     p.add_argument("--timeout", type=float, default=90.0, help="boot/shot timeout in seconds")

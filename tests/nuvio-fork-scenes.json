@@ -1,0 +1,754 @@
+{
+  "scenes": [
+    {
+      "name": "fork-source-picker",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 10,
+      "run_s": 4,
+      "key_gap": 2.0,
+      "keys": [
+        "press:home.shelf.0.card.1",
+        "press:detail.hero.alt",
+        "press:alt.row.0"
+      ],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "expect_lines": [
+        "coldopen screen=alt"
+      ],
+      "a11y_checks": [
+        {
+          "has_ids": [
+            "alt.row.0"
+          ],
+          "min_count": [
+            {
+              "prefix": "alt.row.",
+              "n": 2
+            }
+          ],
+          "max_count": [
+            {
+              "prefix": "alt.row.",
+              "n": 9
+            }
+          ]
+        }
+      ],
+      "note": "Fork-only: Detail ▸ Sources opens a bounded, non-empty source list from the local addon. Picking a source is deliberately NOT pressed (it opens the real engine against peers).",
+      "local_tmdb": true
+    },
+    {
+      "name": "fork-episode-click",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 10,
+      "run_s": 6,
+      "key_gap": 5.0,
+      "keys": [
+        "press:home.shelf.0.card.0",
+        "press:detail.episodes.still.0",
+        "press:alt.row.0",
+        "press:alt.row.0"
+      ],
+      "triggers": [
+        "clocksink"
+      ],
+      "mock_addon_args": [
+        "--movies",
+        "30",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "1",
+        "--lead-series",
+        "--sources",
+        "4",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa",
+        "--media",
+        "@FIXTURE_MEDIA@"
+      ],
+      "expect_lines": [
+        "coldopen screen=alt",
+        "coldopen screen=player"
+      ],
+      "a11y_checks": [
+        {
+          "route": "player",
+          "has_ids": [
+            "player.control.subtitles",
+            "player.control.audio"
+          ]
+        }
+      ],
+      "note": "Fork-only: the local addon's series has real episodes with synthetic id tt8000000:1:1; pressing its still enters playback with a genuine ratingKey.",
+      "host_engine": true,
+      "local_tmdb": true
+    },
+    {
+      "name": "fork-subtitle-drill",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 10,
+      "run_s": 8,
+      "key_gap": 4.0,
+      "keys": [
+        "press:home.shelf.0.card.0",
+        "press:detail.episodes.still.0",
+        "press:alt.row.0",
+        "press:alt.row.0",
+        "press:player.control.subtitles",
+        "press:menu.other",
+        "press:menu.lang.0",
+        "press:menu.sub.1",
+        "press:player.control.subtitles"
+      ],
+      "triggers": [
+        "clocksink"
+      ],
+      "mock_addon_args": [
+        "--movies",
+        "30",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "1",
+        "--lead-series",
+        "--sources",
+        "4",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa",
+        "--media",
+        "@FIXTURE_MEDIA@"
+      ],
+      "expect_lines": [
+        "coldopen screen=alt",
+        "coldopen screen=player"
+      ],
+      "a11y_checks": [
+        {
+          "route": "player",
+          "has_ids": [
+            "menu.off",
+            "menu.forced",
+            "menu.sub.0",
+            "menu.other",
+            "menu.search"
+          ],
+          "absent_ids": [
+            "menu.lang.0"
+          ],
+          "max_count": [
+            {
+              "prefix": "menu.sub.",
+              "n": 4
+            }
+          ]
+        }
+      ],
+      "note": "Fork-only: Subtitles ▸ Other languages ▸ a language ▸ a track, then REOPEN the menu. The regression is a flat 12+ row list after the pick; the pass is a compact one/two-language menu with the picked row checked.",
+      "host_engine": true,
+      "local_tmdb": true
+    },
+    {
+      "name": "fork-home-catalog-shape",
+      "behavior": false,
+      "screen": "home",
+      "route": "home",
+      "settle_s": 8,
+      "run_s": 18,
+      "warmup_s": 3,
+      "key_gap": 0.5,
+      "keys": [],
+      "triggers": [
+        "grid",
+        "homeosc"
+      ],
+      "loop_floor": 50,
+      "fps_floor": 20,
+      "mock_addon_args": [
+        "--movies",
+        "300",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "41",
+        "--section-hubs",
+        "2",
+        "--cw-art-fixture",
+        "--sources",
+        "8"
+      ],
+      "note": "Deterministic replacement for the public-benchmark catalog: 41 shelves, 300 movies, locally generated 250x375 art with 220-character tokenized URLs. Host smoke only; the device gate stays on the real addon set.",
+      "local_tmdb": true,
+      "serial": true
+    },
+    {
+      "name": "fork-detail-telemetry",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 10,
+      "run_s": 3,
+      "key_gap": 2.0,
+      "keys": [
+        "press:home.shelf.0.card.0"
+      ],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "20",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "2"
+      ],
+      "expect_regex": [
+        "detail: shim rk=\\d+ meta_ms=\\d+ streams_ms=\\d+ tmdb_ms=\\d+ total_ms=\\d+"
+      ],
+      "a11y_checks": [
+        {
+          "route": "detail",
+          "has_ids": [
+            "detail.hero.play",
+            "detail.cast.card.0"
+          ]
+        }
+      ],
+      "note": "S10 pin: the shim's four detail phase legs are present, on a deterministic local item.",
+      "local_tmdb": true
+    },
+    {
+      "name": "fork-privacy-erase",
+      "behavior": true,
+      "screen": "settings",
+      "route": "settings",
+      "settle_s": 8,
+      "run_s": 3,
+      "key_gap": 3.0,
+      "keys": [
+        "press:privacy.delete",
+        "press:privacy.alert.delete"
+      ],
+      "triggers": [
+        "settings=privacy"
+      ],
+      "mock_addon_args": [
+        "--movies",
+        "2",
+        "--shows",
+        "1",
+        "--home-hubs",
+        "1"
+      ],
+      "expect_lines": [
+        "nuvio: synthetic local data erased"
+      ],
+      "a11y_checks": [
+        {
+          "absent_ids": [
+            "privacy.delete"
+          ]
+        }
+      ],
+      "note": "S4 pin: Delete all local data clears the private redb only; never run this on a real install.",
+      "log_reset": true,
+      "local_tmdb": true
+    },
+    {
+      "name": "fork-catalogs-selector",
+      "behavior": true,
+      "screen": "library",
+      "route": "library",
+      "settle_s": 8,
+      "run_s": 3,
+      "key_gap": 2.0,
+      "keys": [
+        "press:library.header.catalogs",
+        "press:library_menu.catalog.1"
+      ],
+      "triggers": [
+        "library=3"
+      ],
+      "mock_addon_args": [
+        "--movies",
+        "30",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "3"
+      ],
+      "expect_lines": [
+        "coldopen screen=library_menu"
+      ],
+      "a11y_checks": [
+        {
+          "route": "library",
+          "has_ids": [
+            "library.header.catalogs"
+          ]
+        }
+      ],
+      "note": "S7 pin: the Movies header exposes Catalogs, the menu opens, and selecting a row changes the grid.",
+      "local_tmdb": true
+    },
+    {
+      "name": "sc-s1-sealed-boot",
+      "behavior": true,
+      "screen": "home",
+      "route": "home",
+      "settle_s": 6,
+      "run_s": 2,
+      "key_gap": 0.5,
+      "keys": [],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "expect_lines": [
+        "nuvio: LIVE addon installed:",
+        "nuvio: LIVE tmdb=configured",
+        "nuvio: SYNTHETIC private redb store",
+        "nuvio: shim serving on"
+      ],
+      "expect_regex": [
+        "nuvio: 1 addon\\(s\\): Local Fixture",
+        "ff: bound avutil -> .*libavutil-plx-host",
+        "ff: bound swresample -> .*libswresample-plx-host",
+        "ff: bound avcodec -> .*libavcodec-plx-host",
+        "ff: bound avformat -> .*libavformat-plx-host",
+        "ff: bound swscale -> .*libswscale-plx-host"
+      ],
+      "expect_absent": [
+        "ff: FFmpeg unavailable",
+        "ff: swresample is MISSING"
+      ],
+      "a11y_checks": [
+        {
+          "route": "home",
+          "min_count": [
+            {
+              "prefix": "home.shelf.0.card.",
+              "n": 1
+            }
+          ]
+        }
+      ],
+      "note": "S1 + S9: sealed nuviolive boot with local addon and all five host FFmpeg binds, no MISSING line."
+    },
+    {
+      "name": "sc-s2-person",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 8,
+      "run_s": 2,
+      "key_gap": 3.0,
+      "keys": [
+        "press:home.shelf.0.card.1",
+        "press:detail.cast.card.0"
+      ],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "expect_lines": [
+        "coldopen screen=person"
+      ],
+      "expect_regex": [
+        "person: profile guid=",
+        "person: credits .* rows="
+      ],
+      "a11y_checks": [
+        {
+          "route": "person",
+          "min_count": [
+            {
+              "prefix": "person.filmography.",
+              "n": 1
+            }
+          ]
+        }
+      ],
+      "note": "S2: cast card opens a person page served by the shim from the local TMDB fixture."
+    },
+    {
+      "name": "sc-s5-playback-pipeline",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 8,
+      "run_s": 5,
+      "key_gap": 5.0,
+      "keys": [
+        "press:home.shelf.0.card.0",
+        "press:detail.episodes.still.0",
+        "press:alt.row.0",
+        "press:alt.row.0"
+      ],
+      "triggers": [
+        "clocksink"
+      ],
+      "host_engine": true,
+      "mock_addon_args": [
+        "--movies",
+        "30",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "1",
+        "--lead-series",
+        "--sources",
+        "4",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa",
+        "--media",
+        "@FIXTURE_MEDIA@"
+      ],
+      "expect_regex": [
+        "clocksink: ARMED",
+        "ff: v=#0 codec=h264",
+        "playing item: rk=\\d+ audio=\\d+ subs=\\d+"
+      ],
+      "a11y_checks": [
+        {
+          "route": "player",
+          "has_ids": [
+            "player.control.subtitles"
+          ]
+        }
+      ],
+      "note": "S5: demux/framing/clock with a real ratingKey from the local addon; picture is black by design."
+    },
+    {
+      "name": "sc-s6-dead-addon",
+      "behavior": true,
+      "screen": "home",
+      "route": "home",
+      "settle_s": 8,
+      "run_s": 2,
+      "key_gap": 0.5,
+      "keys": [],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "mock_addon_extra_urls": [
+        "http://127.0.0.1:9/dead-manifest.json"
+      ],
+      "expect_lines": [
+        "nuvio: LIVE addon FAILED",
+        "hubs: landed"
+      ],
+      "a11y_checks": [
+        {
+          "route": "home",
+          "min_count": [
+            {
+              "prefix": "home.shelf.0.card.",
+              "n": 1
+            }
+          ]
+        }
+      ],
+      "note": "S6: one dead addon degrades gracefully; the local addon still lands a populated Home."
+    },
+    {
+      "name": "sc-s8-brand-about",
+      "behavior": true,
+      "screen": "settings",
+      "route": "settings",
+      "settle_s": 6,
+      "run_s": 2,
+      "key_gap": 2.0,
+      "keys": [
+        "press:settings.about"
+      ],
+      "triggers": [
+        "settings=root"
+      ],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "shot": "sc-s8-about",
+      "expect_lines": [
+        "overlay=legal"
+      ],
+      "note": "S8: About page opens; copy must be read from the shot (GPL, upstream attribution, TMDB notice, BetterPosters)."
+    },
+    {
+      "name": "sc-s11-p2p-gate",
+      "behavior": true,
+      "screen": "settings",
+      "route": "settings",
+      "settle_s": 6,
+      "run_s": 3,
+      "key_gap": 5.0,
+      "keys": [
+        "press:playback.p2p_toggle",
+        "back",
+        "press:nav.movies",
+        "press:library.grid.card.0",
+        "press:detail.hero.alt"
+      ],
+      "triggers": [
+        "settings=playback"
+      ],
+      "host_engine": true,
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa",
+        "--media",
+        "@FIXTURE_MEDIA@"
+      ],
+      "shot": "sc-s11-p2p-off",
+      "expect_lines": [
+        "coldopen screen=alt"
+      ],
+      "a11y_checks": [
+        {
+          "route": "detail"
+        }
+      ],
+      "note": "S11: toggle Enable P2P off in the SAME boot, then open Sources; the toggle state and the empty-picker text must be read from sc-s11-p2p-off-1.png (log-only proof is unreliable for a visual setting)."
+    },
+    {
+      "name": "sc-s12-resume",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 8,
+      "run_s": 4,
+      "key_gap": 5.0,
+      "keys": [
+        "press:home.shelf.0.card.0",
+        "press:detail.episodes.still.0",
+        "press:alt.row.0",
+        "press:alt.row.0",
+        "stop",
+        "back",
+        "back",
+        "back"
+      ],
+      "triggers": [
+        "clocksink"
+      ],
+      "host_engine": true,
+      "mock_addon_args": [
+        "--movies",
+        "30",
+        "--shows",
+        "2",
+        "--home-hubs",
+        "1",
+        "--lead-series",
+        "--sources",
+        "4",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa",
+        "--media",
+        "@FIXTURE_MEDIA@"
+      ],
+      "expect_regex": [
+        "clocksink: ARMED"
+      ],
+      "a11y_checks": [
+        {
+          "has_ids": [
+            "home.continue.card.0"
+          ]
+        }
+      ],
+      "note": "S12: stop a partial playback, back to Home, and assert the Continue Watching card; the Resume pill label must be read from the shot."
+    },
+    {
+      "name": "sc-s14-logo-plot",
+      "behavior": true,
+      "screen": "home",
+      "route": "home",
+      "settle_s": 6,
+      "run_s": 3,
+      "key_gap": 1.0,
+      "keys": [],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "shot": "sc-s14-home-hero",
+      "a11y_checks": [
+        {
+          "route": "home",
+          "min_count": [
+            {
+              "prefix": "home.shelf.0.card.",
+              "n": 1
+            }
+          ]
+        }
+      ],
+      "note": "S14: Home hero plot and player clear logo are VISUAL pins — open sc-s14-home-hero-1.png; no log-only proof.",
+      "expect_lines": [
+        "coldopen screen=home"
+      ]
+    },
+    {
+      "name": "sc-s15-trailer-dash",
+      "behavior": true,
+      "screen": "home",
+      "route": "detail",
+      "settle_s": 8,
+      "run_s": 5,
+      "key_gap": 3.0,
+      "keys": [
+        "press:home.shelf.0.card.1",
+        "press:detail.extras.card.0"
+      ],
+      "triggers": [],
+      "mock_addon_args": [
+        "--movies",
+        "60",
+        "--shows",
+        "12",
+        "--home-hubs",
+        "3",
+        "--sources",
+        "8",
+        "--subs-per-lang",
+        "4",
+        "--languages",
+        "eng,alb,ind,spa"
+      ],
+      "expect_regex": [
+        "trailer:|dash:"
+      ],
+      "a11y_checks": [
+        {
+          "route": "player"
+        }
+      ],
+      "note": "S15: trailer card opens the player; DASH manifest/framing evidence is in the log if the host demux is armed."
+    },
+    {
+      "name": "sc-s16-fake-mode",
+      "behavior": true,
+      "screen": "home",
+      "route": "home",
+      "settle_s": 5,
+      "run_s": 2,
+      "key_gap": 0.5,
+      "keys": [],
+      "triggers": [],
+      "fake_mode": true,
+      "expect_lines": [
+        "nuvio: SYNTHETIC private redb store",
+        "nuvio: SYNTHETIC debug backend"
+      ],
+      "expect_absent": [
+        "nuvio: LIVE"
+      ],
+      "a11y_checks": [
+        {
+          "route": "home",
+          "min_count": [
+            {
+              "prefix": "home.shelf.0.card.",
+              "n": 1
+            }
+          ]
+        }
+      ],
+      "note": "S16: fixed fake catalog with no public addons and no TMDB; the control that makes S1 meaningful."
+    }
+  ]
+}
