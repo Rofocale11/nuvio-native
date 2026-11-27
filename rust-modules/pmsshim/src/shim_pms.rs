@@ -10,9 +10,11 @@ use crate::shim_store::{
     WatchState,
 };
 use crate::shim_profiles;
+// Fork Rofocale11: name the image-origin helper through the registered `addons_tmdb` module;
+// the layer gate classifies a bare `plx_stremio::` root item as [app], which [pmsshim] may not use.
 use plx_stremio::addons_tmdb::{
-    TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie, TmdbMovieDetails,
-    TmdbPerson, TmdbShow, TmdbShowDetails,
+    tmdb_image_base, TmdbCast, TmdbClient, TmdbCollection, TmdbCredit, TmdbImages, TmdbMovie,
+    TmdbMovieDetails, TmdbPerson, TmdbShow, TmdbShowDetails,
 };
 use plx_stremio::model::{Meta, MetaPreview, Stream, Video};
 use serde_json::{json, Map, Value};
@@ -944,9 +946,11 @@ fn page_params(req: &Request) -> (usize, Option<usize>) {
     (start, size)
 }
 
+// Fork Rofocale11: TMDB image URLs follow TMDB_IMAGE_BASE so sealed host runs never
+// dial the real image CDN; the default stays byte-identical to upstream's ladder.
 fn tmdb_image(path: Option<&str>) -> Option<String> {
     path.filter(|path| path.starts_with('/'))
-        .map(|path| format!("https://image.tmdb.org/t/p/w300{path}"))
+        .map(|path| format!("{}/w300{path}", tmdb_image_base()))
 }
 
 /// TMDB's `images.logos` as the row's `clearLogo`: the English logotype when TMDB has one, else
@@ -963,7 +967,7 @@ fn tmdb_logo(images: Option<&TmdbImages>) -> Option<String> {
         .or_else(|| logos.iter().find(|logo| logo.file_path.is_some()))?;
     pick.file_path
         .as_deref()
-        .map(|path| format!("https://image.tmdb.org/t/p/w500{path}"))
+        .map(|path| format!("{}/w500{path}", tmdb_image_base()))
 }
 
 fn tmdb_role(cast: &TmdbCast) -> Option<Value> {
@@ -5455,7 +5459,7 @@ impl Shim {
     fn tmdb_fallback_row(&self, movie: &TmdbMovie, fallback_key: i64) -> Value {
         let poster = movie.poster_path.as_deref().and_then(|path| {
             path.starts_with('/')
-                .then(|| format!("https://image.tmdb.org/t/p/w300{path}"))
+                .then(|| format!("{}/w300{path}", tmdb_image_base()))
         });
         let preview = MetaPreview {
             id: format!("tmdb:{}", movie.id),
@@ -5465,7 +5469,7 @@ impl Shim {
             background: movie
                 .backdrop_path
                 .as_deref()
-                .map(|path| format!("https://image.tmdb.org/t/p/w300{path}")),
+                .map(|path| format!("{}/w300{path}", tmdb_image_base())),
             description: movie.overview.clone(),
             release_info: movie.release_date.clone(),
             ..MetaPreview::default()
@@ -5597,7 +5601,7 @@ impl Shim {
         let movie = &details.movie;
         let image_url = |path: Option<&str>| {
             path.filter(|path| path.starts_with('/'))
-                .map(|path| format!("https://image.tmdb.org/t/p/w300{path}"))
+                .map(|path| format!("{}/w300{path}", tmdb_image_base()))
         };
         let preview = MetaPreview {
             id: format!("tmdb:{}", movie.id),

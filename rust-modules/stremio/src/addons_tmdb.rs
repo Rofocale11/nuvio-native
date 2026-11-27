@@ -17,6 +17,19 @@ use std::time::{Duration, Instant};
 const API_BASE: &str = "https://api.themoviedb.org/3";
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// Origin for TMDB image paths (`/w500/...`), overridden by `TMDB_IMAGE_BASE` so a hermetic
+/// harness can serve logos, headshots and collection art from loopback too.
+pub fn tmdb_image_base() -> &'static str {
+    static BASE: OnceLock<String> = OnceLock::new();
+    BASE.get_or_init(|| {
+        std::env::var("TMDB_IMAGE_BASE")
+            .ok()
+            .map(|base| base.trim().trim_end_matches('/').to_string())
+            .filter(|base| !base.is_empty())
+            .unwrap_or_else(|| "https://image.tmdb.org/t/p".to_string())
+    }).as_str()
+}
+
 type ResponseCache = Mutex<HashMap<(String, String), (Instant, Value)>>;
 
 fn shared_cache() -> Arc<ResponseCache> {
@@ -45,6 +58,9 @@ fn shared_flights() -> Arc<Flights> {
 #[derive(Clone)]
 pub struct TmdbClient {
     api_key: String,
+    /// HTTP origin for every lookup. The default is TMDB; a hermetic harness can point this at
+    /// a loopback fixture with `TMDB_API_BASE`. Fork-owned module, so no upstream merge surface.
+    api_base: String,
     cache: Arc<ResponseCache>,
     flights: Arc<Flights>,
 }
@@ -353,8 +369,14 @@ impl TmdbClient {
             .map(|key| key.trim().to_string())
             .filter(|key| !key.is_empty())
             .unwrap_or_default();
+        let api_base = std::env::var("TMDB_API_BASE")
+            .ok()
+            .map(|base| base.trim().trim_end_matches('/').to_string())
+            .filter(|base| !base.is_empty())
+            .unwrap_or_else(|| API_BASE.to_string());
         Self {
             api_key,
+            api_base,
             cache: shared_cache(),
             flights: shared_flights(),
         }
@@ -367,7 +389,8 @@ impl TmdbClient {
     fn url(&self, path: &str) -> String {
         let separator = if path.contains('?') { '&' } else { '?' };
         format!(
-            "{API_BASE}{path}{separator}api_key={}",
+            "{}{path}{separator}api_key={}",
+            self.api_base,
             addon_http::encode_component(&self.api_key)
         )
     }
@@ -574,6 +597,7 @@ mod tests {
     fn client(api_key: &str) -> TmdbClient {
         TmdbClient {
             api_key: api_key.to_string(),
+            api_base: API_BASE.to_string(),
             cache: Arc::new(Mutex::new(HashMap::new())),
             flights: Arc::new(Mutex::new(HashMap::new())),
         }
