@@ -81,6 +81,9 @@ LIVE_PROOFS = (
 )
 SESSION_FILE = Path(tempfile.gettempdir()) / "nuvio-tv-session.json"
 SCENES_FILE = REPO / "tests/nuvio-tv-scenes.json"
+# Fork Rofocale11: allow the generated upstream-coverage scene set to be selected without
+# clobbering the hand-written Nuvio scenes. The default path is unchanged.
+SCENES_OVERRIDE = None
 MODES = ("run", "selftest", "start", "shot", "key", "state", "press", "detail", "log",
          "expect", "status", "stop", "bench", "gate", "scenes")
 VALUE_OPTS = frozenset({"--runtime", "--addons", "--trigger", "--keys", "--key-gap", "--settle",
@@ -222,12 +225,14 @@ def require_deployed_binary(flavor: str) -> None:
 
 
 def load_scenes() -> dict[str, dict]:
-    if not SCENES_FILE.is_file():
-        fail(f"missing bench scene file: {SCENES_FILE}", 2)
-    data = json.loads(SCENES_FILE.read_text(encoding="utf-8"))
+    # Fork Rofocale11: the generated upstream-coverage set is selected with --scenes.
+    path = SCENES_OVERRIDE or SCENES_FILE
+    if not path.is_file():
+        fail(f"missing bench scene file: {path}", 2)
+    data = json.loads(path.read_text(encoding="utf-8"))
     scenes = data.get("scenes") if isinstance(data, dict) else None
     if not isinstance(scenes, list) or not scenes:
-        fail(f"{SCENES_FILE} must contain a non-empty `scenes` array", 2)
+        fail(f"{path} must contain a non-empty `scenes` array", 2)
     out: dict[str, dict] = {}
     for scene in scenes:
         if not isinstance(scene, dict) or not scene.get("name") or not scene.get("route"):
@@ -336,18 +341,41 @@ def capture_shot(flavor: str, rundir: str, runtime: Path, name: str) -> Path | N
 
 
 def pick_detail(flavor: str, runtime: Path) -> tuple[str, str]:
-    """Read the live Home snapshot and open a title by id, the same way the host loop does."""
+    """Open a title by id that actually LOADED, so a detail scene has a page to grade.
+
+    Fork Rofocale11: the live benchmark catalog can hand us a shelf card whose metadata fetch
+    failed. The page still opens (`route=detail`) but logs only `detail: rk=N … no metadata`, never
+    the `rk=N show=` line this harness waits for. Picking the first subject-bearing card made
+    `detail-idle` wait 90 s for a line that could not arrive. Try further cards until one loads.
+    """
     out = runtime / "a11y.json"
     call([str(SESSION), "state", "--flavor", flavor, "--out", str(out)], timeout=30)
     elements = json.loads(out.read_text(encoding="utf-8")).get("elements", [])
-    card = next((e for e in elements
-                 if e.get("id", "").startswith("home.shelf.") and e.get("subject")), None)
-    if card is None:
+    candidates = [(e["id"], e["subject"]) for e in elements
+                  if e.get("id", "").startswith("home.shelf.") and e.get("subject")]
+    if not candidates:
         fail("no Home shelf card with a subject in the live snapshot", 1)
-    ident, rk = card["id"], card["subject"]
-    call([str(SESSION), "press", "--flavor", flavor, ident, "--rk", rk], timeout=30)
-    say(f"  opened {ident} rk={rk}")
-    return ident, rk
+    tried: list[str] = []
+    for ident, rk in candidates[:6]:
+        pressed = call([str(SESSION), "press", "--flavor", flavor, ident, "--rk", rk],
+                       check=False, timeout=30)
+        if pressed.returncode:
+            say(f"  press refused for {ident} rk={rk}; trying next card")
+            continue
+        say(f"  opened {ident} rk={rk}")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            text = tv_log(flavor)
+            if f"rk={rk} show=" in text:
+                return ident, rk
+            if f"detail: rk={rk}" in text and "no metadata" in text:
+                break
+            time.sleep(0.5)
+        tried.append(rk)
+        # The failed card still opened a page; return Home before pressing the next one.
+        call([str(SESSION), "key", "--flavor", flavor, "back"], check=False, timeout=30)
+        time.sleep(1)
+    fail(f"no shelf card loaded detail metadata (tried rks: {', '.join(tried)})", 1)
 
 
 def save_session(data: dict) -> None:
@@ -1025,7 +1053,9 @@ def parser() -> argparse.ArgumentParser:
                    help="press an accessibility id; pair with --rk for title-bearing elements")
     p.add_argument("--rk", metavar="ratingKey", help="title this --press must act on")
     p.add_argument("--scene", metavar="NAME",
-                   help="bench scene from tests/nuvio-tv-scenes.json (`nuvio-tv.py scenes` lists them)")
+                   help="bench scene from the scene file (`nuvio-tv.py scenes` lists them)")
+    p.add_argument("--scenes", metavar="FILE",
+                   help="scene file; defaults to tests/nuvio-tv-scenes.json (fork: generated coverage set)")
     p.add_argument("--suite", action="store_true",
                    help="with bench: run every declared scene in turn, each in its own sealed boot")
     p.add_argument("--runs", type=int, default=2,
@@ -1038,6 +1068,7 @@ def parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     ns = parser().parse_args(normalize_argv(sys.argv[1:]))
+    SCENES_OVERRIDE = Path(ns.scenes).resolve() if getattr(ns, "scenes", None) else None
     if ns.mode == "selftest":
         selftest()
     elif ns.mode == "scenes":

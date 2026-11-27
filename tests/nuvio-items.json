@@ -1,0 +1,26 @@
+{
+  "_comment": "Fork-owned: synthetic ratingKeys from a sealed nuviolive boot against the benchmark addon. No owner account, token, title or private manifest.local.json is read. Regenerate with tools/nuvio-items.py when the addon list changes.",
+  "source": "nuviolive + tests/nuvio-tv-benchmark-addons.json",
+  "movies_seen": 30,
+  "shows_seen": 30,
+  "items": {
+    "movie_in_home_catalog": "10018",
+    "movie_with_related": "10024",
+    "movie_cast0_in_both_libraries": "10031",
+    "collection_member_movie": "10038",
+    "collection": "10023",
+    "movie_h264_ac3_1080p": "10055",
+    "show_detail": "10017",
+    "show_long_season": "10018"
+  },
+  "unmapped": [
+    "episode_hevc_4k_hdr10_eac3",
+    "movie_av1_no_dp_audio",
+    "movie_hevc_4k_dovi_p8",
+    "episode_h264_aac",
+    "movie_h264_ac3_many_audio",
+    "movie_hevc_4k_hdr10_truehd",
+    "movie_hevc_aac_mp4",
+    "movie_hevc_4k_pgs_subs"
+  ]
+}
