@@ -39,6 +39,14 @@ pub trait Backend: Send + Sync {
         fp
     }
 
+    /// Fork Rofocale11: Settings > Addons persists its toggle in the account's `addonEnabled`
+    /// prefs, not in the addon set loaded from the durable store. Every install of a set must
+    /// apply those overrides or a disabled addon comes back on after a restart. Pseudo backends
+    /// have no addon set and answer false.
+    fn apply_enabled_overrides(&self, _overrides: &serde_json::Map<String, serde_json::Value>) -> bool {
+        false
+    }
+
     /// Home-shelf catalogs, in the user's addon order.
     fn catalogs(&self) -> Vec<CatalogInfo>;
     /// Every browseable catalog (Home shelves plus ones hidden from Home), for the Library
@@ -85,6 +93,26 @@ pub trait Backend: Send + Sync {
     }
 }
 
+/// Fork Rofocale11: apply the account's saved `addonEnabled` overrides to a set before it is
+/// installed. Shared by the boot install (`shim_core::start_on`) and the account reload
+/// (`shim_account::activate_loaded_profile`) so the two paths cannot drift. Returns whether a
+/// flag actually changed, which is what tells the shim whether its warm caches are now stale.
+pub fn apply_addon_overrides(
+    set: &mut plx_stremio::addons::AddonSet,
+    overrides: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let mut changed = false;
+    for addon in set.addons.iter_mut() {
+        if let Some(enabled) = overrides.get(&addon.transport_url).and_then(serde_json::Value::as_bool) {
+            if addon.disabled == enabled {
+                addon.disabled = !enabled;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// The user's addons. Swappable at run time ([`AddonBackend::replace`]) so Settings can install,
 /// remove or re-import addons without restarting the shim.
 pub struct AddonBackend {
@@ -100,6 +128,16 @@ impl AddonBackend {
     }
     pub fn snapshot(&self) -> plx_stremio::addons::AddonSet {
         self.set.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn apply_overrides(&self, overrides: &serde_json::Map<String, serde_json::Value>) -> bool {
+        let mut set = self.snapshot();
+        if apply_addon_overrides(&mut set, overrides) {
+            self.replace(set);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -131,6 +169,10 @@ impl Backend for AddonBackend {
             .collect();
         fp.sort();
         fp
+    }
+
+    fn apply_enabled_overrides(&self, overrides: &serde_json::Map<String, serde_json::Value>) -> bool {
+        self.apply_overrides(overrides)
     }
 
     fn catalogs(&self) -> Vec<CatalogInfo> {
@@ -196,5 +238,51 @@ mod poster_tests {
         assert!(p.ends_with("rs=RT"));
         assert_eq!(backend.poster("tmdb:123", Some("original")), Some("original".into()));
         assert_eq!(backend.poster("tt123?credential", Some("original")), Some("original".into()));
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn overrides(pairs: &[(&str, bool)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), serde_json::Value::Bool(*v))).collect()
+    }
+
+    /// The durable set says enabled; the prefs saved by Settings say off. A boot must flip it,
+    /// and a second install of the same override must report no change so warm caches survive.
+    #[test]
+    fn saved_disable_is_applied_once() {
+        let mut set = plx_stremio::addons::AddonSet::defaults();
+        let saved = overrides(&[(plx_stremio::addons::CINEMETA_URL, false)]);
+        assert!(!set.addons[0].disabled);
+        assert!(apply_addon_overrides(&mut set, &saved));
+        assert!(set.addons[0].disabled);
+        assert!(!apply_addon_overrides(&mut set, &saved));
+    }
+
+    /// Unknown keys and non-boolean values are never a reason to disable an addon or to drop a
+    /// warm cache.
+    #[test]
+    fn unknown_and_malformed_overrides_are_ignored() {
+        let mut set = plx_stremio::addons::AddonSet::defaults();
+        let unknown = overrides(&[("https://unknown.example/manifest.json", false)]);
+        let mut malformed = overrides(&[(plx_stremio::addons::OPENSUBTITLES_URL, true)]);
+        malformed.insert(
+            plx_stremio::addons::OPENSUBTITLES_URL.into(),
+            serde_json::Value::String("false".into()),
+        );
+        assert!(!apply_addon_overrides(&mut set, &unknown));
+        assert!(!apply_addon_overrides(&mut set, &malformed));
+        assert!(set.addons.iter().all(|a| !a.disabled));
+    }
+
+    #[test]
+    fn the_backend_installs_the_overridden_set() {
+        let backend = AddonBackend::new(plx_stremio::addons::AddonSet::defaults());
+        let saved = overrides(&[(plx_stremio::addons::OPENSUBTITLES_URL, false)]);
+        assert!(backend.apply_enabled_overrides(&saved));
+        assert!(backend.snapshot().addons[1].disabled);
+        assert!(!backend.apply_enabled_overrides(&saved));
     }
 }

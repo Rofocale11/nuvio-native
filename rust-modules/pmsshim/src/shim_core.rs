@@ -79,9 +79,16 @@ pub fn start_on(backend: Arc<dyn Backend>, cfg: Config, host: &str, port: u16) -
     let token = cfg.token.clone();
     // Fork Rofocale11: the synthetic decision is captured before `cfg` moves into the Shim.
     let synthetic = cfg.synthetic;
-    let shim = Arc::new(crate::shim_pms::Shim::new(backend, cfg));
+    let shim = Arc::new(crate::shim_pms::Shim::new(backend.clone(), cfg));
     shim.bind_self();
     shim.account.set_origin(&format!("http://127.0.0.1:{port}"));
+    // Fork Rofocale11: the durable addon set is installed here without the Settings > Addons
+    // toggles, which live only in the account prefs. Apply them before the first warm and before
+    // anything can cache catalogs from an addon the viewer turned off. A synthetic boot has no
+    // household prefs and must not read them.
+    if !synthetic && backend.apply_enabled_overrides(&shim.account.addon_enabled_overrides()) {
+        shim.addons_changed();
+    }
     // Fork Rofocale11: Continue Watching is account-backed. In synthetic mode it stays local —
     // a headless run on a signed-in TV must not merge (or later write) the household's history.
     if !synthetic {

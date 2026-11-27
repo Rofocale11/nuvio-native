@@ -224,6 +224,18 @@ impl Account {
         prefs.get("addonEnabled").and_then(Value::as_object).and_then(|m| m.get(key)).and_then(Value::as_bool)
     }
 
+    /// Fork Rofocale11: the whole map for the boot install. The durable addon set carries no
+    /// record of a Settings toggle, so the shim applies these prefs to the set it starts with.
+    pub fn addon_enabled_overrides(&self) -> serde_json::Map<String, Value> {
+        self.prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("addonEnabled")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Persist a local enable/disable override for an addon into `nuvio-session.json`.
     pub fn set_addon_enabled(&self, key: &str, enabled: bool) {
         {
@@ -765,16 +777,19 @@ fn activate_loaded_profile<F>(
         if let Some(store) = plx_nuvio_store::get() {
             let _ = store.put(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp", account_fp.as_bytes());
         }
-        let mut addons = addons;
-        if !addons.is_empty() {
-            // Apply session-scoped enable/disable overrides from nuvio-session.json.
-            let overrides = prefs.lock().unwrap_or_else(|e| e.into_inner()).get("addonEnabled").and_then(Value::as_object).cloned().unwrap_or_default();
-            for a in addons.iter_mut() {
-                if let Some(b) = overrides.get(&a.transport_url).and_then(Value::as_bool) {
-                    a.disabled = !b;
-                }
-            }
-            sink(plx_stremio::addons::AddonSet { addons });
+        let mut set = plx_stremio::addons::AddonSet { addons };
+        if !set.addons.is_empty() {
+            // Apply session-scoped enable/disable overrides from nuvio-session.json. The same
+            // helper serves the boot install, so the two paths cannot drift apart.
+            let overrides = prefs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get("addonEnabled")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            crate::shim_backend::apply_addon_overrides(&mut set, &overrides);
+            sink(set);
         }
     }
     if library.lock().unwrap_or_else(|e| e.into_inner()).generation != generation {
@@ -1097,6 +1112,29 @@ mod tests {
         });
 
         assert!(order.lock().unwrap().is_empty(), "a superseded fetch must not install or pull");
+    }
+
+    /// Settings > Addons writes the toggle to the account prefs, but the durable addon set the
+    /// app boots from still says "enabled". A restart must apply the saved override to that set
+    /// before the shim warms its catalogs, or the addon comes back on by itself.
+    #[test]
+    fn a_saved_addon_disable_survives_a_restart() {
+        let _serial = serial();
+        install_test_store();
+        let dir = temp_dir();
+        let account = super::Account::new(Some(&dir), "tok");
+        account.set_addon_enabled(plx_stremio::addons::OPENSUBTITLES_URL, false);
+
+        let backend = Arc::new(crate::shim_backend::AddonBackend::new(plx_stremio::addons::AddonSet::defaults()));
+        assert!(!backend.snapshot().addons[1].disabled, "the durable set starts enabled");
+        let _handle = crate::shim_core::start(backend.clone(), crate::shim_core::Config::default(), 0)
+            .expect("bind loopback");
+
+        assert!(
+            backend.snapshot().addons[1].disabled,
+            "the override saved at the last Settings visit must be applied when the shim boots"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
