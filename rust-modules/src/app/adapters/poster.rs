@@ -160,6 +160,10 @@ struct Pslot {
     /// external logo URL wrapped in a resizer link stayed a skeleton. A `String` has no such
     /// ceiling; [`set_key`] reuses its capacity, so a warm store claims without allocating.
     key: String,
+    // Fork Rofocale11: the old fork's one-word identity for `key` (token excluded), written only by
+    // `set_key`. The slot scan is 96 comparisons per probe on EVERY visible tile of EVERY page
+    // walk; comparing one word keeps that scan off the render thread's critical path.
+    art: u64,
     /// Which server this art was asked of — the OTHER half of the slot's identity, and what the
     /// worker dials. Two servers can hand out the same `/photo/:/transcode?url=/library/metadata/
     /// 42/thumb/…` path (their rating keys are both server-local integers from 1), so a key alone
@@ -219,6 +223,7 @@ struct Pslot {
 impl Pslot {
     const ZERO: Pslot = Pslot {
         key: String::new(),
+        art: 0,
         srv: ServerId::UNSET,
         pw: 0,
         ph: 0,
@@ -413,13 +418,29 @@ fn is_transient(outcome: &plx_plex::plex::ArtFetch) -> bool {
 /// resident slot answers a draw whose key differs only in `X-Plex-Token`, and [`lookup`] re-keys
 /// it; whether the IDENTITY behind that token still matches is [`Pslot::grant_epoch`]'s question.
 fn same_art(s: &Pslot, srv: ServerId, key: &[u8]) -> bool {
+    same_art_h(s, srv, key, art_hash(key))
+}
+
+/// Fork Rofocale11: [`same_art`] with the probe's hash already computed — what `lookup`'s slot scan
+/// calls so 96 slots cost integers, not 96 `memcmp`s plus two token scans. The stored hash and the
+/// token-less compare both come from the bytes the slot actually holds; a collision still answers
+/// on the full comparison, never a wrong picture.
+fn same_art_h(s: &Pslot, srv: ServerId, key: &[u8], hash: u64) -> bool {
     if s.state == P_EMPTY || s.srv != srv {
         return false;
     }
-    // One memcmp settles the common case (an unchanged credential); only a key that differs pays
-    // for the two token scans.
-    let held = key_bytes(s);
-    held == key || sans_token(held) == sans_token(key)
+    s.art == hash && sans_token(key_bytes(s)) == sans_token(key)
+}
+
+/// FNV-1a over the key with its credential set aside: the identity `same_art` compares, folded to
+/// one word so [`lookup`] computes it once per probe rather than once per slot.
+fn art_hash(key: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in sans_token(key) {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// `key` without its trailing credential. [`plx_plex::plex::Client::with_token`] appends
@@ -506,6 +527,9 @@ fn key_bytes(s: &Pslot) -> &[u8] {
 fn set_key(s: &mut Pslot, key: &str) {
     s.key.clear();
     s.key.push_str(key);
+    // Fork Rofocale11: hash the STORED bytes, not the argument — the slot must answer for what it
+    // can actually match, and `set_key` is the one writer of those bytes.
+    s.art = art_hash(key_bytes(s));
 }
 
 // (server, path, w, h, png) → built transcode path, memoised. resolve_tex_wh_on re-derives the key for
@@ -1114,8 +1138,11 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
     // a stored server under plex.tv's current grant for the same user moves `token_gen` (and the
     // key's `X-Plex-Token`) but not the art — the owner's "every poster blinks when the server is
     // reached" (imgtrace `cause=key_changed`, 2026-09-30).
+    // Fork Rofocale11: one hash per probe, not one per slot — this loop runs for every visible tile
+    // on all three page walks.
+    let probe = art_hash(key_s.as_bytes());
     for i in 0..PT_CAP {
-        if g.slots[i].cache_gen == cache_gen && g.slots[i].grant_epoch == grant_epoch && same_art(&g.slots[i], srv, key_s.as_bytes()) {
+        if g.slots[i].cache_gen == cache_gen && g.slots[i].grant_epoch == grant_epoch && same_art_h(&g.slots[i], srv, key_s.as_bytes(), probe) {
             // Same identity, refreshed credential: carry the fresh request so any later fetch of
             // this slot (a re-arm after eviction, a retry) dials with the grant now in force.
             let key_changed = key_bytes(&g.slots[i]) != key_s.as_bytes();
@@ -1308,7 +1335,10 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
         Some(i) => i,
         None => { trace::outcome("store_full"); return (None, Warm::Full) } // all visible: skip
     };
-    let (was_ready, old_px) = (g.slots[idx].state == P_READY, g.slots[idx].px);
+    // Fork Rofocale11: a P_DECODED slot holds a worker-owned buffer; every other holder is a C
+    // allocation, and the two must be released by their own allocator.
+    let (was_ready, was_decoded, old_px) = (g.slots[idx].state == P_READY, g.slots[idx].state == P_DECODED, g.slots[idx].px);
+    let (old_w, old_h) = (g.slots[idx].pw, g.slots[idx].ph);
     if trace::armed() {
         if g.slots[idx].state != P_EMPTY {
             trace::lost(idx, g.slots[idx].gen, "recycled");
@@ -1365,9 +1395,7 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
     if was_ready {
         tex::free(PosterKey(idx as u32), &mut GfxUploader);
     }
-    if old_px != 0 {
-        img::img_free(old_px as *mut c_uchar);
-    }
+    free_pixels(old_px, was_decoded, old_w, old_h);
     #[cfg(feature = "devtriggers")]
     plx_ui::card_motion_metrics::request();
     CV.notify_one();
@@ -1575,11 +1603,42 @@ pub(crate) fn begin_frame() -> Vec<ResourceOutcome> {
     results
 }
 
+/// Fork Rofocale11: the old fork's worker-side ownership of decoded pixels. Converting the decoder's
+// C allocation into a Rust-owned buffer on the RENDER thread cost 8-82 ms of a 16.7 ms frame in page
+// faults on a fresh multi-megabyte allocation; a worker has the same copy and no deadline. A slot in
+// P_DECODED therefore holds an `owned_px` buffer, and every other holder is a C allocation that goes
+// back through `img_free` (the guard-page allocator is not interchangeable with `free`).
+fn owned_px(px: *mut c_uchar, w: c_int, h: c_int) -> usize {
+    let n = (w as usize) * (h as usize) * 4;
+    // SAFETY: `px` is a non-null w*h*4 allocation this worker owns and it is freed right here.
+    let owned: Box<[u8]> = unsafe { std::slice::from_raw_parts(px as *const u8, n) }.into();
+    img::img_free(px);
+    Box::into_raw(owned) as *mut u8 as usize
+}
+
+/// # Safety
+/// `px` must be an [`owned_px`] address and nothing else may hold it any more.
+unsafe fn take_owned_px(px: usize, w: c_int, h: c_int) -> Box<[u8]> {
+    let n = (w as usize) * (h as usize) * 4;
+    unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(px as *mut u8, n)) }
+}
+
+fn free_pixels(px: usize, owned: bool, w: c_int, h: c_int) {
+    if px == 0 {
+        return;
+    }
+    if owned {
+        // SAFETY: `owned` is passed exactly for a P_DECODED slot's `px`.
+        unsafe { drop(take_owned_px(px, w, h)) };
+    } else {
+        img::img_free(px as *mut c_uchar);
+    }
+}
+
 /// MAIN thread, once per frame (§3.3 step 3, the adapter's results): every slot a worker has
-/// DECODED hands its pixels to the render cache as one `PosterReady` and becomes READY. No GL
-/// here — the cache uploads in PREPARE ([`prepare`]). The pixels are copied once out of the
-/// decoder's C allocation into the owned `Decoded` (a 250x375 poster is ~375 KB, tens of
-/// microseconds) so the library owns what it uploads.
+/// DECODED hands its pixels to the render cache as one `PosterReady` and becomes READY. No GL here
+/// (the cache uploads in PREPARE) and no pixel copy either — the worker already converted the
+/// decoder's allocation into an owned buffer, so this loop only moves the pointer.
 pub(crate) fn drain_decoded() {
     loop {
         let (idx, px, w, h, current) = {
@@ -1598,26 +1657,22 @@ pub(crate) fn drain_decoded() {
             (i, px, w, h, current)
         };
         if !current {
-            if px != 0 { img::img_free(px as *mut c_uchar); }
+            free_pixels(px, true, w, h);
             continue;
         }
         let key = PosterKey(idx as u32);
         let result = if px != 0 && w > 0 && h > 0 && w <= u16::MAX as c_int && h <= u16::MAX as c_int {
-            let n = (w as usize) * (h as usize) * 4;
-            // SAFETY: the worker decoded exactly w*h RGBA bytes at `px` (img::img_decode_rgba's
-            // contract) and handed the pointer over under the lock; it is freed right below.
-            let rgba: Box<[u8]> = unsafe { std::slice::from_raw_parts(px as *const u8, n) }.into();
+            // SAFETY: a P_DECODED slot holds exactly what `owned_px` stored — a Box of w*h*4 bytes.
+            let rgba: Box<[u8]> = unsafe { take_owned_px(px, w, h) };
             Ok(Decoded {
                 w: w as u16,
                 h: h as u16,
                 rgba,
             })
         } else {
+            free_pixels(px, true, w, h);
             Err(PosterError::Decode)
         };
-        if px != 0 {
-            img::img_free(px as *mut c_uchar);
-        }
         tex::accept(PosterReady { key, result });
         let mut g = store();
         // Rejection may synchronously notify unresident during accept. Preserve that verdict.
@@ -2249,7 +2304,9 @@ fn poster_worker() {
             let s = &mut g.slots[idx];
             if s.gen == gen && s.state == P_LOADING {
                 if cache_gen == plx_os::imgcache::generation() && !px.is_null() {
-                    s.px = px as usize;
+                    // Fork Rofocale11: own the pixels here, on the worker. The render thread used
+                    // to pay the page faults for this conversion on a frame it had to present.
+                    s.px = owned_px(px, w, h);
                     s.pw = w;
                     s.ph = h;
                     s.state = P_DECODED;
@@ -2368,14 +2425,13 @@ pub(crate) fn shutdown() {
     {
         let mut g = store();
         for i in 0..PT_CAP {
-            to_free.push(g.slots[i].px);
+            to_free.push((g.slots[i].px, g.slots[i].state == P_DECODED, g.slots[i].pw, g.slots[i].ph));
             g.slots[i] = Pslot::ZERO;
         }
     }
-    for px in to_free {
-        if px != 0 {
-            img::img_free(px as *mut c_uchar);
-        }
+    // Fork Rofocale11: release by owner — a P_DECODED slot holds a worker-owned Box, others C pixels.
+    for (px, owned, w, h) in to_free {
+        free_pixels(px, owned, w, h);
     }
     tex::shutdown(&mut GfxUploader);
 }
@@ -4148,6 +4204,22 @@ mod tests {
             });
             assert_eq!(victim(&slots, 7), None, "state {st} must not be evictable");
         }
+    }
+
+    /// Fork Rofocale11: the slot scan's hash must describe the bytes the slot actually holds, and
+    /// must ignore a refreshed credential. Without this the 96-slot scan pays two token scans and a
+    /// ~250-byte comparison per visible tile on every page walk.
+    #[test]
+    fn art_hash_stamps_the_stored_bytes_and_ignores_the_token() {
+        const KEY: &str = "/photo/:/transcode?width=250&height=375&minSize=1&url=%2Flibrary%2Fmetadata%2F42%2Fthumb%2F1";
+        let sid = ServerId::from_raw(7);
+        let mut s = Pslot { state: P_READY, srv: sid, ..Pslot::ZERO };
+        set_key(&mut s, KEY);
+        assert_eq!(s.art, art_hash(KEY.as_bytes()), "set_key stamps the hash of what it stored");
+        assert!(same_art_h(&s, sid, KEY.as_bytes(), s.art));
+        let fresh = format!("{KEY}&X-Plex-Token=fresh");
+        assert!(same_art_h(&s, sid, fresh.as_bytes(), art_hash(fresh.as_bytes())), "a new credential is the same art");
+        assert!(!same_art_h(&s, sid, KEY.as_bytes(), s.art ^ 1), "a hash the slot does not hold is refused before any key compare");
     }
 
     /// **The two-server identity rule.** Rating keys are server-local integers from 1, so our own

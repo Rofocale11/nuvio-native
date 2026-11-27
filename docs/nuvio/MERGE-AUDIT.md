@@ -76,6 +76,15 @@ fork-owned copies, with no conflict to resolve.
   doc (`recent_channels`).
 - `rust-modules/src/app/input.rs`: kept both the fork's `miss_label` / Home-Resume
   wait and upstream's devtrigger `api` field / `for_api` constructor.
+- `rust-modules/src/app/adapters/poster.rs`: ported the two missing halves of old-fork
+  `204ad687f` (in the `3c4bfd60..41cf768f` push). A slot now stores `art`, an FNV-1a hash of its
+  token-less key, stamped by `set_key`; `lookup` computes one hash per probe and `same_art_h`
+  compares integers, so the 96-slot scan no longer pays ~250-byte comparisons on every visible
+  tile of every page walk. Decoded pixels are converted to a Rust-owned buffer **on the worker**
+  (`owned_px`) and released by owner (`free_pixels`), so the render thread no longer takes the
+  page faults for a fresh multi-megabyte allocation. The oversized-art cap from the same commit
+  was already present in this tree. `art_hash_stamps_the_stored_bytes_and_ignores_the_token`
+  pins the hash rule.
 - `rust-modules/screens/src/registry.rs` and `rust-modules/src/app/recorder.rs`:
   kept both shape inventories, used upstream's frozen `prior_vector` iterator for
   historical identities, and re-pinned the combined tree:

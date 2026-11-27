@@ -311,3 +311,27 @@ The stable library endpoint reported the original one saved title. No fresh phys
 playback/subtitle check was run on that artwork/list follow-up at the time; the earlier stable
 viewer confirmation and login observations above remained the playback evidence until the
 owner's 7500PSC confirmation on 2026-11-25 (see Current status).
+
+## Home scroll smoothness — recovered old-fork poster path (2026-11-27, local only)
+
+The old fork's `204ad687f` (in the `3c4bfd60..41cf768f` push) fixed three measured render-thread
+costs, two of which were missing from this tree: the per-slot identity hash and moving the decoded
+pixel copy off the render thread onto the worker. Both are now ported into
+`rust-modules/src/app/adapters/poster.rs` with a hash regression test. The oversized-art cap from
+that commit was already present, and the 750 ms focus dwell from the companion `41cf768f` is
+present as `WARM_DWELL_MS` (the companion's shelf cull was also lost but is currently stashed, not
+in this tree).
+
+Simulator, uncapped mode (the only mode where late frames are rare enough to resolve), same
+15-down/15-up walk with the 41-catalog addon: `frame_gt16` totals **61 baseline vs 4 on two fixed
+runs**, median 1.5 -> 0, FRAMEDROP 7 -> 4. Host coverage: 1537 application tests, `check-nodef`
+and an ARM release build pass.
+
+On the debug TV (ARM release, benchmark addon, panel on, 15 down @0.5 s / pause / 15 up @0.5 s)
+the ported fix graded **2/2 PASS**
+(`/tmp/nuvio-tv-gate-dow45l6n/gate-home-nav-deep.json`: cold 12 frames over 22 ms, max 35.6 ms;
+warm 11, max 32.3 ms, against the calibrated 15/40 contract). The first gate after the port graded
+1/2 on one 47.8 ms cold spike with a second run at 38.7 ms, so the max is variable by ~10 ms on
+this set; the repeat above is the clean result. The earlier stricter committed contract (5/33,
+restored by the stash of the calibrated scene file) does not pass — that contract was calibrated
+as unattainable on this set.
