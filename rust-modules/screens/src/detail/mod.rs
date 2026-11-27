@@ -243,9 +243,12 @@ pub struct DetailScreen {
     /// for free through `Spring::step`'s own `note_spring` call.
     preview_logo: Spring,
     /// The `preview_cache_rk()` this hero already autoplayed a trailer to COMPLETION for, this
-    /// visit. Single slot, not a history — bouncing between two items and back within one visit can
-    /// re-arm each once more per return, which is accepted as reasonable rather than a gap (eng
-    /// review, `docs/trailer-ux-plan.md` §8.2 issue 1B). Reset on `WillLeave`/`Unmount` alongside
+    /// visit — and, Fork Rofocale11:, one the viewer dismissed by moving focus. A key-dismissed
+    /// preview must not start again on returning to the hero: each start re-binds the hardware
+    /// video plane and cost a ~47 ms swap on the 2026-11-27 detail-nav-deep UP leg. Single slot,
+    /// not a history — bouncing between two items and back within one visit can re-arm each once
+    /// more per return, which is accepted as reasonable rather than a gap (eng review,
+    /// `docs/trailer-ux-plan.md` §8.2 issue 1B). Reset on `WillLeave`/`Unmount` alongside
     /// `preview_dwell`/`preview_promoted`, so re-entering the same item's page autoplays again.
     preview_played_for: Option<String>,
     /// The `preview_cache_rk()` captured at the MOMENT [`request_preview`](Self::request_preview)
@@ -4399,6 +4402,9 @@ impl DetailScreen {
         if plx_media::player::preview::occupies() && !hero_active && !self.preview_promoted {
             self.preview_dwell = 0.0;
             self.content(fx, ContentReq::PreviewStop);
+            // Fork Rofocale11: walking back to the hero must not spend a second Load and BOUND
+            // edge on this item; the trailer was already shown and deliberately dismissed.
+            self.note_preview_halted();
         }
         // Natural-completion detection for play-once suppression (`docs/trailer-ux-plan.md` §8.2).
         // `preview_completed_naturally` is a pure function precisely so it is unit-testable
@@ -4515,6 +4521,16 @@ impl DetailScreen {
     /// entry is written under a key nothing ever looks up again.
     fn preview_cache_rk(&self, meta: plx_data::metadata::MetadataView<'_>) -> String {
         self.preview_extra(meta).map(|e| e.rk.clone()).unwrap_or_else(|| self.rk.clone())
+    }
+
+    /// Fork Rofocale11: treat a preview the viewer stopped by leaving the hero as already shown
+    /// for this visit, using the same single slot natural EOS writes. The identity comes from
+    /// `preview_started_for`, captured when the Load actually started, never from a fresh read
+    /// that could name an item swapped underneath a live session.
+    fn note_preview_halted(&mut self) {
+        if let Some(started_for) = self.preview_started_for.take() {
+            self.preview_played_for = Some(started_for);
+        }
     }
 
     fn request_preview<H: ContentLike>(&mut self, fx: &mut Effects<'_, H>, meta: plx_data::metadata::MetadataView<'_>) {
@@ -4672,6 +4688,9 @@ impl DetailScreen {
         }
         self.preview_dwell = 0.0;
         self.content(fx, ContentReq::PreviewStop);
+        // Fork Rofocale11: same play-once rule as the focus-walk halt — a dismissed preview must
+        // not re-bind the video plane on a later return to this hero.
+        self.note_preview_halted();
         true
     }
 

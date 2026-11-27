@@ -10,6 +10,9 @@ pub mod feed_driver;
 pub mod feed_resources;
 pub mod feed_pump;
 pub mod feed_state;
+// Fork Rofocale11: preview teardown parks the demux reader off the key frame instead of joining it
+// on the UI thread; upstream modules keep only the marked branches that move the ownership set.
+pub(crate) mod preview_teardown;
 /// The host's stand-in for the Starfish/ACB seam (see its module doc): the simulator's `sim` build, and
 /// the tests, this crate's own and the ones that enable `test-support`. Two declarations of one file, never
 /// both active, so that no single `cfg` mixes the simulator with `test` (that would be a production-visible

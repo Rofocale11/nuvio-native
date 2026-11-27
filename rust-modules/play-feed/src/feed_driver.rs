@@ -315,6 +315,9 @@ impl FeedDriver {
     pub fn exit_disposition(&self, feed: &FeedResources) -> ExitDisposition {
         if self.active.is_none() && self.staged.is_empty()
             && !feed.is_live() && !feed.has_pending_release() && !feed.has_abandoned_load()
+            // Fork Rofocale11: a parked demux still owns the one native socket pointer, so the
+            // process may not exit with native ownership considered clean.
+            && !feed.has_parked_demux()
             && !feed.has_reaped_release() {
             ExitDisposition::Clean
         } else {

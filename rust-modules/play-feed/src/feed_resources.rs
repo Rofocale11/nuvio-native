@@ -49,6 +49,9 @@ pub struct FeedResources {
     load_tickets: BTreeMap<u64, LoadTicket>,
     next_load_token: u64,
     abandoned_load: Option<feed_state::AbandonedLoad>,
+    // Fork Rofocale11: a preview stop hands the demux thread and every allocation it writes into to
+    // this slot; the per-frame reaper releases them rather than blocking the key frame on the join.
+    parked_demux: Option<crate::preview_teardown::ParkedDemux>,
     reaped_release: Option<(AttemptId, plx_playback_contract::ReleaseStatus)>,
     // The main-thread release tail may inspect/take this through `&self`; the adapter is !Send.
     pending_release: RefCell<Option<feed_state::PendingRelease>>,
@@ -75,6 +78,7 @@ impl FeedResources {
             load_tickets: BTreeMap::new(),
             next_load_token: 0,
             abandoned_load: None,
+            parked_demux: None,
             reaped_release: None,
             pending_release: RefCell::new(None),
             unload_spawner: None,
@@ -176,6 +180,21 @@ impl FeedResources {
     pub fn has_abandoned_load(&self) -> bool { self.abandoned_load.is_some() }
     pub fn abandoned_load_mut(&mut self) -> Option<&mut feed_state::AbandonedLoad> { self.abandoned_load.as_mut() }
     pub fn take_abandoned_load(&mut self) -> Option<feed_state::AbandonedLoad> { self.abandoned_load.take() }
+
+    // Fork Rofocale11: the parked-demux slot is per FeedResources, never a process global, and is
+    // held by the same owner that already parks an abandoned Load.
+    pub(crate) fn park_demux(&mut self, parked: crate::preview_teardown::ParkedDemux) {
+        debug_assert!(self.parked_demux.is_none(), "a second parked demux cannot exist");
+        self.parked_demux = Some(parked);
+    }
+    pub fn has_parked_demux(&self) -> bool { self.parked_demux.is_some() }
+    pub(crate) fn parked_demux_mut(&mut self) -> Option<&mut crate::preview_teardown::ParkedDemux> {
+        self.parked_demux.as_mut()
+    }
+    pub(crate) fn take_parked_demux(&mut self) -> Option<crate::preview_teardown::ParkedDemux> {
+        self.parked_demux.take()
+    }
+
     pub fn note_reaped_release(&mut self, attempt: AttemptId,
         status: plx_playback_contract::ReleaseStatus) {
         self.reaped_release = Some((attempt, status));

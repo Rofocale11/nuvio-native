@@ -2562,6 +2562,40 @@ fn preview_already_played_is_a_plain_key_match() {
     assert!(super::preview_already_played(Some("rk1"), "rk1"));
 }
 
+/// Fork Rofocale11: a trailer the viewer dismissed by walking off the hero must use the same
+/// play-once slot natural EOS writes. Otherwise returning to the hero after five UP keys dwells
+/// again and spends a second Load + `videoplane: BOUND` edge (the 2026-11-27 `swap=46.7ms` spike).
+#[test]
+fn a_key_dismissed_preview_is_marked_played_so_returning_to_the_hero_does_not_restart_it() {
+    let sid = ServerId::UNSET;
+    let _guard = install(detail(sid, "movie"));
+    let mut screen = bare(&_guard, sid, "movie");
+    screen.preview_started_for = Some("trailer-rk".into());
+    plx_media::player::preview::force_playing_for_test();
+
+    let mut effects = Vec::new();
+    let mut present = plx_machine::present::Present::new();
+    let mut sink = Effects::new(
+        &mut effects,
+        plx_machine::machine::MachineId::Instance(plx_machine::machine::InstanceId(1)),
+        &mut present,
+    );
+    // No hero focus: `hero_active` is false, so the halt arm fires on this tick.
+    screen.preview_tick::<TestHost>(16, 0.016, None, None, false, &mut sink, test_store().view());
+
+    assert_eq!(
+        screen.preview_played_for.as_deref(),
+        Some("trailer-rk"),
+        "a dismissed preview must occupy the play-once slot so a walk back to the hero does not \
+         spend a second Load and video-plane BOUND edge",
+    );
+    assert!(screen.preview_started_for.is_none(), "the halt must consume the captured start identity");
+
+    drop(sink);
+    plx_media::player::preview::reset_for_test();
+    clear();
+}
+
 /// The preview logo's own scroll fade: untouched at `t=0` (a normal hero has no preview to pin
 /// into a corner, and the caller's own `hero_alpha` already governs it), full at the top even
 /// while shrunk (`t=1`, `scroll_pos=0`), eased down as `scroll_pos` climbs toward `hero_extent`

@@ -16,6 +16,35 @@ When rotating this audit into history, keep the heading
 **Status: conflicts resolved, gates in progress, not committed.** All 24 conflicts
 are resolved and staged. Host verification is running; no device claim is made here.
 
+## Fork Rofocale11: trailer autoplay jank (2026-11-27)
+
+Fixing the `detail-nav-deep` FPS regression added one fork-owned file and narrow marked
+branches in upstream files; this is the surface a future `upstream/main` merge must reconcile.
+
+- `rust-modules/play-feed/src/preview_teardown.rs` (new, fork-owned): `ParkedDemux` owns a
+  preview's demux thread plus the two AU queues and `HttpStream` it holds by raw pointer, and
+  releases them only after a deferred join. `reap` is called from the existing per-frame
+  `reap_abandoned_load_resource` hook.
+- `rust-modules/play-feed/src/lib.rs`: one `pub(crate) mod preview_teardown` declaration.
+- `rust-modules/play-feed/src/native_executor.rs`: `NativeStop` parks a `PrimeProfile::Preview`
+  demux instead of joining it on the key frame, skips `http_close` while parked, hands the set
+  to `FeedResources` in `release_and_drain`, reaps it on the existing hook, refuses a native
+  start while one is parked, and exposes `drain_one` to the reaper. Each site carries a marker.
+- `rust-modules/play-feed/src/feed_resources.rs`: one per-owner slot plus accessors, mirroring
+  `abandoned_load`; no process-global registry.
+- `rust-modules/play-feed/src/feed_driver.rs`: `exit_disposition` also refuses to call playback
+  clean while a demux is parked.
+- `rust-modules/screens/src/detail/mod.rs`: a key-dismissed trailer is recorded in
+  `preview_played_for` (the slot natural EOS already writes), so walking back to the hero does
+  not spend a second Load and video-plane BOUND edge. Upstream change is one marked branch in
+  `preview_tick`, one in `collapse_background_preview`, the helper and a field-doc correction.
+- `pkg/resources/hr/appinfo.json` (non-commentable JSON): Croatian was added upstream in
+  `cc14d0af1` with the upstream brand in `title`, unlike the other 15 locales. The stable
+  packaging gate (`ci/check-package.py`) refuses it; the title is now the untranslated product
+  brand, `Nuvio Native`. The translated `appDescription` is untouched. `catalog_brand.rs` only
+  rewrites catalog strings, not appinfo resources, so this one field cannot be fixed in
+  `nuvio-locales/brand.json`.
+
 ## Proof certificates — durable fix for the recurring conflict
 
 `ci/proofs/platform-generated-enums.json`, `ci/proofs/serde-json-immutable.json`,
@@ -172,3 +201,41 @@ Static `Fork Rofocale11:` marker audit on the diff; host gates and
 (`plxnative-nuviofake`, read the identity line) and Streams-picker acceptance.
 Replay fingerprints changed by this merge need `tools/plxnative-rec rerecord`
 on a macOS simulator before `make check-replay` is trusted.
+
+## Hermetic scene harness — new upstream-file surface (uncommitted)
+
+`tools/nuvio-sim-scenes.py` now starts a local Stremio addon and a loopback TMDB
+API/image fixture per scene, so routine coverage never dials a CDN. Two edit
+surfaces touch file-owned code:
+
+- `rust-modules/stremio/src/addons_tmdb.rs` (fork-owned): `TMDB_API_BASE` overrides
+  the API origin; new public `tmdb_image_base()` reads `TMDB_IMAGE_BASE`.
+- `rust-modules/pmsshim/src/shim_pms.rs` (upstream-owned): five production image
+  URL builders now format through `plx_stremio::tmdb_image_base()` instead of the
+  hardcoded `https://image.tmdb.org/t/p` string, each marked `Fork Rofocale11:`.
+  With neither env var set, the emitted URLs are byte-identical to upstream's.
+
+Merge rule: if upstream moves those five builders, re-apply the env-origin indirection
+at the new sites; do not let the hardcoded CDN string return.
+
+### Upstream-discipline jank fixes (uncommitted)
+
+- `rust-modules/pmsshim/src/shim_pms.rs`: `tmdb_image_base` is imported through
+  the `addons_tmdb` module, not the crate root — the layer gate classifies a bare
+  `plx_stremio::` root item as `[app]`, which `[pmsshim]` may not name.
+- `Makefile`: `sim-nuvio` and `sim-nuvio-linux` are in `DISK_ENTRIES`, since both
+  run cargo and `ci/test_disk_preflight.py` enforces the list.
+
+- `rust-modules/screens/src/detail/mod.rs` (upstream-owned): the detail backdrop is now
+  requested at 1280x720 instead of 1920x1080 (`Fork Rofocale11:` marker at the call),
+  restoring upstream's modest art-size discipline. A device FRAMEDROP line measured a
+  48.6 ms one-shot upload of 2,073,600 px on detail open; `Rect::FULL.cover` scales the
+  smaller texture over the same rect.
+
+
+
+- `rust-modules/ui/src/cards/shelf.rs` (upstream-owned): restored old fork `204ad687f`'s
+  off-band `card_row::paint_visible` cull (`Fork Rofocale11:` marker at the call). Detail's
+  Related/Collection/Extras/Cast shelves use this same `Shelf`; an off-band card was paying
+  art resolution and label fitting even though it contributes no fragment. The current tree
+  had lost this gate in the shim port.

@@ -294,7 +294,9 @@ pub fn drain_aq(eng: &mut Engine) {
     eng.pending_audio = None;
 }
 
-fn drain_one(q: Option<&mut Box<AuQueue>>) {
+// Fork Rofocale11: the preview reaper drains the parked queues with the same primitive as the
+// ordinary release, so an AU never needs two free paths.
+pub(crate) fn drain_one(q: Option<&mut Box<AuQueue>>) {
     if let Some(q) = q {
         let qp = &mut **q as *mut AuQueue;
         let mut eof: c_int = 0;
@@ -604,6 +606,9 @@ pub fn reap_abandoned_load_resource(
     mt: &MainThread,
     hooks: &ReleaseHooks,
 ) -> bool {
+    // Fork Rofocale11: the per-frame reap hook this function already is also reaps a parked
+    // preview demux, so no new backend trait method or app-loop verb is needed.
+    crate::preview_teardown::reap(feed);
     let finished = match feed.abandoned_load_mut() {
         Some(parked) => parked.load_th.is_finished(),
         None => return false,
@@ -631,6 +636,13 @@ pub fn begin_native_open(feed: &mut FeedResources, mt: &MainThread) -> bool {
     if feed.has_abandoned_load() {
         plx_base::eventlog::log(
             "start_bufferfeed: an abandoned Load has not returned yet (refusing native start)");
+        return false;
+    }
+    // Fork Rofocale11: a parked preview demux still owns `hs_ptr`; a new open must not overwrite
+    // the pointer the parked reader is using as its AVIO socket.
+    if feed.has_parked_demux() {
+        plx_base::eventlog::log(
+            "start_bufferfeed: a preview demux is still parked (refusing native start)");
         return false;
     }
     reset_fed_counters();
@@ -759,6 +771,9 @@ pub(crate) struct NativeStop {
     stream: bool,
     spans: TeardownSpans,
     abandoned_load: Option<std::thread::JoinHandle<()>>,
+    // Fork Rofocale11: a hero trailer's demux reader and the queues/socket it holds; moved to
+    // FeedResources in `release_and_drain`, reaped on a later frame off the key press.
+    parked_demux: Option<crate::preview_teardown::ParkedDemux>,
     unload_th: Option<std::thread::JoinHandle<()>>,
     release_status: plx_playback_contract::ReleaseStatus,
     /// The logical playback ended under a kept session (`FeedStop::stop_begin`'s `terminal`): a
@@ -772,8 +787,8 @@ impl NativeStop {
         let eng = feed.take().expect("main-thread live check and take are one transaction");
         feed.retire_load_attempt(eng.attempt);
         let stream = matches!(eng.source, Source::Stream { .. });
-        Self { eng, stream, spans: TeardownSpans::new(), abandoned_load: None, unload_th: None,
-            release_status: plx_playback_contract::ReleaseStatus::Closing, terminal }
+        Self { eng, stream, spans: TeardownSpans::new(), abandoned_load: None, parked_demux: None,
+            unload_th: None, release_status: plx_playback_contract::ReleaseStatus::Closing, terminal }
     }
 
     /// The attempt whose Engine this stop owns.
@@ -800,7 +815,25 @@ impl NativeStop {
         }
         self.spans.mark("unblock");
         if let Some(thread) = self.eng.stream_th.take() {
-            plx_base::task::join("demux", thread);
+            // Fork Rofocale11: a hero trailer is stopped by an ordinary key press. Joining its
+            // demux reader on that frame held the UI for ~44 ms (googlevideo abort/unwind). Park
+            // the reader together with every allocation it holds by raw pointer; the per-frame
+            // reaper joins and frees them once the thread has actually returned.
+            let park = self.eng.prime_profile == crate::prime_profile::PrimeProfile::Preview
+                && !thread.is_finished();
+            if park {
+                let hs = std::mem::replace(&mut self.eng.hs, plx_net::stream::http_stream_boxed());
+                self.parked_demux = Some(crate::preview_teardown::ParkedDemux::new(
+                    thread,
+                    self.eng.aq_video.take(),
+                    self.eng.aq_audio.take(),
+                    hs,
+                    shared.hs_ptr.load(Ordering::Acquire),
+                ));
+                self.spans.mark("park_demux");
+            } else {
+                plx_base::task::join("demux", thread);
+            }
         }
         self.spans.mark("join_demux");
         self.abandoned_load = match self.eng.load_th.take() {
@@ -813,7 +846,9 @@ impl NativeStop {
             None => None,
         };
         self.spans.mark("join_media");
-        if self.stream {
+        // Fork Rofocale11: close the socket only after the demux reader no longer owns it. A parked
+        // reader still owns this fd; its reaper closes it after the deferred join.
+        if self.stream && self.parked_demux.is_none() {
             let p = shared.hs_ptr.load(Ordering::Acquire);
             if !p.is_null() { plx_net::stream::http_close(p); }
         }
@@ -835,6 +870,13 @@ impl NativeStop {
     pub fn release_and_drain(&mut self, mt: &MainThread,
         feed: &mut FeedResources, for_reload: bool, hooks: &ReleaseHooks) {
         let shared = self.eng.shared;
+        // Fork Rofocale11: a parked demux still writes into its queues and socket, so the ordinary
+        // drain/destroy below must not free them here. Hand the whole ownership set to the
+        // per-frame reaper; the loop below sees no queues and becomes a no-op for this stop.
+        if let Some(parked) = self.parked_demux.take() {
+            feed.park_demux(parked);
+            self.spans.mark("park_handoff");
+        }
         if let Some(load_th) = self.abandoned_load.take() {
             if !shared.abandon_native_session(self.eng.native_epoch) {
                 plx_base::eventlog::log(&format!(
