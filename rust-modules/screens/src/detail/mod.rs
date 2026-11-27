@@ -3145,7 +3145,8 @@ impl DetailScreen {
             // device-measured open frame spent 48.6 ms uploading 2,073,600 px. The documented
             // `Residency` budget prices a 1280x720 backdrop; `Rect::FULL.cover` scales the smaller
             // texture to the same rect, so the visible art is unchanged.
-            plx_ui::widgets::resolve_tex_wh_on(sid.raw(), path, 1280, 720, 0)
+            plx_ui::widgets::resolve_tex_wh_on(sid.raw(), path,
+                plx_ui::detail_layout::BACKDROP_W, plx_ui::detail_layout::BACKDROP_H, 0)
         } else {
             (0, 0.0, 0.0)
         };

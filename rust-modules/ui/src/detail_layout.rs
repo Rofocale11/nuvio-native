@@ -24,6 +24,15 @@ pub const FACTS_INK: [f32; 4] = theme::TEXT_SECONDARY;
 pub const COMPACT_TITLE_BOT: f32 = MARGIN_Y + theme::logo::COMPACT_H_MAX;
 pub const TOP_MARGIN: f32 = COMPACT_TITLE_BOT + 26.0;
 
+/// Fork Rofocale11: the box Detail requests its backdrop at, shared with Home's focus-dwell and
+/// Enter probes so they ask for the EXACT texture key this page draws. The old 1920x1080 request
+/// produced an 8.3 MB RGBA decode and upload, and a hero->Detail nav missed the 1280x720 texture
+/// Home had just fetched. `Rect::FULL.cover` scales either size to the same rect, so this is not a
+/// look change. It lives here, in the shared detail vocabulary, rather than in the screen module:
+/// `ci/check-deps.sh`'s sibling gate forbids one screen naming another and allows this layer.
+pub const BACKDROP_W: i32 = 1280;
+pub const BACKDROP_H: i32 = 720;
+
 
 /// Top-left anchor for the hero logo while a trailer plays in the background — independent of
 /// scroll, unlike the pinned [`COMPACT_TITLE_BOT`] title (which answers "how far down have I

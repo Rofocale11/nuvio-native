@@ -335,3 +335,17 @@ warm 11, max 32.3 ms, against the calibrated 15/40 contract). The first gate aft
 this set; the repeat above is the clean result. The earlier stricter committed contract (5/33,
 restored by the stash of the calibrated scene file) does not pass — that contract was calibrated
 as unattainable on this set.
+
+### 2026-11-28: the gate's blanked panel is a 48 Hz measurement, not a jank regression
+
+Two clean ARM release/debug builds (HEAD, then HEAD + the contained poster/backdrop wins below)
+were graded with `nuvio-tv.py gate --scene home-nav-deep --runs 2`. Both runs of both builds
+reported `loop=`/`fps=` medians of **48**, with 114–117 frames over 22 ms on the cold walk and
+87–96 on the warm walk — versus **60/60** and 12/11 drops in the panel-on gate above. The bench
+blanks the panel by default; this set composites at 48 Hz while blanked, so nearly every frame
+trips a 22 ms threshold. Those FAILs are a measurement artifact and say nothing about browsing
+smoothness. Per-frame medians on late frames did move as designed (`draw` 9.0 → 6.9 ms, `src`
+3.0 → 2.6, `disc` 1.1 → 0.7) while `swap` rose 11.2 → 13.5 ms and `total` stayed ~23 ms: saving
+CPU work only parks longer at the fixed compositor fence. No panel-on A/B was run, so the contained
+wins are **not** claimed to improve the smoothness grade, and these numbers must not be compared
+with the panel-on 15/40 evidence.

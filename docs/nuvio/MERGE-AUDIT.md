@@ -16,6 +16,34 @@ When rotating this audit into history, keep the heading
 **Status: conflicts resolved, gates in progress, not committed.** All 24 conflicts
 are resolved and staged. Host verification is running; no device claim is made here.
 
+## Fork Rofocale11: Stage 1 scroll-hitch contained wins (2026-11-28)
+
+Three behaviour-identical reductions, all in upstream-owned files; each edit carries a
+`Fork Rofocale11:` marker at the site. They were deployed only to the debug install for an
+A/B against a clean HEAD build; no stable install or release was touched. That A/B used the
+gate's default blanked panel and is not a smoothness result — see `VALIDATION.md`.
+
+- `rust-modules/src/app/adapters/poster.rs`: the two/three-worker tier is replaced by
+  `POSTER_WORKERS = 4` on every set (core and RAM readings remain in the boot log only),
+  restoring the old fork's measured cold-row floor. The tiered `workers_for` test is
+  replaced by one pinning the constant.
+- `rust-modules/ui/src/detail_layout.rs`: new shared `BACKDROP_W`/`BACKDROP_H` (1280×720)
+  constants, the common detail vocabulary rather than a screen private to Detail —
+  `check-deps`' sibling gate forbids one screen naming another.
+- `rust-modules/screens/src/detail/mod.rs`: the backdrop request uses those constants
+  instead of literals, so Home cannot probe a different key from the one this page
+  draws. Same pixels — `Rect::FULL.cover` scales either box to the same rect.
+- `rust-modules/screens/src/home/mod.rs`: a focus dwell that fires the shim metadata
+  warm now also probes the exact Detail backdrop key; `ScreenEvent::Enter` re-probes the
+  selected hero's backdrop before the fade-in. Both use `resolve_tex_wh_on` (demand),
+  never `warm_tex_on`, and share Detail's constants. One test pins the probe key.
+
+Deliberately NOT ported: the old fork's frame-scoped art-resolve memo. This tree already
+has `KEY_MEMO`, one hash per `lookup` probe, `card_motion` sharing the arrival answer
+across walks, and `is_recording()` culling the discovery walk; skipping the remaining
+`lookup` would drop its LRU/draw touches and can change which art survives eviction,
+i.e. the picture, so it is not behaviour-identical.
+
 ## Fork Rofocale11: trailer autoplay jank (2026-11-27)
 
 Fixing the `detail-nav-deep` FPS regression added one fork-owned file and narrow marked

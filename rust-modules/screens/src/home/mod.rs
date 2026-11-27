@@ -364,6 +364,28 @@ impl WarmDwell {
     }
 }
 
+/// Fork Rofocale11: the exact texture key the Detail page draws for this card. The box comes
+/// from the shared detail vocabulary rather than being repeated here: a probe at any other size
+/// names a different store slot and buys nothing. `art` (the landscape backdrop) is what Detail
+/// asks for, not `thumb` (the portrait poster).
+fn detail_backdrop_key(item: &PmsMovie) -> Option<(u16, &str, i32, i32)> {
+    (!item.art.is_empty()).then(|| (
+        item.sid.raw(), item.art.as_str(), plx_ui::detail_layout::BACKDROP_W,
+        plx_ui::detail_layout::BACKDROP_H,
+    ))
+}
+
+/// Fork Rofocale11: ask for the backdrop as DEMAND, not as a warm. A warm is refused while any
+/// visible request is outstanding — on a browsing page, almost always — and takes LRU age 0,
+/// making it the first victim of the next miss. A probe is the same call the draw makes: it is
+/// LRU-touched, evict-protected and re-armed after a release, so the next page opens on art that
+/// is already resident instead of showing flat ground for one solo-upload frame.
+fn probe_detail_backdrop(item: &PmsMovie) {
+    if let Some((srv, path, w, h)) = detail_backdrop_key(item) {
+        plx_ui::widgets::resolve_tex_wh_on(srv, path, w, h, 0);
+    }
+}
+
 struct Backdrop {
     wash: AmbientWash,
     grid_target: [[f32; 4]; 4],
@@ -2210,6 +2232,14 @@ impl HomeScreen {
                         sid: plx_plex::plex::ServerId::from_raw(sid_raw),
                         rk,
                     }))));
+                // Fork Rofocale11: the command above warms the shim's DATA caches only; Detail's
+                // first frame still fetched its backdrop cold. Probe the exact key that page
+                // draws — same server, same landscape path, same 1280x720 box — while the viewer
+                // is deliberately resting on this card. A scroll step never reaches the dwell,
+                // so this does not add requests to a moving row.
+                if let Some(item) = grid_item {
+                    probe_detail_backdrop(item);
+                }
             }
         } else {
             self.warm.reset();
@@ -3797,6 +3827,14 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 // paints; one that RETURNS (`Restored`: a modal's dismissal, a pop) is the page it
                 // was, and paints again only if what it draws changed while it was away.
                 let changed = self.sync_catalog_changed(cx);
+                // Fork Rofocale11: back from Detail/Player, re-probe the selected hero's backdrop
+                // before the fade-in. Residency churn while away can have taken that texture; a
+                // probe issued now is queued as the frame's solo take instead of being discovered
+                // by the first visible frame, which used to paint flat ground for one whole
+                // fetch+decode+upload cycle. It is demand, so it cannot be dropped as a warm.
+                if let Some(hero) = self.selected_hero(H::hubs(cx)) {
+                    probe_detail_backdrop(hero.item);
+                }
                 if changed || matches!(enter, Enter::Fresh { .. }) {
                     fx.invalidate(Provenance::Nav);
                 }
@@ -4935,6 +4973,22 @@ mod warm_dwell_tests {
             rk: rk.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_dwell_probe_names_the_exact_key_the_detail_page_draws() {
+        // Fork Rofocale11: a different box — or the portrait `thumb` — is a different store slot,
+        // so the probe would warm the wrong picture and the page would still open on flat ground.
+        let mut card = item(7, "rk-7");
+        card.art = "/library/metadata/7/backdrop".into();
+        card.thumb = "/library/metadata/7/thumb".into();
+        assert_eq!(
+            detail_backdrop_key(&card),
+            Some((7, "/library/metadata/7/backdrop", plx_ui::detail_layout::BACKDROP_W,
+                  plx_ui::detail_layout::BACKDROP_H)),
+        );
+        card.art.clear();
+        assert_eq!(detail_backdrop_key(&card), None, "no landscape art, no backdrop probe");
     }
 
     #[test]

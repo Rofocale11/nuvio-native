@@ -25,7 +25,7 @@
 //! recycled by [`victim`] frees its cache entry on the way out.
 //!
 //! Rust port of the old src/posters.c; rewritten on std::sync (a `Mutex<Store>` + `Condvar` +
-//! two or three `task::spawn` workers, [`workers_for`]). The decoded-pixel pointer is stored as an address (usize) so the
+//! four `task::spawn` workers, [`POSTER_WORKERS`]). The decoded-pixel pointer is stored as an address (usize) so the
 //! shared `Store` stays `Send`.
 //!
 //! ## Plex artwork names its server; public immutable content names its verified digest
@@ -1785,7 +1785,7 @@ fn first_failure(srv: ServerId, cause: ArtFail) -> bool {
         Mutex::new(std::collections::BTreeMap::new());
     let bit = 1u32 << cause as u32;
     // One lock, not load-then-store: this loop runs on more than one thread (`poster::init` spawns
-    // two or three), so two workers can reach the same cause for the same server at once and only the one
+    // four), so two workers can reach the same cause for the same server at once and only the one
     // that flipped the bit may write the line.
     let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
     let word = logged.entry(srv.raw()).or_insert(0);
@@ -2349,33 +2349,16 @@ fn queue_refresh(
     }
 }
 
-/// Fetch + decode workers on a set with fewer than [`ROOMY_CORES`] cores or [`ROOMY_MEM_KIB`] of RAM
-/// (and when either could not be read).
-const WORKERS_DEFAULT: usize = 2;
-/// Fetch + decode workers on a roomier set. Measured on a four-core, 2.7 GB set against a slow
-/// server (100 ms per image, 377 uncached posters scrolled a row every 120 ms): three workers got
-/// about a fifth more posters on screen within half a second than two, for roughly 8 MB less free
-/// RAM and about a frame per second less while scrolling. That run had a cold disk cache, so its
-/// workers mostly waited on a socket: the frame cost with a warm cache, where three decodes run
-/// back to back on the frame thread's cores, is NOT determined. The slot holds a finished decode
-/// until the upload queue takes it, and [`DECODE_BACKLOG_MAX`] gates when a decode STARTS, so a
-/// third worker adds one more decode in flight (up to one 1920x1080 backdrop, about 8.3 MB)
-/// beyond that budget, not a bigger queue (the peak queued bytes read 7.4 MB with two workers and
-/// 7.8 MB with three, posters only).
-const WORKERS_ROOMY: usize = 3;
-/// The core count from which a set gets [`WORKERS_ROOMY`].
-const ROOMY_CORES: usize = 4;
-/// The RAM (`MemTotal`, in KiB) from which a set gets [`WORKERS_ROOMY`]: 2 GiB.
-const ROOMY_MEM_KIB: u64 = 2 * 1024 * 1024;
-
-/// How many poster workers a set gets: three on a set with at least [`ROOMY_CORES`] cores and
-/// [`ROOMY_MEM_KIB`] of RAM, two on anything smaller or anything that could not be read.
-fn workers_for(cores: Option<usize>, mem_total_kib: Option<u64>) -> usize {
-    match (cores, mem_total_kib) {
-        (Some(c), Some(m)) if c >= ROOMY_CORES && m >= ROOMY_MEM_KIB => WORKERS_ROOMY,
-        _ => WORKERS_DEFAULT,
-    }
-}
+/// Fork Rofocale11: four fetch + decode workers on every set. The old fork measured a cold Home
+/// row at ≈4 s with two workers and ≈1.2 s at four (imgtrace 2026-11-02: 20 identities in one row,
+/// 450–600 ms each, mostly the shim's upstream fetch), and this fork's tier had lost that floor:
+/// the TV got two workers, or three only when both cores and RAM could be read. The work is mostly
+/// a socket read, so the extra workers spend most of their life parked, not on a core. Everything
+/// that made two safe is unchanged: every worker is niced below the frame thread, the upload that
+/// actually stalls a frame is paced independently (`ui/src/frame/budget.rs`), speculation is bounded
+/// by [`PREFETCH_OUTSTANDING_MAX`] and decoded pixels by [`DECODE_BACKLOG_MAX`]. Core and RAM readings
+/// stay in the boot log as diagnostics; they no longer decide the count.
+const POSTER_WORKERS: usize = 4;
 
 /// `MemTotal` in KiB from the text of `/proc/meminfo`.
 fn mem_total_kib(meminfo: &str) -> Option<u64> {
@@ -2396,11 +2379,10 @@ pub(crate) fn init() {
     }
     let cores = std::thread::available_parallelism().ok().map(std::num::NonZeroUsize::get);
     let mem = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| mem_total_kib(&t));
-    let workers = workers_for(cores, mem);
-    plx_base::eventlog::log(&format!("posters: workers={workers} cores={cores:?} mem_kib={mem:?}"));
+    plx_base::eventlog::log(&format!("posters: workers={} cores={cores:?} mem_kib={mem:?}", POSTER_WORKERS));
     // filter_map, not map: a refused worker is one fewer decoder, not a dead app. Artwork degrades
     // to whatever the survivors can fetch (and to nothing at all if every one is refused).
-    let handles: Vec<JoinHandle<()>> = (0..workers)
+    let handles: Vec<JoinHandle<()>> = (0..POSTER_WORKERS)
         .filter_map(|_| plx_base::task::spawn("poster", poster_worker))
         .collect();
     store().workers = handles;
@@ -4334,18 +4316,11 @@ mod tests {
         assert_eq!(builds.get(), 4);
     }
 
-    /// The worker count is a tier on what the set reports, and anything unreadable is the small tier.
+    /// Fork Rofocale11: the count is a floor, not a tier on what the set reports. A set that
+    /// cannot say how many cores or how much RAM it has gets the same four as one that can.
     #[test]
-    fn workers_for_gives_three_only_to_a_roomy_set() {
-        assert_eq!(workers_for(Some(4), Some(2_678_680)), 3, "four cores and 2.7 GB");
-        assert_eq!(workers_for(Some(8), Some(2 * 1024 * 1024)), 3, "2 GiB is the floor, inclusive");
-        assert_eq!(workers_for(Some(2), Some(4 * 1024 * 1024)), 2, "two cores");
-        assert_eq!(workers_for(Some(3), Some(4 * 1024 * 1024)), 2, "just under four cores");
-        assert_eq!(workers_for(Some(4), Some(1024 * 1024)), 2, "four cores but 1 GB");
-        assert_eq!(workers_for(Some(4), Some(2 * 1024 * 1024 - 1)), 2, "just under 2 GiB");
-        assert_eq!(workers_for(None, Some(4 * 1024 * 1024)), 2, "cores unknown");
-        assert_eq!(workers_for(Some(4), None), 2, "memory unknown");
-        assert_eq!(workers_for(None, None), 2, "nothing known");
+    fn every_set_gets_four_poster_workers() {
+        assert_eq!(POSTER_WORKERS, 4);
     }
 
     #[test]
