@@ -3138,7 +3138,11 @@ impl DetailScreen {
         let art_alpha = (1.0 - sf) * self.preview_art;
         let (sid, path) = self.art_identity(d);
         let (texture, width, height) = if art_alpha > 0.01 {
-            plx_ui::widgets::resolve_tex_wh_on(sid.raw(), path, 1920, 1080, 0)
+            // Fork Rofocale11: the detail backdrop was requested at full panel resolution and a
+            // device-measured open frame spent 48.6 ms uploading 2,073,600 px. The documented
+            // `Residency` budget prices a 1280x720 backdrop; `Rect::FULL.cover` scales the smaller
+            // texture to the same rect, so the visible art is unchanged.
+            plx_ui::widgets::resolve_tex_wh_on(sid.raw(), path, 1280, 720, 0)
         } else {
             (0, 0.0, 0.0)
         };

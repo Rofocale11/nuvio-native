@@ -999,6 +999,13 @@ impl Shelf {
         }
         let unscrolled = self.slot(i, src.len(), SectionFrame { y: at.y - pr.dy(), ..at }, 0.0);
         let rect = unscrolled.scaled(s);
+        // Fork Rofocale11: re-port old fork 204ad687f's off-band shelf cull, lost in the shim
+        // port. Detail's Related/Collection/Extras/Cast shelves use this same Shelf; a card
+        // outside the blur band's clip contributes no fragment but was still paying art
+        // resolution (`page.image` in cpuprof), change declaration and label fitting.
+        if !card_row::paint_visible(pr, rect, s, focused) {
+            return;
+        }
         // an arriving card fades in
         let pr = match self.landing.alpha(src.len(), i) {
             a if a < 1.0 => pr.alpha(a),
