@@ -7,6 +7,7 @@
 //! return and asks the app to flip a switch, so it keeps no store of its own.
 
 use std::borrow::Cow;
+use std::time::Duration;
 
 use plx_machine::machine::{
     Canon, Cx, Delivery, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InstanceId, Key,
@@ -25,24 +26,45 @@ use super::super::family::{form_activate, form_focus, form_right_target, InnerHo
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum AddonId {
+    /// Fork Rofocale11: the pull-cloud action sits above the per-addon switches.
+    Sync,
     Row(usize),
 }
 
 impl FormId for AddonId {
     fn key(&self) -> RowKey {
-        RowKey(match self { AddonId::Row(i) => *i as u32 })
+        RowKey(match self {
+            AddonId::Sync => 0,
+            AddonId::Row(i) => *i as u32 + 1,
+        })
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum AddonAction {
+    Sync,
     Toggle(usize),
 }
 
 /// The pure builder over a supplied inventory, so a fit test can exercise the real form without
 /// reading the shim's process-global registry.
-fn addons_form(addons: &[(String, String, bool)]) -> Form<AddonId, AddonAction, SettingsPage> {
+fn addons_form(
+    addons: &[(String, String, bool)],
+    syncing: bool,
+) -> Form<AddonId, AddonAction, SettingsPage> {
     let mut section = FormSection::new("");
+    // Fork Rofocale11: an action row, not a toggle — there is no persistent on/off state to store.
+    // The label is app-owned copy from the fork's own catalog, so it is localized like any other.
+    section = section.item(
+        AddonId::Sync,
+        RowKind::Button,
+        AddonAction::Sync,
+        Row::new(if syncing {
+            plx_os::i18n::msg::settings_addons_syncing()
+        } else {
+            plx_os::i18n::msg::settings_addons_sync()
+        }),
+    );
     for (i, (_key, name, enabled)) in addons.iter().enumerate() {
         section = section.item(
             AddonId::Row(i),
@@ -58,6 +80,8 @@ fn addons_form(addons: &[(String, String, bool)]) -> Form<AddonId, AddonAction, 
 struct AddonsState {
     sel: RowKey,
     addons: Vec<(String, String, bool)>,
+    /// Fork Rofocale11: transient label state for the Sync action. Never persisted.
+    syncing: bool,
 }
 
 impl LogicalState for AddonsState {
@@ -69,9 +93,10 @@ impl LogicalState for AddonsState {
             w.str(n);
             w.bool(*e);
         }
+        w.bool(self.syncing);
     }
     fn probe(&self, out: &mut String) {
-        out.push_str(&format!("addons sel={} count={}", self.sel.0, self.addons.len()));
+        out.push_str(&format!("addons sel={} count={} syncing={}", self.sel.0, self.addons.len(), self.syncing));
     }
 }
 
@@ -79,6 +104,9 @@ pub struct AddonsPage {
     entry: EntryId,
     form: FormTable<AddonId, AddonAction, SettingsPage>,
     state: AddonsState,
+    /// Fork Rofocale11: remaining frame time for the transient "Syncing…" label. No wall clock,
+    /// no IO — the screen only counts the `dt` the frame pump already gives it.
+    sync_left: Option<Duration>,
 }
 
 impl AddonsPage {
@@ -87,7 +115,8 @@ impl AddonsPage {
         let mut page = Self {
             entry,
             form: FormTable::page(super::super::registry::BAND),
-            state: AddonsState { sel: RowKey(0), addons },
+            state: AddonsState { sel: RowKey(0), addons, syncing: false },
+            sync_left: None,
         };
         page.rebuild(None);
         page
@@ -95,7 +124,7 @@ impl AddonsPage {
 
     fn rebuild(&mut self, keep: Option<AddonId>) {
         self.state.addons = plx_plex::plex::nuvio::installed_addons();
-        self.form.set(addons_form(&self.state.addons), keep.as_ref());
+        self.form.set(addons_form(&self.state.addons, self.state.syncing), keep.as_ref());
         self.state.sel = self.form.key_at(self.form.table.sel.max(0) as usize).map_or(RowKey(0), |k| k);
     }
 
@@ -108,14 +137,27 @@ impl AddonsPage {
     }
 
     fn activate(&mut self, key: u32, fx: &mut Effects<'_, InnerHost>) {
-        if let Some(AddonAction::Toggle(i)) = form_activate(&self.form, key, fx) {
-            if i < self.state.addons.len() {
-                let (k, _name, enabled) = &self.state.addons[i];
-                let _ = plx_plex::plex::nuvio::set_addon_enabled(k.clone(), !*enabled);
-                let keep = self.form.selected_id().cloned();
-                self.rebuild(keep);
-                fx.invalidate(Provenance::Input);
+        match form_activate(&self.form, key, fx) {
+            Some(AddonAction::Sync) => {
+                // Fork Rofocale11: the worker does the account read; the screen only flips a
+                // transient label and never performs IO in `step`.
+                if !self.state.syncing && plx_plex::plex::nuvio::sync_addons() {
+                    self.state.syncing = true;
+                    self.sync_left = Some(Duration::from_secs(4));
+                    self.rebuild(Some(AddonId::Sync));
+                    fx.invalidate(Provenance::Input);
+                }
             }
+            Some(AddonAction::Toggle(i)) => {
+                if i < self.state.addons.len() {
+                    let (k, _name, enabled) = &self.state.addons[i];
+                    let _ = plx_plex::plex::nuvio::set_addon_enabled(k.clone(), !*enabled);
+                    let keep = self.form.selected_id().cloned();
+                    self.rebuild(keep);
+                    fx.invalidate(Provenance::Input);
+                }
+            }
+            None => {}
         }
     }
 }
@@ -134,6 +176,14 @@ impl Machine<InnerHost> for AddonsPage {
                 Handled::Yes
             }
             ScreenEvent::Tick(t) => {
+                if let Some(left) = self.sync_left {
+                    let left = left.saturating_sub(Duration::from_secs_f32(t.dt().max(0.0)));
+                    self.sync_left = (!left.is_zero()).then_some(left);
+                    if self.sync_left.is_none() {
+                        self.state.syncing = false;
+                        self.rebuild(Some(AddonId::Sync));
+                    }
+                }
                 self.form.table.update(t.dt(), RouteLayout::screen().sectioned_table().h);
                 Handled::Yes
             }
@@ -187,7 +237,7 @@ mod tests {
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
             let mut form: FormTable<AddonId, AddonAction, SettingsPage> = FormTable::page(crate::registry::BAND);
-            form.set(addons_form(&addons), None);
+            form.set(addons_form(&addons, false), None);
             out.extend(form.table.app_fit_failures(RouteLayout::screen().sectioned_table().w, language.tag()));
         }
         plx_ui::table::assert_no_fit_failures(&out);
@@ -200,13 +250,16 @@ mod tests {
             ("a".into(), "Alpha".into(), true),
             ("b".into(), "Beta".into(), false),
         ];
-        let form = addons_form(&addons);
+        let form = addons_form(&addons, false);
         let mut table: FormTable<AddonId, AddonAction, SettingsPage> = FormTable::page(crate::registry::BAND);
         table.set(form, None);
-        assert_eq!(table.table.n_rows(), 2);
+        // Fork Rofocale11: row 0 is the Sync action, the addon toggles follow it.
+        assert_eq!(table.table.n_rows(), 3);
         assert_eq!(table.key_at(0).unwrap().0, 0);
         assert_eq!(table.key_at(1).unwrap().0, 1);
-        assert_eq!(table.binding_at(0).unwrap().kind, RowKind::Toggle);
+        assert_eq!(table.key_at(2).unwrap().0, 2);
+        assert_eq!(table.binding_at(0).unwrap().kind, RowKind::Button);
         assert_eq!(table.binding_at(1).unwrap().kind, RowKind::Toggle);
+        assert_eq!(table.binding_at(2).unwrap().kind, RowKind::Toggle);
     }
 }

@@ -443,11 +443,21 @@ impl MetaCache {
                 }
             }
         }
+        let legacy_keys: Vec<String> = legacy.iter().map(|r| cache_key(&r.type_, &r.id)).collect();
         let parsed = stored
             .iter()
             .filter_map(|(key, bytes)| decode_cached::<MetaRow>(bytes).map(|row| (key.clone(), row)))
             .chain(legacy.into_iter().map(|row| (cache_key(&row.type_, &row.id), row)))
             .collect::<Vec<_>>();
+        // Fork Rofocale11: only rows still in the OLD plain-JSON format need a write transaction
+        // at boot. Rewriting every live row on every launch put O(N) redb commits on the boot path;
+        // after this one-time migration the 8-byte TTL envelope is already on disk.
+        let needs_envelope: std::collections::HashSet<String> = stored
+            .iter()
+            .filter(|(_, bytes)| serde_json::from_slice::<MetaRow>(bytes).is_ok())
+            .map(|(key, _)| key.clone())
+            .chain(legacy_keys)
+            .collect();
         for (key, row) in parsed {
             if now.saturating_sub(row.at) >= meta_ttl(&row.type_) {
                 // Fork Rofocale11: expired rows used to be skipped in memory but left in the store,
@@ -462,6 +472,9 @@ impl MetaCache {
         }
         if let Some(store) = plx_nuvio_store::get() {
             for ((type_, id), (at, meta)) in &rows {
+                if !needs_envelope.contains(&cache_key(type_, id)) {
+                    continue;
+                }
                 let row = MetaRow { type_: type_.clone(), id: id.clone(), at: *at, meta: (**meta).clone() };
                 if let Ok(bytes) = serde_json::to_vec(&row) {
                     // Fork Rofocale11: use the store's TTL envelope so purge/shed can see these
@@ -612,11 +625,20 @@ impl EnrichCache {
                 }
             }
         }
+        let legacy_keys: Vec<String> = legacy.iter().map(|r| cache_key(&r.type_, &r.id)).collect();
         let parsed = stored
             .iter()
             .filter_map(|(key, bytes)| decode_cached::<EnrichRow>(bytes).map(|row| (key.clone(), row)))
             .chain(legacy.into_iter().map(|row| (cache_key(&row.type_, &row.id), row)))
             .collect::<Vec<_>>();
+        // Fork Rofocale11: one-time envelope migration, as in MetaCache::open — no per-launch
+        // write transaction for rows that already carry their TTL envelope.
+        let needs_envelope: std::collections::HashSet<String> = stored
+            .iter()
+            .filter(|(_, bytes)| serde_json::from_slice::<EnrichRow>(bytes).is_ok())
+            .map(|(key, _)| key.clone())
+            .chain(legacy_keys)
+            .collect();
         for (key, row) in parsed {
             if now.saturating_sub(row.at) >= ENRICH_TTL.as_secs() as i64 {
                 // Fork Rofocale11: same cleanup as the meta cache — an enrichment row that is
@@ -630,6 +652,9 @@ impl EnrichCache {
         }
         if let Some(store) = plx_nuvio_store::get() {
             for ((type_, id), (at, enrich)) in &rows {
+                if !needs_envelope.contains(&cache_key(type_, id)) {
+                    continue;
+                }
                 let row = EnrichRow { type_: type_.clone(), id: id.clone(), at: *at, enrich: (**enrich).clone() };
                 if let Ok(bytes) = serde_json::to_vec(&row) {
                     // Fork Rofocale11: the store's TTL envelope lets purge/shed see this row.

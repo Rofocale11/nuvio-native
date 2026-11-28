@@ -1,10 +1,16 @@
-//! durable catalog pages for the shim's Home/Library shelves.
+//! Durable catalog pages for the shim's Home/Library shelves — stale-while-revalidate.
 //!
 //! The catalog rows used to live only in [`crate::shim_pms`]'s in-memory `catalogs` map, so every
 //! TV relaunch re-fetched the first page of every addon catalog (the ~15 s cold launch). This
-//! module keeps the same 15-minute window in the one redb store. A relaunch with an unchanged
-//! addon set reads the rows instead of asking the addons; the window bounds how stale a catalog's
-//! *content* may get, because a Stremio addon publishes no change signal we could watch.
+//! module keeps the last successful fill in the one redb store. A relaunch with an unchanged addon
+//! set paints Home/Library from those rows immediately, then revalidates them in the background.
+//!
+//! [`CATALOG_TTL`] is a FRESHNESS hint, not an expiry: a row older than it is still served, and its
+//! reader starts a background revalidation. That is what keeps a launch fast even after a long gap
+//! — an addon publishes no "content changed" signal, so the only alternative is to ask it before
+//! painting, which is the slow launch this module removed. The durable envelope uses a much longer
+//! window so budget maintenance cannot throw away a still-useful row; the row's own `at` travels
+//! with it, so a stale row cannot masquerade as fresh after a restart.
 //!
 //! Configuration changes are detected exactly by the caller: the key is namespaced by the addon
 //! fingerprint AND the catalog declarations from the installed manifests. Adding, removing,
@@ -14,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use plx_stremio::model::MetaPreview;
 
@@ -29,21 +35,26 @@ mod test_store {
     }
 }
 
-/// The same freshness bound the in-memory catalog cache already used.
+/// When a row counts as fresh. Past this age a reader still serves it but revalidates it.
 pub const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// The redb envelope's own window. Longer than `CATALOG_TTL` on purpose: an old row is still the
+/// best answer we have until the revalidation lands, so maintenance must not purge it underneath
+/// the reader. The row carries its real fetch time in `CachedCatalog::at`.
+const CATALOG_DURABLE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CachedCatalog {
     pub rows: Vec<MetaPreview>,
     pub exhausted: bool,
-    /// Unix seconds when the rows were fetched. Keeps the in-memory age honest after a restart:
-    /// a row written 14 minutes ago must not get a fresh 15 minutes just because it was read.
+    /// Unix seconds when the rows were fetched. Travels with the durable row so a restart keeps
+    /// the age honest: a stale row must be recognised and revalidated, not treated as fresh.
     pub at: i64,
 }
 
 #[derive(Default)]
 struct Inner {
-    rows: HashMap<String, (Instant, CachedCatalog)>,
+    rows: HashMap<String, CachedCatalog>,
 }
 
 pub struct CatalogCache {
@@ -60,6 +71,14 @@ fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// The store wraps cached values in an 8-byte big-endian expiry. Read the payload with or without
+/// that prefix so a row written by either format can still be served.
+fn decode_answer(bytes: &[u8]) -> Option<CachedCatalog> {
+    serde_json::from_slice::<CachedCatalog>(bytes)
+        .ok()
+        .or_else(|| serde_json::from_slice::<CachedCatalog>(bytes.get(8..)?).ok())
+}
+
 impl CatalogCache {
     pub fn open() -> CatalogCache {
         CatalogCache::default()
@@ -71,18 +90,20 @@ impl CatalogCache {
         format!("{namespace}\u{0}{catalog}\u{0}{}", genre.unwrap_or(""))
     }
 
+    /// Read the raw table, NOT `cache_get`: the envelope's expiry is a maintenance hint, not a
+    /// reason to blank a shelf. Freshness is the caller's decision, made from `CachedCatalog::at`.
     fn durable_get(&self, key: &str) -> Option<Vec<u8>> {
         #[cfg(test)]
         {
             return test_store::STORE.with(|s| {
                 s.borrow().as_ref().and_then(|store| {
-                    store.cache_get(plx_nuvio_store::NuvioCache::Catalogs, key)
+                    store.get(plx_nuvio_store::Table::CatalogCache, key)
                 })
             });
         }
         #[cfg(not(test))]
         {
-            plx_nuvio_store::get()?.cache_get(plx_nuvio_store::NuvioCache::Catalogs, key)
+            plx_nuvio_store::get()?.get(plx_nuvio_store::Table::CatalogCache, key)
         }
     }
 
@@ -92,7 +113,7 @@ impl CatalogCache {
             test_store::STORE.with(|s| {
                 if let Some(store) = s.borrow().as_ref() {
                     let _ = store.cache_put(
-                        plx_nuvio_store::NuvioCache::Catalogs, key, CATALOG_TTL, bytes,
+                        plx_nuvio_store::NuvioCache::Catalogs, key, CATALOG_DURABLE_TTL, bytes,
                     );
                 }
             });
@@ -101,29 +122,24 @@ impl CatalogCache {
         #[cfg(not(test))]
         {
             if let Some(store) = plx_nuvio_store::get() {
-                let _ = store.cache_put(plx_nuvio_store::NuvioCache::Catalogs, key, CATALOG_TTL, bytes);
+                let _ = store.cache_put(
+                    plx_nuvio_store::NuvioCache::Catalogs, key, CATALOG_DURABLE_TTL, bytes,
+                );
             }
         }
     }
 
-    /// A live answer, from memory or from the durable table. An answer past its window is dropped,
-    /// never served — the next read re-fetches it from the addon.
+    /// The last known rows, from memory or from the durable table. A row past [`CATALOG_TTL`] is
+    /// still returned — the caller uses `CachedCatalog::at` to decide whether to revalidate it.
+    /// Missing rows (first launch, addon change, or a cleared table) still miss.
     pub fn get(&self, key: &str) -> Option<CachedCatalog> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, answer)) = g.rows.get(key) {
-            if at.elapsed() < CATALOG_TTL {
-                return Some(answer.clone());
-            }
-            g.rows.remove(key);
+        if let Some(answer) = g.rows.get(key) {
+            return Some(answer.clone());
         }
         let bytes = self.durable_get(key)?;
-        let answer: CachedCatalog = serde_json::from_slice(&bytes).ok()?;
-        let age = Duration::from_secs(now_secs().saturating_sub(answer.at) as u64);
-        if age >= CATALOG_TTL {
-            return None;
-        }
-        let started = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
-        g.rows.insert(key.to_string(), (started, answer.clone()));
+        let answer = decode_answer(&bytes)?;
+        g.rows.insert(key.to_string(), answer.clone());
         Some(answer)
     }
 
@@ -134,7 +150,28 @@ impl CatalogCache {
             self.durable_put(key, &bytes);
         }
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
-            .rows.insert(key.to_string(), (Instant::now(), answer));
+            .rows.insert(key.to_string(), answer);
+    }
+
+    /// Mark a row stale without dropping it. Used by the explicit Sync action: the rows stay
+    /// painted, but the next reader sees an old `at` and revalidates them from the addon.
+    pub fn mark_stale(&self, key: &str) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let old = now_secs() - CATALOG_TTL.as_secs() as i64 - 1;
+        if let Some(answer) = g.rows.get_mut(key) {
+            answer.at = old;
+            if let Ok(bytes) = serde_json::to_vec(&*answer) {
+                self.durable_put(key, &bytes);
+            }
+            return;
+        }
+        if let Some(mut answer) = self.durable_get(key).and_then(|bytes| decode_answer(&bytes)) {
+            answer.at = old;
+            if let Ok(bytes) = serde_json::to_vec(&answer) {
+                self.durable_put(key, &bytes);
+            }
+            g.rows.insert(key.to_string(), answer);
+        }
     }
 
     /// An addon-set change makes every row's namespace stale. Drop the durable rows too, so the
@@ -199,15 +236,30 @@ mod tests {
         assert_eq!(got.rows[0].id, "tt-persisted");
         assert!(got.exhausted);
 
-        // The store's envelope still governs: an expired row is missed, not served warm.
-        let expired_key = CatalogCache::key("restart-ns", "addon/movie/old", None);
+        // A row past its freshness window is STILL served — the caller revalidates it in the
+        // background instead of blanking the shelf while an addon answers.
+        let stale_key = CatalogCache::key("restart-ns", "addon/movie/old", None);
+        let stale = CachedCatalog {
+            rows: vec![preview("tt-old")],
+            exhausted: true,
+            at: now_secs() - CATALOG_TTL.as_secs() as i64 - 60,
+        };
         reopened_store.cache_put(
             plx_nuvio_store::NuvioCache::Catalogs,
-            &expired_key,
-            Duration::ZERO,
-            serde_json::to_vec(&CachedCatalog { rows: vec![preview("tt-old")], exhausted: true, at: now_secs() }).unwrap().as_slice(),
+            &stale_key,
+            CATALOG_DURABLE_TTL,
+            serde_json::to_vec(&stale).unwrap().as_slice(),
         ).unwrap();
-        assert!(after.get(&expired_key).is_none(), "an expired durable row must not be served");
+        let got = after.get(&stale_key).expect("a stale row is served, not dropped");
+        assert_eq!(got.rows[0].id, "tt-old");
+        assert!(now_secs().saturating_sub(got.at) >= CATALOG_TTL.as_secs() as i64);
+
+        // An explicit Sync marks the row stale without dropping it: it still answers, but with
+        // an old timestamp so the shim's reader revalidates it from the addon.
+        after.mark_stale(&key);
+        let marked = after.get(&key).expect("stale marking must never blank a shelf");
+        assert_eq!(marked.rows[0].id, "tt-persisted");
+        assert!(now_secs().saturating_sub(marked.at) >= CATALOG_TTL.as_secs() as i64);
 
         test_store::STORE.with(|s| *s.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);

@@ -232,6 +232,22 @@
     }
   },
   "add": {
+    "settings.addons.sync": {
+      "description": "Settings > Addons action row: pull the Nuvio cloud addon list and refresh the catalogs.",
+      "en": "Sync addons", "es": "Sincronizar addons", "be": "Сінхранізаваць дадаткі",
+      "ca": "Sincronitza addons", "fr": "Synchroniser les addons", "it": "Sincronizza addon",
+      "pt": "Sincronizar addons", "de": "Addons synchronisieren", "hu": "Addonok szinkronizálása",
+      "ru": "Синхронизировать дополнения", "pl": "Synchronizuj dodatki", "nl": "Addons synchroniseren",
+      "hr": "Sinkroniziraj dodatke"
+    },
+    "settings.addons.syncing": {
+      "description": "Settings > Addons action row while the cloud addon pull is in flight.",
+      "en": "Syncing addons…", "es": "Sincronizando addons…", "be": "Сінхранізацыя дадаткаў…",
+      "ca": "Sincronitzant addons…", "fr": "Synchronisation des addons…", "it": "Sincronizzazione addon…",
+      "pt": "Sincronizando addons…", "de": "Addons werden synchronisiert…", "hu": "Addonok szinkronizálása…",
+      "ru": "Синхронизация дополнений…", "pl": "Synchronizowanie dodatków…", "nl": "Addons synchroniseren…",
+      "hr": "Sinkroniziranje dodataka…"
+    },
     "nuvio.profiles.delete_again": {
       "description": "The armed Delete row asks for a second press before removing a Nuvio profile.",
       "en": "Press again", "es": "Pulsa de nuevo", "be": "Націсніце яшчэ раз",

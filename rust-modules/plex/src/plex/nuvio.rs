@@ -108,6 +108,9 @@ use std::sync::{Arc, OnceLock};
 pub trait AddonControl: Send + Sync {
     fn installed(&self) -> Vec<(String, String, bool)>;
     fn set_enabled(&self, key: String, enabled: bool) -> bool;
+    /// Fork Rofocale11: Settings ▸ Addons ▸ Sync Addons. Pull the account's addon rows and
+    /// reconcile locally; returns whether the work was queued. A pull only — never a cloud push.
+    fn sync(&self) -> bool;
 }
 
 static ADDON_CONTROL: OnceLock<Arc<dyn AddonControl>> = OnceLock::new();
@@ -124,6 +127,12 @@ pub fn set_addon_enabled(key: String, enabled: bool) -> bool {
     ADDON_CONTROL.get().map(|c| c.set_enabled(key, enabled)).unwrap_or(false)
 }
 
+/// Fork Rofocale11: the Settings row's Sync action. No-op (false) before the app registers a
+/// control, so unit tests and pre-boot screens never invent account work.
+pub fn sync_addons() -> bool {
+    ADDON_CONTROL.get().map(|c| c.sync()).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     /// before the app registers its boot control (the state of every unit-test
@@ -133,5 +142,6 @@ mod tests {
     fn addon_control_is_quiet_until_the_app_registers_it() {
         assert!(super::installed_addons().is_empty());
         assert!(!super::set_addon_enabled("https://addon.example/manifest.json".into(), true));
+        assert!(!super::sync_addons());
     }
 }

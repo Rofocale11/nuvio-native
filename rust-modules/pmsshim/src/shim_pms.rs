@@ -539,6 +539,10 @@ struct CatalogCache {
     exhausted: bool,
     /// One fill at a time; waiters sleep on `cv` and are woken when it ends.
     filling: bool,
+    /// Fork Rofocale11: a revalidation replaces the rows from page 0 instead of appending to
+    /// them. The old rows stay visible until the new ones land, so a stale shelf never blanks
+    /// while it refreshes.
+    refreshing: bool,
     /// A failed fill is not retried before this instant.
     retry_at: Option<Instant>,
     /// Wakes the readers waiting for this fill. Behind an `Arc` so a waiter can hold it while it
@@ -2606,6 +2610,47 @@ mod tmdb_metadata_tests {
             "a fresh durable window must not touch the addon");
     }
 
+    /// Fork Rofocale11: a stale shelf is served from local rows but revalidated in the background,
+    /// replacing those rows from page 0 rather than appending to them. The caller never waits on
+    /// the addon, so a long gap between launches cannot make Home slow.
+    #[test]
+    fn a_stale_catalog_is_revalidated_from_page_zero() {
+        let backend = Arc::new(CountingCatalogBackend::default());
+        let shim = Arc::new(Shim::new(backend.clone(), Config::default()));
+        let k = ("a/movie/top".to_string(), None);
+        let entry = Arc::new(Mutex::new(CatalogCache {
+            at: Instant::now() - CATALOG_TTL - Duration::from_secs(1),
+            rows: vec![MetaPreview {
+                id: "tt-stale".into(),
+                type_: "movie".into(),
+                name: "Stale".into(),
+                ..Default::default()
+            }],
+            exhausted: true,
+            filling: false,
+            refreshing: false,
+            retry_at: None,
+            cv: Arc::new(Condvar::new()),
+        }));
+        shim.catalogs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(k.clone(), Arc::clone(&entry));
+
+        shim.ensure_catalog_fill(&k, &entry, None, None, 10);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let rows = entry.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+            if rows.len() == 1 && rows[0].id == "tt-fresh" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the stale entry was never revalidated");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(backend.calls.load(Ordering::SeqCst) >= 1);
+        assert!(entry.lock().unwrap_or_else(|e| e.into_inner()).at.elapsed() < CATALOG_TTL);
+    }
+
     #[test]
     fn synthetic_rating_keys_reach_addons_as_tmdb_ids() {
         let backend = Arc::new(RecordingBackend::default());
@@ -3355,6 +3400,8 @@ impl Shim {
             if !fresh {
                 // seed from the one durable window before starting any fetch. A
                 // relaunch with unchanged addons then answers Home from redb, not from the addons.
+                // A stale row still seeds the entry. Its real `at` is preserved so the caller
+                // revalidates in the background while the shelf paints from local data.
                 let seeded = self.catalog_cache.get(&durable_key).map(|answer| {
                     let age = Duration::from_secs(now_secs().saturating_sub(answer.at) as u64);
                     CatalogCache {
@@ -3362,6 +3409,7 @@ impl Shim {
                         rows: answer.rows,
                         exhausted: answer.exhausted,
                         filling: false,
+                        refreshing: false,
                         retry_at: None,
                         cv: Arc::new(Condvar::new()),
                     }
@@ -3373,6 +3421,7 @@ impl Shim {
                         rows: Vec::new(),
                         exhausted: false,
                         filling: false,
+                        refreshing: false,
                         retry_at: None,
                         cv: Arc::new(Condvar::new()),
                     }))),
@@ -3441,13 +3490,21 @@ impl Shim {
         {
             let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
+            let stale = c.at.elapsed() >= CATALOG_TTL;
             if c.filling
-                || c.exhausted
-                || c.rows.len() >= want
+                || (!stale && (c.exhausted || c.rows.len() >= want))
                 || c.retry_at.is_some_and(|at| now < at)
             {
                 return;
             }
+            // Fork Rofocale11: a stale entry with rows is REVALIDATED — they were served to the
+            // reader already, now refresh them from page 0 in the background. `at` moves to now
+            // so only one fill is started, and `refreshing` tells it to replace, not append.
+            c.refreshing = stale && !c.rows.is_empty();
+            if c.refreshing {
+                c.exhausted = false;
+            }
+            c.at = now;
             c.filling = true;
         }
         let (me, filling, clear, claim, k) = (
@@ -3508,6 +3565,10 @@ impl Shim {
         want: usize,
     ) {
         self.acquire();
+        // Fork Rofocale11: a revalidation fetches from page 0 into a separate vector and publishes
+        // each page to the entry, so the old rows stay visible until the fresh ones replace them.
+        let refreshing = entry.lock().unwrap_or_else(|e| e.into_inner()).refreshing;
+        let mut fresh_rows: Vec<MetaPreview> = Vec::new();
         let mut failed = false;
         let mut added = false;
         let mut stale = false;
@@ -3519,7 +3580,11 @@ impl Shim {
             }
             let (skip, done) = {
                 let c = entry.lock().unwrap_or_else(|e| e.into_inner());
-                (c.rows.len() as u32, c.exhausted || c.rows.len() >= want)
+                if refreshing {
+                    (fresh_rows.len() as u32, c.exhausted || fresh_rows.len() >= want)
+                } else {
+                    (c.rows.len() as u32, c.exhausted || c.rows.len() >= want)
+                }
             };
             if done {
                 break;
@@ -3528,22 +3593,42 @@ impl Shim {
             match self.backend.catalog_page(&k.0, skip, fetch_genre.as_deref()) {
                 Ok(page) => {
                     let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
-                    let before = c.rows.len();
-                    for p in page {
-                        if match_genre
-                            .as_deref()
-                            .is_some_and(|g| !p.genres.iter().any(|x| genre_matches(x, g)))
-                        {
-                            continue;
+                    if refreshing {
+                        let before = fresh_rows.len();
+                        for p in page {
+                            if match_genre
+                                .as_deref()
+                                .is_some_and(|g| !p.genres.iter().any(|x| genre_matches(x, g)))
+                            {
+                                continue;
+                            }
+                            if !fresh_rows.iter().any(|r| r.id == p.id) {
+                                fresh_rows.push(p);
+                            }
                         }
-                        if !c.rows.iter().any(|r| r.id == p.id) {
-                            c.rows.push(p);
+                        if fresh_rows.len() == before {
+                            c.exhausted = true;
                         }
+                        added |= fresh_rows.len() > before;
+                        c.rows = fresh_rows.clone();
+                    } else {
+                        let before = c.rows.len();
+                        for p in page {
+                            if match_genre
+                                .as_deref()
+                                .is_some_and(|g| !p.genres.iter().any(|x| genre_matches(x, g)))
+                            {
+                                continue;
+                            }
+                            if !c.rows.iter().any(|r| r.id == p.id) {
+                                c.rows.push(p);
+                            }
+                        }
+                        if c.rows.len() == before {
+                            c.exhausted = true;
+                        }
+                        added |= c.rows.len() > before;
                     }
-                    if c.rows.len() == before {
-                        c.exhausted = true;
-                    }
-                    added |= c.rows.len() > before;
                 }
                 Err(()) => {
                     failed = true;
@@ -3553,6 +3638,7 @@ impl Shim {
         }
         {
             let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+            c.refreshing = false;
             // A failure is NOT an empty catalog. Expire the entry so a later read retries, and
             // back the retry off: a dead addon must not be asked on every page read that follows.
             if failed && c.rows.is_empty() {
@@ -6811,6 +6897,38 @@ impl Shim {
                 // finished warm is itself a content change worth re-reading.
                 me.bump_content();
             });
+    }
+
+    /// Fork Rofocale11: explicit refresh (Settings ▸ Addons ▸ Sync Addons, unchanged-account path).
+    /// Revalidate every catalog from the addons without an addon-set change or a cache wipe of
+    /// detail/enrich rows.
+    /// The rows the viewer can currently see are put back with an old `at`, so shelves stay painted
+    /// while the background fills replace them; catalogs not yet on screen start cold.
+    pub fn refresh_catalogs(self: &Arc<Self>) {
+        let ns = self.catalog_ns.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut keys: Vec<String> = self
+            .catalogs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .map(|k| crate::shim_catalog_cache::CatalogCache::key(&ns, &k.0, k.1.as_deref()))
+            .collect();
+        for c in self.catalog_list() {
+            keys.push(crate::shim_catalog_cache::CatalogCache::key(&ns, &c.key, None));
+        }
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            self.catalog_cache.mark_stale(&key);
+        }
+        // The in-memory entries must also look stale, or `catalog_range` keeps answering from
+        // them and never re-seeds (and therefore never revalidates) the marked durable rows.
+        for entry in self.catalogs.lock().unwrap_or_else(|e| e.into_inner()).values() {
+            let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+            c.at = Instant::now() - CATALOG_TTL - Duration::from_secs(1);
+            c.retry_at = None;
+        }
+        self.warm();
     }
 
     // ---- routing ---------------------------------------------------------------------------

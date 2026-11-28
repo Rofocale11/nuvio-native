@@ -16,6 +16,36 @@ When rotating this audit into history, keep the heading
 **Status: conflicts resolved, gates in progress, not committed.** All 24 conflicts
 are resolved and staged. Host verification is running; no device claim is made here.
 
+## Fork Rofocale11: fast launch + Sync Addons (2026-11-28)
+
+Home/Library used to re-fetch every addon catalog on a launch more than 15 minutes after the
+previous fill. Catalog pages are now **stale-while-revalidate**: the last successful rows are
+served immediately from redb, and their reader starts a background revalidation that replaces the
+rows in place. There is still no cloud-content change signal for Stremio addons, so freshness is
+time-based; it no longer gates first paint.
+
+Upstream files touched (each edit carries a `Fork Rofocale11:` marker):
+
+- `pmsshim/src/shim_pms.rs` — `CatalogCache` gained a `refreshing` flag; `ensure_catalog_fill`
+  starts a fill for a stale entry even when it already has rows; `fill_catalog` replaces rows from
+  page 0 while keeping the old ones visible; new `Shim::refresh_catalogs()` for the explicit Sync
+  action.
+- `pmsshim/src/shim_store.rs` — `MetaCache::open` / `EnrichCache::open` rewrite only rows that
+  still lack a TTL envelope, turning an O(N)-commits-per-boot migration into a one-time cost.
+- `plex/src/plex/nuvio.rs` — `AddonControl::sync()` + `sync_addons()`; one small upstream seam so
+  the fork-owned Settings screen can ask for a pull without naming `pmsshim`.
+- `stremio/src/nuvio.rs` — `fetch_rows` now uses the documented addon GET
+  (`/rest/v1/addons?select=*&profile_id=eq.<n>&order=sort_order`, Bearer + apikey) first; the
+  undocumented `tv_addons` table and `sync_pull_addons` RPC remain compatibility fallbacks only.
+  The addon fingerprint includes position, so a cloud reorder is detected.
+
+Fork-owned files: `pmsshim/src/shim_catalog_cache.rs` (durable stale rows), `src/app/nuvio_addons.rs`
+(the smart Sync worker), `screens/src/settings_addons.rs` (Sync action row), and two new strings in
+`nuvio-locales/brand.json` (JSON cannot carry an inline marker).
+
+**Never call `sync_push_addons`**: that documented RPC is a full replace that deletes omitted
+addons. This feature is pull-only.
+
 ## Fork Rofocale11: frame-thread IO removal (2026-11-28)
 
 Four fork paths performed blocking work inside the app's frame pump. All work now runs on

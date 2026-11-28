@@ -117,6 +117,33 @@ impl plx_plex::plex::nuvio::AddonControl for Ctl {
         }
         true
     }
+
+    fn sync(&self) -> bool {
+        // Fork Rofocale11: the documented Nuvio API reads addons with a table GET; the RPC form is
+        // a full-replace PUSH that deletes omitted addons and must never be used from this action.
+        // One cheap fingerprint read decides whether to re-pull manifests or just refresh shelves.
+        let shim = Arc::clone(&self.shim);
+        plx_base::eventlog::log("nuvio: addon sync queued on worker");
+        plx_base::task::spawn("nuvio-addon-sync", move || {
+            let Some(fp) = shim.account.account_addons_fingerprint() else {
+                plx_base::eventlog::log(
+                    "nuvio: addon sync — account unreachable, keeping the cached set",
+                );
+                return;
+            };
+            let changed = plx_nuvio_store::get()
+                .and_then(|s| s.get(plx_nuvio_store::Table::InstallPrefs, "account_addons_fp"))
+                .is_some_and(|old| old != fp.as_bytes());
+            if changed {
+                plx_base::eventlog::log("nuvio: addon sync — cloud set changed, reloading");
+                shim.account.load_profile(None);
+            } else {
+                plx_base::eventlog::log("nuvio: addon sync — unchanged, refreshing catalogs");
+                shim.refresh_catalogs();
+            }
+        })
+        .is_some()
+    }
 }
 
 #[cfg(test)]

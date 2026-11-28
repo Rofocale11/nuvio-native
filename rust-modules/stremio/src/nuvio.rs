@@ -614,20 +614,24 @@ pub fn addon_rows(rows: &Value) -> Vec<AddonRow> {
 /// The same addon configuration in two shapes must produce the SAME fingerprint: the account's
 /// rows (cheap boot probe) and the installed `AddonSet` (written when the set is applied). A
 /// mismatch would either re-fetch on every boot or miss a real account change.
-fn fingerprint_parts(mut parts: Vec<(String, bool, String)>) -> String {
-    parts.sort();
+///
+/// Fork Rofocale11: the position is part of the fingerprint. The old helper sorted the tuples,
+/// which made a cloud REORDER (`sort_order` in the documented API) invisible to both the boot
+/// probe and the Settings > Addons Sync action. Both inputs arrive in `sort_order` sequence, so
+/// indexing them yields the same value on either side.
+fn fingerprint_parts(parts: Vec<(usize, String, bool, String)>) -> String {
     format!("{parts:?}")
 }
 
 pub fn addon_rows_fingerprint(rows: &[AddonRow]) -> String {
-    fingerprint_parts(rows.iter().map(|r| {
-        (addons::canonicalize_url(&r.url), r.enabled, r.display_name.clone().unwrap_or_default())
+    fingerprint_parts(rows.iter().enumerate().map(|(i, r)| {
+        (i, addons::canonicalize_url(&r.url), r.enabled, r.display_name.clone().unwrap_or_default())
     }).collect())
 }
 
 pub fn addon_set_fingerprint(addons: &[crate::model::Addon]) -> String {
-    fingerprint_parts(addons.iter().map(|a| {
-        (a.transport_url.clone(), !a.disabled, a.display_name.clone().unwrap_or_default())
+    fingerprint_parts(addons.iter().enumerate().map(|(i, a)| {
+        (i, a.transport_url.clone(), !a.disabled, a.display_name.clone().unwrap_or_default())
     }).collect())
 }
 
@@ -650,14 +654,21 @@ pub fn addons_fingerprint(session: &Session, profile_id: &str) -> Result<String>
 }
 
 fn fetch_rows(c: &Config, s: &Session, profile_index: u32) -> Result<Value> {
-    let owner = owner_id(c, s)?;
-    let owner_q = http::encode_component(&owner);
-    let q = format!("/rest/v1/addons?user_id=eq.{owner_q}&profile_id=eq.{profile_index}&select=*&order=sort_order.asc");
+    // Fork Rofocale11: the documented Nuvio Server API reads addons with a plain table GET —
+    // `GET /rest/v1/addons?select=*&profile_id=eq.<n>&order=sort_order` (Bearer + apikey, both
+    // added by `call`). RLS scopes rows to the signed-in user, so no `user_id` filter (and no
+    // extra `get_sync_owner` RPC) is needed. Pushes are the RPC side (`sync_push_addons`), which
+    // this client never calls: it is a full replace that deletes omitted addons.
+    let q = format!("/rest/v1/addons?select=*&profile_id=eq.{profile_index}&order=sort_order");
     match call(c, "GET", &q, Some(&s.access_token), None)? {
         (st, v) if (200..300).contains(&st) => return Ok(v),
         (404, _) => {}
         (st, _) => return Err(Error::Status(st)),
     }
+    // Compatibility fallbacks for older/self-hosted backends that predate the documented table.
+    // Neither is in the public spec; keep them only for installs that need them.
+    let owner = owner_id(c, s)?;
+    let owner_q = http::encode_component(&owner);
     let q = format!("/rest/v1/tv_addons?owner_id=eq.{owner_q}&select=*&order=position.asc");
     match call(c, "GET", &q, Some(&s.access_token), None)? {
         (st, v) if (200..300).contains(&st) => return Ok(v),
@@ -740,6 +751,18 @@ mod tests {
         let removed = vec![];
         assert_ne!(addon_rows_fingerprint(&rows), addon_set_fingerprint(&removed),
             "an addon deleted in the account must change the fingerprint");
+    }
+
+    /// Fork Rofocale11: a reorder in the Nuvio cloud is a real config change. The old helper
+    /// sorted the fingerprint tuples, so a viewer reordering addons on nuvio.tv saw nothing happen
+    /// on the TV until some other field changed.
+    #[test]
+    fn a_cloud_reorder_changes_the_fingerprint() {
+        let a = AddonRow { url: "https://a.example/manifest.json".into(), display_name: None, enabled: true, sort_order: 0 };
+        let b = AddonRow { url: "https://b.example/manifest.json".into(), display_name: None, enabled: true, sort_order: 1 };
+        let before = addon_rows_fingerprint(&[a.clone(), b.clone()]);
+        let after = addon_rows_fingerprint(&[b, a]);
+        assert_ne!(before, after, "a sort_order reorder must read as an account change");
     }
 
     #[test]
