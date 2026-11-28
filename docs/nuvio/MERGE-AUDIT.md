@@ -414,3 +414,40 @@ source from the next episode's fresh list, matching by torrent info hash (ignori
 addon's own per-episode index wins), Stremio `bingeGroup`, or addon + resolution. Upstream-owned
 `pmsshim/src/shim_pms.rs` carries only two marked call sites; `pmsshim/src/lib.rs` carries the
 module line. Tests pin torrent-over-direct and debrid-by-addon/height matching.
+
+## Reverted: Nuvio Engine v0.1.7 migration (2026-11-28)
+
+Commit `ee1c4f3b8` upgraded the vendored engine from v0.1.5 to v0.1.7 (pristine upstream source
+plus strict build-time patches), replaced our streaming window with upstream's bounded cache,
+added a daily release watcher, and changed Diagnostics to show Rate in Mbps/kbps and byte amounts
+in KiB/MiB via `nuvio-locales/brand.json`. It was committed, `make check` green, and deployed to
+the stable set. It has now been **fully reverted**: the branch was reset to `7f862fbf0` and
+force-pushed there, so the local tree, `origin/nuvio-native` and the deployed binary all run v0.1.5
+again. The abandoned commit survives only as the local ref `backup-before-v017-reset`.
+
+**Why it was reverted — measured RAM regression on the same torrent.** With v0.1.5 the engine's
+`resident` moved between **16 and 32 MB** (≈28 MB at rest), payload 36 MB in tmpfs,
+`MemAvailable` 102 MB, 48 fps, 0 dropped frames, no OOM. With v0.1.7 the same content settled at
+**~111 MB resident**, payload 112 MB, `MemAvailable` 68 MB — still 48 fps with no dropped frames
+and negligible PSI stalls, but far above the intended 30 MB cap and with a much thinner margin.
+The viewer reported the memory rise as the reason to revert.
+
+**Mechanism to understand before trying another upgrade.** v0.1.5's
+`cmake/patches/libtorrent-2.0.12-nuvio-drop-piece.patch` made eviction *proactive*: after the
+streaming window passed a piece the engine called `we_dont_have` and sent `dont_have` to peers, so
+the data could not accumulate. The `reject-piece-end.patch` that shipped beside it is a SIGSEGV fix
+for that continuous rejection path and must travel with it. v0.1.7 dropped all three libtorrent
+patches (they conflicted with upstream changes) and relies on reactive
+`enforce_retention()` → `nuvio_evict_pieces()` instead. That path bails out entirely when
+`range_release_available()` fails its hole-punch probe on the payload filesystem, and the `freed`
+stat in the event log is `disk_cache_evictions` (the whole-torrent cache), **not** stream-retention
+evidence. A second defect in the abandoned patch: `0003-active-retention.patch` set
+`minimum_readahead_bytes = 30 MiB`, making the retention floor 44 MiB, while the docs and the
+owner's request said 20 MiB / a 34 MiB floor — the smaller readahead was never in the shipped code.
+
+**Instruction for a future engine bump:** port the proactive drop mechanism forward (including
+the SIGSEGV fix) instead of trusting upstream's reactive retention, set the readahead actually
+asked for, and gate the upgrade on an on-device resident measurement against a fast, well-seeded
+torrent. Do not treat green host gates or `freed > 0` as proof that retention works. Losing the
+v0.1.7 commit also removed its Diagnostics Mbps/KiB labels and the release watcher; reintroduce
+those separately if wanted, not as a precondition for the engine work.
