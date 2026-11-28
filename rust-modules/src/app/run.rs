@@ -330,9 +330,18 @@ impl plx_ui::dispatch::FrameRuntime<AppHost> for ProductFrameRuntime<'_> {
         // restore metadata and peers. Entering lifts any limit a previous session left behind.
         if was_player && !playing {
             restore_played_entry(app);
-            plx_stremio::sbengine::stop_background();
+            // Fork Rofocale11: the C++ teardown deletes every torrent and its payload and writes
+            // the event log synchronously. On a frame it is an unbounded one-shot hitch leaving a
+            // film. Run it on an application worker; ordering with a later Start is safe because
+            // `resolve_stream` re-lifts the limits at its head after any restored swarm.
+            plx_base::eventlog::log("sbengine: stop queued on worker");
+            if plx_base::task::spawn("sbengine-stop", plx_stremio::sbengine::stop_background).is_none() {
+                plx_base::eventlog::log("sbengine: stop worker refused — engine left running");
+            }
         } else if !was_player && playing {
-            plx_stremio::sbengine::resume_foreground();
+            // Fork Rofocale11: limits + event-log write are IO, not frame work.
+            plx_base::eventlog::log("sbengine: resume queued on worker");
+            let _ = plx_base::task::spawn("sbengine-resume", plx_stremio::sbengine::resume_foreground);
         }
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);
@@ -2395,6 +2404,11 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         let _ = app.adapters.player.backend_poll_session_at(&mut app.player.session, backend_at);
         super::playback::drain_uri_track_fallbacks(&mut app.player.session,
             &mut app.adapters.player, app.runtime.metadata_mut());
+        // Fork Rofocale11: a player Streams pick answered on a worker lands here, on the frame,
+        // and performs only the route reload — never the `/nuvio/select` HTTP call.
+        crate::app::nuvio_more::drain_pick_results(&mut app.player.session,
+            &mut app.adapters.player, &mut app.runtime.bridge(&mut app.bridge),
+            &mut app.pages.present);
         if let Some(recovery) = app.adapters.player.take_released_uri_recovery() {
             // The driver has proved this exact URI owner Released and the adapter has retired
             // its reporter. Re-resolve the same source episode before generic report::tick can

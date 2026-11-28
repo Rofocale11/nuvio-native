@@ -15,6 +15,48 @@ use plx_media::route::PlaybackSession;
 use plx_os::i18n::msg;
 use plx_stremio::sbengine::EngineStats;
 use plx_ui::widgets::Field;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Fork Rofocale11: the two fork-specific samples are IO (a C++ mutex-guarded FFI call and a
+/// `/proc/meminfo` read). The diagnostics panel re-samples at 2 Hz ON THE FRAME THREAD, so both
+/// are taken by a worker and read back from here. A short mutex over a copy of plain values is
+/// all the frame pays.
+#[derive(Clone, Copy, Default)]
+struct ForkSample {
+    stats: Option<EngineStats>,
+    mem: Option<(u64, u64)>,
+}
+
+static SAMPLE: OnceLock<Arc<Mutex<ForkSample>>> = OnceLock::new();
+static REFRESHER: AtomicBool = AtomicBool::new(false);
+
+fn fork_sample() -> ForkSample {
+    let cell = SAMPLE.get_or_init(|| Arc::new(Mutex::new(ForkSample::default())));
+    if !REFRESHER.swap(true, Ordering::AcqRel) {
+        plx_base::eventlog::log("nuvio: diagnostics sampler on worker");
+        let worker_cell = Arc::clone(cell);
+        let spawned = plx_base::task::spawn("nuvio-diag-sample", move || loop {
+            let sample = ForkSample {
+                stats: plx_stremio::sbengine::stats(),
+                mem: mem_usage(),
+            };
+            if let Ok(mut held) = worker_cell.lock() {
+                *held = sample;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            // Stop when the panel closes; the next open starts a fresh worker.
+            if !super::enabled() {
+                REFRESHER.store(false, Ordering::Release);
+                return;
+            }
+        });
+        if spawned.is_none() {
+            REFRESHER.store(false, Ordering::Release);
+        }
+    }
+    cell.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// the three-way delivery column. A torrent gets the swarm block, a live adaptive
 /// session keeps the upstream controller rows, and everything else (a debrid or addon link) gets the
@@ -22,7 +64,9 @@ use plx_ui::widgets::Field;
 /// the only boundary change is the `now` argument the parent already has on its sampling clock.
 pub(super) fn model_rows(ps: &PlaybackSession, d: &Diag, now: u32) -> Vec<Field> {
     let mut v = Vec::with_capacity(super::RIGHT_ROWS);
-    match (plx_media::route::is_p2p(ps), plx_stremio::sbengine::stats()) {
+    // Fork Rofocale11: read the worker-taken sample; never call the engine FFI on a frame.
+    let sampled = fork_sample();
+    match (plx_media::route::is_p2p(ps), sampled.stats) {
         // **A torrent.** File identity, then the swarm. The name and the size get a row each: a
         // release name is long enough that "name · size" wraps onto a second line anyway, and the
         // size is the number a reader compares with what the swarm has delivered.
@@ -206,7 +250,8 @@ fn mem_usage() -> Option<(u64, u64)> {
 /// The RAM row's value, in whole megabytes. `—` where the set does not answer, rather than a zero
 /// that would read as an empty machine.
 fn ram_value() -> String {
-    match mem_usage() {
+    // Fork Rofocale11: `/proc/meminfo` is read by the fork sampler worker, not here.
+    match fork_sample().mem {
         Some((used, total)) => {
             const MIB: u64 = 1024 * 1024;
             msg::browse_diagnostics_ram(

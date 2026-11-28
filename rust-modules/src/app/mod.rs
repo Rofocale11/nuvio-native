@@ -69,6 +69,9 @@ pub(crate) mod lifecycle;
 pub(crate) mod nuvio;
 // Fork Rofocale11: the player's Streams pick — shim select + fresh resolve — in a fork-owned file
 // so `playback.rs` keeps only one marked match arm.
+// Fork Rofocale11: the addon control moved off the frame thread; the new file owns the cached
+// Settings view and queues the durable writes on a worker.
+mod nuvio_addons;
 mod nuvio_more;
 // Fork Rofocale11: the Watchlist page reads the Nuvio account's My List through the shim, not
 // plex.tv; this is the fork-owned I/O seam that makes that translation.

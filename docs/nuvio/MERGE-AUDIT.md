@@ -16,6 +16,33 @@ When rotating this audit into history, keep the heading
 **Status: conflicts resolved, gates in progress, not committed.** All 24 conflicts
 are resolved and staged. Host verification is running; no device claim is made here.
 
+## Fork Rofocale11: frame-thread IO removal (2026-11-28)
+
+Four fork paths performed blocking work inside the app's frame pump. All work now runs on
+application workers; every upstream file touched carries a `Fork Rofocale11:` marker at the site.
+
+- **Player Streams pick** — `app/nuvio_more.rs` (fork-owned, rewritten): the inline
+  `client.nuvio_select()` HTTP call (8 s connect / 25 s total deadline) is queued on a
+  `nuvio-stream-pick` worker; its answer returns through a mailbox and `run.rs` drains it beside
+  `drain_uri_track_fallbacks`, where only the route reload happens. One marked call arm in
+  `app/run.rs`. The Detail picker was already correct (`NuvioReq::Select` → worker).
+- **Settings ▸ Addons toggle** — new fork-owned `app/nuvio_addons.rs`: `AddonControl` reads a small
+  cached `(url, name, enabled)` vector instead of cloning every manifest out of the shim's global
+  `RwLock`; `set_enabled` flips that row optimistically and queues the backend replace, prefs
+  write, five redb table clear+commit cycles and warm on a worker. `app/nuvio.rs` changes by one
+  `mod` sibling's `register`/`refresh` calls plus markers; the account sink refreshes the cached
+  view before it hands the set to the backend. A `FrameScope` regression test pins the seam.
+- **Player exit / enter** — `app/run.rs`: `sbengine::stop_background()` and `resume_foreground()`
+  are spawned on `sbengine-stop` / `sbengine-resume` workers instead of running C++ FFI and an
+  event-log file write on the frame. Ordering with a later Start is safe because
+  `resolve_stream` re-lifts limits at its head.
+- **Diagnostics** — `app/diagnostics/diagnostics_nuvio.rs` (fork-owned child): `sbengine::stats()`
+  and `/proc/meminfo` are sampled by a 4 Hz worker and read back from a small mutex-protected copy;
+  the worker stops when the panel closes.
+
+Also in `pmsshim/src/shim_pms.rs`, the `pmsshim-warm` and `p2p-warm` speculation threads now call
+`yield_to_frame_thread()` like the shim's request threads and poster workers already do.
+
 ## Fork Rofocale11: Stage 1 scroll-hitch contained wins (2026-11-28)
 
 Three behaviour-identical reductions, all in upstream-owned files; each edit carries a

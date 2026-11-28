@@ -6800,6 +6800,9 @@ impl Shim {
         let _ = std::thread::Builder::new()
             .name("pmsshim-warm".into())
             .spawn(move || {
+                // Fork Rofocale11: speculative addon fan-out. Let the frame thread win the cores
+                // whenever they contend — this runs at boot and after every addon toggle.
+                plx_base::task::yield_to_frame_thread();
                 let _ = me.account.saved_library(false);
                 let list = me.catalog_list();
                 let _ = me.catalog_hubs(&list, |_| true, 12, true, Duration::from_secs(60), None);
@@ -7522,6 +7525,9 @@ impl Shim {
         std::thread::Builder::new()
             .name("p2p-warm".into())
             .spawn(move || {
+                // Fork Rofocale11: speculative swarm warm has no deadline; the presenting frame
+                // does. Same policy as the shim's request and poster workers.
+                plx_base::task::yield_to_frame_thread();
                 let ok = plx_stremio::sbengine::warm(&ih);
                 plx_base::eventlog::log(&format!(
                     "sbengine: warm {tag} — {}",

@@ -347,6 +347,10 @@ pub(crate) fn boot() {
             if !save_addons(&set, &path) {
                 log("nuvio: could not persist account addons");
             }
+            // Fork Rofocale11: keep the frame-safe Settings view in step with an off-frame
+            // replacement. The view lives in the fork-owned nuvio_addons child module; refresh
+            // before `replace` takes ownership of the set.
+            crate::app::nuvio_addons::refresh(&set);
             backend.replace(set);
             shim.addons_changed();
             shim.warm();
@@ -359,40 +363,10 @@ pub(crate) fn boot() {
     // Fork Rofocale11: Settings > Addons is inert under fake content; there is no addon set to
     // flip and no account preference to record.
     if let Some(addons) = addons.clone() {
-        struct Ctl {
-            backend: Arc<plx_pmsshim::AddonBackend>,
-            shim: Arc<plx_pmsshim::shim_pms::Shim>,
-        }
-        impl plx_plex::plex::nuvio::AddonControl for Ctl {
-            fn installed(&self) -> Vec<(String, String, bool)> {
-                self.backend.snapshot().addons.into_iter()
-                    .map(|a| {
-                        let name = a.display_name.clone().unwrap_or_else(|| a.manifest.name.clone());
-                        (a.transport_url, name, !a.disabled)
-                    })
-                    .collect()
-            }
-            fn set_enabled(&self, key: String, enabled: bool) -> bool {
-                let mut set = self.backend.snapshot();
-                let mut found = false;
-                for a in set.addons.iter_mut() {
-                    if a.transport_url == key {
-                        a.disabled = !enabled;
-                        found = true;
-                    }
-                }
-                if !found { return false; }
-                self.backend.replace(set);
-                self.shim.account.set_addon_enabled(&key, enabled);
-                self.shim.addons_changed();
-                self.shim.warm();
-                true
-            }
-        }
-        plx_plex::plex::nuvio::register_addon_control(Arc::new(Ctl {
-            backend: addons,
-            shim: handle.shim.clone(),
-        }));
+        // Fork Rofocale11: the whole control moved into a fork-owned child module. Reads now come
+        // from a small cached view and the durable writes run on a worker — the former inline
+        // implementation put five redb clear+commit cycles on the frame thread on every toggle.
+        crate::app::nuvio_addons::register(addons, handle.shim.clone());
     }
     // Fork Rofocale11: Settings > Profiles reaches the shim through this seam, the same way
     // Settings > Addons reaches it. No screen may name `pmsshim` itself. A synthetic boot has no
