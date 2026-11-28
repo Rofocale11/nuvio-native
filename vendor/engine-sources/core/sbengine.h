@@ -3,7 +3,7 @@
 #ifndef SB_ENGINE_H
 #define SB_ENGINE_H
 #include <stdint.h>
-#define SBE_API_VERSION 4
+#define SBE_API_VERSION 5
 typedef struct { char path[512]; uint64_t size; } sbe_file;
 typedef struct {
   uint32_t peers, seeds, known, connecting;
@@ -42,5 +42,10 @@ typedef struct {
      torrents download again there, streams keep their address; 0 = queued */
   int         (*relocate)(const char *cacheDir, uint64_t segmentBytes);
   int         (*restored)(const char *ih);                           /* 1 = metadata came from a kept resume file */
+  /* Fork Rofocale11: stop one prepared file stream WITHOUT removing the torrent. A season pack
+     keeps one info hash across episodes; opening the next episode's fileIdx must kill the previous
+     episode's stream and its window payload, not pile a second stream on the same swarm. The
+     vendored engine already has nuvio_engine_stop_stream; this only exposes it across the ABI. */
+  int         (*stop_stream)(const char *ih, uint32_t idx);          /* 0 = stopped (idempotent) */
 } sbe_api;
 #endif

@@ -43,6 +43,9 @@ pub mod shim_credits;
 // permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C). A new fork-owned
 // file keeps the only upstream edit in shim_pms.rs to visibility and four routed call sites.
 pub mod shim_tmdb_ids;
+// Fork Rofocale11: carry the played source across episodes of a series, so Next keeps the
+// season-pack torrent instead of falling to a higher-ranked (and often expired) debrid URL.
+pub mod shim_source_memory;
 
 pub use shim_backend::{AddonBackend, Backend, CatalogInfo};
 pub use shim_core::{start, start_on, Config, Handle, MACHINE_ID};

@@ -4147,6 +4147,12 @@ impl Shim {
         if selected.is_none() {
             let last = self.watch.get(rk).last_stream;
             Self::promote_last_stream(&mut out, last.as_ref(), false);
+            // Fork Rofocale11: a Next handoff lands on a NEW ratingKey, so the per-item memory
+            // above cannot help. Promote the source played for another episode of this series,
+            // matching by release hash / binge group / addon instead of the expiring URL.
+            if let Ident::Episode { series, .. } = ident {
+                crate::shim_source_memory::promote(&mut out, series);
+            }
         }
         // The auto pick is ranked against the stream that actually plays (`out[0]` after
         // rank/pick/promote): a `movie1.1080.bluray.mkv` video prefers the
@@ -6133,22 +6139,41 @@ impl Shim {
         // engine picks the largest file when `preferred_idx` is None, which
         // matches that heuristic for season packs.
         let _ = (season, episode);
-        match plx_stremio::sbengine::resolve_stream(&magnet, &hash, preferred, 30_000) {
-            Ok(u) => {
-                // One line per opened stream: the log then says which engine served it, which is
-                // the only evidence on a TV that the C engine (rather than Node) is in play.
-                plx_base::eventlog::log(&format!(
-                    "sbengine: serving {} via engine (file {})",
-                    &hash[..hash.len().min(12)],
-                    preferred.map_or("largest".to_string(), |i| i.to_string())
-                ));
-                Some(u)
-            }
-            Err(e) => {
-                plx_base::eventlog::log(&format!("sbengine: resolve failed, torrents unavailable ({e})"));
-                None
+        // Fork Rofocale11: a consecutive season-pack file switch can hit a transient engine
+        // EAGAIN while the previous file's stream is still winding down. Re-opening the torrent
+        // resets the wrapper's error entry and re-activates the handle; one bounded retry has
+        // resolved it on the stable set. Explicit engine resets before/inside the switch did not.
+        let started = Instant::now();
+        let mut last_error = String::new();
+        for attempt in 0..2 {
+            let remaining = 30_000u64
+                .saturating_sub(started.elapsed().as_millis() as u64)
+                .max(1);
+            match plx_stremio::sbengine::resolve_stream(&magnet, &hash, preferred, remaining) {
+                Ok(u) => {
+                    // One line per opened stream: the log then says which engine served it, which
+                    // is the only evidence on a TV that the C engine (rather than Node) is in play.
+                    plx_base::eventlog::log(&format!(
+                        "sbengine: serving {} via engine (file {})",
+                        &hash[..hash.len().min(12)],
+                        preferred.map_or("largest".to_string(), |i| i.to_string())
+                    ));
+                    return Some(u);
+                }
+                Err(e) => {
+                    last_error = e;
+                    if attempt == 0 {
+                        let _ = plx_stremio::sbengine::open(&magnet, &hash);
+                        std::thread::sleep(Duration::from_millis(700));
+                        continue;
+                    }
+                }
             }
         }
+        plx_base::eventlog::log(&format!(
+            "sbengine: resolve failed, torrents unavailable ({last_error})"
+        ));
+        None
     }
 
     fn season_row(&self, show_rk: i64, m: &Meta, n: u32) -> Value {
@@ -6396,6 +6421,12 @@ impl Shim {
                     // resume re-selects it while it is still offered.
                     if let Some(Ok(_)) = r.clone() {
                         self.watch.set_last_stream(rk, Self::last_stream_of(c));
+                        // Fork Rofocale11: remember this source for the SERIES too, so the next
+                        // episode keeps the season-pack torrent instead of re-ranking into a
+                        // direct/debrid URL that may already be expired.
+                        if let Ident::Episode { series, .. } = &ident {
+                            crate::shim_source_memory::remember(series, c);
+                        }
                     }
                     r
                 } else {

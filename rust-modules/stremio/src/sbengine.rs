@@ -16,9 +16,13 @@
 //! (9.2 and later) depending on release. With both linked in, `tools/fwcompat.py`
 //! grades one `.so` OK on every release in its inventory (1.2 to 11.2, current sets
 //! included). Where `dlopen` still fails (a firmware we have never graded, a missing
-//! file), or the table's `api()` is not version 4, `available()` is false for the
+//! file), or the table's `api()` is not version 5, `available()` is false for the
 //! process: `torrent_server()` returns `None` and `shim_media::rank` drops every
 //! torrent and magnet stream. There is no Node fallback on that install.
+//!
+//! Fork Rofocale11: API 5 appends `stop_stream`. It is available for a future in-place file
+//! switch, but the shipping path lets the engine replace the old file's stream itself: both
+//! `stop_stream` and remove + re-open broke the Next handoff on the stable set.
 //!
 //! # Build
 //!
@@ -44,10 +48,12 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 
-/// The engine's own compatibility gate (`SBE_API_VERSION` in sbengine.h). 4 appends the playing
+/// The engine's own compatibility gate (`SBE_API_VERSION` in sbengine.h). 4 appended the playing
 /// stream's counters (`scheduled_pieces`, `active_demands`, `delivered`) to `sbe_stats`, which is
 /// what lets the transfer log tell "downloading for the player" from "downloading for itself".
-pub const API_VERSION: c_int = 4;
+/// Fork Rofocale11: 5 appends `stop_stream` so a season pack's next file can kill the previous
+/// stream without dropping the shared torrent.
+pub const API_VERSION: c_int = 5;
 
 /// Bytes of payload kept around the playhead (the streaming window).
 ///
@@ -154,6 +160,8 @@ struct EngineApi {
     setting: unsafe extern "C" fn(*const c_char, c_int) -> c_int,
     relocate: unsafe extern "C" fn(*const c_char, u64) -> c_int,
     restored: unsafe extern "C" fn(*const c_char) -> c_int,
+    // Fork Rofocale11: API 5. Stop one prepared file stream without removing the torrent.
+    stop_stream: unsafe extern "C" fn(*const c_char, u32) -> c_int,
 }
 
 plx_base::dynlib! {
@@ -348,6 +356,10 @@ pub fn url_trim(buf: &[u8]) -> String {
 /// heuristic — callers with `(season, episode)` should pre-pick via `torrent.rs`);
 /// else the first file.
 pub fn resolve_stream(magnet: &str, ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result<String, String> {
+    // Fork Rofocale11: do NOT reset the engine here. Letting the vendored engine replace the old
+    // file's stream is the only path that reliably resolves; an explicit reset before the switch
+    // failed on the very first handoff with an empty resolve error. The transient EAGAIN on a
+    // second consecutive switch is retried in `shim_pms::resolve_with_sbengine` instead.
     reset_session_download();
     resume_foreground();
     if !open(magnet, ih) {
@@ -356,10 +368,19 @@ pub fn resolve_stream(magnet: &str, ih: &str, preferred_idx: Option<u32>, timeou
     resolve_open(ih, preferred_idx, timeout_ms)
 }
 
-/// The torrent the shim last resolved. The engine keeps every opened torrent alive, still
+/// The file stream the shim last resolved. The engine keeps every opened torrent alive, still
 /// downloading and still holding its own window, until `remove`; without this a source change
 /// left the old torrent competing with the new one for the same bandwidth and RAM.
-static ACTIVE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Fork Rofocale11: the file index is part of the identity because a season pack is one torrent
+/// whose episodes are different `fileIdx` values. Same hash + new index is a FILE switch, not a
+/// retry: the old stream's window payload has to go before the next episode opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveStream {
+    hash: String,
+    file_idx: u32,
+}
+
+static ACTIVE: std::sync::Mutex<Option<ActiveStream>> = std::sync::Mutex::new(None);
 
 /// Baseline for the engine-wide `downloaded` counter, so the Diagnostics "got" figure means
 /// bytes pulled for THIS playback rather than for the whole engine process. `u64::MAX` is
@@ -378,24 +399,71 @@ fn reset_session_download() {
 /// answers 404 for the rest of the session). Callers that cache an engine URL must compare it
 /// against this before reusing it.
 pub fn active_hash() -> Option<String> {
-    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    ACTIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|a| a.hash.clone())
 }
 
-/// Remember `ih` as the playing torrent and drop the previous one. Same hash is a no-op (a retry
-/// of the current source must not tear its stream down).
-fn remember(ih: &str) {
+/// Pure decision for a new resolve against the last active stream.
+/// Fork Rofocale11: split the old "same hash is a no-op" rule. A retry of the SAME file must not
+/// tear its own stream down; a season pack's next episode is the same hash with a DIFFERENT file
+/// index, which the engine replaces in place (a transient EAGAIN is retried by the shim).
+#[derive(Debug, PartialEq, Eq)]
+enum Switch {
+    Retry,
+    Fresh,
+    Torrent(String),
+    File(u32),
+}
+
+fn switch_from(active: Option<&ActiveStream>, ih: &str, idx: u32) -> Switch {
+    match active {
+        None => Switch::Fresh,
+        Some(a) if a.hash == ih && a.file_idx == idx => Switch::Retry,
+        Some(a) if a.hash == ih => Switch::File(a.file_idx),
+        Some(a) => Switch::Torrent(a.hash.clone()),
+    }
+}
+
+/// Remember the resolved file and release whatever it replaced. Returns `true` when this is a
+/// retry of the SAME hash and file (caller skips the prebuffer gate; the stream is already open).
+///
+/// Fork Rofocale11: a season pack is one hash with many files. Stopping just the old file's
+/// stream leaves the torrent with NO active stream, and the engine's cache policy then unloads
+/// it on its own (`TORRENT_REMOVED`) while the next file's resolve races that unload — the stable
+/// set got `EAGAIN` and the handoff failed. So a file switch now REMOVES the torrent explicitly,
+/// waits for the wrapper to process `TORRENT_REMOVED`, then re-opens from the kept `.resume`
+/// state. `remove` also deletes the payload (the window's RAM bytes) via `delete_files`.
+fn remember(ih: &str, idx: u32) -> bool {
     let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
-    if active.as_deref() == Some(ih) {
-        return;
+    let decision = switch_from(active.as_ref(), ih, idx);
+    match decision {
+        Switch::Retry => return true,
+        Switch::Fresh => {}
+        Switch::Torrent(previous) => {
+            reset_session_download();
+            remove(&previous);
+            plx_base::eventlog::log(&format!(
+                "sbengine: released previous torrent {}",
+                &previous[..previous.len().min(12)]
+            ));
+        }
+        Switch::File(_) => {
+            // Fork Rofocale11: do NOT clean up explicitly. The engine's own `register_stream`
+            // stops the previous stream for this torrent when a new file is prepared
+            // (`libtorrent_stream_bridge.cpp:465-477`), and two attempts to out-do it both broke
+            // the handoff on the stable set: `stop_stream` left the streamless torrent to be
+            // unloaded by the engine's cache policy (`EAGAIN` on the next resolve), and
+            // remove + re-open failed with an empty resolve error right after the re-add.
+            // Keep the hash alive and let the engine replace the file's stream itself. The
+            // streaming window's resident bytes may still rise across a season pack, but the
+            // owner measured that as harmless sparse payload on this set; playback wins here.
+        }
     }
-    reset_session_download();
-    if let Some(previous) = active.replace(ih.to_string()) {
-        remove(&previous);
-        plx_base::eventlog::log(&format!(
-            "sbengine: released previous torrent {}",
-            &previous[..previous.len().min(12)]
-        ));
-    }
+    *active = Some(ActiveStream { hash: ih.to_string(), file_idx: idx });
+    false
 }
 
 /// Whether `ih` resolved from a kept resume file (metadata restored, peer
@@ -426,17 +494,11 @@ fn was_restored(ih: &str) -> bool {
 fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result<String, String> {
     let started = std::time::Instant::now();
     let deadline = started + std::time::Duration::from_millis(timeout_ms);
-    // Evict the previous torrent BEFORE taking the baseline. `EngineStats::downloaded`
-    // is engine-wide, so while the old torrent is still live its bytes keep arriving
-    // during the prebuffer wait and fill the delta with stale bytes: the gate
-    // passed instantly, the URL was served with zero fresh pieces of the new torrent,
-    // the probe failed (fps=14/3/2) and `playback retry` saved it. Removing first
-    // stops the old swarm competing and makes the delta count only this torrent.
-    // A same-hash retry must not tear its own stream down (remember() is a no-op
-    // to itself) and must not wait for the gate again — it already has what it needs.
-    let retry_same = active_hash().as_deref() == Some(ih);
-    remember(ih);
-    let baseline = stats().map(|s| s.downloaded).unwrap_or(0);
+    // Wait for metadata first: the resolved file index is what distinguishes a retry of the
+    // current stream from the next episode of a season pack (same hash, different fileIdx).
+    // Fork Rofocale11: remember() used to run here, before the index was known, which made a
+    // same-hash file switch indistinguishable from a retry and left the old episode's payload
+    // resident under the shared info hash.
     let files = loop {
         match files(ih) {
             Some(Ok(f)) if !f.is_empty() => break f,
@@ -459,6 +521,13 @@ fn resolve_open(ih: &str, preferred_idx: Option<u32>, timeout_ms: u64) -> Result
             .map(|(i, _)| i as u32)
             .unwrap_or(0),
     };
+    // Evict/release BEFORE taking the baseline. `EngineStats::downloaded` is engine-wide, so
+    // while the old stream or torrent is still live its bytes keep arriving during the
+    // prebuffer wait and fill the delta with stale bytes: the gate passed instantly, the URL
+    // was served with zero fresh pieces of the new file, and the probe failed. A true retry of
+    // the SAME hash and file must not tear its own stream down or wait for the gate again.
+    let retry_same = remember(ih, idx);
+    let baseline = stats().map(|s| s.downloaded).unwrap_or(0);
     let mut buf = vec![0u8; 4096];
     loop {
         match stream(ih, idx, &mut buf) {
@@ -628,6 +697,18 @@ pub fn remove(ih: &str) {
     }
 }
 
+/// Fork Rofocale11: stop ONE prepared file stream on a torrent, leaving the torrent and its
+/// swarm alive. Available for a future in-place switch; the shipping season-pack path lets the
+/// engine's own `register_stream` replace the old file's stream. Stopping the last stream made
+/// the engine unload the torrent (`EAGAIN`), and remove + re-open failed with an empty resolve
+/// error right after the re-add.
+pub fn stop_stream(ih: &str, idx: u32) -> Result<(), String> {
+    let a = api().ok_or_else(|| "engine unavailable".to_string())?;
+    let c_ih = CString::new(ih).map_err(|_| "invalid info hash".to_string())?;
+    let rc = unsafe { (a.stop_stream)(c_ih.as_ptr(), idx) };
+    if rc == 0 { Ok(()) } else { Err(error(ih)) }
+}
+
 /// Remove every torrent and its payload.
 pub fn remove_all() {
     if let Some(a) = api() {
@@ -710,7 +791,22 @@ fn _assert_c_void(_: *mut c_void) {}
 
 #[cfg(test)]
 mod budget_tests {
-    use super::{DEFAULT_MEM_CACHE_BYTES, DEFAULT_WINDOW_BYTES};
+    use super::{switch_from, ActiveStream, Switch, DEFAULT_MEM_CACHE_BYTES, DEFAULT_WINDOW_BYTES};
+
+    /// Fork Rofocale11: a season pack's next episode is the same hash with a new file index. That
+    /// is a FILE switch, not a retry — retrying the same file is the only case that may keep its
+    /// stream and skip the window flush.
+    #[test]
+    fn a_season_pack_file_switch_is_not_a_retry() {
+        let active = Some(ActiveStream { hash: "abc".into(), file_idx: 33 });
+        assert_eq!(switch_from(active.as_ref(), "abc", 33), Switch::Retry);
+        assert_eq!(switch_from(active.as_ref(), "abc", 34), Switch::File(33));
+        assert_eq!(
+            switch_from(active.as_ref(), "def", 34),
+            Switch::Torrent("abc".into())
+        );
+        assert_eq!(switch_from(None, "abc", 33), Switch::Fresh);
+    }
 
     /// The engine's payload is one budget, not two independent knobs.
     ///

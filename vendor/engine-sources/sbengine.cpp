@@ -155,6 +155,30 @@ int restored(const char *ih) {
   auto it = torrents.find(lower(ih));
   return it != torrents.end() && it->second.restored ? 1 : 0;
 }
+// Fork Rofocale11: a season pack is ONE torrent with many episode files. Preparing the next
+// episode's fileIdx leaves the previous file's route, demands and window payload alive under the
+// same info hash; the resident bytes then climb past the configured window (measured: 160 MB
+// against 32 MB on the stable set, followed by the app dying at the next handoff). The vendored
+// engine can stop a single stream; expose it here so the app can kill the old episode without
+// dropping the swarm. Idempotent: no prepared stream for this idx is a successful no-op.
+int stop_stream(const char *ih, uint32_t idx) {
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = torrents.find(lower(ih));
+  if (it == torrents.end() || !engine) return -1;
+  auto s = it->second.streams.find(idx);
+  if (s == it->second.streams.end()) return 0;
+  if (!s->second.id.empty()) {
+    std::uint64_t rid = 0;
+    const auto st = nuvio_engine_stop_stream(engine, s->second.id.c_str(), &rid);
+    if (st != NUVIO_ENGINE_STATUS_OK) {
+      lastError = nuvio_engine_status_message(st);
+      return -1;
+    }
+  }
+  // The engine's STREAM_STOPPED event will try to erase this entry too; that becomes a no-op.
+  it->second.streams.erase(s);
+  return 0;
+}
 int stream(const char *ih, uint32_t idx, char *url, int cap) {
   std::lock_guard<std::mutex> lock(mu);
   auto it = torrents.find(lower(ih)); if (it == torrents.end() || !engine) return -1;
@@ -224,6 +248,6 @@ struct StopAtExit { ~StopAtExit() { stop(); } } stopAtExit;
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) const sbe_api *sbe_get(void) {
-  static const sbe_api a = { api, version, start, stop, open, files, stream, error, stats, limits, remove_one, remove_all, window, setting, relocate, restored };
+  static const sbe_api a = { api, version, start, stop, open, files, stream, error, stats, limits, remove_one, remove_all, window, setting, relocate, restored, stop_stream };
   return &a;
 }

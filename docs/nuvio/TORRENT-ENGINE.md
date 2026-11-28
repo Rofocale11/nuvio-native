@@ -12,7 +12,7 @@ and headers.
 
 ```
 plx_stremio::sbengine          Rust FFI, ONE dlopen symbol (sbe_get)
-        ↓  sbe_api function-pointer table, SBE_API_VERSION 4
+        ↓  sbe_api function-pointer table, SBE_API_VERSION 5
 libsbengine.so                 C++ wrapper: torrent map, event loop, non-blocking calls
         ↓  nuvio_engine_* C API
 nuvio_engine (static)          C++20 core: libtorrent 2.0, scheduler, cache, HTTP range server
@@ -88,6 +88,7 @@ Every call returns immediately; the app polls. Ids are 40-character lowercase in
 | `files(ih)` | file count; `-1` metadata still in flight, `-2` failed |
 | `stream(ih, idx, url)` | `1` ready, `0` preparing, `-1` failed; fills a loopback URL |
 | `error`, `stats`, `limits`, `window`, `setting`, `relocate`, `restored`, `remove`, `remove_all` | diagnostics and controls |
+| Fork Rofocale11 / API 5: `stop_stream(ih, idx)` | stop ONE prepared file stream without removing its torrent; used for a season pack's next episode |
 
 `libsbengine`'s `nuvio_engine_config` is set to the **SOFT** profile (35 peers, 35 connections
 per second), limited upload (2 MiB/s), and **zero** stream-inactivity / warm-torrent timeouts:
@@ -157,8 +158,27 @@ its PMS `Media` row `p2p: true`. An addon/debrid HTTP URL is never a marker. At 
 **Cached URLs are torrent-scoped.** `remember` removes the old torrent, and its `/stream/<id>`
 then 404s for the rest of the session (the old "playback retry" loop). `engine_url_is_current`
 compares the marker's hash with `sbengine::active_hash()` case-insensitively and drops a cached
-URL when they differ. A same-hash retry is a no-op in `remember`, so it never tears its own
-stream down.
+URL when they differ. A same-hash retry of the SAME file is a no-op in `remember`, so it never
+tears its own stream down.
+
+Fork Rofocale11: a **season pack is one hash with many file indexes**. The active identity is
+therefore `(hash, file_idx)`, not the hash alone. A same-hash resolve with a different `file_idx`
+is a FILE switch, not a retry, but the shipping path does **not** clean up explicitly. The
+vendored engine's `register_stream` already stops the previous stream for that torrent when the
+new file is prepared (`libtorrent_stream_bridge.cpp:465-477`). Two explicit cleanup attempts were
+tried and reverted after stable-set failures: API-5 `stop_stream` left the torrent with no active
+stream, so the engine unloaded it and the next resolve raced that unload (`EAGAIN` /
+"Resource temporarily unavailable"); remove + re-open then failed with an empty resolve error
+right after the re-add, and resetting the engine BEFORE the switch failed on the very first
+handoff. The shipping path leaves the torrent alone and retries the engine resolve once on any
+transient error: `resolve_with_sbengine` re-opens the torrent (which clears the wrapper's error
+entry and re-activates the handle), waits 700 ms, and tries again within the same 30 s budget.
+The owner measured the resident growth as harmless sparse payload on this set.
+The stable set measured `window=32MB resident=160MB` across a file 33 → file 34
+handoff, with the resident payload landing in the RAM-backed tmpfs; the app then left playback
+with no OOM line in the event log (so the kill itself is not proven by that log). A different hash still takes
+the old path: `remove` drops the torrent and its payload (`delete_files`), keeping only resume
+state.
 
 ## 6. Warming a resume before Play
 

@@ -362,3 +362,55 @@ at the new sites; do not let the hardcoded CDN string return.
   Related/Collection/Extras/Cast shelves use this same `Shelf`; an off-band card was paying
   art resolution and label fitting even though it contributes no fragment. The current tree
   had lost this gate in the shim port.
+
+## Season-pack file switches must kill the previous file's stream (2026-11-28)
+
+The stable set's event log showed a season pack (`44b8ad50fdc0`, 39 files) opening file 33 and
+then file 34 with the **same info hash**: `remember` treated the second as a same-hash retry, so
+no torrent or stream was released. The engine's streaming window is keyed by info hash, so the
+first episode's pieces stayed resident under that key and `window=32MB resident=160MB` was
+observed before the next handoff, after which playback was left (no OOM line was logged, so the
+kill itself is not proven by the event log). The Diagnostics UI only shows the configured
+window capacity (32 MB), not `resident` — that row was removed because a used figure may legally
+exceed the window.
+
+Upstream/vendored files touched (each carries a `Fork Rofocale11:` marker):
+
+- `vendor/engine-sources/core/sbengine.h` — `SBE_API_VERSION` 4 → 5 and a new trailing
+  `stop_stream(ih, idx)` entry. Appended (not inserted) so existing offsets stay stable.
+- `vendor/engine-sources/sbengine.cpp` — implements `stop_stream` by calling the already-vendored
+  `nuvio_engine_stop_stream` for the active file's stream id and erasing the wrapper's map entry;
+  idempotent when no stream is prepared.
+- `rust-modules/stremio/src/sbengine.rs` — Rust ABI entry and `stop_stream` (available for a future
+  in-place switch); active identity is now `(hash, file_idx)`. A pure `switch_from` classifies
+  Fresh / Retry / Torrent / File. **The File arm is deliberately a no-op in the shipping tree:**
+  the vendored engine's `register_stream` already stops the prior stream for the same torrent, so
+  no explicit cleanup is done. Two attempts to out-do it both broke the Next handoff on the stable
+  set. `stop_stream` + a window shrink left the streamless torrent to be unloaded by the engine,
+  producing `EAGAIN` / "Resource temporarily unavailable"; remove + re-open then produced
+  `sbengine: resolve failed, torrents unavailable ()` immediately after the re-add. Resetting the
+  engine BEFORE the switch then failed on the very first handoff. The shipping path leaves the
+  engine alone and retries the resolve once inside `resolve_with_sbengine` (re-open + 700 ms,
+  same 30 s budget) for the transient EAGAIN seen on a consecutive switch. The owner measured the
+  resulting resident growth as harmless sparse payload, so playback wins. A different hash still
+  takes the old `remove` path. `resolve_open` still waits for metadata so the file index is known
+  before `remember` decides.
+- `docs/nuvio/TORRENT-ENGINE.md` — records API 5 and why the file-switch arm does no cleanup.
+
+No behaviour change for debrid links: they never enter the engine and have no window payload.
+
+### Next episode kept the season-pack torrent instead of a stale debrid URL (2026-11-28)
+
+The first stable deployment of the file-switch fix still failed on Next with `curlio: status=404`
+and **no** `sbengine:` line at all: the next episode never entered the engine. `LastStream` was
+keyed by ratingKey, so a handoff to a NEW episode had no source memory, and `shim_media::rank`
+floats direct/debrid HTTP links ahead of torrents — the viewer could be playing a season pack and
+land on an expired URL for episode N+1.
+
+Fork-owned file `pmsshim/src/shim_source_memory.rs` keeps a bounded in-memory last-played source
+per **series** (no new redb table; a restart simply falls back to ranking). `/decision` records the
+accepted source for the series alongside the per-item `LastStream`; `ranked()` promotes a matching
+source from the next episode's fresh list, matching by torrent info hash (ignoring fileIdx, so the
+addon's own per-episode index wins), Stremio `bingeGroup`, or addon + resolution. Upstream-owned
+`pmsshim/src/shim_pms.rs` carries only two marked call sites; `pmsshim/src/lib.rs` carries the
+module line. Tests pin torrent-over-direct and debrid-by-addon/height matching.
