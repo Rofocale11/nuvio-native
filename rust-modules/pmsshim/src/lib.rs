@@ -36,6 +36,10 @@ pub mod shim_core;
 // catalog pages survive a TV relaunch for one 15-minute window, keyed by the addon
 // fingerprint and the installed manifests' catalog declarations so a change always misses.
 pub mod shim_catalog_cache;
+// Fork Rofocale11: best-effort crowd-sourced outro timestamps for titles whose file has no
+// chapter atoms. Kept in its own file so the merge surface is this one line plus a field and a
+// routing branch in shim_pms.rs.
+pub mod shim_credits;
 // permanent IMDb -> TMDB id lookups (DETAIL-LATENCY Stage 2C). A new fork-owned
 // file keeps the only upstream edit in shim_pms.rs to visibility and four routed call sites.
 pub mod shim_tmdb_ids;

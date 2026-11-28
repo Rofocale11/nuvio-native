@@ -65,6 +65,17 @@ pub struct Sub {
     pub forced: bool,
 }
 
+/// Fork Rofocale11: one container chapter, copied from `plx_nuvio_probe::ProbedChapter`. A real
+/// BluRay REMUX carries named chapters, the last of which is often "End Credits" — the only exact
+/// credits boundary a Nuvio source can provide. Kept here so the shim (which must not depend on the
+/// media layer) still owns the shape it puts in its own probe cache.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Chapter {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub title: String,
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProbeInfo {
     /// `mkv` / `mp4` / `mpegts` (`MediaProbe::container()`).
@@ -76,6 +87,93 @@ pub struct ProbeInfo {
     pub video_decodable: bool,
     pub audio: Vec<Audio>,
     pub subtitles: Vec<Sub>,
+    /// Fork Rofocale11: container chapters in file order. Empty for most torrents and every
+    /// debrid HTTP URL; present for author-made MKVs and BluRay remuxes.
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
+}
+
+/// Fork Rofocale11: the file's own chapters as PMS `Chapter[]` rows. The app already parses these
+/// (`convert_chapters`) to draw the Chapters strip; the shim simply never published them before.
+/// Index is 1-based over the rows we keep, so a malformed atom cannot leave a hole in the list.
+pub fn chapters_json(info: &ProbeInfo) -> Option<Value> {
+    if info.chapters.is_empty() {
+        return None;
+    }
+    let rows: Vec<Value> = info
+        .chapters
+        .iter()
+        .filter(|c| c.start_ms >= 0 && c.end_ms > c.start_ms)
+        .enumerate()
+        .map(|(i, c)| {
+            json!({
+                "index": (i + 1) as i64,
+                "startTimeOffset": c.start_ms,
+                "endTimeOffset": c.end_ms,
+                "tag": c.title,
+                "thumb": ""
+            })
+        })
+        .collect();
+    (!rows.is_empty()).then(|| Value::Array(rows))
+}
+
+/// Fork Rofocale11: the PMS `Marker` a named final credits chapter makes. Emitted as a normal
+/// server marker so the existing Up Next / Skip Credits chain needs no second path: the app's
+/// `convert_markers` already reads `Marker[]` off a leaf item. A chapter only qualifies when its
+/// NAME says credits and it runs to the end of the file — a mid-file credits chapter followed by a
+/// post-credits scene must not become a final segment.
+pub fn credits_marker(info: &ProbeInfo) -> Option<Value> {
+    let dur = info.duration_ms;
+    if dur <= 0 {
+        return None;
+    }
+    let c = info.chapters.iter().rev().find(|c| {
+        let t = c.title.to_ascii_lowercase();
+        (t.contains("credit") || t.contains("generique") || t.contains("générique"))
+            && c.start_ms > 0
+            && c.end_ms > c.start_ms
+    })?;
+    // A chapter ending within two seconds of the item counts as running to the end, the same
+    // slack the app uses for PMS markers whose `final` flag is absent.
+    if c.end_ms + 2_000 < dur {
+        return None;
+    }
+    Some(json!({
+        "type": "credits",
+        "startTimeOffset": c.start_ms,
+        "endTimeOffset": c.end_ms.max(dur),
+        "final": true
+    }))
+}
+
+/// Fork Rofocale11: the PMS `intro` marker a named opening chapter makes, which drives the app's
+/// existing Skip Intro pill. Much narrower than the credits rule: the chapter must be near the
+/// start AND short, because a chapter merely called "Introduction" in the middle of a film is not a
+/// title sequence, and offering to skip it would jump the viewer into the story.
+pub fn intro_marker(info: &ProbeInfo) -> Option<Value> {
+    let dur = info.duration_ms;
+    if dur <= 0 {
+        return None;
+    }
+    let c = info.chapters.iter().find(|c| {
+        let t = c.title.to_ascii_lowercase();
+        (t.contains("intro")
+            || t.contains("opening")
+            || t.contains("titles")
+            || t.contains("recap")
+            || t.contains("previously on"))
+            && c.start_ms >= 0
+            && c.end_ms > c.start_ms
+            && c.start_ms <= dur / 10
+            && c.end_ms <= (dur / 4).min(600_000)
+    })?;
+    Some(json!({
+        "type": "intro",
+        "startTimeOffset": c.start_ms,
+        "endTimeOffset": c.end_ms,
+        "final": false
+    }))
 }
 
 /// `(url, deadline) -> probe`. `Err` = not playable here (unreachable or unsupported container).
@@ -519,6 +617,84 @@ pub fn apply(media: &mut Value, p: &ProbeInfo) {
 
 #[cfg(test)]
 mod tests {
+    /// Fork Rofocale11: a real 2160p BluRay REMUX has `Chapter 01` … `Chapter 23` then
+    /// `End Credits` ending at the container duration. That atom is the credits start.
+    #[test]
+    fn a_named_end_credits_chapter_becomes_a_final_marker() {
+        let p = ProbeInfo {
+            duration_ms: 9_654_048,
+            chapters: vec![
+                Chapter { start_ms: 0, end_ms: 9_000_000, title: "Chapter 23".into() },
+                Chapter { start_ms: 9_057_631, end_ms: 9_654_048, title: "End Credits".into() },
+            ],
+            ..Default::default()
+        };
+        let m = credits_marker(&p).expect("the named chapter is the credits boundary");
+        assert_eq!(m["type"], "credits");
+        assert_eq!(m["startTimeOffset"], 9_057_631);
+        assert_eq!(m["final"], true);
+    }
+
+    /// Fork Rofocale11: the same probe also feeds the player's Chapters strip. The shim must use
+    /// the PMS field names the app's `convert_chapters` reads, with a 1-based index.
+    #[test]
+    fn container_chapters_become_pms_chapter_rows() {
+        let p = ProbeInfo {
+            chapters: vec![
+                Chapter { start_ms: 0, end_ms: 20_000, title: "Main".into() },
+                Chapter { start_ms: -1, end_ms: 5_000, title: "broken".into() },
+                Chapter { start_ms: 20_000, end_ms: 27_000, title: "End Credits".into() },
+            ],
+            ..Default::default()
+        };
+        let rows = chapters_json(&p).expect("chapters");
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "a degenerate atom is dropped, not left as a hole");
+        assert_eq!(rows[0]["index"], 1);
+        assert_eq!(rows[0]["startTimeOffset"], 0);
+        assert_eq!(rows[0]["tag"], "Main");
+        assert_eq!(rows[1]["index"], 2);
+        assert_eq!(rows[1]["tag"], "End Credits");
+        assert!(chapters_json(&ProbeInfo::default()).is_none());
+    }
+
+    /// Fork Rofocale11: an opening chapter becomes the PMS intro marker the Skip Intro pill reads.
+    #[test]
+    fn a_named_opening_chapter_becomes_a_non_final_intro_marker() {
+        let p = ProbeInfo {
+            duration_ms: 2_700_000,
+            chapters: vec![
+                Chapter { start_ms: 0, end_ms: 90_000, title: "Opening Titles".into() },
+                Chapter { start_ms: 90_000, end_ms: 2_700_000, title: "Chapter 02".into() },
+            ],
+            ..Default::default()
+        };
+        let m = intro_marker(&p).expect("a short opening chapter");
+        assert_eq!(m["type"], "intro");
+        assert_eq!(m["startTimeOffset"], 0);
+        assert_eq!(m["endTimeOffset"], 90_000);
+        assert_eq!(m["final"], false);
+    }
+
+    #[test]
+    fn intro_chapters_must_be_early_and_short() {
+        let mut p = ProbeInfo { duration_ms: 2_700_000, ..Default::default() };
+        p.chapters = vec![Chapter { start_ms: 2_000_000, end_ms: 2_100_000, title: "Intro".into() }];
+        assert!(intro_marker(&p).is_none(), "a late 'Intro' is not a title sequence");
+        p.chapters = vec![Chapter { start_ms: 0, end_ms: 1_500_000, title: "Introduction".into() }];
+        assert!(intro_marker(&p).is_none(), "a 25-minute 'Introduction' is not a skip");
+    }
+
+    /// Generic chapter names and mid-file credits do not invent a boundary.
+    #[test]
+    fn a_generic_chapter_or_a_mid_file_credits_chapter_is_no_marker() {
+        let base = ProbeInfo { duration_ms: 3_600_000, ..Default::default() };
+        let mut p = base.clone();
+        p.chapters = vec![Chapter { start_ms: 3_000_000, end_ms: 3_600_000, title: "Chapter 24".into() }];
+        assert!(credits_marker(&p).is_none(), "a generic name says nothing about credits");
+        p.chapters = vec![Chapter { start_ms: 100_000, end_ms: 200_000, title: "Credits".into() }];
+        assert!(credits_marker(&p).is_none(), "a credits chapter with a scene after it is not final");
+    }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -740,6 +916,7 @@ mod tests {
                 Audio { codec: "ac3".into(), channels: 6, language: "eng".into(), decodable: true, ..Default::default() },
             ],
             subtitles: vec![Sub { codec: "subrip".into(), language: "eng".into(), ..Default::default() }],
+            chapters: Vec::new(),
         }
     }
 

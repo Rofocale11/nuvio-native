@@ -101,6 +101,13 @@ SAME64(offsetof(AVFormatContext, duration), 104, "OFF_FMT_DURATION != 64 [host]"
 /* start_time is the int64 right before duration: how a transport stream's clock is rebased to 0. */
 SAME32(offsetof(AVFormatContext, start_time), 56, "OFF_FMT_START_TIME != 56");
 SAME64(offsetof(AVFormatContext, start_time), 96, "OFF_FMT_START_TIME != 56 [host]");
+/* Fork Rofocale11: the Nuvio prober reads the container's chapter atoms to find a named end-credits
+   segment. These are local constants in nuvio-probe/src/lib.rs; hold them to the same headers the
+   rest of this table uses before a device build can trust them. */
+SAME32(offsetof(AVFormatContext, nb_chapters), 40, "chapter count != 40");
+SAME64(offsetof(AVFormatContext, nb_chapters), 72, "chapter count != 72 [host]");
+SAME32(offsetof(AVFormatContext, chapters), 44, "chapter list != 44");
+SAME64(offsetof(AVFormatContext, chapters), 80, "chapter list != 80 [host]");
 
 /* --- AVFrame: poked directly by the encode path, and read by the lossless → PCM decoder. --- */
 SAME(offsetof(AVFrame, data), 0, "OFF_FRAME_DATA != 0");

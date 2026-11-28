@@ -727,6 +727,9 @@ pub struct Shim {
     /// `tmdb:` content ids already asked of TMDB's `/external_ids`, by `(type, content id)`.
     /// `None` is a settled miss: addons get the catalog's own id, exactly as before.
     imdb_ids: Mutex<HashMap<(String, String), Option<String>>>,
+    /// Fork Rofocale11: SkipDB outro timestamps, warmed off the metadata path and cached for the
+    /// process. A chapter from the file always wins; this is the fallback for chapter-less rips.
+    skipdb: crate::shim_credits::CreditsCache,
     torrent_server: std::sync::RwLock<Option<String>>,
     /// Whether peer-to-peer streams may be offered at all (see [`Config::p2p_enabled`]). Read by
     /// [`Shim::torrent_server`], so every stream list, pick and resolve that goes through a
@@ -2936,6 +2939,7 @@ impl Shim {
             trailer_proxy: crate::shim_trailer::TrailerProxy::default_paths(),
             resolved: Mutex::new(HashMap::new()),
             imdb_ids: Mutex::new(HashMap::new()),
+            skipdb: crate::shim_credits::CreditsCache::default(),
             torrent_server: std::sync::RwLock::new(cfg_ts),
             p2p_enabled: AtomicBool::new(cfg_p2p),
             audio_codecs: std::sync::RwLock::new(Vec::new()),
@@ -3821,6 +3825,46 @@ impl Shim {
         }
         g.insert(key, imdb.clone());
         imdb
+    }
+
+    /// Fork Rofocale11: the SkipDB key for a title, when it has one. A Stremio episode id is
+    /// `tt…:season:episode`; a movie is keyed by its IMDb id alone. A title without an IMDb id is
+    /// simply not looked up — there is no reliable join key and guessing one would be worse.
+    fn skipdb_key(&self, ident: &Ident) -> Option<(String, Option<u32>, Option<u32>)> {
+        match ident {
+            Ident::Title { type_, id } => {
+                let base = id.split(':').next().unwrap_or(id);
+                self.imdb_base(type_, base).map(|imdb| (imdb, None, None))
+            }
+            Ident::Episode { series, video } => {
+                let mut parts = video.rsplitn(3, ':');
+                let ep = parts.next()?.parse::<u32>().ok()?;
+                let se = parts.next()?.parse::<u32>().ok()?;
+                let tail = parts.next().unwrap_or("");
+                let imdb = is_imdb_id(tail)
+                    .then(|| tail.to_string())
+                    .or_else(|| self.imdb_base("series", series))?;
+                Some((imdb, Some(se), Some(ep)))
+            }
+            Ident::Season { .. } => None,
+        }
+    }
+
+    /// Fork Rofocale11: answer from the cache, or start ONE off-path lookup for a chapter-less
+    /// title. The first metadata read therefore never waits on SkipDB; a later one (the reader
+    /// re-asks when the shim's content generation moves) sees the answer.
+    fn skipdb_credits(&self, ident: &Ident, duration_ms: i64) -> Option<(i64, i64)> {
+        if duration_ms <= 0 {
+            return None;
+        }
+        let (imdb, season, episode) = self.skipdb_key(ident)?;
+        let key = format!("{imdb}|{season:?}|{episode:?}");
+        if let Some(hit) = self.skipdb.get(&key) {
+            return hit;
+        }
+        let url = crate::shim_credits::url(&imdb, season, episode, duration_ms);
+        self.skipdb.warm(key, url, duration_ms);
+        None
     }
 
     fn slot(&self, rk: i64, ident: &Ident) -> Option<Arc<StreamSlot>> {
@@ -6262,6 +6306,7 @@ impl Shim {
                     decodable: true,
                 }],
                 subtitles: Vec::new(),
+                chapters: Vec::new(),
             };
             return Some((row, Some(Ok(probe)), Duration::ZERO));
         }
@@ -6360,6 +6405,30 @@ impl Shim {
                 };
                 if let Some(Ok(p)) = &probed {
                     crate::shim_probe::apply(&mut m, p);
+                    // Fork Rofocale11: a Nuvio addon has no marker API, but the FILE may. Named
+                    // intro and final-credits chapters are published as ordinary PMS Markers so
+                    // the app's Skip Intro / Up Next / Skip Credits chain needs no fork-specific
+                    // branch. This is per ITEM, so episodes get them exactly as movies do.
+                    if row.get("Marker").is_none() {
+                        let mut markers = Vec::new();
+                        if let Some(m) = crate::shim_probe::credits_marker(p) {
+                            markers.push(m);
+                        }
+                        if let Some(m) = crate::shim_probe::intro_marker(p) {
+                            markers.push(m);
+                        }
+                        if !markers.is_empty() {
+                            row["Marker"] = json!(markers);
+                        }
+                    }
+                    // Fork Rofocale11: publish the whole chapter list too. The app already parses
+                    // PMS `Chapter[]` into its Chapters strip; the shim simply never had any rows
+                    // to give it before the probe started reading them.
+                    if row.get("Chapter").is_none() {
+                        if let Some(chapters) = crate::shim_probe::chapters_json(p) {
+                            row["Chapter"] = chapters;
+                        }
+                    }
                 }
                 media.push(m);
             }
@@ -6384,6 +6453,19 @@ impl Shim {
                 row["duration"] = json!(d);
             }
             row["Media"] = Value::Array(media);
+            // Fork Rofocale11: no chapter credits in the file? Try the crowd-sourced fallback.
+            // The first read only WARMS it (never blocks); a later re-read of the same item gets
+            // the answer from cache and publishes the same PMS Marker shape as a real chapter.
+            if row.get("Marker").is_none() {
+                if let Some((start, end)) = self.skipdb_credits(&ident, row["duration"].as_i64().unwrap_or(0)) {
+                    row["Marker"] = json!([{
+                        "type": "credits",
+                        "startTimeOffset": start,
+                        "endTimeOffset": end,
+                        "final": true
+                    }]);
+                }
+            }
         }
         Some((row, verdict, streams_wait))
     }
@@ -8822,6 +8904,87 @@ mod playback_regressions {
         panic!("the background stream fetch never reached the detail row");
     }
 
+    /// Fork Rofocale11: the whole fork path in one test — the probe finds a named final credits
+    /// chapter, the shim publishes it as a PMS Marker on the item, and the app's existing
+    /// `convert_markers` can therefore arm Up Next without a new screen or machine.
+    #[test]
+    fn a_named_credits_chapter_reaches_the_item_as_a_pms_marker() {
+        let shim = Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ));
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt1254207".into(),
+        });
+        shim.probes.set_prober(Arc::new(|_, _| {
+            Ok(crate::shim_probe::ProbeInfo {
+                container: "mkv".into(),
+                duration_ms: 9_654_048,
+                video_decodable: true,
+                chapters: vec![
+                    crate::shim_probe::Chapter {
+                        start_ms: 0,
+                        end_ms: 90_000,
+                        title: "Opening Titles".into(),
+                    },
+                    crate::shim_probe::Chapter {
+                        start_ms: 9_057_631,
+                        end_ms: 9_654_048,
+                        title: "End Credits".into(),
+                    },
+                ],
+                ..Default::default()
+            })
+        }));
+        let (row, verdict, _) = shim.item_probed(rk, Some(0)).expect("a probed item");
+        assert!(matches!(verdict, Some(Ok(_))), "the prober answered");
+        let markers = row["Marker"].as_array().expect("markers on the item");
+        assert_eq!(markers.len(), 2);
+        assert_eq!(markers[0]["type"], "credits");
+        assert_eq!(markers[0]["startTimeOffset"], 9_057_631);
+        assert_eq!(markers[0]["final"], true);
+        assert_eq!(markers[1]["type"], "intro");
+        assert_eq!(markers[1]["endTimeOffset"], 90_000);
+        assert_eq!(markers[1]["final"], false);
+        let chapters = row["Chapter"].as_array().expect("the file's chapter list");
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0]["tag"], "Opening Titles");
+        assert_eq!(chapters[1]["startTimeOffset"], 9_057_631);
+        assert_eq!(chapters[1]["tag"], "End Credits");
+    }
+
+    /// Fork Rofocale11: a chapter-less file still gets a credits boundary from a warmed SkipDB
+    /// answer. The answer is injected as the SAME PMS Marker shape, so the app never learns which
+    /// source supplied it.
+    #[test]
+    fn a_warmed_skipdb_outro_reaches_the_item_as_a_pms_marker() {
+        let shim = Arc::new(Shim::new(
+            Arc::new(crate::shim_fake::FakeBackend),
+            Config::default(),
+        ));
+        let rk = shim.keys.key_of(&Ident::Title {
+            type_: "movie".into(),
+            id: "tt1254207".into(),
+        });
+        shim.skipdb.put_for_test(
+            "tt1254207|None|None".into(),
+            Some((1_200_000, 1_260_000)),
+        );
+        shim.probes.set_prober(Arc::new(|_, _| {
+            Ok(crate::shim_probe::ProbeInfo {
+                container: "mkv".into(),
+                duration_ms: 1_260_000,
+                video_decodable: true,
+                ..Default::default()
+            })
+        }));
+        let (row, _, _) = shim.item_probed(rk, Some(0)).expect("a probed item");
+        let markers = row["Marker"].as_array().expect("a credits marker");
+        assert_eq!(markers[0]["type"], "credits");
+        assert_eq!(markers[0]["startTimeOffset"], 1_200_000);
+    }
+
     #[test]
     fn an_inflight_stream_list_cannot_direct_play_a_placeholder() {
         let shim = Arc::new(Shim::new(
@@ -8965,6 +9128,7 @@ mod playback_regressions {
                     language: "eng".into(),
                     ..Default::default()
                 }],
+                chapters: Vec::new(),
             })
         }));
         let mut request = Request {
@@ -10509,6 +10673,7 @@ mod trailer_tests {
                 decodable: true,
             }],
             subtitles: Vec::new(),
+            chapters: Vec::new(),
         }
     }
 

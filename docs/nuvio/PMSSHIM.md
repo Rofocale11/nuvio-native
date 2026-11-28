@@ -275,8 +275,8 @@ pass through unchanged
 3. **Media/Part/Stream rows.** Each ranked stream becomes one `Media` with
    `id = ratingKey*1000 + index` and a `Part` whose `key` is `/library/parts/<pid>/…` and whose
    `file` is the release filename (not a filesystem path) (`shim_media.rs:334-416`, `:411`).
-   Label guesses fill codec/resolution fields (`:353-393`); there are **no** chapter/intro/credit
-   markers and no `protocol` field in those rows.
+   Label guesses fill codec/resolution fields (`:353-393`); there are no addon-supplied chapter/intro/credit
+   markers and no `protocol` field in those rows. Fork Rofocale11: a stream whose CONTAINER has a named opening or final credits chapter (common in BluRay REMUXes) now contributes a PMS `Marker` row (Skip Intro / Up Next), and a chapter-less title can get a crowd-sourced SkipDB `outro` boundary (see `shim_probe::credits_marker` and `shim_credits.rs`). The whole chapter list is also published as PMS `Chapter[]` rows, so the player's Chapters strip works for files that carry them. The 30-second synthesized tail remains the last fallback.
 4. **Real probe.** The app installs `prober()` (`app/nuvio.rs:303-329`, `:485-546`) backed by
    `plx_nuvio_probe::probe_url`, which opens a private curl transfer at byte 0, wraps it in AVIO and
    calls libavformat (`nuvio-probe/src/lib.rs:291-354`). There is no HEAD request. `shim_probe::apply`

@@ -50,6 +50,31 @@ const AV_DISPOSITION_ATTACHED_PIC: c_int = 1 << 10;
 // AVSEEK_SIZE is FFmpeg's own. Kept local for the same reason as the two offsets above.
 const AVSEEK_SIZE: c_int = 0x10000;
 
+// Fork Rofocale11: a container chapter is the only credits signal that can come from the media
+// itself (addons and debrid links carry no segment metadata). These offsets are derived from the
+// bundled FFmpeg 9.1 headers — host `nb_chapters` 72 / `chapters` 80, ARM 40 / 44 (the 32-bit
+// numbers follow from AAPCS and are cross-checked against the known start_time 56 / duration 64).
+// Kept local for the same reason as the stream offsets above: no edit to upstream's ABI table.
+#[cfg(target_pointer_width = "32")]
+const OFF_FMT_NB_CHAPTERS: usize = 40;
+#[cfg(target_pointer_width = "32")]
+const OFF_FMT_CHAPTERS: usize = 44;
+#[cfg(target_pointer_width = "64")]
+const OFF_FMT_NB_CHAPTERS: usize = 72;
+#[cfg(target_pointer_width = "64")]
+const OFF_FMT_CHAPTERS: usize = 80;
+
+/// FFmpeg 9's `AVChapter`. Both ABIs place every field at the same offset (all are 8-byte
+/// aligned), so one mirror serves the TV and the simulator.
+#[repr(C)]
+struct AvChapter {
+    id: i64,
+    time_base: AVRational,
+    start: i64,
+    end: i64,
+    metadata: *mut AVDictionary,
+}
+
 /// the media layer's `curlio::PlexAuthorization` bound to the shared byte-range
 /// source. Duplicated here rather than imported from `plx_media` because that would make this
 /// low-level crate depend on the orchestration layer above it (and invert `ci/module-layers.ini`).
@@ -119,6 +144,16 @@ pub struct ProbedSubtitle {
     pub forced: bool,
 }
 
+/// One container chapter, in file order. `title` is the atom's `title` tag when it has one.
+/// Fork Rofocale11: read from the file we are already probing, so a release with named chapters
+/// can tell us where its credits start without a network dependency or a server we do not have.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProbedChapter {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub title: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaProbe {
     /// libavformat's short name list, e.g. `matroska,webm` or `mov,mp4,m4a,3gp,3g2,mj2`.
@@ -129,6 +164,9 @@ pub struct MediaProbe {
     pub video: Option<ProbedVideo>,
     pub audio: Vec<ProbedAudio>,
     pub subtitles: Vec<ProbedSubtitle>,
+    /// Fork Rofocale11: container chapters, including a named "Credits"/"End Credits" atom when
+    /// the release author put one there. Empty for the common torrent/debrid rip.
+    pub chapters: Vec<ProbedChapter>,
 }
 
 impl MediaProbe {
@@ -208,8 +246,7 @@ extern "C" fn probe_seek(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
     }
 }
 
-unsafe fn dict_value(s: *mut AVStream, key: &std::ffi::CStr) -> String {
-    let dict = *((s as *const u8).add(OFF_STREAM_METADATA) as *const *const AVDictionary);
+unsafe fn dict_str(dict: *const AVDictionary, key: &std::ffi::CStr) -> String {
     if dict.is_null() {
         return String::new();
     }
@@ -221,6 +258,23 @@ unsafe fn dict_value(s: *mut AVStream, key: &std::ffi::CStr) -> String {
         .to_string_lossy()
         .trim()
         .to_string()
+}
+
+unsafe fn dict_value(s: *mut AVStream, key: &std::ffi::CStr) -> String {
+    let dict = *((s as *const u8).add(OFF_STREAM_METADATA) as *const *const AVDictionary);
+    dict_str(dict, key)
+}
+
+/// A chapter's timestamp is in its own time base, not AV_TIME_BASE. Convert to milliseconds with
+/// saturating arithmetic: a malformed atom must not wrap into a plausible-looking chapter.
+fn chapter_ms(value: i64, tb: AVRational) -> i64 {
+    if tb.num <= 0 || tb.den <= 0 {
+        return -1;
+    }
+    value
+        .saturating_mul(tb.num as i64)
+        .saturating_mul(1000)
+        .saturating_div(tb.den as i64)
 }
 
 /// The container's own name for this track — `title` (Matroska and most formats), else `name`
@@ -431,6 +485,40 @@ pub fn probe_url(url: &str, deadline: std::time::Duration) -> Result<MediaProbe,
                 _ => {}
             }
         }
+        // Fork Rofocale11: collect the file's own chapters. Most torrent/debrid rips have none;
+        // when they do, a "Credits" title is the only real credits boundary available to a client
+        // whose addons carry no segment metadata. Bounded so a hostile container cannot allocate
+        // without limit.
+        let nch = *((fmt as *const u8).add(OFF_FMT_NB_CHAPTERS) as *const u32) as usize;
+        // AVFormatContext.chapters is `AVChapter **`: one pointer to an array of pointers.
+        let chapter_ptrs =
+            *((fmt as *const u8).add(OFF_FMT_CHAPTERS) as *const *const *const AvChapter);
+        if !chapter_ptrs.is_null() {
+            for i in 0..nch.min(256) {
+                let p = *chapter_ptrs.add(i);
+                if p.is_null() {
+                    continue;
+                }
+                let ch = &*p;
+                let mut title = dict_str(ch.metadata, c"title");
+                if title.is_empty() {
+                    title = dict_str(ch.metadata, c"name");
+                }
+                out.chapters.push(ProbedChapter {
+                    start_ms: chapter_ms(ch.start, ch.time_base),
+                    end_ms: chapter_ms(ch.end, ch.time_base),
+                    title: title.chars().take(120).collect(),
+                });
+            }
+        }
+        if !out.chapters.is_empty() {
+            let names: Vec<&str> = out.chapters.iter().map(|c| c.title.as_str()).collect();
+            plx_base::eventlog::log(&format!(
+                "nuvio: probe chapters={} names={:?}",
+                out.chapters.len(),
+                &names[..names.len().min(8)]
+            ));
+        }
         avformat_close_input(&mut fmt);
         free_avio(avio);
         drop(io);
@@ -482,6 +570,16 @@ mod tests {
             Some(0)
         );
         assert_eq!(preferred_audio(&[], no_dts), None);
+    }
+
+    /// Fork Rofocale11: chapter atoms use their own time base, which is not always milliseconds.
+    #[test]
+    fn chapter_timestamps_convert_from_the_atoms_time_base() {
+        let ms = AVRational { num: 1, den: 1000 };
+        assert_eq!(chapter_ms(1_234, ms), 1_234);
+        let ts = AVRational { num: 1, den: 90_000 };
+        assert_eq!(chapter_ms(90_000 * 42, ts), 42_000);
+        assert_eq!(chapter_ms(42, AVRational { num: 0, den: 0 }), -1);
     }
 
     #[test]

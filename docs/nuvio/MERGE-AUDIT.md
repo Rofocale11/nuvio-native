@@ -16,6 +16,41 @@ When rotating this audit into history, keep the heading
 **Status: conflicts resolved, gates in progress, not committed.** All 24 conflicts
 are resolved and staged. Host verification is running; no device claim is made here.
 
+## Fork Rofocale11: real credits boundaries for Up Next (2026-11-28)
+
+The Up Next trigger used a synthesized 30-second tail because Nuvio's addons carry no intro/credits
+markers. It now resolves the boundary in three layers, best first:
+
+1. **Named credits chapter in the file.** `plx_nuvio_probe` reads `AVFormatContext.chapters` during
+   the probe it already performs. A real 83 GB BluRay REMUX was verified: 24 chapters, the last
+   named `End Credits`, at 9,057.631 s. No extra request is made.
+2. **SkipDB `outro`.** For chapter-less files, a public, credential-free GET keyed by IMDb id +
+   season/episode + the playing duration; accepted only on `match` exact/shifted and confidence
+   ≥ 0.7. The lookup is warmed off the metadata path, never blocks a detail read or playback, and
+   its answer is cached for the process. A settled miss is cached too.
+3. **The existing 30-second tail** (`data/src/metadata.rs`) stays as the last fallback.
+
+Both real answers are published as ordinary PMS `Marker[]` rows on the item, so the app's existing
+`convert_markers` / Up Next / Watch Credits chain is unchanged. A short named opening chapter is
+published as an `intro` Marker the same way, enabling the existing Skip Intro pill; it must start
+in the first tenth of the item and end within the first quarter (or ten minutes), so a chapter
+merely called "Introduction" later on is not mistaken for a title sequence. The probed chapters are separately
+published as PMS `Chapter[]` rows, which the app's existing `convert_chapters` uses to fill the
+player's Chapters strip.
+
+Upstream files touched (every edit carries a `Fork Rofocale11:` marker):
+
+- `nuvio-probe/src/lib.rs` — chapter extraction from the container (fork-owned crate).
+- `pmsshim/src/shim_probe.rs` — `ProbeInfo.chapters` (serde-defaulted, so old cache entries still
+  load) and the pure `credits_marker` matching rule.
+- `pmsshim/src/shim_pms.rs` — one field plus init for the SkipDB cache, a key/answer seam, and the
+  marker injection in `item_probed`.
+- `pmsshim/src/lib.rs` — one `mod` declaration.
+- `src/app/nuvio.rs` — copies `MediaProbe.chapters` into `ProbeInfo` at the prober seam.
+
+Fork-owned new file: `pmsshim/src/shim_credits.rs` (bounded public GET, parse/gate, in-memory cache
+and single-flight worker). No account is written; SkipDB is read-only.
+
 ## Fork Rofocale11: fast launch + Sync Addons (2026-11-28)
 
 Home/Library used to re-fetch every addon catalog on a launch more than 15 minutes after the

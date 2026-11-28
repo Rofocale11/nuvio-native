@@ -522,6 +522,14 @@ fn prober() -> plx_pmsshim::shim_probe::Prober {
                 .iter()
                 .map(|s| p::Sub { codec: s.codec.clone(), language: s.language.clone(), title: s.title.clone(), default: s.default, forced: s.forced })
                 .collect(),
+            // Fork Rofocale11: carry the container's named chapters through to the shim. A real
+            // BluRay REMUX names its last one "End Credits", which is the only exact credits
+            // boundary a Nuvio stream can give us; addons and debrid links carry no markers.
+            chapters: m
+                .chapters
+                .iter()
+                .map(|c| p::Chapter { start_ms: c.start_ms, end_ms: c.end_ms, title: c.title.clone() })
+                .collect(),
         })
     })
 }
